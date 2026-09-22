@@ -10,6 +10,7 @@ slots=True)`` 的不可变数据类，构造后不得修改；结构演进通过
 
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 
 from cpt.domain.types import BarLike  # noqa: F401  # re-exported for runtime_checkable
@@ -54,6 +55,30 @@ class CanonicalBar:
     taker_buy_base_volume: float
     taker_buy_quote_volume: float
     is_closed: bool
+
+    def __post_init__(self) -> None:
+        """数值 / 时间字段值域校验;非法值直接抛 ValueError 而非静默污染导出。"""
+        if not (self.open_time < self.close_time):
+            raise ValueError(
+                f"open_time({self.open_time}) 必须严格小于 close_time({self.close_time})"
+            )
+        if not (self.high >= self.low):
+            raise ValueError(f"high({self.high}) 必须 >= low({self.low})")
+        for name in (
+            "open",
+            "high",
+            "low",
+            "close",
+            "volume",
+            "quote_volume",
+            "taker_buy_base_volume",
+            "taker_buy_quote_volume",
+        ):
+            v = getattr(self, name)
+            if not math.isfinite(v):
+                raise ValueError(f"{name}({v!r}) 必须是有限数值, 不接受 NaN/inf")
+        if self.trade_count < 0:
+            raise ValueError(f"trade_count({self.trade_count}) 必须 >= 0")
 
     # BarLike 协议暴露
     @property

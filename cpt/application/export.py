@@ -41,6 +41,11 @@ EXPORT_SCHEMA_URL: str = (
     "https://github.com/nxz1026/Chan_Pattern_Trader/blob/main/docs/export-schema-v1.md"
 )
 
+#: 占位时间戳哨兵:``cpt.adapters.reference_chanlun.PLACEHOLDER_TIME``。
+#: 任何结构对象的 ``start_time`` / ``end_time`` 等于此值时, ``export_dataset``
+#: 拒绝导出,防止占位语义污染已冻结的 schema v1。
+_EXPORT_PLACEHOLDER_TIME: int = -1
+
 
 def _bar_to_dict(bar: CanonicalBar) -> dict[str, Any]:
     """``CanonicalBar`` → schema v1 bar 对象。
@@ -51,6 +56,21 @@ def _bar_to_dict(bar: CanonicalBar) -> dict[str, Any]:
     data: dict[str, Any] = asdict(bar)
     data["direction"] = bar.direction
     return data
+
+
+def _reject_placeholders(
+    name: str,
+    items: Sequence[object],
+    fields: tuple[str, ...] = ("start_time", "end_time"),
+) -> None:
+    """检查序列中任何对象的指定字段是否含 PLACEHOLDER_TIME, 有则 raise。"""
+    for idx, obj in enumerate(items):
+        for field in fields:
+            if getattr(obj, field, None) == _EXPORT_PLACEHOLDER_TIME:
+                raise ValueError(
+                    f"{name}[{idx}].{field} 是占位时间戳 ({-1}); "
+                    f"schema v1 不接受占位语义。请在反腐层传入 bars 参数解析。"
+                )
 
 
 def export_dataset(
@@ -64,7 +84,14 @@ def export_dataset(
     signals: Sequence[Signal],
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """把一次计算结果打包为 schema v1 的 ``dict``。"""
+    """把一次计算结果打包为 schema v1 的 ``dict``。
+
+    拒绝任何 ``start_time`` / ``end_time`` 等于占位哨兵 (-1) 的结构对象,
+    防止占位语义污染已冻结格式。调用方应在反腐层 ``map_*`` 时传入 bars。
+    """
+    _reject_placeholders("fractals", fractals)
+    _reject_placeholders("bis", bis)
+    _reject_placeholders("zhongshus", zhongshus)
     return {
         "schema_version": EXPORT_SCHEMA_VERSION,
         "schema_url": EXPORT_SCHEMA_URL,
@@ -103,7 +130,7 @@ def export_to_json_string(
         signals=signals,
         metadata=metadata,
     )
-    return json.dumps(payload, sort_keys=True, ensure_ascii=False, indent=2)
+    return json.dumps(payload, sort_keys=True, ensure_ascii=False, indent=2, allow_nan=False)
 
 
 def export_to_file(
@@ -139,6 +166,10 @@ def dataset_hash(payload: dict[str, Any]) -> str:
     组输入（无论序列顺序、元数据差异）产出同一哈希。
     """
     canonical = json.dumps(
-        payload["data"], sort_keys=True, ensure_ascii=False, separators=(",", ":")
+        payload["data"],
+        sort_keys=True,
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
     )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

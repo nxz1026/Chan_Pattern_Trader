@@ -48,6 +48,16 @@ __all__ = [
 ]
 
 
+_REQUIRED_BAR_FIELDS = (
+    "open_time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "close_time",
+)
+
+
 def load_fixture(path: str | Path) -> tuple[RulesConfig, list[CanonicalBar], dict[str, Any]]:
     """从 JSON 文件读取 ``(config, bars, metadata)``。
 
@@ -60,36 +70,67 @@ def load_fixture(path: str | Path) -> tuple[RulesConfig, list[CanonicalBar], dic
           "metadata": {<可选,会传到 export_dataset metadata>},
           "bars": [{"open_time": ..., "open": ..., ...}, ...]
         }
+
+    缺字段或值非法时抛 ``ValueError``, 错误信息带 case 名 + bar 索引 + 字段名,
+    便于排障(而非裸 KeyError)。
     """
-    data = json.loads(Path(path).read_text(encoding="utf-8"))
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except json.JSONDecodeError as e:
+        raise ValueError(f"fixture {path} 不是合法 JSON: {e}") from e
+
+    case_name = data.get("name", Path(path).stem)
 
     config_data = data.get("config")
-    config = RulesConfig.from_dict(config_data) if config_data else RulesConfig()
+    if config_data is not None and not isinstance(config_data, dict):
+        raise ValueError(
+            f"fixture[{case_name}] config 必须是 dict, 收到 {type(config_data).__name__}"
+        )
+    try:
+        config = RulesConfig.from_dict(config_data) if config_data else RulesConfig()
+    except (TypeError, ValueError) as e:
+        raise ValueError(f"fixture[{case_name}] config 无效: {e}") from e
 
     bars: list[CanonicalBar] = []
-    for raw in data.get("bars", []):
-        bars.append(
-            make_canonical_bar(
-                open_time=raw["open_time"],
-                open=raw["open"],
-                high=raw["high"],
-                low=raw["low"],
-                close=raw["close"],
-                close_time=raw["close_time"],
-                volume=raw.get("volume", 0.0),
-                quote_volume=raw.get("quote_volume", 0.0),
-                trade_count=raw.get("trade_count", 0),
-                taker_buy_base_volume=raw.get("taker_buy_base_volume", 0.0),
-                taker_buy_quote_volume=raw.get("taker_buy_quote_volume", 0.0),
-                is_closed=raw.get("is_closed", True),
+    for idx, raw in enumerate(data.get("bars", [])):
+        if not isinstance(raw, dict):
+            raise ValueError(
+                f"fixture[{case_name}].bars[{idx}] 必须是 dict, 收到 {type(raw).__name__}"
             )
-        )
+        missing = [f for f in _REQUIRED_BAR_FIELDS if f not in raw]
+        if missing:
+            raise ValueError(
+                f"fixture[{case_name}].bars[{idx}] 缺字段: {missing}; 实际键: {sorted(raw)}"
+            )
+        try:
+            bars.append(
+                make_canonical_bar(
+                    open_time=raw["open_time"],
+                    open=raw["open"],
+                    high=raw["high"],
+                    low=raw["low"],
+                    close=raw["close"],
+                    close_time=raw["close_time"],
+                    volume=raw.get("volume", 0.0),
+                    quote_volume=raw.get("quote_volume", 0.0),
+                    trade_count=raw.get("trade_count", 0),
+                    taker_buy_base_volume=raw.get("taker_buy_base_volume", 0.0),
+                    taker_buy_quote_volume=raw.get("taker_buy_quote_volume", 0.0),
+                    is_closed=raw.get("is_closed", True),
+                )
+            )
+        except (TypeError, ValueError) as e:
+            raise ValueError(f"fixture[{case_name}].bars[{idx}] 字段值非法: {e}") from e
 
     metadata: dict[str, Any] = {
-        "name": data.get("name", ""),
+        "name": case_name,
         "description": data.get("description", ""),
     }
     if data.get("metadata"):
+        if not isinstance(data["metadata"], dict):
+            raise ValueError(
+                f"fixture[{case_name}].metadata 必须是 dict, 收到 {type(data['metadata']).__name__}"
+            )
         metadata.update(data["metadata"])
     return config, bars, metadata
 
@@ -129,17 +170,21 @@ def run_replay(
     ``fractals/bis/zhongshus`` 缺省时由 backend 算出；可显式传入做 oracle 对照。
     """
     backend = backend or _default_backend()
+    primary_level = config.levels[0]  # __post_init__ 保证 levels 非空
 
     if fractals is None or bis is None or zhongshus is None:
         result = backend.compute_structures(list(bars), _to_ref_config(config))
+        # 传给 map_* 真实 bars, 让 start_time/end_time 解析为毫秒,
+        # 避免 PLACEHOLDER_TIME 被 export_dataset 拒绝。
         fractals = (
             fractals
             if fractals is not None
             else [
                 map_fractal(
                     fx,
-                    level=config.levels[0] if config.levels else 5,
+                    level=primary_level,
                     source_ids=(f"b:{fx.bar_index}",),
+                    bars=bars,
                 )
                 for fx in result.fx_list
             ]
@@ -150,8 +195,9 @@ def run_replay(
             else [
                 map_bi(
                     bi,
-                    level=config.levels[0] if config.levels else 5,
+                    level=primary_level,
                     source_ids=(f"fx:{bi.start_bar}", f"fx:{bi.end_bar}"),
+                    bars=bars,
                 )
                 for bi in result.bi_list
             ]
@@ -162,8 +208,9 @@ def run_replay(
             else [
                 map_zhongshu(
                     zs,
-                    level=config.levels[0] if config.levels else 5,
+                    level=primary_level,
                     source_ids=tuple(f"bi:{i}" for i in zs.bi_indices),
+                    bars=bars,
                 )
                 for zs in result.zs_list
             ]

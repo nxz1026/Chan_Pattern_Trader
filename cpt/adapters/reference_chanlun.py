@@ -19,6 +19,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
@@ -120,44 +121,77 @@ class ChanlunBackend(Protocol):
     ) -> ChanlunResult: ...
 
 
-def map_fractal(raw: FxRaw, *, level: int, source_ids: tuple[str, ...]) -> Fractal:
+#: ``start_time``/``end_time`` 哨兵值,表示"尚未解析为毫秒时间戳"。
+#: 导出侧 (``cpt.application.export.export_dataset``) 会拒绝把含此值的
+#: 结构放进 schema v1 输出,防止占位语义污染已冻结格式。
+PLACEHOLDER_TIME: int = -1
+
+
+def _resolve_time(bar_index: int, bars: Sequence[BarLike] | None) -> int:
+    """把 bar 索引解析为毫秒时间戳;无 bars 时返回 PLACEHOLDER_TIME。"""
+    if bars is None:
+        return PLACEHOLDER_TIME
+    if not (0 <= bar_index < len(bars)):
+        raise IndexError(f"bar_index={bar_index} 超出 bars 范围 [0, {len(bars)})")
+    return int(bars[bar_index].open_time)
+
+
+def map_fractal(
+    raw: FxRaw,
+    *,
+    level: int,
+    source_ids: tuple[str, ...],
+    bars: Sequence[BarLike] | None = None,
+) -> Fractal:
     """把原始分型映射为 ``Fractal``。
 
-    ``raw.bar_index`` 仅在反腐层内部有索引语义；``start_time`` /
-    ``end_time`` 以 bar 索引占位，索引到毫秒时间戳的解析由持有原始 bar
-    序列的调用方（M3+ 真实后端）负责。
+    ``bars`` 可选:传入则把 ``raw.bar_index`` 解析为真实毫秒时间戳;
+    不传则 ``start_time``/``end_time`` 保留 PLACEHOLDER_TIME, 导出侧会拦截。
     """
+    start = _resolve_time(raw.bar_index, bars)
     return Fractal(
         kind=raw.kind,
         level=level,
         bar_index=raw.bar_index,
-        start_time=raw.bar_index,
-        end_time=raw.bar_index,
+        start_time=start,
+        end_time=start,
         high=raw.high,
         low=raw.low,
         source_ids=source_ids,
     )
 
 
-def map_bi(raw: BiRaw, *, level: int, source_ids: tuple[str, ...]) -> Bi:
-    """把原始笔映射为 ``Bi``（``start_time``/``end_time`` 以 bar 索引占位）。"""
+def map_bi(
+    raw: BiRaw,
+    *,
+    level: int,
+    source_ids: tuple[str, ...],
+    bars: Sequence[BarLike] | None = None,
+) -> Bi:
+    """把原始笔映射为 ``Bi``(时间字段可解析为毫秒)。"""
     return Bi(
         level=level,
         direction=raw.direction,
-        start_time=raw.start_bar,
-        end_time=raw.end_bar,
+        start_time=_resolve_time(raw.start_bar, bars),
+        end_time=_resolve_time(raw.end_bar, bars),
         high=raw.high,
         low=raw.low,
         source_ids=source_ids,
     )
 
 
-def map_zhongshu(raw: ZsRaw, *, level: int, source_ids: tuple[str, ...]) -> ZhongShu:
-    """把原始笔中枢映射为 ``ZhongShu``（``start_time``/``end_time`` 以 bar 索引占位）。"""
+def map_zhongshu(
+    raw: ZsRaw,
+    *,
+    level: int,
+    source_ids: tuple[str, ...],
+    bars: Sequence[BarLike] | None = None,
+) -> ZhongShu:
+    """把原始笔中枢映射为 ``ZhongShu``(时间字段可解析为毫秒)。"""
     return ZhongShu(
         level=level,
-        start_time=raw.start_bar,
-        end_time=raw.end_bar,
+        start_time=_resolve_time(raw.start_bar, bars),
+        end_time=_resolve_time(raw.end_bar, bars),
         high=raw.high,
         low=raw.low,
         bi_ids=tuple(f"bi:{i}" for i in raw.bi_indices),
