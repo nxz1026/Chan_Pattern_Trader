@@ -134,6 +134,7 @@ class SQLiteRepository:
 
     def init_schema(self) -> None:
         # 不使用 `with`，因为内存库的 self._conn 在 with 退出时会被关闭。
+        # 单条 conn.execute 逐条跑 DDL，确保 PRAGMA foreign_keys 仍生效。
         conn = self._conn
         for stmt in ddl_statements():
             conn.execute(stmt)
@@ -203,7 +204,12 @@ class SQLiteRepository:
         interval_minutes: int,
         start_ms: int | None = None,
         end_ms: int | None = None,
+        limit: int | None = None,
     ) -> list[CanonicalBar]:
+        """按 ``open_time`` 升序返回 ``[start_ms, end_ms)`` 半开区间内的 K 线。
+
+        ``limit`` 为 None 取全量, 否则只取前 N 条(按时间顺序最早 N 条)。
+        """
         sql = """\
         SELECT open_time, close_time, open, high, low, close, volume,
                quote_volume, trade_count, taker_buy_base_volume,
@@ -219,6 +225,11 @@ class SQLiteRepository:
             sql += " AND open_time < ?"
             params.append(end_ms)
         sql += " ORDER BY open_time ASC"
+        if limit is not None:
+            if limit <= 0:
+                raise ValueError(f"limit 必须为正整数, 实测 {limit}")
+            sql += " LIMIT ?"
+            params.append(int(limit))
 
         with self._connect() as conn:
             rows = conn.execute(sql, params).fetchall()
@@ -333,15 +344,30 @@ class SQLiteRepository:
             raise RuntimeError("insert structure_events 未返回 rowid")
         return last_id
 
-    def list_structure_events(self, structure_id: str) -> list[StructureEvent]:
-        sql = """\
+    def list_structure_events(
+        self,
+        structure_id: str,
+        *,
+        limit: int | None = None,
+    ) -> list[StructureEvent]:
+        """按 ``occurred_at`` 升序返回某结构的全部事件。
+
+        ``limit`` 为 None 取全量, 否则只取前 N 条(按时间顺序最早 N 条)。
+        """
+        sql = """
         SELECT event_type, structure_id, revision, payload, occurred_at
         FROM structure_events
         WHERE structure_id = ?
         ORDER BY occurred_at ASC, event_id ASC
         """
+        params: tuple[object, ...] = (structure_id,)
+        if limit is not None:
+            if limit <= 0:
+                raise ValueError(f"limit 必须为正整数, 实测 {limit}")
+            sql += " LIMIT ?"
+            params = (structure_id, int(limit))
         with self._connect() as conn:
-            rows = conn.execute(sql, (structure_id,)).fetchall()
+            rows = conn.execute(sql, params).fetchall()
         return [
             StructureEvent(
                 event_type=row["event_type"],

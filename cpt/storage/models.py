@@ -92,6 +92,11 @@ CREATE TABLE structure_events (
 )
 """
 
+_DDL_INDEX_EVENTS: str = """\
+CREATE INDEX idx_events_sid_time
+    ON structure_events(structure_id, occurred_at, event_id)
+"""
+
 _DDL_SIGNALS: str = """\
 CREATE TABLE signals (
     signal_id         TEXT    PRIMARY KEY,
@@ -127,12 +132,13 @@ CREATE TABLE llm_calls (
 
 
 def ddl_statements() -> tuple[str, ...]:
-    """返回全部 6 条 ``CREATE TABLE`` 语句，顺序即创建顺序。"""
+    """返回全部 DDL(6 表 + 1 索引),顺序即创建顺序。"""
     return (
         _DDL_RAW_BARS,
         _DDL_NORMALIZED_BARS,
         _DDL_STRUCTURE_STATES,
         _DDL_STRUCTURE_EVENTS,
+        _DDL_INDEX_EVENTS,
         _DDL_SIGNALS,
         _DDL_LLM_CALLS,
     )
