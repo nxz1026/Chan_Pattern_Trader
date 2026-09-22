@@ -1,0 +1,86 @@
+#!/usr/bin/env bash
+# 一键拉取并固定三个缠论参考仓库到 references/ 子目录。
+#
+# 用法: scripts/fetch_references.sh
+#
+# 行为:
+#   - 目录不存在 -> git clone --no-checkout 后 checkout 到固定 commit
+#   - 目录已存在 -> git fetch + git checkout <commit>
+#   - 输出每个仓库实际 HEAD hash,与期望值校验;任一不一致则退出码非 0
+#   - 打印每个仓库的 LICENSE 路径(若存在)
+#
+# 约束: bash 4+;不使用 git submodule;失败时给出明确仓库名 + commit。
+
+set -euo pipefail
+
+# 仓库定义: 名称|仓库 URL|期望 commit|许可证(SPDX)
+REPOS=(
+  "chanlun-pro|https://github.com/yijixiuxin/chanlun-pro.git|78ffa470f1e9463809d8fe2a2802e9e84b896dfe|Apache-2.0"
+  "chanlun.py|https://github.com/YuYuKunKun/chanlun.py.git|2e4fa135b19eaa201fca7bfcc8ca4a86cbde7815|MIT"
+  "chanlun_pine|https://github.com/Ye-Yu-Mo/chanlun_pine.git|0c028ef52fa8474b212b9a234aabbf22c3f45b4e|GPL-3.0"
+)
+
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+ROOT_DIR="$(dirname -- "$SCRIPT_DIR")"
+REFS_DIR="$ROOT_DIR/references"
+
+fail() {
+  echo "错误[$1]: $2" >&2
+  exit 1
+}
+
+[ "${BASH_VERSINFO[0]}" -ge 4 ] || fail "bash" "需要 bash 4+,当前 ${BASH_VERSION}"
+
+mkdir -p "$REFS_DIR"
+
+declare -a FAILURES=()
+
+for entry in "${REPOS[@]}"; do
+  IFS='|' read -r name url commit license <<< "$entry"
+
+  target="$REFS_DIR/$name"
+  echo "==> [$name] 目标 commit: $commit"
+
+  if [ -d "$target/.git" ]; then
+    echo "    目录已存在,执行 git fetch..."
+    git -C "$target" fetch --tags --force origin 2>/dev/null \
+      || fail "$name" "git fetch 失败 (origin: $url)"
+  else
+    echo "    目录不存在,git clone --no-checkout..."
+    git clone --no-checkout "$url" "$target" 2>/dev/null \
+      || fail "$name" "git clone 失败 (url: $url)"
+  fi
+
+  git -C "$target" checkout "$commit" 2>/dev/null \
+    || fail "$name" "checkout 失败 (commit: $commit)"
+
+  actual="$(git -C "$target" rev-parse HEAD)"
+
+  if [ "$actual" = "$commit" ]; then
+    echo "    HEAD: $actual   [OK]"
+  else
+    echo "    HEAD: $actual   [不符!] 期望: $commit" >&2
+    FAILURES+=("$name: 期望 $commit,实际 $actual")
+  fi
+
+  # 打印 LICENSE 路径(大小写不敏感,若存在)
+  license_path="$(find "$target" -maxdepth 1 -iname 'licen[cs]e*' -type f -print -quit 2>/dev/null)"
+  if [ -n "$license_path" ]; then
+    echo "    LICENSE: ${license_path#$REFS_DIR/}"
+  else
+    echo "    LICENSE: (未找到)"
+  fi
+
+  echo ""
+done
+
+if [ "${#FAILURES[@]}" -gt 0 ]; then
+  echo "校验失败:" >&2
+  for f in "${FAILURES[@]}"; do
+    echo "  - $f" >&2
+  done
+  exit 1
+fi
+
+echo "全部参考仓库已就位且 commit 校验通过。"
+exit 0

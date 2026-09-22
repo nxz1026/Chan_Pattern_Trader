@@ -6,7 +6,33 @@
 # Python caches and local environments.
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 .venv/
+venv/
+env/
+ENV/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+*.egg
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
+*.swp
+
+# OMP runtime logs and stop flags
+.omp-logs/
 
 # Local secrets and runtime data.
 .env

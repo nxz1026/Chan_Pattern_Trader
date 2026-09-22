@@ -1,0 +1,53 @@
+[importlinter]
+root_package = cpt
+include_external_packages = True
+
+[importlinter:contract:application-cannot-depend-on-llm]
+name = Application cannot depend on llm
+type = independence
+modules =
+    cpt.application
+unauthorized_modules =
+    cpt.llm
+
+[importlinter:contract:domain-has-no-third-party-deps]
+name = Domain has no third-party deps
+type = forbidden
+source_modules =
+    cpt.domain
+forbidden_modules =
+    chanlun_pro
+    chanlun
+    czsc
+    requests
+    httpx
+    sqlalchemy
+
+[importlinter:contract:adapters-do-not-leak-into-domain]
+name = Adapters do not leak into domain
+type = forbidden
+source_modules =
+    cpt.domain
+forbidden_modules =
+    cpt.adapters
+    cpt.engine
+    cpt.storage
+
+[importlinter:contract:storage-isolated-from-application]
+name = Storage isolated from application
+type = forbidden
+source_modules =
+    cpt.storage
+forbidden_modules =
+    cpt.application
+    cpt.engine
+
+[importlinter:contract:engine-orchestrates-domain-and-storage-only]
+name = Engine orchestrates domain and storage only
+type = forbidden
+source_modules =
+    cpt.engine
+forbidden_modules =
+    cpt.application
+    cpt.adapters
+    cpt.llm

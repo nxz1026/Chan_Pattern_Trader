@@ -1,0 +1,143 @@
+# CPT 进度日志
+
+维护人：队长（DSH 会话）
+开始：2026-09-23 凌晨
+依据：`docs/implementation-plan.md` v0.1（2026-09-22）
+commit 规范：每个里程碑验收通过后一次 commit；阶段内允许 working commit（不阻塞）
+
+## 0. 开局盘点
+
+- 仓库：`/home/ubuntu/work/Chan_Pattern_Trader/`（原 `cryptocurrency-trading/`，本次重命名）
+- remote：`https://github.com/nxz1026/Chan_Pattern_Trader.git`
+- 分支：`main`，已与远端同步（HEAD `f417635`）
+- references/ 现状（本地已落盘，HEAD 与计划 §3 一致）：
+  - `references/chanlun-pro/` — `78ffa470` ✓
+  - `references/chanlun.py/` — `2e4fa135` ✓
+  - `references/chanlun_pine/` — `0c028ef` ✓
+- 缺失交付物：`scripts/fetch_references.sh`、`docs/reference-audit.md`、工具链配置、venv
+
+## 1. 决策日志
+
+### 2026-09-23 开局决策
+- **D1**：M0 派工用 omp-coder skill，四阶段（IMPLEMENT/VERIFY/REAL/REPORT）拆分，每个工单一哨兵。
+- **D2**：本次同步只动 `M0`（基线）+ `M1`（单级别全链路）；M2–M6 后续 goal 推进。
+- **D3**：进度记录写本文件，不混入代码 commit message。
+- **D4**：PyPI MIT 版 chanlun 包验证如果结论为"不可用"，**不阻塞** M0；如实写入 `docs/reference-audit.md`，M2 oracle 切换策略留 TODO。
+- **D5**：fetch_references.sh 用完整 40 位 SHA 作为 commit 期望值，避免 `--short` 截断造成校验假阳性（已确认 OMP 选用了完整 SHA）。
+
+### 2026-09-23 round 1 — M0-01 IMPLEMENT 验收
+- **派工**：M0-01-fetch-references，写 `scripts/fetch_references.sh`，超时 1800s，重试 2。
+- **尝试 1（15:52:07 → 15:54:01，113s）**：OMP 输出 sentinel 字符串到 stdout 但 touch 了空 `.done` 文件 → dispatcher `sentinel_ok()` 失败。
+- **尝试 2（15:54:07 → 15:54:41，34s）**：OMP 在第二条消息里复述"哨兵已落"但同样只 touch 空文件 → dispatcher `done-file-absent` 误判 → `FAILED attempts=2`。
+- **队长独立验收**：
+  - `bash -n scripts/fetch_references.sh` 通过 ✅
+  - `bash scripts/fetch_references.sh` 实跑：3/3 仓库 HEAD 与期望完整 SHA 匹配 ✅
+  - 覆盖检查：完整 SHA + set -euo pipefail + chmod + LICENSE 路径打印 + 失败非零退出码 + bash 4+ 校验 ✅
+- **结论**：实质 IMPLEMENT 通过。`FAILED attempts=2` 是 dispatcher ↔ OMP 哨兵契约错位造成的伪阴性。
+- **D6（哨兵契约补丁）**：OMP prompt 必须明确写 `echo "GATEKEEPER_ACCEPTED <tag>-<phase>" >> .omp-logs/<tag>-<phase>.done`（追加到文件，而非只 touch 空文件）。下次派工起，所有 prompt 用此模板。
+- **补救**：队长手动 `echo "GATEKEEPER_ACCEPTED ..." > .omp-logs/M0-01-fetch-references-IMPLEMENT.done`，记录到日志（本条），不重跑。
+
+### 2026-09-23 round 1 — M0-02 IMPLEMENT 验收
+- **派工**：M0-02-reference-audit，写 `docs/reference-audit.md`，超时 1800s，重试 2。prompt 用 D6 模板明确 `echo "..." >> .done`。
+- **尝试 1（15:56:55 → 15:57:46，51s）**：OMP 完成并把 sentinel 追加到 `.done` 文件，但 dispatcher `sentinel_ok()` 时机过早（OMP 完成 stdout 输出后到真正 `echo >> .done` 落盘之间有 ~1s 间隙），报 `done-file-absent`。
+- **尝试 2（15:57:55 → 15:58:37，42s）**：OMP 复检并再写一次 sentinel，但同 race condition → `FAILED attempts=2`。
+- **哨兵文件最终内容**：两行相同 `GATEKEEPER_ACCEPTED M0-02-reference-audit-IMPLEMENT`（无害冗余）。
+- **队长独立验收**：
+  - 文档存在，3514 bytes，46 行 ✅
+  - 覆盖检查：3 仓库元数据表、复用边界表、许可证合规要点（Apache/MIT/GPL-3.0）、cl_interface 加密核心（query_macd_ld/compare_ld_beichi/user_custom_mmd）、PyPI 旧包 TBD 占位、fetch_references.sh 引用 ✅
+  - URL/commit 取自 `scripts/fetch_references.sh` REPOS 定义 ✅
+  - 实际验证 chanlun.py 存在 NOTICE 文件 ✅
+- **结论**：实质 IMPLEMENT 通过。
+- **D7（dispatcher race condition）**：omp-resilient4.sh 在 `timeout` 返回后立即检查 `.done` 文件，但 OMP 完成 stdout 流到执行 `echo >>` 命令落盘之间有 ~1s 窗口。建议补丁（不在本次范围内）：在 `if [[ -f "$done_file" ]]; then` 前加 `sleep 1` 或等文件 mtime 稳定。当前缓解：队长手动验哨兵文件内容，若含 sentinel 字符串即视为通过，不重跑。
+
+### dispatcher race condition 现象汇总
+- 工单 | 表现 | 哨兵最终状态
+- --- | --- | ---
+- M0-01 | try1+try2 报 done-file-absent | 队长手动 echo > 写入
+- M0-02 | try1+try2 报 done-file-absent | OMP 用 `>>` 追加了 2 次，队长校验通过
+- 影响：dispatcher FAILED 但实际产物有效；下一步应在所有 prompt 中显式 `>>` 而不是 `>`，并由队长独立 grep 哨兵确认。
+
+### 2026-09-23 round 1 — M0-03 VERIFY（fetch_references.sh 可复现性）
+- **队长独立验收**（在 /tmp/cpt-verify-test 干净目录）：
+  - cp 脚本到临时位置、空 references/ → 执行 → 三个仓库全部 clone + checkout 到固定 commit，HEAD 与期望完整 SHA 匹配 ✅
+  - exit code 0 ✅
+- **结论**：fetch_references.sh 在干净环境可一键复现 references/ 到固定 commit ✅
+- **M0-03 哨兵**：手动写入 `.omp-logs/M0-03-fetch-references-VERIFY.done`。
+
+### 2026-09-23 round 2 — M0-04 IMPLEMENT 验收
+- **try 1**（16:01:18 → 16:05:11，3:53）：OMP 完成评估，写入 §5 替换占位 TBD。
+- **关键结论**：
+  - PyPI 上 `chanlun` 包名 2026-05-26 起被 Rust 重写版 `chanlun.rs`（PyO3）接管；旧 Python `chanlun.py` 从未以 pip 包发布。
+  - 旧 Python 包名 `chanlun-py`/`chanlunpy`/`chanlun_py` 均 404。
+  - 同作者近亲：Rust 版 LICENSE 干净 MIT，无 czsc Apache 传染，无加密核心。
+  - 许可证元数据：classifier 标 MIT，但 `license`/`license_expression` 字段为 null（仅靠 LICENSE 文件声明，卫生欠佳）。
+  - 算法覆盖 6/7：分型/笔/中枢/线段/背驰/买卖点全有，**走势类型 trend_type 缺**（旧 Python `chan.py` `走势.分析` 等本就是 `pass` 桩）。
+- **结论**：不可用作"旧版 Python MIT oracle"（前提不成立）。Rust 版作为附带候选留 M2 决策。
+- **独立验证**：队长 curl PyPI `/pypi/chanlun/json`，确认 OMP 报告的 10 个版本号、`license=null`、classifier MIT、author=YuYuKunKun、summary=Rust 重写、project_urls 指向 `chanlun.rs` 全部对得上 ✅
+- **try 2**（16:05:18 → 16:09:07）：dispatcher 同 race 触发二次重试，OMP 重复检视；为避免空跑浪费 token，队长 16:09:07 按 SKILL §4 "立即打断"模式 SIGTERM→KILL。attempts 末尾记录 `KILLED_BY_CAPTAIN`。
+- **M0-04 实质通过**：§5 占位已替换，事实链清晰，队长独立验证对账。
+
+## 6. Round 2 收尾
+
+| 指标 | 值 |
+|---|---|
+| 工单完成数 | 4 / 5 (M0-01, M0-02, M0-03, M0-04) |
+| 工单待派 | M0-05 工具链（ruff/mypy/pytest/pre-commit/import-linter）|
+| 工单待跑 | M0-06 工具链对空骨架生效（队长验）|
+| 工单待跑 | M0-07 全量验收 + commit/push |
+| PyPI 关键事实 | chanlun 包 = Rust 重写版（非 Python 旧版），无趋势类型，license 元数据 null |
+| KILLED_BY_CAPTAIN | M0-04 try 2 已收尾标记 |
+
+## 2. M0 任务分解
+
+| 工单 | 阶段 | 内容 | 哨兵 |
+|---|---|---|---|
+| M0-01 | IMPLEMENT | scripts/fetch_references.sh | `<tag>-IMPLEMENT.done` |
+| M0-02 | IMPLEMENT | docs/reference-audit.md | 同上（合并工单） |
+| M0-03 | VERIFY | 干净环境一键复现 | `<tag>-VERIFY.done` |
+| M0-04 | IMPLEMENT | PyPI MIT chanlun 评估 | 单列 |
+| M0-05 | IMPLEMENT | import-linter + ruff + mypy + pytest + pre-commit | 单列 |
+| M0-06 | VERIFY | 工具链对空骨架生效 | `<tag>-VERIFY.done` |
+| M0-07 | 队长验收 | 全量独立跑 + commit | — |
+
+## 3. M1 任务分解
+
+（待 M0-07 验收后展开）
+
+## 4. 大分歧 / 等用户拍板
+
+（暂无）
+
+## 5. 已知限制
+
+- 队长跑工单期间，`cryptocurrency-trading` 旧会话缓存路径不影响本仓库，仅历史 cwd 记录。
+
+### 2026-09-23 round 3 — M0-05 工具链（队长手写）
+- **派工**：M0-05-toolchain，13 项配置/包骨架文件。
+- **try 1**（16:10:30 → 16:15:48，5+ min）：OMP 一直处于 thinking 阶段，0 个 tool_call 发出；watchdog 多次 tick "no tool_call yet"；日志 1468 行全是 agent_thought_chunk；明显卡死。队长按 SKILL §4 立即打断 SIGKILL 调度器 + omp-call，attempts 标记 `KILLED_BY_CAPTAIN (OMP stuck in thinking 5+ min, 0 tool_call)`。
+- **D10（OMP 触发器问题）**：13 项配置+13 个文件提示体量过大，OMP 在 prompt 解析后进入"自言自语规划"循环未发出 tool_call。可能与 OMP 模型对长 prompt 的工具决策阈值有关。**缓解策略**：超 5 分钟无 tool_call 即视为触发器故障，队长手写或拆工单。
+- **队长手写**（round 3 内完成）：
+  - `pyproject.toml`：PEP 621 + ruff/mypy/pytest/coverage + setuptools 打包配置 + `[tool.setuptools.packages.find]` 限定 `cpt*`，避免把 references/ 误打包。
+  - `.pre-commit-config.yaml`：ruff-format + ruff(check) + mypy + 本地 import-linter hook。
+  - `.importlinter`：5 条契约（application⊥llm / domain 无第三方 / adapters 不入 domain / storage 隔离 application / engine 仅编排 domain+storage）。
+  - `.gitignore`：追加 .pytest_cache/.mypy_cache/.ruff_cache/.coverage/build/dist/.omp-logs/*.bak。
+  - `cpt/{application,engine,domain,adapters,storage,llm}/__init__.py` + `cpt/__init__.py`：6 个包骨架。
+  - `tests/__init__.py` + `tests/test_imports.py`：3 个冒烟测试（顶层 / 子包 / tests 包导入）。
+- **验证**：13/13 文件齐全、9/9 .py 语法通过、3/3 import 冒烟通过 ✅
+- **M0-05 哨兵**：手动写入 `.omp-logs/M0-05-toolchain-IMPLEMENT.done`。
+
+### 2026-09-23 round 3 — M0-06 VERIFY 工具链对空骨架生效
+- **venv 建立**：先 `sudo apt-get install -y python3.14-venv`（系统缺 ensurepip），再 `python3 -m venv .venv`。
+- **安装**：`pip install -e ".[dev]"` 拉入 ruff 0.16.8 / mypy 2.3.1 / pytest 9.1.1 / pytest-cov 7.1.0 / pre-commit 4.6.2 / import-linter 2.15 / types-requests。
+- **初次问题**：
+  - ruff format 把 markdown 里的 python 块当代码格式化 → 加 `extend-exclude = ["docs"]` 和 `src = ["cpt", "tests"]` 修复。
+  - import-linter 报 `KeyError: 'name'` → contract 必须含 `name` 字段，补 5 条 contract 名字。
+  - import-linter 报 `include_external_packages=True` 必需（domain 契约禁外部依赖 chanlun_pro 等），加全局开关。
+  - pre-commit hook 调用应是 `import-linter lint --config .importlinter`（子命令 + config 在 lint 下），不是顶层 `--config`。
+- **全量验证**：
+  - ruff check: All checks passed ✅
+  - ruff format --check: 10 files already formatted ✅
+  - mypy: Success, no issues in 9 source files ✅
+  - pytest -q: 3 passed ✅
+  - import-linter: 5 contracts KEPT, 0 broken ✅
+- **M0-06 哨兵**：手动写入 `.omp-logs/M0-06-toolchain-VERIFY.done`。
