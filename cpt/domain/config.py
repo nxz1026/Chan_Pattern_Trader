@@ -68,16 +68,46 @@ class RulesConfig:
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Self:
-        """从 ``dict`` 反序列化；``levels`` 归一为 ``tuple[int, ...]``。
+        """从 ``dict`` 反序列化。
 
-        未知键被忽略，便于向前兼容（旧数据落入新版配置时丢弃多余字段）。
+        - 未知键被忽略，向前兼容（旧数据落入新版配置时丢弃多余字段）。
+        - ``levels`` 归一为 ``tuple[int, ...]``。
+        - ``config_version`` 不接受数据覆盖——版本号只跟随代码（防止 fixture
+          写 ``"config_version": "v99"`` 绕过 v0 冻结契约）。
+        - 值域校验由 ``__post_init__`` 兜底。
         """
+        if not isinstance(data, dict):
+            raise TypeError(f"RulesConfig.from_dict 需要 dict, 收到 {type(data).__name__}")
         levels = data.get("levels", cls.__dataclass_fields__["levels"].default)
-        if not isinstance(levels, tuple):
-            levels = tuple(levels)
+        if not isinstance(levels, (list, tuple)):
+            raise TypeError(f"levels 必须是 list/tuple, 收到 {type(levels).__name__}")
         kwargs = {k: v for k, v in data.items() if k in cls.__dataclass_fields__}
         kwargs["levels"] = tuple(int(x) for x in levels)
+        kwargs.pop("config_version", None)  # 版本号只跟随代码
         return cls(**kwargs)
+
+    def __post_init__(self) -> None:
+        """值域校验：v0 冻结口径的可执行约束。"""
+        if self.config_version != SCHEMA_VERSION:
+            raise ValueError(
+                f"不支持的 config_version={self.config_version!r};"
+                f" 期望 {SCHEMA_VERSION!r}。升级请走 v0.x 流程并同步 docs/rules.md。"
+            )
+        if self.macd_fast >= self.macd_slow:
+            raise ValueError(f"macd_fast({self.macd_fast}) 必须小于 macd_slow({self.macd_slow})")
+        if self.macd_signal <= 0:
+            raise ValueError(f"macd_signal 必须正整数, 实测 {self.macd_signal}")
+        if not self.levels:
+            raise ValueError("levels 必须为非空级别链")
+        if any(x <= 0 for x in self.levels):
+            raise ValueError(f"levels 必须为正整数, 实测 {self.levels}")
+        if self.min_elements_for_higher_bi < 1:
+            raise ValueError(
+                f"min_elements_for_higher_bi 必须 >= 1, 实测 {self.min_elements_for_higher_bi}"
+            )
+        if self.zs_wzgx not in {"zgd", "zdg", "ggd", "ddd"}:
+            # 实际可用档位由 rules.md §9.5 决定,此处仅做白名单最小校验
+            raise ValueError(f"zs_wzgx 必须是已知档位之一, 实测 {self.zs_wzgx!r}")
 
     def __str__(self) -> str:
         """可读单行形式，首列标注 ``config_version``。"""

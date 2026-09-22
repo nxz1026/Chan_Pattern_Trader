@@ -89,6 +89,20 @@ class SQLiteRepository:
 
     实例持有单一持久连接；``:memory:`` 内存库依赖该连接存活（连接关闭即销毁），
     因此不能在每次操作时新开连接。
+
+    **非线程安全**——``sqlite3`` 连接默认 ``check_same_thread=True``，跨线程
+    使用会抛 ``ProgrammingError``。每个线程 / 事件循环需独立实例。
+
+    显式开启外键约束（SQLite 默认 ``foreign_keys=0``）；所有 UPSERT 使用
+    ``ON CONFLICT DO UPDATE`` 而非 ``INSERT OR REPLACE``，避免 DELETE+INSERT
+    语义导致 rowid 漂移、悬空引用或外键级联动作。
+
+    用法::
+
+        with SQLiteRepository(path="/tmp/cpt.db") as repo:
+            repo.init_schema()
+            repo.upsert_raw_bars(...)
+            ...
     """
 
     path: str  # SQLite 文件路径，":memory:" 表示内存库
@@ -98,11 +112,23 @@ class SQLiteRepository:
         if not isinstance(self.path, str) or not self.path:
             raise ValueError("path 必须是非空字符串")
         conn = sqlite3.connect(self.path)
+        # SQLite 默认关闭外键约束；必须逐连接开启。
+        conn.execute("PRAGMA foreign_keys = ON")
         conn.row_factory = sqlite3.Row
         object.__setattr__(self, "_conn", conn)
 
     def _connect(self) -> sqlite3.Connection:
         return self._conn
+
+    def close(self) -> None:
+        """关闭底层连接。内存库销毁；文件库释放文件句柄。"""
+        self._conn.close()
+
+    def __enter__(self) -> SQLiteRepository:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     # -- schema ----------------------------------------------------------------
 
@@ -145,12 +171,26 @@ class SQLiteRepository:
         ]
         if not rows:
             return 0
-        sql = """\
-        INSERT OR REPLACE INTO raw_bars (
+        # 真正的 UPSERT：不改变 bar_id (rowid 稳定)，避免 normalized_bars 悬空引用。
+        sql = """
+        INSERT INTO raw_bars (
             symbol, interval_minutes, open_time, close_time,
             open, high, low, close, volume, quote_volume, trade_count,
             taker_buy_base_volume, taker_buy_quote_volume, is_closed, fetched_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (symbol, interval_minutes, open_time) DO UPDATE SET
+            close_time             = excluded.close_time,
+            open                   = excluded.open,
+            high                   = excluded.high,
+            low                    = excluded.low,
+            close                  = excluded.close,
+            volume                 = excluded.volume,
+            quote_volume           = excluded.quote_volume,
+            trade_count            = excluded.trade_count,
+            taker_buy_base_volume  = excluded.taker_buy_base_volume,
+            taker_buy_quote_volume = excluded.taker_buy_quote_volume,
+            is_closed              = excluded.is_closed,
+            fetched_at             = excluded.fetched_at
         """
         with self._connect() as conn:
             conn.executemany(sql, rows)
@@ -203,12 +243,26 @@ class SQLiteRepository:
     # -- structure states -------------------------------------------------------
 
     def upsert_structure_state(self, state: StructureState) -> None:
-        sql = """\
-        INSERT OR REPLACE INTO structure_states (
+        sql = """
+        INSERT INTO structure_states (
             structure_id, level, kind, direction, start_time, end_time,
             status, revision, first_seen_at, confirmed_at, invalidated_at,
             source_ids, payload, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (structure_id) DO UPDATE SET
+            level          = excluded.level,
+            kind           = excluded.kind,
+            direction      = excluded.direction,
+            start_time     = excluded.start_time,
+            end_time       = excluded.end_time,
+            status         = excluded.status,
+            revision       = excluded.revision,
+            first_seen_at  = excluded.first_seen_at,
+            confirmed_at   = excluded.confirmed_at,
+            invalidated_at = excluded.invalidated_at,
+            source_ids     = excluded.source_ids,
+            payload        = excluded.payload,
+            updated_at     = excluded.updated_at
         """
         params = (
             state.id,
@@ -273,9 +327,11 @@ class SQLiteRepository:
         )
         with self._connect() as conn:
             cur = conn.execute(sql, params)
-            lastrowid = cur.lastrowid
-            assert lastrowid is not None  # INSERT 单行必然返回 rowid
-            return lastrowid
+            last_id: int | None = cur.lastrowid
+        if last_id is None:
+            # INSERT 单行必然返回 rowid；若 None 则是 sqlite3 内部异常。
+            raise RuntimeError("insert structure_events 未返回 rowid")
+        return last_id
 
     def list_structure_events(self, structure_id: str) -> list[StructureEvent]:
         sql = """\
@@ -300,12 +356,26 @@ class SQLiteRepository:
     # -- signals ------------------------------------------------------------------
 
     def upsert_signal(self, signal: Signal) -> None:
-        sql = """\
-        INSERT OR REPLACE INTO signals (
+        sql = """
+        INSERT INTO signals (
             signal_id, level, signal_type, status, structure_id, center_ids,
             divergence_status, alert_time, candidate_time, confirmed_time,
             invalidated_time, price, source_revision, updated_at
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT (signal_id) DO UPDATE SET
+            level             = excluded.level,
+            signal_type       = excluded.signal_type,
+            status            = excluded.status,
+            structure_id      = excluded.structure_id,
+            center_ids        = excluded.center_ids,
+            divergence_status = excluded.divergence_status,
+            alert_time        = excluded.alert_time,
+            candidate_time    = excluded.candidate_time,
+            confirmed_time    = excluded.confirmed_time,
+            invalidated_time  = excluded.invalidated_time,
+            price             = excluded.price,
+            source_revision   = excluded.source_revision,
+            updated_at        = excluded.updated_at
         """
         params = (
             signal.signal_id,
