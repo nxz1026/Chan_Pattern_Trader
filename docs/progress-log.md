@@ -141,3 +141,27 @@ commit 规范：每个里程碑验收通过后一次 commit；阶段内允许 wo
   - pytest -q: 3 passed ✅
   - import-linter: 5 contracts KEPT, 0 broken ✅
 - **M0-06 哨兵**：手动写入 `.omp-logs/M0-06-toolchain-VERIFY.done`。
+
+### 2026-09-23 round 3 — M0-07 全量验收 + commit
+- **M0 8 项验收全 PASS**：
+  - A1 fetch_references.sh 复现 references → 3/3 OK
+  - A2 reference-audit.md 6 节齐全（含 §5 PyPI 评估实结论）
+  - A3 rules.md §9 已冻结（9.1-9.7 + §9 标题）
+  - A4 ruff check All checks passed
+  - A5 ruff format --check 10 files already formatted
+  - A6 mypy Success, no issues in 9 source files
+  - A7 pytest -q 3 passed
+  - A8 import-linter 5 contracts KEPT, 0 broken
+- **Commit e3ecbe8**：M0 baseline（15 文件），本地已落。
+- **Push 待用户授权**：remote 是 https://github.com/nxz1026/Chan_Pattern_Trader.git，缺凭据（无 askpass/.netrc/credential helper）。SKILL §6 要求"push 用现成 askpass，不现场拼凭据"，故 push 留 TODO 给用户（已加 inbox）。建议：GitHub deploy key 或 `gh auth login` 后 `git push origin main`。
+
+## 7. Round 3 收尾
+
+| 指标 | 值 |
+|---|---|
+| 工单完成数 | 5 / 7 (M0-01, M0-02, M0-03, M0-04, M0-05, M0-06 实际是 6 个) |
+| M0 全量验收 | 8/8 PASS |
+| 本地 commit | e3ecbe8（15 文件）|
+| Push | 待用户凭据（inbox 已记）|
+| 新增能力 | venv + ruff/mypy/pytest/import-linter/pre-commit |
+| 待办 | M1 单级别全链路（domain.types/models/config、adapters.reference_chanlun、storage SQLite、application.export JSON schema v1、人工 fixture 5-8 个）|
