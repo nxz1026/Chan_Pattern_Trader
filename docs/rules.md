@@ -185,12 +185,13 @@ CPT 不再逐项重新发明已有基础规则。凡 `chanlun-pro` 已有明确�
 走势类型状态：
 
 ```text
-candidate       候选
+forming         形成中（原 candidate，见 §9.4 改名）
 consolidation   盘整
 trend           趋势
 extended        延伸
 reclassified    重新分类
 closed          后验关闭
+open_end        开放终态（见 §9.3）
 ```
 
 ### 8.2 一买状态
@@ -390,3 +391,43 @@ source_revision
 ```
 
 事件只追加，不删除；当前状态可以更新；每次变化递增 `revision`。历史最终结果不能覆盖实时预警，实时预警不能伪装成历史确认。
+
+## 9. 已冻结约定（v0，2026-09-22）
+
+以下条目原为未冻结缝隙，现已冻结，与 `docs/architecture.md` §8 一致。
+
+### 9.1 高级别分型包含关系
+
+- 高级别（结构元素层）不做包含合并，只做过滤。
+- 结构元素由完整走势类型构成、时间相邻不重叠；包含合并既无缠论原文依据，又会破坏 `source_structure_id` 追溯链。
+
+### 9.2 级联重构规则
+
+- 确认即冻结，重构走新事件。
+- 候选结构就地更新（`revision+1`）；已确认结构绝不原地修改，失效即发 `invalidated` 事件。
+- 高层结构记录 `source_structure_id + source_revision`；低级别 `revision` 变化时，扫描依赖滞后的高层结构并标记。这是"无未来函数"的执行机制。
+
+### 9.3 走势类型开放终态
+
+- 增加显式终态 `open_end`，与 `closed_by_reversal`（由后续反向走势类型回填关闭）区分。
+- 历史模式数据边界截断时，最后一个走势类型标记为 `open_end`；`open_end` 不参与一买完成统计。
+- 实时模式无需特殊处理。
+
+### 9.4 术语：走势类型状态改名
+
+- 走势类型状态 `candidate` 改名 `forming`，避免与一买信号状态 `candidate` 冲突。
+- 事件类型统一为 `created / updated / confirmed / reclassified / invalidated / closed`。
+
+### 9.5 中枢位置关系档位
+
+- 首版固定 `zs_wzgx = zgd`（高点比 zg、低点比 zd），写入 `RulesConfig`，不按市场分别配置。
+
+### 9.6 背驰力度口径
+
+- 复用 MACD 柱面积法（对应 chanlun-pro `query_macd_ld`），参数固定 `(12,26,9)`。
+- `divergence_status ∈ {not_checked, not_detected, detected}`。
+
+### 9.7 "至少5个结构元素"的语义
+
+- "高级别新笔至少包含 5 个低级别走势类型结构元素"是 CPT 递归工程参数，为 chanlun-pro 新笔"至少 5 根 K 线"的类比映射，而非数值等价。
+- 必须用人工构造案例验证该参数下高级别笔的行为。
