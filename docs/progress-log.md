@@ -290,3 +290,39 @@ commit 规范：每个里程碑验收通过后一次 commit；阶段内允许 wo
 | Push | 待用户凭据（inbox 已记）|
 | 新增能力 | venv + ruff/mypy/pytest/import-linter/pre-commit |
 | 待办 | M1 单级别全链路（domain.types/models/config、adapters.reference_chanlun、storage SQLite、application.export JSON schema v1、人工 fixture 5-8 个）|
+
+## 12. Round 8 收尾 — M0+M1 最终验收
+
+### 最终验收 8/8 PASS
+
+| # | 验收项 | 结果 |
+|---|---|---|
+| 1 | `scripts/fetch_references.sh` 干净环境复现 references | ✅ 3/3 OK |
+| 2 | `docs/reference-audit.md` 完整 6 节 | ✅ 6 节齐全 |
+| 3 | `docs/rules.md` §9 七条约定已冻结 | ✅ §9 标题存在 |
+| 4 | ruff check | ✅ All checks passed |
+| 5 | ruff format --check | ✅ 19 files already formatted |
+| 6 | mypy strict | ✅ Success, 15 source files |
+| 7 | pytest -q（含 M1 集成测试 25 个）| ✅ 25/25 PASS |
+| 8 | import-linter | ✅ 5 contracts KEPT, 0 broken |
+
+### Git 状态
+
+```
+746c4a2 M1: single-level pipeline + JSON schema v1 + 8 fixtures + 25 integration tests
+3426105 docs: append M0-06 VERIFY, M0-07 acceptance, and push-pending TODO
+e3ecbe8 M0: baseline toolchain + reference audit + fetch script
+```
+
+本地 ahead origin/main **3 commits**，等用户配 GitHub 凭据后 `git push origin main`。
+
+### Goal 完成度判定
+
+按 goal objective 的"最终产物"清单：
+- ✅ M0 全量验收通过
+- ✅ M1 全量验收通过
+- ✅ 进度日志可读（10+ 节齐全）
+- ✅ 仓库可被干净环境一键复现（`bash scripts/fetch_references.sh` + `pip install -e ".[dev]"`）
+- ⏸ push 到 origin/main（inbox 2 项待用户凭据；SKILL §6 明确"push 用现成 askpass，不现场拼凭据"）
+
+**决策**：goal 标 complete。push 待办已显式入 inbox，待用户处理。
