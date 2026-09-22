@@ -9,7 +9,7 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, fields
 from typing import Any, Self
 
 __all__ = [
@@ -110,36 +110,13 @@ class RulesConfig:
             raise ValueError(f"zs_wzgx 必须是已知档位之一, 实测 {self.zs_wzgx!r}")
 
     def __str__(self) -> str:
-        """可读单行形式，首列标注 ``config_version``。"""
-        return (
-            f"RulesConfig({self.config_version}): "
-            f"contain={self.contain_direction} "
-            f"fx(qy_middle={self.fx_qy_middle}, qj_ck={self.fx_qj_ck}) "
-            f"bi_type_new={self.bi_type_new} "
-            f"zs(wzgx={self.zs_wzgx}, level_count={self.zs_level_count}) "
-            f"min_elements_for_higher_bi={self.min_elements_for_higher_bi} "
-            f"macd({self.macd_fast},{self.macd_slow},{self.macd_signal}) "
-            f"divergence={self.divergence_compare} "
-            f"levels={self.levels}"
-        )
+        """可读单行形式：``RulesConfig(v0): field=value ...``。
 
-    def __repr__(self) -> str:
-        """可读多行形式，含 ``config_version``。"""
-        return (
-            f"RulesConfig(config_version={self.config_version!r}, "
-            f"contain_direction={self.contain_direction!r}, "
-            f"fx_qy_middle={self.fx_qy_middle!r}, "
-            f"fx_qj_ck={self.fx_qj_ck!r}, "
-            f"bi_type_new={self.bi_type_new!r}, "
-            f"zs_wzgx={self.zs_wzgx!r}, "
-            f"zs_level_count={self.zs_level_count!r}, "
-            f"min_elements_for_higher_bi={self.min_elements_for_higher_bi!r}, "
-            f"macd_fast={self.macd_fast!r}, "
-            f"macd_slow={self.macd_slow!r}, "
-            f"macd_signal={self.macd_signal!r}, "
-            f"divergence_compare={self.divergence_compare!r}, "
-            f"levels={self.levels!r})"
-        )
+        用 ``dataclasses.fields`` 遍历而非硬编码字段清单,新增字段不会
+        静默漏出。
+        """
+        parts = [f"{f.name}={getattr(self, f.name)!r}" for f in fields(self)]
+        return f"RulesConfig({self.config_version}): " + " ".join(parts)
 
 
 def default_rules_config() -> RulesConfig:

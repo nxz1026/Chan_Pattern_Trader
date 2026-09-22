@@ -162,8 +162,12 @@ def export_to_file(
 def dataset_hash(payload: dict[str, Any]) -> str:
     """对 ``payload["data"]`` 子树计算稳定 sha256。
 
-    用 ``sort_keys=True, ensure_ascii=False`` 做规范化序列化，因此同一
-    组输入（无论序列顺序、元数据差异）产出同一哈希。
+    用 ``sort_keys=True, ensure_ascii=False, separators=(",", ":")`` 做规范化
+    序列化——字典键按字母序, 数组顺序保留, 空白一致。
+
+    **序列顺序参与哈希**：bars/fractals/bis/zhongshus/events/signals 等
+    列表的元素顺序变化会产生不同哈希。调用方须保证输入序列稳定,
+    若想"忽略顺序"应在调用前对序列排序并固定排序键。
     """
     canonical = json.dumps(
         payload["data"],

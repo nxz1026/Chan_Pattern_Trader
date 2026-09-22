@@ -243,8 +243,12 @@ def main(argv: list[str] | None = None) -> int:
 
     config, bars, metadata = load_fixture(args.input)
     payload = run_replay(config=config, bars=bars, metadata=metadata)
-    Path(args.output).write_text(
-        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2),
+
+    # Path(parent) 确保父目录存在;复用同一序列化参数(allow_nan=False)。
+    out_path = Path(args.output)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2, allow_nan=False),
         encoding="utf-8",
     )
 

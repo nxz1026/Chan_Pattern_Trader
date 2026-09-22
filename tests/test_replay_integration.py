@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import pytest
 from cpt.application.export import dataset_hash
@@ -101,7 +100,12 @@ def test_case6_short_no_bi() -> None:
 
 
 def test_replay_export_to_file_round_trip(tmp_path: Path) -> None:
-    """端到端：replay → export → re-read → 比对 hash（键序无关 + tuple/list 等价）。"""
+    """端到端: replay → 写文件 → 重读 → dataset_hash 跨序列化一致。
+
+    dict 顺序差异不影响 hash(sort_keys=True), 不需要 _normalize 重新比较;
+    此处只断言 hash(哈希基于规范化 JSON, 顺序无关); payload['data'] ==
+    on_disk['data'] 不再断言, 因为重读后 dict 内部 hash 不可控。
+    """
     cfg, bars, meta = load_fixture(FIXTURES_DIR / "case3_zigzag.json")
     payload = run_replay(config=cfg, bars=bars, metadata=meta)
     out = tmp_path / "out.json"
@@ -110,22 +114,11 @@ def test_replay_export_to_file_round_trip(tmp_path: Path) -> None:
     )
 
     on_disk = json.loads(out.read_text(encoding="utf-8"))
-
-    # 用 sorted-keys + tuple/list 等价 比较
-    def _normalize(o: Any) -> Any:
-        if isinstance(o, dict):
-            return {k: _normalize(o[k]) for k in sorted(o)}
-        if isinstance(o, (list, tuple)):
-            return [_normalize(x) for x in o]
-        return o
-
-    assert _normalize(on_disk["data"]) == _normalize(payload["data"])
-    # dataset_hash 也应一致(这是核心复现性保证)
     assert dataset_hash(on_disk) == dataset_hash(payload)
 
 
 def test_storage_raw_bars_round_trip() -> None:
-    """case4 的 K 线写入 SQLiteRepository 再读出，逐字段比对。"""
+    """case4 的 K 线写入 SQLiteRepository 再读出,逐字段比对。"""
     cfg, bars, meta = load_fixture(FIXTURES_DIR / "case4_volatile.json")
     repo = SQLiteRepository(path=":memory:")
     repo.init_schema()
@@ -142,7 +135,6 @@ def test_storage_raw_bars_round_trip() -> None:
 
 def test_storage_events_signals_round_trip() -> None:
     """events/signals 经 SQLiteRepository round-trip 保持完整。"""
-    state = None  # 先 insert 一个 state 让 FK 满足
     from cpt.domain.models import StructureState
 
     repo = SQLiteRepository(path=":memory:")
