@@ -1,0 +1,108 @@
+{
+  "name": "case3_zigzag",
+  "description": "Zigzag: 3 tops + 2 bottoms alternating → 5 bis",
+  "config": {},
+  "metadata": {
+    "expected_min_bi_count": 3
+  },
+  "bars": [
+    {
+      "open_time": 1000000,
+      "close_time": 1000600,
+      "open": 100.0,
+      "high": 100.0,
+      "low": 100.0,
+      "close": 100.0,
+      "volume": 1.0,
+      "quote_volume": 100.0,
+      "trade_count": 10,
+      "taker_buy_base_volume": 0.5,
+      "taker_buy_quote_volume": 50.0,
+      "is_closed": true
+    },
+    {
+      "open_time": 1000600,
+      "close_time": 1001200,
+      "open": 105.0,
+      "high": 110.0,
+      "low": 102.0,
+      "close": 108.0,
+      "volume": 1.0,
+      "quote_volume": 108.0,
+      "trade_count": 10,
+      "taker_buy_base_volume": 0.5,
+      "taker_buy_quote_volume": 54.0,
+      "is_closed": true
+    },
+    {
+      "open_time": 1001200,
+      "close_time": 1001800,
+      "open": 108.0,
+      "high": 102.0,
+      "low": 100.0,
+      "close": 100.0,
+      "volume": 1.0,
+      "quote_volume": 100.0,
+      "trade_count": 10,
+      "taker_buy_base_volume": 0.5,
+      "taker_buy_quote_volume": 50.0,
+      "is_closed": true
+    },
+    {
+      "open_time": 1001800,
+      "close_time": 1002400,
+      "open": 100.0,
+      "high": 120.0,
+      "low": 102.0,
+      "close": 119.0,
+      "volume": 1.0,
+      "quote_volume": 119.0,
+      "trade_count": 10,
+      "taker_buy_base_volume": 0.5,
+      "taker_buy_quote_volume": 59.5,
+      "is_closed": true
+    },
+    {
+      "open_time": 1002400,
+      "close_time": 1003000,
+      "open": 119.0,
+      "high": 102.0,
+      "low": 100.0,
+      "close": 100.0,
+      "volume": 1.0,
+      "quote_volume": 100.0,
+      "trade_count": 10,
+      "taker_buy_base_volume": 0.5,
+      "taker_buy_quote_volume": 50.0,
+      "is_closed": true
+    },
+    {
+      "open_time": 1003000,
+      "close_time": 1003600,
+      "open": 100.0,
+      "high": 130.0,
+      "low": 102.0,
+      "close": 129.0,
+      "volume": 1.0,
+      "quote_volume": 129.0,
+      "trade_count": 10,
+      "taker_buy_base_volume": 0.5,
+      "taker_buy_quote_volume": 64.5,
+      "is_closed": true
+    },
+    {
+      "open_time": 1003600,
+      "close_time": 1004200,
+      "open": 129.0,
+      "high": 102.0,
+      "low": 100.0,
+      "close": 100.0,
+      "volume": 1.0,
+      "quote_volume": 100.0,
+      "trade_count": 10,
+      "taker_buy_base_volume": 0.5,
+      "taker_buy_quote_volume": 50.0,
+      "is_closed": true
+    }
+  ]
+}

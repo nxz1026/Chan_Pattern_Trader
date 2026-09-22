@@ -155,6 +155,131 @@ commit 规范：每个里程碑验收通过后一次 commit；阶段内允许 wo
 - **Commit e3ecbe8**：M0 baseline（15 文件），本地已落。
 - **Push 待用户授权**：remote 是 https://github.com/nxz1026/Chan_Pattern_Trader.git，缺凭据（无 askpass/.netrc/credential helper）。SKILL §6 要求"push 用现成 askpass，不现场拼凭据"，故 push 留 TODO 给用户（已加 inbox）。建议：GitHub deploy key 或 `gh auth login` 后 `git push origin main`。
 
+## 7. Round 4 收尾
+
+| 指标 | 值 |
+|---|---|
+| 工单完成数 | M1-01, M1-02（2/8 M1 工单） |
+| 文件新增 | cpt/domain/types.py（51 行）+ cpt/domain/models.py（200 行） |
+| 质量门 | ruff/mypy/pytest/import-linter 全部 PASS |
+| Push | 待凭据（inbox 已有） |
+| D14 | BarLike Protocol 用 `@property` 形式 read-only 成员，否则 mypy 严格模式下 `CanonicalBar.direction` 用 @property 会被报 "override writeable with read-only" |
+| D15 | M1 工单拆分策略：每工单只做 1 文件（与 M0-05 卡死教训吻合） |
+
+### Round 4 — M1-01 IMPLEMENT (cpt/domain/types.py)
+- 派工 16:32:01 → try 1 rc=0 16:33:30（89s）。
+- 队长独立验收：runtime_checkable isinstance 检查 OK；缺字段检测 OK；import-linter / mypy / ruff / pytest 全绿。
+
+## 9. Round 6 收尾
+
+| 指标 | 值 |
+|---|---|
+| 工单完成数 | M1-01~M1-06（6/8 M1 工单） |
+| 文件新增 | storage/models.py + storage/repository.py + application/export.py |
+| 质量门 | ruff/mypy/pytest/import-linter 全部 PASS（14 source files） |
+| 待办 | M1-07 (5-8 fixture) + M1-08 (集成验证 + 同输入哈希稳定) |
+| D19 | SQLite 内存库的 `init_schema` 不能用 `with self._connect() as conn:`（连接会在 with 退出时关闭，导致后续操作失败） |
+| D20 | 时间区间语义必须代码 + 测试一致：当前实现是 `[start_ms, end_ms)` 半开 |
+| D21 | mypy strict 模式要求所有 `dict` 都带泛型参数（如 `dict[str, Any]`） |
+
+### Round 6 — M1-05a IMPLEMENT (cpt/storage/models.py)
+- 派工 16:50:38 → try 1 rc=0 16:51:10（32s）。
+- 6 张表 DDL + 6 个表名常量 + SCHEMA_VERSION + ddl_statements() 函数。
+- 实测：DLL 在 SQLite in-memory 全部可执行，UNIQUE(symbol, interval_minutes, open_time) 实际生效。
+- 全质量门 PASS。
+
+### Round 6 — M1-05b IMPLEMENT (cpt/storage/repository.py)
+- 派工 16:52:44 → try 1 rc=0 16:54:54（2:10，14 tool_call）。
+- Repository Protocol + SQLiteRepository 实现（init_schema / upsert_raw_bars / load_raw_bars / upsert_structure_state / load_structure_state / append_structure_event / list_structure_events / upsert_signal / load_signal）。
+- 队长验：raw_bars round-trip + 时间半开区间过滤 + UNIQUE 替换 + structure_states JSON source_ids 序列化 + events payload dict 序列化 + signals center_ids 序列化。
+- **修复**：
+  - `init_schema` 的 `with self._connect() as conn:` 改成直接 `conn.execute()`（内存库 connection 不能关）
+  - `int(cur.lastrowid)` 改为 None-check 后返回（mypy strict）
+- 全质量门 PASS。
+
+### Round 6 — M1-06 IMPLEMENT (cpt/application/export.py)
+- 派工 17:00:41 → try 1 rc=0 17:01:47（1:06）。
+- EXPORT_SCHEMA_VERSION = "v1" + EXPORT_SCHEMA_URL + export_dataset / export_to_json_string / export_to_file / dataset_hash。
+- dataset_hash 对 `payload["data"]` 子树计算稳定 sha256，对相同输入产出相同 hash。
+- **修复**：mypy strict 报 `dict` 缺泛型参数 → 改为 `dict[str, Any] | None`。
+- 全质量门 PASS。
+
+## 10. Round 7 收尾 — M1-07 (replay + fixture + integration test)
+
+| 指标 | 值 |
+|---|---|
+| 工单完成数 | M1-07（7/8 M1 工单） |
+| 文件新增 | cpt/application/replay.py + 8 fixture + tests/test_replay_integration.py |
+| 测试 | 25/25 PASS（hash 稳定 8 + export schema v1 8 + 5 个 case-specific + storage round-trip + metadata hints） |
+| 质量门 | ruff/mypy/pytest/import-linter 全部 PASS（15 source files） |
+| CLI | `python -m cpt.application.replay --input ... --output ...` 跑通，stderr 输出 dataset_hash |
+| 待办 | M1 commit + push（等凭据） |
+
+### Round 7 — M1-07 IMPLEMENT (cpt/application/replay.py + 8 fixtures + integration test)
+- **派工（OMP）**：17:07:00 → 3+ 分钟卡在 read-context loop，0 write 触发器。队长按 SKILL §4 SIGKILL，attempts 标记 `KILLED_BY_CAPTAIN`。
+- **D22**：10 文件工单（replay + 8 fixture + 1 test）触发 OMP 的 read-context loop 类似 M0-05 模式。**新决策**：fixture 数值精度要求 + 多文件协调 → 队长手写更稳。
+- **队长手写**（round 7 内完成）：
+  - `cpt/application/replay.py`：load_fixture + run_replay + main（argparse），把 InMemoryChanlunBackend → map_* → domain → export_dataset 串起来。
+  - 8 个 fixture JSON：case1-8 覆盖单调涨/跌、zigzag、震荡、常数、过短、50 长、100 随机游走。
+  - `tests/test_replay_integration.py`：25 个测试（hash 稳定 parametrize×8 + export schema v1 parametrize×8 + 5 个 case-specific + storage raw_bars round-trip + storage events/signals round-trip + fixture metadata hints 全过）。
+- **Fixture 难点**：InMemoryChanlunBackend 用"前后 bar 都低于/高于当前"判定分型，纯单调序列不会产生分型，必须构造"先涨后跌"或"先跌后涨"。case2/case3 初次实测不符预期，调整 1-2 根 K 线的高低点后通过。
+- **修复**：
+  - main() 最初调用 `export_to_file(payload=...)` 错传参数 → 改为直接 `json.dumps(payload, ...)` 写文件
+  - mypy 报 4 个 dict 缺泛型 → 统一加 `dict[str, Any]`
+  - 测试 round-trip 时 json.loads 反序列化把 tuple 变 list → 加 `_normalize` 把 list/tuple 等价
+  - 测试 `expected_bi_count == 1` 但 fixture 实际只产 1 个 fractal → 调整 fixture 数据
+- **全质量门 PASS**：15 source files + 25 tests + CLI 端到端可用。
+
+### M1 完成度
+- ✅ M1-01: cpt/domain/types.py (BarLike Protocol)
+- ✅ M1-02: cpt/domain/models.py (8 dataclass)
+- ✅ M1-03: cpt/domain/config.py (RulesConfig)
+- ✅ M1-04: cpt/adapters/reference_chanlun.py (反腐层 + 3 mapper + InMemoryChanlunBackend)
+- ✅ M1-05a: cpt/storage/models.py (6 DDL)
+- ✅ M1-05b: cpt/storage/repository.py (SQLite 接口)
+- ✅ M1-06: cpt/application/export.py (JSON schema v1)
+- ✅ M1-07: cpt/application/replay.py + 8 fixture + 25 integration tests
+
+**M1 验收条件达成**：
+- ✅ 5m 数据 → 包含 → 分型 → 新笔 → 笔中枢 → JSON 导出 通路打通（用 InMemoryChanlunBackend 占位）
+- ✅ JSON schema v1 冻结
+- ✅ 5-8 fixture 实际 8 个
+- ✅ `python -m cpt.application.replay --input ... --output ...` 可重复
+- ✅ 同输入 dataset_hash 稳定（8/8 case）
+- ✅ pytest 25/25 PASS
+
+## 8. Round 5 收尾
+
+| 指标 | 值 |
+|---|---|
+| 工单完成数 | M1-01, M1-02, M1-03, M1-04（4/8 M1 工单） |
+| 文件新增 | types.py + models.py + config.py + adapters/reference_chanlun.py |
+| 质量门 | ruff/mypy/pytest/import-linter 全部 PASS |
+| 待办 | M1-05 (storage/) + M1-06 (application/export.py) + M1-07 (5-8 fixture) + M1-08 (集成验证) |
+| D16 | Python 3.14 dataclass 拒绝继承带 `@property` 的 Protocol（property 被当作带默认值的类属性） |
+| D17 | 反腐层模式：`ChanlunBackend` Protocol 注入后端实现 + `map_*` 把 Raw 映射到 domain 不可变对象 |
+
+### Round 5 — M1-03 IMPLEMENT (cpt/domain/config.py)
+- 派工 16:40:48 → try 1 rc=0 16:41:34（46s）。
+- 队长独立验收：默认值 + frozen + round-trip + partial dict + list→tuple 全部 OK。
+- 全质量门 PASS。
+
+### Round 5 — M1-04 IMPLEMENT (cpt/adapters/reference_chanlun.py)
+- 派工 16:43:41 → try 1 rc=0 16:47:23（3:42，10 tool_call + 16 completed）。
+- 接口：`ReferenceChanlunConfig`、`ChanlunBackend` Protocol、`ChanlunResult`、`FxRaw/BiRaw/ZsRaw`、`map_fractal/map_bi/map_zhongshu`、`InMemoryChanlunBackend`。
+- 队长验：接口齐全；3 个 mapper 把 Raw 正确映射到 Fractal/Bi/ZhongShu；isinstance(BarLike) 在修复后仍 OK。
+- **修复**：`CanonicalBar` 原本继承 `BarLike` Protocol 触发 Python 3.14 dataclass 拒绝（property 当默认值）。改为不继承，靠 `@property` 暴露 5 个属性 + `isinstance(b, BarLike)` 在运行时检查。ruff 加 `noqa: F401` 让 BarLike 显式 re-export 表达"此模块决定 BarLike 契约被满足"。
+- 全质量门 PASS。
+
+### Round 4 — M1-02 IMPLEMENT (cpt/domain/models.py)
+- 派工 16:34:58 → try 1 rc=0 16:36:18（80s）。
+- 8/8 dataclass + 工厂函数全验：不可变、BarLike 实现、Optional 字段。
+- **质量门问题修复**（队长亲自改）：
+  - mypy 报 `Cannot override writeable attribute with read-only property`（BarLike Protocol 把 direction 标 writable，CanonicalBar 用 @property 暴露）→ 改为 BarLike 用 `@property` read-only 形式
+  - mypy 报 `Missing type arguments for generic type "dict"` → 改为 `dict[str, object]`
+  - ruff E501 行长 108 > 100 → 把 `# kind ∈ {...}` 注释从 inline 拆到 docstring 上方
+- 修复后全绿。
+
 ## 7. Round 3 收尾
 
 | 指标 | 值 |
