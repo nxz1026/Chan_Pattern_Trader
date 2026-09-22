@@ -1,0 +1,15 @@
+# dev 依赖(顶层声明),由 pip-compile 生成 requirements-dev.txt 锁版本
+#
+# 升级流程:
+#   1. 改这里(或 pyproject.toml [project.optional-dependencies].dev)
+#   2. pip-compile requirements-dev.in -o requirements-dev.txt
+#   3. CI 与本地统一用 requirements-dev.txt
+
+ruff>=0.6.0
+mypy>=1.10
+pytest>=8.0
+pytest-cov>=5.0
+pre-commit>=3.7
+import-linter>=2.0
+types-requests
+pip-tools>=7.0

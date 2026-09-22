@@ -6,10 +6,12 @@
 # 行为:
 #   - 目录不存在 -> git clone --no-checkout 后 checkout 到固定 commit
 #   - 目录已存在 -> git fetch + git checkout <commit>
+#   - 校验工作区无未提交改动(若脏,HEAD commit 校验不可信,直接失败)
 #   - 输出每个仓库实际 HEAD hash,与期望值校验;任一不一致则退出码非 0
 #   - 打印每个仓库的 LICENSE 路径(若存在)
 #
 # 约束: bash 4+;不使用 git submodule;失败时给出明确仓库名 + commit。
+# 所有 git 命令保留 stderr 输出,失败原因不被吞掉。
 
 set -euo pipefail
 
@@ -43,15 +45,19 @@ for entry in "${REPOS[@]}"; do
 
   if [ -d "$target/.git" ]; then
     echo "    目录已存在,执行 git fetch..."
-    git -C "$target" fetch --tags --force origin 2>/dev/null \
+    # 若工作区有未提交改动,HEAD 校验不可信:直接 fail
+    if ! git -C "$target" diff --quiet HEAD --; then
+      fail "$name" "工作区存在未提交改动,commit 校验不可信;请先 git stash 或 git checkout ."
+    fi
+    git -C "$target" fetch --tags --force origin \
       || fail "$name" "git fetch 失败 (origin: $url)"
   else
     echo "    目录不存在,git clone --no-checkout..."
-    git clone --no-checkout "$url" "$target" 2>/dev/null \
+    git clone --no-checkout "$url" "$target" \
       || fail "$name" "git clone 失败 (url: $url)"
   fi
 
-  git -C "$target" checkout "$commit" 2>/dev/null \
+  git -C "$target" checkout "$commit" \
     || fail "$name" "checkout 失败 (commit: $commit)"
 
   actual="$(git -C "$target" rev-parse HEAD)"
@@ -64,7 +70,7 @@ for entry in "${REPOS[@]}"; do
   fi
 
   # 打印 LICENSE 路径(大小写不敏感,若存在)
-  license_path="$(find "$target" -maxdepth 1 -iname 'licen[cs]e*' -type f -print -quit 2>/dev/null)"
+  license_path="$(find "$target" -maxdepth 1 -iname 'licen[cs]e*' -type f -print -quit)"
   if [ -n "$license_path" ]; then
     echo "    LICENSE: ${license_path#$REFS_DIR/}"
   else
