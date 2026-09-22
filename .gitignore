@@ -1,0 +1,13 @@
+# Local reference checkouts are kept on disk but not tracked by CPT.
+/references/chanlun-pro/
+/references/chanlun.py/
+/references/chanlun_pine/
+
+# Python caches and local environments.
+__pycache__/
+*.py[cod]
+.venv/
+
+# Local secrets and runtime data.
+.env
+*.sqlite3
