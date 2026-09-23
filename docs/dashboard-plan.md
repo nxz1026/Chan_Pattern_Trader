@@ -150,7 +150,7 @@ git diff --check
 - D5：已完成 snapshot 短轮询、连接异常提示和 stale 超时状态；仍不包含交易操作。
 - D6：基础质量验收完成；后续产品路线以 `docs/dashboard-product-roadmap.md` 的 Phase 0-6 为准。
 - 产品路线 Phase 0：已完成模式切换、共享十字线 OHLCV 和结构联动基础；Phase 1：已交付运行索引、逐根检查、包含决策追踪、溯源树、复现 hash/diff 和 parity 基础服务。
-- 产品路线 Phase 2-3：已交付 `dashboard.v2` 组合服务、MACD 指标服务、不伪造 24h 数据的盯盘投影、周期选择器和结构化质量报告。
+- 产品路线 Phase 2-3：已交付 `dashboard.v2` 组合服务、MACD 指标服务、不伪造 24h 数据的盯盘投影、周期选择器、结构化质量报告、信号历史和事件审计基础。
 
 D1 当前契约入口：
 

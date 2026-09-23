@@ -809,3 +809,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 新增 `cpt/application/dashboard_signal_history.py`，将 signal 与 StructureEvent 生命周期投影为只读历史 rows。
 - Dashboard 增加信号历史摘要面板，展示 signal id、status 和 divergence 状态。
 - 未加入浏览器提醒或交易操作，继续遵守只读红线。
+
+## 46. Dashboard Phase 5 事件审计（2026-09-26）
+
+- 新增 `cpt/application/dashboard_event_audit.py`，按 structure/revision 生成 before/after/changed_fields 只读审计记录。
+- Dashboard 增加事件审计列表，与现有回放和事件数据共享 snapshot。
