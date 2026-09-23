@@ -701,7 +701,10 @@
           if (detail) detail.textContent = `${item.kind} · ${status} · ${ref.start_time ?? ref.bar_index ?? "—"}`;
           document.querySelectorAll("[data-parity-selected]").forEach((selected) => selected.removeAttribute("data-parity-selected"));
           node.setAttribute("data-parity-selected", "true");
-          root.dispatchEvent(new CustomEvent("cpt:parity-selected", { detail: { side, kind: item.kind, status, cpt: item.cpt, oracle: item.oracle } }));
+          const anchor = ref.start_time ?? ref.bar_index ?? null;
+          root.dispatchEvent(new CustomEvent("cpt:parity-selected", { detail: { side, kind: item.kind, status, anchor, cpt: item.cpt, oracle: item.oracle } }));
+          document.querySelectorAll("[data-parity-anchor]").forEach((element) => element.removeAttribute("data-parity-anchor"));
+          document.querySelectorAll(`[data-open-time="${anchor}"]`).forEach((element) => element.setAttribute("data-parity-anchor", "true"));
         };
         node.addEventListener("click", selectParity);
         node.addEventListener("keydown", (event) => {
