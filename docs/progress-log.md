@@ -1024,3 +1024,25 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 2. **宽 `except Exception` 是数据杀手**：它把"高级别递归失败"变成"整张图零结构"，线上表现与"没有结构"无法区分。降级必须按层隔离，并且要 `_LOG.warning` 留痕。
 3. **OMP 派工必须让 worker 自己写 `.omp-logs/<tag>.done`**（整行哨兵），否则 dispatcher 判"哨兵未接受"并重试，可能二次改动同一文件；本次工单 A 因此重试了一次，被队长及时终止。
 4. **`pgrep -f '<tag>'` 会匹配到队长自己的 shell**，误杀过一次自己的命令；停调度器要用精确 pid。
+
+## 76. 周期档位/时间范围/图表文字泥潭（2026-09-23）
+
+用户诉求：周期选择太少（最长 1h）、默认要 1h、要能选时间；并反馈图上"肉眼看不了"。
+
+先开了 vision-router 的「👁 识图」后用视觉模型审图（此前本项目模型无法读图，只能靠 DOM 探针），视觉结论明确了真正的病灶：**蜡烛本身没问题，是图上常驻 SVG 文字堆成"蓝色乱码云"**（`中枢 L6: …`、`中枢下沿 …`、`走势类型 forming` 直接压在图里），另有走势类型色块两侧贯穿全高的虚边框。
+
+| 改动 | 内容 | 验收证据 |
+| --- | --- | --- |
+| 周期档位 | `1m/3m/5m/15m/30m/1h/2h/4h/6h/8h/12h/1d/3d/1w` 共 14 档，默认 **1h**；后端 `--interval` 默认与 systemd 单元同步改 1h | 公网探针：`optionCount=14`、`selectedValue=3600000`；后端 `/api/dashboard/snapshot` 返回 `interval=1h` |
+| 周期标签 | 去掉硬编码 `{"60000":"1m",…}`，改读选中项文本；新增 `INTERVAL_LABELS` 让快照里的 `interval_ms` 显示档位名而非 `60m`/`1440m` | 探针 `topbarInterval` 由 `"60m"` 修正为 `"1h"` |
+| 时间范围 | 顶栏新增起止时间选择（`datetime-local`）+「应用时间范围」+「回到实时」+ 状态显示；后端 `/api/dashboard/snapshot` 接受 `start_ms`/`end_ms`，非法/倒置 400 | 探针：7 天/10 天区间请求 URL 带 `start_ms&end_ms`，`range.available=true`、`data_source=binance_history`、10 天 1h = 240 根、80 分型/79 笔/10 中枢；`start>end` 与非整数均 **400** |
+| 区间会话 | 固定区间后**跳过轮询**（否则 30 秒后被实时快照冲掉）；固定时**整段渲染**（不套"最近 180 根"），失败回滚 | 探针：`statusState="pinned"`、`renderedCandles=240` 与 `bar_count=240` 一致；「回到实时」恢复 `live` |
+| 文字泥潭 | 删除 `走势类型 …`、`中枢下沿 …`、`一买 …` 与走势类型色块虚边框；中枢标签改为**仅选中时**显示一条 `中枢 L{level} {high}—{low}`（详情仍在侧栏与悬浮提示） | `grep -c` 常驻文案归零；视觉复审待用户确认 |
+| 修 bug | `state.pinnedRange` 原先在快照返回**之后**才赋值，导致绘制早于置位、区间仍被截成 180 根 | 改为请求前置位、失败回滚；探针 `renderedCandles` 180 → **240** |
+
+流程记录（OMP 派工）：
+- 工单 `dashboard-range`（唯一文件 `dashboard/dashboard.js`，三件事：周期标签泛化 + 时间范围会话 + 图上文字清理），哨兵 `GATEKEEPER_ACCEPTED dashboard-range-IMPLEMENT` 由 worker 写入 `.omp-logs/dashboard-range.done` 后被 dispatcher 接受；队长独立复跑 `node --check` 与 6 个 focused 测试。
+- 队长自己完成：`index.html`（14 档 + 时间控件）、`cpt/web/app.py`（`start_ms`/`end_ms` 解析与 400 分支、`RangeSource` 协议、与 `level` 分支互斥）、`cpt/web/__main__.py`（`_snapshot_from_bars` + 两个 provider 的 `snapshot_for_range`、默认周期 1h）、`dashboard.css`（新控件样式）、systemd 单元周期。
+- 教训（补）：`<pre>` 里抓探针输出不能用 `sed 's/.*PROBE_JSON://'`，会命中内联脚本里的字面量；必须先定位 `<pre id="out">` 再解析。
+
+质量门：`pytest tests` **175 passed**；ruff/format/mypy(55 files)/import-linter(4 kept) 全绿；公网三文件 md5 与仓库一致。

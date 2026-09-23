@@ -5,7 +5,10 @@ import re
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
+
+import pytest
 
 
 def test_demo_entrypoint_serves_schema_snapshot() -> None:
@@ -176,6 +179,91 @@ def test_demo_entrypoint_parity_does_not_pretend_zero_match() -> None:
             payload = json.load(response)
         assert payload["available"] is False
         assert "reason" in payload
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+
+
+def _serve(proc_stdout) -> int:
+    import re as _re
+
+    deadline = time.monotonic() + 10
+    line = ""
+    while not line and time.monotonic() < deadline:
+        line = proc_stdout.readline().strip()
+    return int(_re.search(r":(\d+)", line).group(1))
+
+
+def test_fixture_entrypoint_serves_time_range_and_rejects_bad_params() -> None:
+    """时间范围查询：fixture 模式按 [start_ms, end_ms] 切片重建，非法参数 400。"""
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "cpt.web",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--mode",
+            "fixture",
+            "--limit",
+            "600",
+            "--interval",
+            "5m",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    try:
+        port = _serve(process.stdout)
+        base = 1_700_000_000_000
+        start = base + 100 * 300_000
+        end = base + 400 * 300_000
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/dashboard/snapshot?start_ms={start}&end_ms={end}"
+        ) as response:
+            payload = json.load(response)
+        assert payload["range"]["available"] is True
+        assert payload["range"]["start_ms"] == start
+        assert payload["range"]["end_ms"] == end
+        assert 200 <= payload["range"]["bar_count"] <= 310
+        assert payload["runtime"]["data_source"] == "fixture_history"
+        assert payload["overlays"]["fractals"], "区间快照必须带真实结构"
+
+        for query, expected in (
+            ("start_ms=1&end_ms=1", 400),
+            ("start_ms=abc&end_ms=1", 400),
+            (f"start_ms={end}&end_ms={start}", 400),
+        ):
+            request = urllib.request.Request(
+                f"http://127.0.0.1:{port}/api/dashboard/snapshot?{query}"
+            )
+            with pytest.raises(urllib.error.HTTPError) as error:
+                urllib.request.urlopen(request)
+            assert error.value.code == expected
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+
+
+def test_demo_entrypoint_reports_range_unavailable() -> None:
+    """demo 模式没有 range provider，必须如实报告不可用而不是伪造区间数据。"""
+    process = subprocess.Popen(
+        [sys.executable, "-m", "cpt.web", "--host", "127.0.0.1", "--port", "0", "--mode", "demo"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    try:
+        port = _serve(process.stdout)
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/dashboard/snapshot?start_ms=1000&end_ms=2000"
+        ) as response:
+            payload = json.load(response)
+        assert payload["available"] is False
+        assert payload["reason"] == "range_unavailable_in_mode"
     finally:
         process.terminate()
         process.wait(timeout=5)

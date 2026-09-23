@@ -63,3 +63,51 @@ def test_default_zoom_window_keeps_candles_readable() -> None:
     assert "Math.max(1.5, Math.min(view.geom.slot * 0.62, 16))" in javascript
     # tooltip 索引基于 applyZoomWindow 之后的窗口
     assert "const shown = applyZoomWindow(all);" in javascript
+
+
+def test_interval_tiers_and_default_hour() -> None:
+    """回归（2026-09-23）：周期档位扩到 1m~1w，默认 1h。"""
+    html = (ROOT / "dashboard/index.html").read_text(encoding="utf-8")
+    expected = [
+        ("60000", "1m"),
+        ("180000", "3m"),
+        ("300000", "5m"),
+        ("900000", "15m"),
+        ("1800000", "30m"),
+        ("3600000", "1h"),
+        ("7200000", "2h"),
+        ("14400000", "4h"),
+        ("21600000", "6h"),
+        ("28800000", "8h"),
+        ("43200000", "12h"),
+        ("86400000", "1d"),
+        ("259200000", "3d"),
+        ("604800000", "1w"),
+    ]
+    for value, label in expected:
+        assert f'<option value="{value}"' in html, f"缺少周期档位 {label}"
+    assert '<option value="3600000" selected>1h</option>' in html, "默认周期必须是 1h"
+
+
+def test_time_range_controls_exist() -> None:
+    """回归（2026-09-23）：时间范围选择控件（起止时间 + 应用 + 回到实时 + 状态）。"""
+    html = (ROOT / "dashboard/index.html").read_text(encoding="utf-8")
+    for testid in ("range-start", "range-end", "range-apply", "range-live", "range-status"):
+        assert f'data-testid="{testid}"' in html, f"缺少时间范围控件 {testid}"
+    javascript = (ROOT / "dashboard/dashboard.js").read_text(encoding="utf-8")
+    # 请求参数名是冻结契约（后端 app.py 同名解析）
+    assert 'url.searchParams.set("start_ms"' in javascript
+    assert 'url.searchParams.set("end_ms"' in javascript
+    # 固定区间后必须跳过轮询，且整段渲染（否则所选区间前半段被默认窗口截掉）
+    assert "if (state.pinnedRange) return;" in javascript
+    assert "if (state.pinnedRange) return candles;" in javascript
+    assert "state.pinnedRange = { startMs, endMs };" in javascript
+    assert "node.dataset.state = value;" in javascript
+
+
+def test_interval_labels_cover_all_tiers() -> None:
+    """回归（2026-09-23）：快照里的 interval_ms 必须显示成档位名，不是 "60m"/"1440m"。"""
+    javascript = (ROOT / "dashboard/dashboard.js").read_text(encoding="utf-8")
+    assert "INTERVAL_LABELS" in javascript
+    for label in ('60000: "1m"', '3600000: "1h"', '86400000: "1d"', '604800000: "1w"'):
+        assert label in javascript, f"周期标签表缺少 {label}"

@@ -146,6 +146,7 @@
     crosshair: null,
     zoomLevel: 0,
     visibleWindow: null,
+    pinnedRange: null,
   };
 
   /* ------------------------------------------------------------ DOM 基础 */
@@ -248,7 +249,18 @@
     return formatNumber(value, 2);
   };
 
-  const formatInterval = (ms) => (ms === null ? "—" : `${formatNumber(ms / MS_PER_MINUTE, 0)}m`);
+  /* 周期档位名：与 index.html 的 interval-select 选项一一对应，
+     避免 3600000 被显示成 "60m"、86400000 被显示成 "1440m"。 */
+  const INTERVAL_LABELS = {
+    60000: "1m", 180000: "3m", 300000: "5m", 900000: "15m", 1800000: "30m",
+    3600000: "1h", 7200000: "2h", 14400000: "4h", 21600000: "6h",
+    28800000: "8h", 43200000: "12h", 86400000: "1d", 259200000: "3d", 604800000: "1w",
+  };
+
+  const formatInterval = (ms) => {
+    if (ms === null) return "—";
+    return INTERVAL_LABELS[ms] || `${formatNumber(ms / MS_PER_MINUTE, 0)}m`;
+  };
 
   const directionLabel = (direction) => {
     if (direction === 1) return "向上（+1）";
@@ -258,11 +270,6 @@
   };
 
   const directionState = (direction) => (direction === 1 ? "up" : direction === -1 ? "down" : "flat");
-
-  const trendLabel = (item) => {
-    const kind = typeof item.kind === "string" ? item.kind : "—";
-    return item.direction === 1 ? `${kind} ↑` : item.direction === -1 ? `${kind} ↓` : kind;
-  };
 
   /* ---------------------------------------------------------- snapshot 读取 */
 
@@ -1073,6 +1080,7 @@
     state.selection = payload;
     node.setAttribute("data-selected", "true");
     renderSelection();
+    scheduleDraw();
     root.dispatchEvent(new CustomEvent("cpt:structure-selected", { detail: payload }));
   }
 
@@ -1158,6 +1166,9 @@
       const clampedEnd = Math.max(clampedStart + 1, Math.min(end, candles.length));
       return candles.slice(clampedStart, clampedEnd);
     }
+    // 用户主动选定的历史区间：整段展示，不再套"最近 N 根"默认窗口，
+    // 否则所选区间的前半段会被静默截掉（2026-09-23 端到端实测）。
+    if (state.pinnedRange) return candles;
     if (candles.length > DEFAULT_VISIBLE_BARS) return candles.slice(candles.length - DEFAULT_VISIBLE_BARS);
     return candles;
   }
@@ -1292,15 +1303,9 @@
       paint(element, {
         fill: trendFill(num(item.direction)),
         stroke: "var(--color-accent)",
-        "stroke-opacity": "0.3",
-        "stroke-dasharray": "3 3",
+        "stroke-opacity": "0.15",
       });
       group.appendChild(attachHit(element, payloadFor("trend_type", item, view, structureStateOf(view, num(item.end_time)))));
-      group.appendChild(
-        paint(createSvg("text", { x: left + 4, y: view.geom.top + 11 }, `走势类型 ${trendLabel(item)}`), {
-          fill: "var(--color-accent)",
-        }),
-      );
     });
   }
 
@@ -1333,14 +1338,14 @@
         "stroke-dasharray": "4 3",
       });
       group.appendChild(attachHit(element, payloadFor("zhongshu", item, view, structureStateOf(view, num(item.end_time)))));
-      group.appendChild(
-        paint(createSvg("text", { x: left + 4, y: top - 4 }, `中枢 L${num(item.level)} · ${formatPrice(high)}`), {
-          fill: "var(--color-loading)",
-        }),
-      );
-      group.appendChild(
-        createSvg("text", { x: left + 4, y: top + height + 11 }, `中枢下沿 ${formatPrice(low)}`),
-      );
+      if (state.selection && state.selection.kind === "zhongshu" && num(item.start_time) === state.selection.startTime) {
+        group.appendChild(
+          paint(
+            createSvg("text", { x: left + 4, y: top - 4 }, `中枢 L${num(item.level)} ${formatPrice(high)}—${formatPrice(low)}`),
+            { fill: "var(--color-loading)" },
+          ),
+        );
+      }
     });
   }
 
@@ -1511,11 +1516,6 @@
       "stroke-dasharray": "6 4",
     });
     group.appendChild(attachHit(element, payloadFor("signal", signal, view, stateValue)));
-    group.appendChild(
-      paint(createSvg("text", { x: view.xForIndex(index), y: y - 4 }, `一买 ${stateValue} · ${formatPrice(price)}`), {
-        fill: stateValue === "confirmed" ? "var(--color-confirmed)" : "var(--color-alert)",
-      }),
-    );
   }
 
   function drawLastPrice(group, view) {
@@ -2060,7 +2060,7 @@
     }
   }
 
-  function refreshSelectedSnapshot({ level } = {}) {
+  function refreshSelectedSnapshot({ level, startMs, endMs } = {}) {
     const endpoint = snapshotEndpoint();
     if (!endpoint) {
       setConnection("offline", "当前为离线 demo；切换仅更新本地选择状态");
@@ -2072,6 +2072,8 @@
     if (symbol) url.searchParams.set("symbol", symbol);
     if (interval) url.searchParams.set("interval_ms", interval);
     if (Number.isInteger(level)) url.searchParams.set("level", String(level));
+    if (Number.isInteger(startMs)) url.searchParams.set("start_ms", String(startMs));
+    if (Number.isInteger(endMs)) url.searchParams.set("end_ms", String(endMs));
     return loadSnapshot(url.toString());
   }
 
@@ -2159,14 +2161,78 @@
     const select = q("[data-testid=interval-select]");
     if (!select) return;
     select.addEventListener("change", () => {
-      const labels = { "60000": "1m", "300000": "5m", "900000": "15m", "3600000": "1h" };
-      const label = labels[select.value] || select.value;
+      const option = select.selectedOptions && select.selectedOptions[0];
+      const label = option && typeof option.textContent === "string" && option.textContent.trim() !== ""
+        ? option.textContent.trim()
+        : String(select.value);
       setText("[data-testid=topbar-interval]", label);
       root.dataset.intervalMs = select.value;
       setConnection("connecting", `正在切换周期：${label}`);
       root.dispatchEvent(new CustomEvent("cpt:interval-changed", { detail: { intervalMs: Number(select.value), label } }));
       refreshSelectedSnapshot();
     });
+  }
+
+  /** 历史区间会话：固定区间后停止自动刷新，避免实时快照把固定窗口冲掉。 */
+  function installTimeRange() {
+    const startInput = q("[data-testid=range-start]");
+    const endInput = q("[data-testid=range-end]");
+    const applyButton = q("[data-testid=range-apply]");
+    const liveButton = q("[data-testid=range-live]");
+    if (!applyButton && !liveButton) return;
+
+    const setRangeStatus = (text) => setText("[data-testid=range-status]", text);
+    const setRangeState = (value) => {
+      const node = q("[data-testid=range-status]");
+      if (node) node.dataset.state = value;
+    };
+
+    if (applyButton) {
+      applyButton.addEventListener("click", () => {
+        const startValue = startInput ? startInput.value : "";
+        const endValue = endInput ? endInput.value : "";
+        if (!startValue || !endValue) {
+          setRangeStatus("请选择开始与结束时间");
+          return;
+        }
+        const startMs = new Date(startValue).getTime();
+        const endMs = new Date(endValue).getTime();
+        if (!Number.isInteger(startMs) || !Number.isInteger(endMs)) {
+          setRangeStatus("时间格式无效");
+          return;
+        }
+        if (startMs >= endMs) {
+          setRangeStatus("结束时间必须晚于开始时间");
+          return;
+        }
+        // 必须在发起请求**之前**置位：绘制发生在 loadSnapshot 内部，
+        // 晚一步设置会让窗口被默认的「最近 N 根」截断（2026-09-23 实测）。
+        const previousRange = state.pinnedRange;
+        state.pinnedRange = { startMs, endMs };
+        Promise.resolve(refreshSelectedSnapshot({ startMs, endMs })).then((snapshot) => {
+          if (!snapshot) {
+            state.pinnedRange = previousRange;
+            setRangeStatus("区间快照加载失败，区间未固定");
+            return;
+          }
+          setRangeStatus(`历史区间 ${new Date(startMs).toLocaleString()} ~ ${new Date(endMs).toLocaleString()}`);
+          setRangeState("pinned");
+          stopPolling();
+          scheduleDraw();
+        });
+      });
+    }
+
+    if (liveButton) {
+      liveButton.addEventListener("click", () => {
+        state.pinnedRange = null;
+        if (startInput) startInput.value = "";
+        if (endInput) endInput.value = "";
+        setRangeStatus("实时");
+        setRangeState("live");
+        if (state.snapshotUrl) startPolling(state.snapshotUrl);
+      });
+    }
   }
 
   function installModeSwitch() {
@@ -2318,6 +2384,7 @@
     stopPolling();
     state.snapshotUrl = url;
     state.pollTimer = window.setInterval(() => {
+      if (state.pinnedRange) return;
       loadSnapshot(url).catch(() => undefined);
     }, Math.max(1000, Number(intervalMs) || 5000));
     return state.pollTimer;
@@ -2414,6 +2481,7 @@
     installRuntimeStyle();
     installModeSwitch();
     installIntervalSwitch();
+    installTimeRange();
     installSymbolSwitch();
     installRealtimeRefresh();
     installAlertObserver();

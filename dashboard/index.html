@@ -53,11 +53,32 @@
           <dt>周期</dt>
           <dd><select data-testid="interval-select" aria-label="切换周期">
             <option value="60000">1m</option>
-            <option value="300000" selected>5m</option>
+            <option value="180000">3m</option>
+            <option value="300000">5m</option>
             <option value="900000">15m</option>
-            <option value="3600000">1h</option>
+            <option value="1800000">30m</option>
+            <option value="3600000" selected>1h</option>
+            <option value="7200000">2h</option>
+            <option value="14400000">4h</option>
+            <option value="21600000">6h</option>
+            <option value="28800000">8h</option>
+            <option value="43200000">12h</option>
+            <option value="86400000">1d</option>
+            <option value="259200000">3d</option>
+            <option value="604800000">1w</option>
           </select></dd>
-          <span data-testid="topbar-interval" data-field="market.interval_ms" hidden>5m</span>
+          <span data-testid="topbar-interval" data-field="market.interval_ms" hidden>1h</span>
+        </div>
+        <div class="meta-item time-range">
+          <dt>时间范围</dt>
+          <dd>
+            <input type="datetime-local" data-testid="range-start" aria-label="开始时间" />
+            <span class="range-sep">~</span>
+            <input type="datetime-local" data-testid="range-end" aria-label="结束时间" />
+            <button type="button" data-testid="range-apply">应用时间范围</button>
+            <button type="button" data-testid="range-live">回到实时</button>
+            <span data-testid="range-status" data-state="live">实时</span>
+          </dd>
         </div>
         <div class="meta-item">
           <dt>数据来源</dt>

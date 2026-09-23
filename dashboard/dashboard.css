@@ -1095,3 +1095,52 @@ noscript p {
 .cpt-parity-svg [data-parity-selected="true"] { stroke: var(--color-accent); stroke-width: 3; }
 .cpt-chart-hit[data-parity-anchor="true"] { stroke: var(--color-accent); stroke-width: 2; }
 .cpt-crosshair-tooltip { position: absolute; z-index: 10; pointer-events: none; padding: 6px 8px; color: var(--color-text); background: var(--color-panel-strong); border: 1px solid var(--color-border); border-radius: 4px; font: 11px var(--font-mono); white-space: nowrap; }
+
+/* ------------------------------------------------- 时间范围选择（历史区间） */
+
+.topbar-meta .time-range dd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  white-space: normal;
+}
+
+.time-range input[type="datetime-local"] {
+  padding: 1px var(--space-2);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  color-scheme: dark;
+}
+
+.time-range .range-sep {
+  color: var(--color-text-faint);
+}
+
+.time-range button {
+  padding: 1px var(--space-2);
+  border: var(--border-width) solid var(--color-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+.time-range button:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}
+
+.time-range [data-testid="range-status"] {
+  color: var(--color-text-dim);
+  font-size: var(--font-size-xs);
+}
+
+.time-range [data-testid="range-status"][data-state="pinned"] {
+  color: var(--color-accent);
+}

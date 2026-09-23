@@ -32,6 +32,13 @@ class InspectProvider(Protocol):
     def inspect(self, bar_index: int) -> dict[str, Any]: ...
 
 
+@runtime_checkable
+class RangeSource(Protocol):
+    """Read-only provider that can rebuild a snapshot for an explicit time window."""
+
+    def snapshot_for_range(self, start_ms: int, end_ms: int) -> dict[str, Any]: ...
+
+
 def make_handler(
     provider: SnapshotProvider | SnapshotSource,
 ) -> type[BaseHTTPRequestHandler]:
@@ -73,7 +80,38 @@ def make_handler(
                         return
                 payload["market"] = market
                 payload["runtime"] = runtime
-                if query.get("level") and isinstance(provider, MultiLevelSource):
+                range_applied = False
+                if query.get("start_ms") or query.get("end_ms"):
+                    raw_start = (query.get("start_ms") or [""])[0]
+                    raw_end = (query.get("end_ms") or [""])[0]
+                    try:
+                        start_ms = int(raw_start)
+                        end_ms = int(raw_end)
+                    except ValueError:
+                        self.send_error(HTTPStatus.BAD_REQUEST, "start_ms/end_ms must be integers")
+                        return
+                    if start_ms >= end_ms:
+                        self.send_error(
+                            HTTPStatus.BAD_REQUEST, "start_ms must be earlier than end_ms"
+                        )
+                        return
+                    if not isinstance(provider, RangeSource):
+                        payload = {"available": False, "reason": "range_unavailable_in_mode"}
+                        return self._write_json(payload)
+                    try:
+                        payload = provider.snapshot_for_range(start_ms, end_ms)
+                    except Exception:  # noqa: BLE001
+                        self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "range rebuild failed")
+                        return
+                    payload = dict(payload)
+                    payload["market"] = dict(payload.get("market", {}))
+                    payload["runtime"] = dict(payload.get("runtime", {}))
+                    range_applied = True
+                if (
+                    query.get("level")
+                    and not range_applied
+                    and isinstance(provider, MultiLevelSource)
+                ):
                     try:
                         level = int(query["level"][0])
                     except ValueError:

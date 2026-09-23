@@ -23,7 +23,11 @@ import time as _time
 from collections.abc import Mapping, Sequence
 from typing import Any
 
-from cpt.adapters.binance_futures import BinanceFuturesClient, resolve_interval_ms
+from cpt.adapters.binance_futures import (
+    MAX_KLINES_LIMIT,
+    BinanceFuturesClient,
+    resolve_interval_ms,
+)
 from cpt.adapters.native_chanlun import NativeChanlunBackend
 from cpt.adapters.reference_chanlun import (
     ReferenceChanlunConfig,
@@ -169,6 +173,57 @@ def _compute_trend_types(
         return ()
 
 
+def _snapshot_from_bars(
+    config: RulesConfig,
+    backend: NativeChanlunBackend,
+    bars: tuple[CanonicalBar, ...],
+    *,
+    symbol: str,
+    interval: str,
+    data_source: str,
+    status: str = "confirmed",
+) -> dict[str, Any]:
+    """把一段 K 线跑成完整 v2 快照（主叠加层 + 多级别 + 走势类型）。
+
+    供「按时间范围查询」这类一次性重建使用：与轮询路径同源（同一 backend、
+    同一守卫），但读的是调用方给定的 bars，不碰 provider 的实时状态。
+    """
+    fractals, bis, zhongshus = _compute_domain_structures(bars, config, backend)
+    try:
+        multi = build_multi_level(bars, config, backend, levels=tuple(config.levels))
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("multi-level build failed for range snapshot: %s", exc)
+        multi = _fallback_multi_level(config, fractals, bis, zhongshus)
+    if not multi.get(config.levels[0], {}).get("fractals"):
+        multi = _fallback_multi_level(config, fractals, bis, zhongshus)
+    snapshot = build_dashboard_snapshot_v2(
+        config,
+        bars,
+        fractals=fractals,
+        bis=bis,
+        zhongshus=zhongshus,
+        trend_types=_compute_trend_types(bis, zhongshus, config),
+        mode="research",
+        status=status,
+        data_source=data_source,
+        multi_level=_format_multi_level(multi),
+        config_compare=_compare_with_default(config),
+        runtime={
+            "data_source": data_source,
+            "symbol": symbol,
+            "interval": interval,
+            "buffer_size": len(bars),
+            "window_size": len(bars),
+            "status": status,
+        },
+    )
+    snapshot["market"]["symbol"] = symbol
+    snapshot["market"]["interval_ms"] = resolve_interval_ms(interval)
+    snapshot["runtime"]["symbol"] = symbol
+    snapshot["runtime"]["interval"] = interval
+    return snapshot
+
+
 class _FixtureProvider:
     """Static snapshot+inspect provider for ``fixture`` mode."""
 
@@ -192,6 +247,35 @@ class _FixtureProvider:
 
     def snapshot_payload(self) -> dict[str, Any]:
         return dict(self._snapshot)
+
+    def snapshot_for_range(self, start_ms: int, end_ms: int) -> dict[str, Any]:
+        """按 [start_ms, end_ms] 从合成序列切出窗口并重建快照。"""
+        window = tuple(bar for bar in self._bars if start_ms <= bar.open_time <= end_ms)
+        if len(window) < 3:
+            empty = demo_snapshot(self._symbol, self._interval)
+            empty["range"] = {
+                "available": False,
+                "reason": "range_too_short",
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "bar_count": len(window),
+            }
+            return empty
+        snapshot = _snapshot_from_bars(
+            self._config,
+            self._backend,
+            window,
+            symbol=self._symbol,
+            interval=self._interval,
+            data_source="fixture_history",
+        )
+        snapshot["range"] = {
+            "available": True,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "bar_count": len(window),
+        }
+        return snapshot
 
     def snapshot_for_level(self, level: int) -> dict[str, Any]:
         try:
@@ -377,6 +461,53 @@ class _RealtimeProvider:
         with self._lock:
             return dict(self._snapshot)
 
+    def snapshot_for_range(self, start_ms: int, end_ms: int) -> dict[str, Any]:
+        """按 [start_ms, end_ms] 向上游拉取历史 K 线并重建快照（只读、无副作用）。"""
+        try:
+            bars = self._client.fetch_validated_klines(
+                self._symbol,
+                self._interval,
+                start_time=start_ms,
+                end_time=end_ms,
+                limit=MAX_KLINES_LIMIT,
+            )
+        except Exception as exc:  # noqa: BLE001 — 上游不可用时如实降级，不伪造数据
+            _LOG.warning("historical range fetch failed: %s", exc)
+            empty = demo_snapshot(self._symbol, self._interval)
+            empty["range"] = {
+                "available": False,
+                "reason": "upstream_range_unavailable",
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+            }
+            return empty
+        if len(bars) < 3:
+            empty = demo_snapshot(self._symbol, self._interval)
+            empty["range"] = {
+                "available": False,
+                "reason": "range_too_short",
+                "start_ms": start_ms,
+                "end_ms": end_ms,
+                "bar_count": len(bars),
+            }
+            return empty
+        snapshot = _snapshot_from_bars(
+            self._config,
+            self._backend,
+            tuple(bars),
+            symbol=self._symbol,
+            interval=self._interval,
+            data_source="binance_history",
+        )
+        snapshot["market_24h"] = self._safe_24h()
+        snapshot["range"] = {
+            "available": True,
+            "start_ms": start_ms,
+            "end_ms": end_ms,
+            "bar_count": len(bars),
+        }
+        return snapshot
+
     def inspect(self, bar_index: int) -> dict[str, Any]:
         with self._lock:
             bars = self._bars
@@ -529,7 +660,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="demo",
     )
     parser.add_argument("--symbol", default="BTCUSDT")
-    parser.add_argument("--interval", default="5m")
+    parser.add_argument("--interval", default="1h")
     parser.add_argument(
         "--poll-seconds",
         type=float,
