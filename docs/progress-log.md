@@ -621,3 +621,27 @@ M4 已具备回放入口所需的数据连续性与缺口阻断基础。下一�
 ### 结论
 
 M4 已具备可注入、可验证的 Binance 数据入口和缺口阻断；下一步实现批量/单根回放并确保 schema v1 导出兼容。
+
+## 24. M4 批量与单根回放（2026-09-23）
+
+### 交付物
+
+- 扩展 `cpt/application/replay.py`：新增 `replay_bars()` 与 `replay_incremental()`。
+- 批量回放先执行 validators；单根回放先验证完整序列，再按前缀复用同一 `run_replay` 管线。
+- 新增 `--validate-only` CLI 模式，输出校验行数和时间范围，不写结构文件。
+- 缺口在任何前缀输出前阻断；不足三根前缀输出 schema v1 空结构。
+- 保留原有 `run_replay()` 低层兼容入口，避免破坏既有人工 fixture 合约。
+
+### 独立验收
+
+- 现有回放/验证 focused：**29 passed**。
+- `pytest tests -q`：**104 passed**。
+- `ruff check cpt tests scripts/compare_oracle.py`：**All checks passed**。
+- `ruff format --check`：**44 files already formatted**。
+- `mypy cpt`：**Success, 26 source files**。
+- `import-linter`：**5 contracts kept, 0 broken**。
+- `git diff --check`：通过。
+
+### 限制
+
+现有历史人工 fixture 使用旧的 600ms 时间演示格式，不满足 Binance 5m 的 `close_time = open_time + 300000 - 1` 契约，因此继续由兼容的 `run_replay()` 测试；真实 Binance 数据与新回放入口使用 validators 严格校验。后续 M6 前应统一 fixture 时间契约。
