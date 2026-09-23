@@ -525,3 +525,27 @@ M3 已具备基础走势类型分类能力；下一步实现递归结构元素�
 ### 结论
 
 M3 已具备走势类型到高级别候选结构元素的映射基础；下一步实现一买状态机与重构事件。
+
+## 20. M3 一买状态机（2026-09-23）
+
+### 交付物
+
+- 新增 `cpt/domain/signal.py`：`assess_first_buy()` 与 `transition_first_buy()`。
+- 一买准备要求向下走势、至少两个中枢和背驰段；背驰是否成立不作为硬门槛。
+- 支持 `structure_ready / alert / candidate / confirmed / invalidated` 状态转移。
+- 严格校验 divergence 三态、级别、走势方向和状态，保留 `source_revision` 与各状态时间。
+- 新增 `tests/test_signal.py`：5 个 focused 用例。
+
+### 独立验收
+
+- `pytest tests/test_signal.py -x -q`：**5 passed**。
+- `pytest tests -q`：**93 passed**。
+- `ruff check cpt tests scripts/compare_oracle.py`：**All checks passed**。
+- `ruff format --check`：**38 files already formatted**。
+- `mypy cpt`：**Success, 23 source files**。
+- `import-linter`：**5 contracts kept, 0 broken**。
+- `git diff --check`：通过。
+
+### 结论
+
+M3 已具备基础走势分类、一级递归映射和一买状态机。下一阶段补齐重构事件与历史/实时候选一致性。
