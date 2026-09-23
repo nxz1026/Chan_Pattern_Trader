@@ -1536,6 +1536,17 @@
 
   /* ------------------------------------------------------------ 生命周期 */
 
+  function installSymbolSwitch() {
+    const select = q("[data-testid=symbol-select]");
+    if (!select) return;
+    select.addEventListener("change", () => {
+      const symbol = select.value;
+      setText("[data-testid=topbar-symbol]", symbol);
+      root.dataset.symbol = symbol;
+      root.dispatchEvent(new CustomEvent("cpt:symbol-changed", { detail: { symbol } }));
+    });
+  }
+
   function installLevelFilter() {
     const select = q("[data-testid=level-select]");
     if (!select) return;
@@ -1793,6 +1804,7 @@
     installRuntimeStyle();
     installModeSwitch();
     installIntervalSwitch();
+    installSymbolSwitch();
     installLevelFilter();
     installCrosshair();
     ensureSelectionSection();
