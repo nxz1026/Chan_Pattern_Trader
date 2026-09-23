@@ -832,3 +832,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 新增 `tests/test_dashboard_static_smoke.py`，锁定双模式、周期/级别筛选、parity 容器、共享事件和只读入口。
 - 新增 `cpt/application/dashboard_multi_run.py`，按 open_time 对齐多份 snapshot，支持研究者 A/B 检查。
 - 新增 focused 测试，静态 smoke 和多运行对齐通过。
+
+## 50. Dashboard Phase 6 最终验收（2026-09-30）
+
+- 新增 `docs/dashboard-final-acceptance.md`，汇总共享底座、研究者模式、盯盘模式、只读边界、自动化门禁和已知限制。
+- 明确 parity 完整逐元素 SVG 定位、真实 24h 聚合和浏览器框架测试仍是后续视觉/基础设施增强，不将其误报为已完成。

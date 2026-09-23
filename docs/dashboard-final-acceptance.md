@@ -1,0 +1,69 @@
+# CPT Dashboard 最终阶段验收报告
+
+日期：2026-09-30
+状态：Phase 0-6 功能基础已落地，等待产品人工审核
+
+## 已交付能力
+
+### 共享底座
+
+- watch/research 双模式和 URL 模式切换；
+- SVG K 线、成交量、分型、笔、中枢、走势类型叠加；
+- 十字线 OHLCV；
+- 周期选择器；
+- 多级别筛选；
+- 结构点击联动；
+- stale/gap/offline 状态；
+- 离线回放、事件时间线和 snapshot JSON 导出。
+
+### 研究者模式
+
+- 运行/dataset 索引；
+- raw bar 逐根检查；
+- merged bar 和 containment decision 溯源；
+- source_ids 结构树；
+- parity summary 和 CPT/Oracle 对比容器；
+- dataset/config/rules/schema/engine 复现信息；
+- snapshot 字段 diff 和多运行 open_time 对齐；
+- 信号历史；
+- 事件 before/after/changed_fields 审计；
+- 本地注释（localStorage，不进入数据集/hash）；
+- 时间范围切片服务。
+
+### 盯盘模式
+
+- 当前价格和窗口涨跌幅；
+- 窗口高低与成交量；
+- MACD 服务；
+- 收盘倒计时基础显示；
+- signal status 和 divergence status；
+- 没有真实 24h 聚合源时不伪造 24h 数据，返回 `None`。
+
+## 安全与边界
+
+- Dashboard 始终只读；
+- 不提供下单、撤单、账户、持仓、盘口或结构写入；
+- 不在浏览器复制 Binance HTTP 逻辑；
+- oracle 只作为独立参考实现，不视为绝对正确答案；
+- 本地研究注释不改变原始 snapshot、dataset hash 或结构数据。
+
+## 自动化验收
+
+```text
+pytest tests -q -rs
+ruff check cpt tests scripts/compare_oracle.py
+ruff format --check cpt tests scripts/compare_oracle.py
+mypy cpt
+import-linter lint --config .importlinter
+node --check dashboard/dashboard.js
+git diff --check
+```
+
+验收结果：全部通过；当前测试总数为 126 passed。
+
+## 已知边界
+
+- parity 当前完成标准化结果服务、summary 和对比图容器，完整的双 SVG 逐元素叠加/点击定位仍属于后续视觉增强；
+- 真实 24h 统计取决于上游行情聚合源，未提供时明确为 unavailable/None；
+- 当前浏览器 smoke 以静态契约和离线 demo 为主，未引入新的浏览器测试框架；
+- 未引入 HTTP server，application service 可被未来 HTTP adapter 调用。
