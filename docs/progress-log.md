@@ -759,3 +759,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - 增加窗口涨跌幅、当前 K 线收盘倒计时占位和 watch/research 共用的模式基础。
 - 24h 统计仍严格不伪造：dashboard.v1 未提供真实 24h 聚合时保持明确不可用语义。
+
+## 37. Dashboard Phase 1 运行浏览与研究服务验收（2026-09-23）
+
+- 新增 `cpt/application/dashboard_runs.py` 与运行索引 focused 测试。
+- Phase 1 已具备运行索引、逐根检查、溯源树交互、复现 hash/diff、parity 标准化服务。
+- 当前全量：**115 passed**；ruff、format、mypy、import-linter、JS syntax 和 diff check 均通过。
