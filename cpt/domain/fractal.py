@@ -35,9 +35,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Final, Protocol, runtime_checkable
+from typing import Final, Protocol, cast, runtime_checkable
 
-from cpt.domain.models import Fractal
+from cpt.domain.models import Fractal, FractalKind
 from cpt.domain.types import BarLike
 
 __all__ = ["detect_fractals"]
@@ -132,7 +132,7 @@ def detect_fractals(bars: Sequence[BarLike], level: int = 0) -> tuple[Fractal, .
         indices = _component_indices(middle, middle_index)
         fractals.append(
             Fractal(
-                kind=kind,
+                kind=cast(FractalKind, kind),
                 level=level,
                 bar_index=indices[0],
                 start_time=middle.open_time,

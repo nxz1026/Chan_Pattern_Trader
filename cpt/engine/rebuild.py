@@ -40,9 +40,9 @@ from __future__ import annotations
 
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import Final
+from typing import Final, cast
 
-from cpt.domain.models import StructureEvent, StructureState
+from cpt.domain.models import EventType, StructureEvent, StructureState, StructureStatus
 
 __all__ = ["make_rebuild_events", "rebuild_tail", "scan_stale_dependents"]
 
@@ -181,7 +181,7 @@ def _revive_frozen(replacement: StructureState, previous: StructureState) -> Str
     return replace(
         replacement,
         revision=max(previous.revision, replacement.revision) + 1,
-        status=_APPENDED_STATUS,
+        status=cast(StructureStatus, _APPENDED_STATUS),
         first_seen_at=previous.first_seen_at,
         confirmed_at=None,
         invalidated_at=None,
@@ -286,7 +286,7 @@ def _event(
 ) -> StructureEvent:
     """构造只追加事件：``payload`` 记录 ``source_revision`` / ``source_ids`` / ``status``。"""
     return StructureEvent(
-        event_type=event_type,
+        event_type=cast(EventType, event_type),
         structure_id=state.id,
         revision=state.revision if revision is None else revision,
         payload={

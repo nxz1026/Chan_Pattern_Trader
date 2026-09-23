@@ -12,8 +12,17 @@ from __future__ import annotations
 
 import math
 from dataclasses import dataclass
+from typing import Literal
 
-from cpt.domain.types import BarLike  # noqa: F401  # re-exported for runtime_checkable
+FractalKind = Literal["top", "bottom"]
+TrendKind = Literal[
+    "consolidation", "trend", "extended", "forming", "reclassified", "closed", "open_end"
+]
+StructureKind = Literal["fractal", "bi", "zhongshu", "trend_type", "signal"]
+StructureStatus = Literal["forming", "confirmed", "invalidated", "open_end"]
+EventType = Literal["created", "updated", "confirmed", "reclassified", "invalidated", "closed"]
+SignalStatus = Literal["structure_ready", "alert", "candidate", "confirmed", "invalidated"]
+DivergenceStatus = Literal["not_checked", "not_detected", "detected"]  # noqa: F401  # re-exported for runtime_checkable
 
 __all__ = [
     "CanonicalBar",
@@ -25,6 +34,13 @@ __all__ = [
     "StructureEvent",
     "Signal",
     "make_canonical_bar",
+    "FractalKind",
+    "TrendKind",
+    "StructureKind",
+    "StructureStatus",
+    "EventType",
+    "SignalStatus",
+    "DivergenceStatus",
 ]
 
 
@@ -94,7 +110,7 @@ class CanonicalBar:
 class Fractal:
     """分型（缠论 K 线三分型）。"""
 
-    kind: str  # "top" | "bottom"
+    kind: str
     level: int
     bar_index: int
     start_time: int
@@ -135,7 +151,7 @@ class TrendType:
 
     level: int
     # kind ∈ {consolidation, trend, extended, forming, reclassified, closed, open_end}
-    kind: str
+    kind: TrendKind
     direction: int
     start_time: int
     end_time: int
@@ -151,12 +167,12 @@ class StructureState:
     id: str
     level: int
     # kind ∈ {fractal, bi, zhongshu, trend_type, signal}
-    kind: str
+    kind: StructureKind
     direction: int
     start_time: int
     end_time: int
     # status ∈ {forming, confirmed, invalidated, open_end}
-    status: str
+    status: StructureStatus
     revision: int
     first_seen_at: int
     confirmed_at: int | None
@@ -169,7 +185,7 @@ class StructureEvent:
     """结构事件（只追加，不删除，``docs/rules.md`` §8.6）。"""
 
     # event_type ∈ {created, updated, confirmed, reclassified, invalidated, closed}
-    event_type: str
+    event_type: EventType
     structure_id: str
     revision: int
     payload: dict[str, object]
@@ -183,13 +199,13 @@ class Signal:
     signal_id: str
     level: int
     # signal_type = "first_buy"
-    signal_type: str
+    signal_type: Literal["first_buy"]
     # status ∈ {structure_ready, alert, candidate, confirmed, invalidated}
-    status: str
+    status: SignalStatus
     structure_id: str
     center_ids: tuple[str, ...]
     # divergence_status ∈ {not_checked, not_detected, detected}
-    divergence_status: str
+    divergence_status: DivergenceStatus
     alert_time: int | None
     candidate_time: int | None
     confirmed_time: int | None

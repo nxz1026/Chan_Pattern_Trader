@@ -44,9 +44,9 @@ from __future__ import annotations
 import math
 from collections.abc import Sequence
 from dataclasses import replace
-from typing import Final
+from typing import Final, Literal, cast
 
-from cpt.domain.models import Signal
+from cpt.domain.models import DivergenceStatus, Signal, SignalStatus
 
 __all__ = ["assess_first_buy", "transition_first_buy"]
 
@@ -239,11 +239,11 @@ def assess_first_buy(
     return Signal(
         signal_id=_signal_id(level, structure_id),
         level=level,
-        signal_type=_SIGNAL_TYPE,
-        status=status,
+        signal_type=cast("Literal['first_buy']", _SIGNAL_TYPE),
+        status=cast(SignalStatus, status),
         structure_id=structure_id,
         center_ids=tuple(center_ids),
-        divergence_status=divergence_status,
+        divergence_status=cast(DivergenceStatus, divergence_status),
         alert_time=alert_time,
         candidate_time=candidate_time,
         confirmed_time=confirmed_time,
@@ -298,7 +298,7 @@ def transition_first_buy(
     resolved_price = previous.price if price is None else _resolve_price(price, previous.price)
     return replace(
         previous,
-        status=status,
+        status=cast(SignalStatus, status),
         alert_time=alert_time,
         candidate_time=candidate_time,
         confirmed_time=confirmed_time,

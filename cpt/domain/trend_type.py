@@ -43,9 +43,9 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Final
+from typing import Final, cast
 
-from cpt.domain.models import Bi, TrendType, ZhongShu
+from cpt.domain.models import Bi, TrendKind, TrendType, ZhongShu
 
 __all__ = ["classify_trend"]
 
@@ -233,7 +233,7 @@ def classify_trend(
         trend_types.append(
             TrendType(
                 level=trend_level,
-                kind=kind,
+                kind=cast(TrendKind, kind),
                 direction=direction,
                 start_time=covered[0].start_time,
                 end_time=covered[-1].end_time,
