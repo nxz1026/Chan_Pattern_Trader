@@ -675,9 +675,20 @@
         const y = 45 + Math.floor(index / 24) * 35;
         const status = item.status || "matched";
         const node = createSvg("circle", { cx: x, cy: y, r: 7, class: `parity-${status}`, tabindex: "0", role: "button", "data-parity-kind": item.kind, "data-parity-status": status });
-        node.addEventListener("click", () => {
+        const selectParity = () => {
           root.dataset.paritySelection = `${item.kind}:${status}:${JSON.stringify(ref)}`;
+          const detail = q("[data-testid=parity-selection]");
+          if (detail) detail.textContent = `${item.kind} · ${status} · ${ref.start_time ?? ref.bar_index ?? "—"}`;
+          document.querySelectorAll("[data-parity-selected]").forEach((selected) => selected.removeAttribute("data-parity-selected"));
+          node.setAttribute("data-parity-selected", "true");
           root.dispatchEvent(new CustomEvent("cpt:parity-selected", { detail: { side, kind: item.kind, status, cpt: item.cpt, oracle: item.oracle } }));
+        };
+        node.addEventListener("click", selectParity);
+        node.addEventListener("keydown", (event) => {
+          if (event.key === "Enter" || event.key === " ") {
+            event.preventDefault();
+            selectParity();
+          }
         });
         svg.appendChild(node);
       });
