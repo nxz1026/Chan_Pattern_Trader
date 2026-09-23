@@ -777,3 +777,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - Dashboard 增加 parity 摘要显示：matched/missing/extra，缺失数据时明确提示。
 - 增加浏览器 localStorage 研究注释，注释不进入 snapshot、dataset hash 或结构数据。
 - 保持只读红线：没有任何结构写入、交易或账户操作。
+
+## 40. Dashboard 研究解释链（2026-09-24）
+
+- 新增 `cpt/domain/containment_trace.py`：将 merged bar 的 source_indices 转换为稳定的包含/合并决策记录。
+- 新增 focused 测试，研究模式可以从 raw bar 解释到 merged bar 的决策链。
