@@ -559,6 +559,33 @@
     panel.appendChild(section);
   }
 
+  function renderEngineState(snapshot) {
+    const panel = q("[data-testid=structure-panel]");
+    if (!panel) return;
+    let section = q("[data-testid=engine-state]");
+    if (!section) {
+      section = document.createElement("section");
+      section.dataset.testid = "engine-state";
+      const heading = document.createElement("h3");
+      heading.textContent = "引擎内部状态";
+      section.appendChild(heading);
+      panel.appendChild(section);
+    }
+    while (section.children.length > 1) section.removeChild(section.lastChild);
+    const stateValue = snapshot && isObject(snapshot.engine_state) ? snapshot.engine_state : {};
+    const list = document.createElement("dl");
+    [["revision", stateValue.revision], ["pending", stateValue.pending_count], ["buffer", stateValue.buffer_size], ["window", stateValue.window_size], ["truncated", stateValue.truncated], ["reason", stateValue.truncation_reason]].forEach(([key, value]) => {
+      const wrap = document.createElement("div");
+      const term = document.createElement("dt");
+      term.textContent = String(key);
+      const detail = document.createElement("dd");
+      detail.textContent = value == null ? "—" : String(value);
+      wrap.append(term, detail);
+      list.appendChild(wrap);
+    });
+    section.appendChild(list);
+  }
+
   function renderLevelTree(snapshot) {
     const panel = q("[data-testid=structure-panel]");
     if (!panel) return;
@@ -814,6 +841,7 @@
     setText("[data-testid=selection-source-ids]", payload.sourceIds.join(" ") || "—");
     root.dataset.selection = payload.kind;
     renderResearchDetails(payload);
+    renderEngineState(state.snapshot);
     renderLevelTree(state.snapshot);
     renderLocalNote(payload);
     renderParity(state.snapshot);
@@ -1560,6 +1588,7 @@
     renderEventAudit(state.snapshot);
     installSliceExport();
     renderStructureDefaults(state.snapshot);
+    renderEngineState(state.snapshot);
     renderLevelTree(state.snapshot);
     renderSelection();
     drawChart();
