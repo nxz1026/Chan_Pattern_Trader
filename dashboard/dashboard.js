@@ -36,6 +36,9 @@
   const RUNTIME_CSS = [
     '.chart-canvas[data-rendered="true"]::before { display: none; }',
     '.chart-volume[data-rendered="true"] { background-image: none; }',
+    // K 线区已是定位容器；成交量/时间轴区需补 position: relative，
+    // 否则绝对定位的 <svg> 会跑到最近的定位祖先上，跨区域错位。
+    ".chart-volume, .chart-time-axis { position: relative; overflow: hidden; }",
     ".cpt-chart-svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }",
     ".cpt-chart-svg text { font-family: var(--font-mono); font-size: 10px; fill: var(--color-text-faint); }",
     ".cpt-chart-hit { cursor: pointer; }",
@@ -129,6 +132,8 @@
     selection: null,
     selectedNode: null,
     drawPending: false,
+    replayIndex: null,
+    replayTimer: null,
   };
 
   /* ------------------------------------------------------------ DOM 基础 */
@@ -1214,13 +1219,97 @@
 
   function render(snapshot) {
     state.snapshot = isObject(snapshot) ? snapshot : null;
+    state.replayIndex = state.snapshot ? asArray(state.snapshot.candles).length : null;
+    renderReplayControls(state.snapshot);
     state.selection = null;
     state.selectedNode = null;
     renderChrome(state.snapshot);
+    renderEvents(state.snapshot);
     renderStructureDefaults(state.snapshot);
     renderSelection();
     drawChart();
     return state.snapshot;
+  }
+
+  function renderReplayControls(snapshot) {
+    const count = snapshot ? asArray(snapshot.candles).length : 0;
+    const index = state.replayIndex == null ? 0 : state.replayIndex;
+    setText("[data-testid=replay-progress]", `${index} / ${count}`);
+    const runtime = snapshot && isObject(snapshot.runtime) ? snapshot.runtime : {};
+    setText("[data-testid=replay-window-size]", runtime.window_size == null ? count : runtime.window_size);
+    setState(setText("[data-testid=replay-truncated]", runtime.truncated === true ? "true" : "false"), runtime.truncated === true ? "true" : "false");
+    root.querySelectorAll("[data-replay-action]").forEach((button) => {
+      button.disabled = count === 0;
+    });
+  }
+
+  function renderEvents(snapshot) {
+    const timeline = q("[data-testid=event-timeline]");
+    if (!timeline) return;
+    while (timeline.firstChild) timeline.removeChild(timeline.firstChild);
+    const events = snapshot ? asArray(snapshot.events) : [];
+    setHidden("[data-testid=event-timeline-empty]", events.length > 0);
+    events.forEach((event) => {
+      const item = document.createElement("li");
+      item.className = "event-item";
+      item.dataset.eventType = String(event.event_type || "event");
+      const title = document.createElement("strong");
+      title.textContent = `${event.event_type || "event"} · ${event.structure_id || "—"}`;
+      const detail = document.createElement("span");
+      detail.textContent = `revision ${event.revision ?? "—"} · ${formatDateTime(num(event.occurred_at))}`;
+      item.append(title, detail);
+      timeline.appendChild(item);
+    });
+  }
+
+  function replayPrefix(index) {
+    const snapshot = state.snapshot;
+    if (!snapshot) return null;
+    const candles = asArray(snapshot.candles);
+    const prefix = Math.max(0, Math.min(index, candles.length));
+    const next = JSON.parse(JSON.stringify(snapshot));
+    next.candles = candles.slice(0, prefix);
+    next.events = asArray(snapshot.events).filter((event) => Number(event.occurred_at) <= Number(candles[Math.max(0, prefix - 1)]?.open_time ?? Infinity));
+    if (next.market) {
+      next.market.bar_count = next.candles.length;
+      next.market.last_price = next.candles.length ? next.candles[next.candles.length - 1].close : null;
+    }
+    return next;
+  }
+
+  function applyReplay(index) {
+    if (!state.snapshot) return;
+    state.replayIndex = Math.max(0, Math.min(index, asArray(state.snapshot.candles).length));
+    const next = replayPrefix(state.replayIndex);
+    render(next);
+    renderEvents(next);
+    renderReplayControls(state.snapshot);
+  }
+
+  function stopReplay() {
+    if (state.replayTimer !== null) {
+      window.clearInterval(state.replayTimer);
+      state.replayTimer = null;
+    }
+  }
+
+  function installReplayControls() {
+    root.querySelectorAll("[data-replay-action]").forEach((button) => {
+      button.addEventListener("click", () => {
+        const action = button.dataset.replayAction;
+        const count = state.snapshot ? asArray(state.snapshot.candles).length : 0;
+        if (action === "play") {
+          stopReplay();
+          state.replayTimer = window.setInterval(() => {
+            if ((state.replayIndex ?? 0) >= count) return stopReplay();
+            applyReplay((state.replayIndex ?? 0) + 1);
+          }, 250);
+        } else if (action === "pause") stopReplay();
+        else if (action === "step") applyReplay((state.replayIndex ?? 0) + 1);
+        else if (action === "reset") applyReplay(0);
+        else if (action === "seek") applyReplay(count);
+      });
+    });
   }
 
   function showError(message) {
@@ -1281,6 +1370,7 @@
   function boot() {
     installRuntimeStyle();
     ensureSelectionSection();
+    installReplayControls();
 
     if (typeof window.ResizeObserver === "function") {
       const observer = new window.ResizeObserver(() => scheduleDraw());
