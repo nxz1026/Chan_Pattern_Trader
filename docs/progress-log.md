@@ -866,3 +866,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 新增 `cpt/application/dashboard_runtime.py`，将 revision、pending、buffer、window、truncated 和截断原因投影为稳定 engine_state。
 - dashboard.v2 接入 engine_state；研究面板新增引擎内部状态展示。
 - 状态仅来自调用方 runtime snapshot，不暴露可变 engine 对象。
+
+## 56. Dashboard parity 差异定位与浏览器契约（2026-10-06）
+
+- parity SVG 元素支持鼠标/键盘选择，更新 `parity-selection` 详情和 `data-parity-selected` 状态，并发出 `cpt:parity-selected`。
+- 新增浏览器交互契约 focused 测试；当前环境没有 Chromium/Playwright，继续以可访问 DOM/JS 静态契约覆盖，不虚报真实浏览器运行。
