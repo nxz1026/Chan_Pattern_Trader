@@ -803,3 +803,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 前端增加只读周期选择器：1m/5m/15m/1h，切换通过 `cpt:interval-changed` 事件通知宿主，不复制行情请求逻辑。
 - 新增 `cpt/application/dashboard_quality.py`：gap、乱序和 stale 的结构化研究质量报告。
 - focused 测试通过；数据质量报告保持只读。
+
+## 45. Dashboard Phase 4 信号历史（2026-09-26）
+
+- 新增 `cpt/application/dashboard_signal_history.py`，将 signal 与 StructureEvent 生命周期投影为只读历史 rows。
+- Dashboard 增加信号历史摘要面板，展示 signal id、status 和 divergence 状态。
+- 未加入浏览器提醒或交易操作，继续遵守只读红线。
