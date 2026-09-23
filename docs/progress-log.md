@@ -855,3 +855,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 新增 `cpt/web/app.py` 标准库只读 HTTP adapter，提供 `/api/dashboard/snapshot` 和 `/api/dashboard/health`。
 - POST 和未知路径明确拒绝；adapter 只接受 application snapshot provider，不复制 Binance 请求和 domain 算法。
 - 新增 HTTP focused 测试覆盖 snapshot、health 和只读边界。
+
+## 54. Dashboard 研究级别递归（2026-10-04）
+
+- 新增 `cpt/application/dashboard_levels.py`，按 level 分组并输出 parent_level 的只读递归投影。
+- Dashboard 研究面板增加级别树摘要，与 overlays 共用 snapshot，不直接侵入 domain。
