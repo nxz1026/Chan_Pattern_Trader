@@ -559,6 +559,26 @@
     panel.appendChild(section);
   }
 
+  function renderSignalStats(snapshot) {
+    const panel = q("[data-testid=event-panel]");
+    if (!panel) return;
+    let section = q("[data-testid=signal-stats]");
+    if (!section) {
+      section = document.createElement("section");
+      section.dataset.testid = "signal-stats";
+      const heading = document.createElement("h3");
+      heading.textContent = "信号统计";
+      section.appendChild(heading);
+      panel.appendChild(section);
+    }
+    while (section.children.length > 1) section.removeChild(section.lastChild);
+    const signal = snapshot && isObject(snapshot.signal) ? snapshot.signal : null;
+    const text = signal ? `当前：${signal.status || "unknown"} · 背驰：${signal.divergence_status || "unknown"}` : "暂无信号统计";
+    const summary = document.createElement("p");
+    summary.textContent = text;
+    section.appendChild(summary);
+  }
+
   function renderEngineState(snapshot) {
     const panel = q("[data-testid=structure-panel]");
     if (!panel) return;
@@ -1597,6 +1617,7 @@
     renderParityCharts(state.snapshot);
     renderSignalHistory(state.snapshot);
     renderEventAudit(state.snapshot);
+    renderSignalStats(state.snapshot);
     installSliceExport();
     renderStructureDefaults(state.snapshot);
     renderEngineState(state.snapshot);
