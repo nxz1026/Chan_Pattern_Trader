@@ -137,6 +137,8 @@
     pollTimer: null,
     staleTimer: null,
     snapshotUrl: null,
+    notificationPermission: "default",
+    lastAlertSignature: "",
     mode: new URLSearchParams(window.location.search).get("mode") || "research",
     level: null,
     crosshair: null,
@@ -944,20 +946,55 @@
       inspector.dataset.testid = "bar-inspector";
       inspector.className = "cpt-bar-inspector";
       const heading = document.createElement("h3");
-      heading.textContent = "逐根检查器";
+      heading.textContent = "逐根检查器 (B3 trace_containment)";
       inspector.appendChild(heading);
       panel.appendChild(inspector);
     }
     while (inspector.children.length > 1) inspector.removeChild(inspector.lastChild);
     const raw = payload && payload.kind === "candle" ? payload.raw : null;
+    const form = document.createElement("div");
+    form.className = "cpt-inspect-form";
+    const label = document.createElement("label");
+    label.textContent = "检查 bar_index: ";
+    const input = document.createElement("input");
+    input.type = "number";
+    input.min = "0";
+    input.dataset.testid = "inspect-bar-index";
+    input.placeholder = "0";
+    input.value = raw && Number.isInteger(raw.bar_index) ? String(raw.bar_index) : (payload && payload.bar_index != null ? String(payload.bar_index) : "0");
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "调用后端 inspect";
+    button.dataset.testid = "inspect-run";
+    const output = document.createElement("pre");
+    output.dataset.testid = "inspect-output";
+    output.className = "cpt-inspect-output";
+    button.addEventListener("click", async () => {
+      const idx = Number(input.value);
+      if (!Number.isFinite(idx) || idx < 0) {
+        output.textContent = "bar_index 必须是非负整数";
+        return;
+      }
+      output.textContent = "调用 /api/dashboard/inspect 中…";
+      const result = await fetchInspect(idx);
+      if (!result || result.available === false) {
+        output.textContent = `inspect 不可用：${result ? result.reason : "unknown"}`;
+        return;
+      }
+      output.textContent = JSON.stringify(result, null, 2);
+    });
+    form.append(label, input, button);
+    inspector.appendChild(form);
+    inspector.appendChild(output);
     const rawList = document.createElement("dl");
+    rawList.dataset.testid = "inspect-raw";
     [["open_time", raw && raw.open_time], ["open", raw && raw.open], ["high", raw && raw.high], ["low", raw && raw.low], ["close", raw && raw.close], ["volume", raw && raw.volume], ["is_closed", raw && raw.is_closed]].forEach(([key, value]) => {
       const wrap = document.createElement("div");
-      const label = document.createElement("dt");
-      label.textContent = key;
+      const labelNode = document.createElement("dt");
+      labelNode.textContent = key;
       const valueNode = document.createElement("dd");
       valueNode.textContent = value == null ? "—" : String(value);
-      wrap.append(label, valueNode);
+      wrap.append(labelNode, valueNode);
       rawList.appendChild(wrap);
     });
     inspector.appendChild(rawList);
@@ -1874,6 +1911,7 @@
       if (alert) alert.hidden = !realtime;
       if (refresh) refresh.hidden = !realtime;
     };
+    installBrowserAlerts(alert);
     root.addEventListener("cpt:realtime-updated", (event) => {
       const detail = event.detail || {};
       if (alert) {
@@ -1885,8 +1923,110 @@
     syncOffline();
   }
 
+  function isNotificationSupported() {
+    return typeof window !== "undefined" && "Notification" in window;
+  }
+
+  function playAlertBeep() {
+    try {
+      const AudioCtx = window.AudioContext || window.webkitAudioContext;
+      if (!AudioCtx) return;
+      const ctx = new AudioCtx();
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      osc.type = "sine";
+      osc.frequency.value = 880;
+      gain.gain.setValueAtTime(0.0001, ctx.currentTime);
+      gain.gain.exponentialRampToValueAtTime(0.15, ctx.currentTime + 0.02);
+      gain.gain.exponentialRampToValueAtTime(0.0001, ctx.currentTime + 0.45);
+      osc.connect(gain).connect(ctx.destination);
+      osc.start();
+      osc.stop(ctx.currentTime + 0.5);
+    } catch (error) {
+      // 浏览器策略或权限阻止时静默失败；不应阻塞主流程。
+      console.warn("playAlertBeep failed", error);
+    }
+  }
+
+  function installBrowserAlerts(alertNode) {
+    if (!alertNode) return;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.testid = "enable-browser-alerts";
+    button.textContent = "启用浏览器通知 + 蜂鸣";
+    button.addEventListener("click", async () => {
+      if (isNotificationSupported() && typeof window.Notification.requestPermission === "function") {
+        try {
+          const permission = await window.Notification.requestPermission();
+          state.notificationPermission = permission;
+        } catch (error) {
+          state.notificationPermission = "denied";
+        }
+      } else {
+        state.notificationPermission = "unsupported";
+      }
+      updateBrowserAlertsLabel();
+    });
+    alertNode.appendChild(button);
+    if (isNotificationSupported() && typeof window.Notification.permission === "string") {
+      state.notificationPermission = window.Notification.permission;
+    }
+    updateBrowserAlertsLabel();
+    root.addEventListener("cpt:realtime-updated", (event) => {
+      const detail = event.detail || {};
+      if (!detail.triggered) return;
+      const title = "CPT 信号变化";
+      const body = `${detail.previousStatus || "—"} → ${detail.currentStatus || "alert"}`;
+      const signature = `${detail.previousStatus || ""}->${detail.currentStatus || ""}@${detail.at || ""}`;
+      if (signature === state.lastAlertSignature) return;
+      state.lastAlertSignature = signature;
+      playAlertBeep();
+      if (isNotificationSupported() && window.Notification.permission === "granted") {
+        try {
+          new window.Notification(title, { body, tag: "cpt-realtime-alert" });
+        } catch (error) {
+          console.warn("Notification failed", error);
+        }
+      }
+    });
+  }
+
+  function updateBrowserAlertsLabel() {
+    const button = q("[data-testid=enable-browser-alerts]");
+    if (!button) return;
+    const permission = state.notificationPermission;
+    if (permission === "granted") button.textContent = "浏览器通知已启用（点击重试蜂鸣）";
+    else if (permission === "denied") button.textContent = "浏览器通知被拒绝（可手动开启）";
+    else if (permission === "unsupported") button.textContent = "当前环境不支持浏览器通知（蜂鸣仍可用）";
+    else button.textContent = "启用浏览器通知 + 蜂鸣";
+  }
+
   function snapshotEndpoint() {
     return state.snapshotUrl || root.dataset.snapshotUrl || new URLSearchParams(window.location.search).get("snapshot");
+  }
+
+  function inspectEndpoint(barIndex) {
+    const base = snapshotEndpoint();
+    if (!base) return null;
+    const trimmed = base.replace(/\/?snapshot(\?.*)?$/, "");
+    const separator = trimmed.endsWith("/") ? "" : "/";
+    return `${trimmed}${separator}inspect?bar_index=${encodeURIComponent(String(barIndex))}`;
+  }
+
+  async function fetchInspect(barIndex) {
+    const url = inspectEndpoint(barIndex);
+    if (!url) {
+      return { available: false, reason: "inspect_unavailable_no_endpoint" };
+    }
+    try {
+      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      if (!response.ok) {
+        return { available: false, reason: `http_${response.status}` };
+      }
+      return await response.json();
+    } catch (error) {
+      return { available: false, reason: `fetch_failed:${error && error.message ? error.message : String(error)}` };
+    }
   }
 
   function refreshSelectedSnapshot() {

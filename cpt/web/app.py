@@ -6,23 +6,44 @@ import json
 from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, urlsplit
 
 SnapshotProvider = Callable[[], dict[str, Any]]
 
 
-def make_handler(provider: SnapshotProvider) -> type[BaseHTTPRequestHandler]:
+class SnapshotSource(Protocol):
+    """Read-only provider exposing a ``snapshot_payload`` method."""
+
+    def snapshot_payload(self) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class InspectProvider(Protocol):
+    """Read-only per-bar inspection contract for ``/api/dashboard/inspect``."""
+
+    def inspect(self, bar_index: int) -> dict[str, Any]: ...
+
+
+def make_handler(
+    provider: SnapshotProvider | SnapshotSource,
+) -> type[BaseHTTPRequestHandler]:
     """Create a read-only handler bound to a thread-safe snapshot provider.
 
     The provider must use independent repository/connection state per request when
     backed by SQLite; this adapter does not serialize concurrent calls for it.
+
+    If ``provider`` additionally exposes ``inspect(bar_index)``, the
+    ``/api/dashboard/inspect`` route is enabled for B3 per-bar inspection.
     """
 
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
             try:
-                snapshot = provider()
+                if callable(provider) and not hasattr(provider, "snapshot_payload"):
+                    snapshot = provider()
+                else:
+                    snapshot = provider.snapshot_payload()
             except Exception:  # noqa: BLE001
                 self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "snapshot unavailable")
                 return
@@ -55,9 +76,30 @@ def make_handler(provider: SnapshotProvider) -> type[BaseHTTPRequestHandler]:
                 payload = snapshot.get("market_24h", {"available": False, "reason": "unavailable"})
             elif path.path == "/api/dashboard/engine-state":
                 payload = snapshot.get("engine_state", {})
+            elif path.path == "/api/dashboard/inspect":
+                bar_index_raw = (query.get("bar_index") or [""])[0]
+                try:
+                    bar_index = int(bar_index_raw)
+                except ValueError:
+                    self.send_error(HTTPStatus.BAD_REQUEST, "bar_index must be an integer")
+                    return
+                if not isinstance(provider, InspectProvider):
+                    payload = {"available": False, "reason": "inspect_unavailable_in_mode"}
+                    return self._write_json(payload)
+                try:
+                    payload = provider.inspect(bar_index)
+                except IndexError as exc:
+                    self.send_error(HTTPStatus.BAD_REQUEST, str(exc))
+                    return
+                except Exception:  # noqa: BLE001
+                    self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "inspect failed")
+                    return
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
+            self._write_json(payload)
+
+        def _write_json(self, payload: dict[str, Any]) -> None:
             try:
                 encoded = json.dumps(
                     payload, ensure_ascii=False, sort_keys=True, allow_nan=False
@@ -81,7 +123,9 @@ def make_handler(provider: SnapshotProvider) -> type[BaseHTTPRequestHandler]:
 
 
 def serve_snapshot(
-    provider: SnapshotProvider, host: str = "127.0.0.1", port: int = 0
+    provider: SnapshotProvider | SnapshotSource,
+    host: str = "127.0.0.1",
+    port: int = 0,
 ) -> ThreadingHTTPServer:
     """Build a server; caller owns lifecycle and must call ``server_close``."""
     return ThreadingHTTPServer((host, port), make_handler(provider))
