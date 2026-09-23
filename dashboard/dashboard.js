@@ -362,6 +362,19 @@
     const lastPrice = num(market.last_price);
     setText("[data-testid=market-last-price]", lastPrice === null ? "—" : formatPrice(lastPrice));
     const last = candles.length ? candles[candles.length - 1] : null;
+    const first = candles.length ? candles[0] : null;
+    const changeNode = q("[data-testid=market-change]");
+    if (changeNode) {
+      const change = first && first.open ? ((last.close - first.open) / first.open) * 100 : null;
+      changeNode.textContent = change === null ? "—" : `${change >= 0 ? "+" : ""}${change.toFixed(2)}%`;
+      changeNode.dataset.state = change === null ? "flat" : change >= 0 ? "up" : "down";
+    }
+    const countdownNode = q("[data-testid=close-countdown]");
+    if (countdownNode && last) {
+      const interval = num(market.interval_ms) || 300000;
+      const remaining = Math.max(0, last.openTime + interval - Date.now());
+      countdownNode.textContent = `${Math.floor(remaining / 60000)}m ${Math.floor((remaining % 60000) / 1000)}s`;
+    }
     const previous = candles.length > 1 ? candles[candles.length - 2] : null;
     const trendDirection = last && previous ? (last.close > previous.close ? 1 : last.close < previous.close ? -1 : 0) : 0;
     setState(
