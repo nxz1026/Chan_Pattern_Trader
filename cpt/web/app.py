@@ -101,7 +101,7 @@ def make_handler(
                         try:
                             interval_ms = int(query["interval_ms"][0])
                         except ValueError:
-                            self.send_error(HTTPStatus.BAD_REQUEST, "interval_ms must be an integer")
+                            self.send_error(HTTPStatus.BAD_REQUEST, "interval_ms must be int")
                             return
                         requested_interval = resolve_interval_label(interval_ms)
                     try:
@@ -125,7 +125,7 @@ def make_handler(
                         try:
                             market["interval_ms"] = int(query["interval_ms"][0])
                         except ValueError:
-                            self.send_error(HTTPStatus.BAD_REQUEST, "interval_ms must be an integer")
+                            self.send_error(HTTPStatus.BAD_REQUEST, "interval_ms must be int")
                             return
                 payload["market"] = market
                 payload["runtime"] = runtime

@@ -24,8 +24,10 @@ def _stable_payload(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def _closed_bars_subset(snapshot: Mapping[str, Any]) -> list[dict[str, Any]]:
-    """Return the closed-only slice of the snapshot's candle series.
+def _closed_bars_subset(
+    snapshot: Mapping[str, Any],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Return ``(closed_bars, unclosed_bars)`` slices of the candle series.
 
     The full ``dataset_hash`` includes the live tail (the still-updating bar),
     which makes the hash unstable across polls for the same window. Hashing

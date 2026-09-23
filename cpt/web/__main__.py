@@ -20,7 +20,7 @@ import math
 import sys
 import threading
 import time as _time
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from typing import Any
 
 from cpt.adapters.binance_futures import (
@@ -715,10 +715,6 @@ def realtime_snapshot(
     return _RealtimeProvider(
         symbol=symbol, interval=interval, limit=limit, poll_seconds=poll_seconds
     )
-
-
-def _query_value(query: Mapping[str, str], key: str, fallback: str) -> str:
-    return query.get(key, fallback) or fallback
 
 
 def build_parser() -> argparse.ArgumentParser:
