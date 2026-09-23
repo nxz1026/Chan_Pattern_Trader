@@ -860,3 +860,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - 新增 `cpt/application/dashboard_levels.py`，按 level 分组并输出 parent_level 的只读递归投影。
 - Dashboard 研究面板增加级别树摘要，与 overlays 共用 snapshot，不直接侵入 domain。
+
+## 55. Dashboard 研究引擎状态（2026-10-05）
+
+- 新增 `cpt/application/dashboard_runtime.py`，将 revision、pending、buffer、window、truncated 和截断原因投影为稳定 engine_state。
+- dashboard.v2 接入 engine_state；研究面板新增引擎内部状态展示。
+- 状态仅来自调用方 runtime snapshot，不暴露可变 engine 对象。
