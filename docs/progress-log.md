@@ -549,3 +549,27 @@ M3 已具备走势类型到高级别候选结构元素的映射基础；下一�
 ### 结论
 
 M3 已具备基础走势分类、一级递归映射和一买状态机。下一阶段补齐重构事件与历史/实时候选一致性。
+
+## 21. M3 重构事件与依赖扫描（2026-09-23）
+
+### 交付物
+
+- 新增 `cpt/engine/rebuild.py`：尾部重构、重构事件和依赖滞后扫描纯函数。
+- 未确认状态可递增 revision 替换；已确认/open_end/closed 状态冻结，变化追加 forming 新版本。
+- `make_rebuild_events()` 生成稳定排序的 updated/invalidated 事件，payload 保留 source revision 与 source ids。
+- `scan_stale_dependents()` 支持显式 `<source_id>@r<revision>` 依赖引用；裸 source id 不猜测版本、不标记滞后。
+- 新增 `tests/test_rebuild.py`：4 个 focused 用例。
+
+### 独立验收
+
+- `pytest tests/test_rebuild.py -x -q`：**4 passed**。
+- `pytest tests -q`：**97 passed**。
+- `ruff check cpt tests scripts/compare_oracle.py`：**All checks passed**。
+- `ruff format --check`：**40 files already formatted**。
+- `mypy cpt`：**Success, 24 source files**。
+- `import-linter`：**5 contracts kept, 0 broken**。
+- `git diff --check`：通过。
+
+### 结论
+
+M3 的基础算法、一级递归、一买状态机与冻结约定下的重构机制已完成。下一阶段进入 M4：数据验证、Binance 回填接口与可复现回放。
