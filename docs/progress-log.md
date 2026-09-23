@@ -826,3 +826,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 增加只读多级别筛选器，并通过 `cpt:level-changed` 事件通知宿主。
 - 新增 `cpt/application/dashboard_export.py`，支持不修改原 snapshot 的时间范围切片。
 - Dashboard 增加当前 snapshot JSON 导出控件，未引入任何结构写入。
+
+## 49. Dashboard Phase 6 静态 smoke 与多运行对齐（2026-09-29）
+
+- 新增 `tests/test_dashboard_static_smoke.py`，锁定双模式、周期/级别筛选、parity 容器、共享事件和只读入口。
+- 新增 `cpt/application/dashboard_multi_run.py`，按 open_time 对齐多份 snapshot，支持研究者 A/B 检查。
+- 新增 focused 测试，静态 smoke 和多运行对齐通过。
