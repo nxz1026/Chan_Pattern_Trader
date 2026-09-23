@@ -1536,6 +1536,17 @@
 
   /* ------------------------------------------------------------ 生命周期 */
 
+  function installAlertObserver() {
+    root.addEventListener("cpt:realtime-updated", (event) => {
+      const detail = event.detail || {};
+      const alert = q("[data-testid=realtime-alert]");
+      if (alert) {
+        alert.textContent = detail.triggered ? `信号提醒：${detail.currentStatus || "alert"}` : "无新信号提醒";
+        alert.dataset.state = detail.triggered ? "alert" : "idle";
+      }
+    });
+  }
+
   function installRealtimeRefresh() {
     const button = q("[data-testid=realtime-refresh]");
     if (!button) return;
@@ -1816,6 +1827,7 @@
     installIntervalSwitch();
     installSymbolSwitch();
     installRealtimeRefresh();
+    installAlertObserver();
     installLevelFilter();
     installCrosshair();
     ensureSelectionSection();
