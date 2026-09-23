@@ -896,3 +896,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 当前环境原先没有 Chromium/Chrome/Firefox；已通过 Playwright 下载 Chromium 153.0.8010.12 ARM64，并链接到 `$HOME/.local/bin/chromium`。
 - 新增 `tests/test_dashboard_chromium_smoke.py`，调用真实 Chromium headless dump-dom 验证 Dashboard 根节点、双模式、周期和级别选择器。
 - focused smoke：**1 passed**。
+
+## 61. Dashboard 真实 Chromium 与研究 HTTP 路由（2026-10-11）
+
+- 环境缺少无头浏览器，已下载 Playwright Chromium 153.0.8010.12 ARM64，并链接 `$HOME/.local/bin/chromium`。
+- 新增真实 Chromium headless smoke：双模式、周期、级别和根节点契约通过。
+- HTTP adapter 扩展只读 `/api/dashboard/reproducibility`、`/api/dashboard/parity`、`/api/dashboard/runs`，并覆盖 focused 测试。
