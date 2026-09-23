@@ -534,6 +534,30 @@
     return `已选中 ${payload.kind}`;
   }
 
+  function installSliceExport() {
+    const panel = q("[data-testid=event-panel]");
+    if (!panel || q("[data-testid=slice-export]")) return;
+    const section = document.createElement("section");
+    section.dataset.testid = "slice-export";
+    const heading = document.createElement("h3");
+    heading.textContent = "范围导出";
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = "导出当前快照 JSON";
+    button.addEventListener("click", () => {
+      const payload = JSON.stringify(state.snapshot || {}, null, 2);
+      const blob = new Blob([payload], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = "cpt-dashboard-snapshot.json";
+      link.click();
+      URL.revokeObjectURL(url);
+    });
+    section.append(heading, button);
+    panel.appendChild(section);
+  }
+
   function renderEventAudit(snapshot) {
     const panel = q("[data-testid=event-panel]");
     if (!panel) return;
@@ -1474,6 +1498,7 @@
     renderParity(state.snapshot);
     renderSignalHistory(state.snapshot);
     renderEventAudit(state.snapshot);
+    installSliceExport();
     renderStructureDefaults(state.snapshot);
     renderSelection();
     drawChart();
