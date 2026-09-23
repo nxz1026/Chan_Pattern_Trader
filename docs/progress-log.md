@@ -923,3 +923,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - 新增 `cpt/application/dashboard_alerts.py`，比较前后 snapshot signal status 并投影 triggered/reason；不发送通知、不产生交易操作。
 - Dashboard 增加实时提醒指示器，宿主收到新 snapshot 后可发出 `cpt:realtime-updated` 更新 UI。
+
+## 66. Dashboard parity 跨图锚点联动（2026-10-16）
+
+- parity 元素选择现在包含 `anchor`（优先 `start_time`，否则 `bar_index`）。
+- 选择 parity 项后发出 `cpt:parity-selected`，并为与锚点相同 `data-open-time` 的主图元素设置 `data-parity-anchor` 高亮。
+- 新增跨图联动契约 focused 测试和 CSS 高亮。
