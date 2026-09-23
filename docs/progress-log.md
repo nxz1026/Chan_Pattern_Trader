@@ -849,3 +849,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 新增 `cpt/application/dashboard_market.py`，定义上游真实 24h 聚合的 available/incomplete/unavailable 契约。
 - dashboard.v2 增加 `market_24h`；未提供上游聚合时返回明确 reason，前端显示“不可用”，不显示永久破折号或窗口值冒充 24h。
 - 完整聚合接入仍由未来 Binance adapter/application caller 注入，Dashboard 不复制行情 HTTP 逻辑。
+
+## 53. Dashboard HTTP adapter（2026-10-03）
+
+- 新增 `cpt/web/app.py` 标准库只读 HTTP adapter，提供 `/api/dashboard/snapshot` 和 `/api/dashboard/health`。
+- POST 和未知路径明确拒绝；adapter 只接受 application snapshot provider，不复制 Binance 请求和 domain 算法。
+- 新增 HTTP focused 测试覆盖 snapshot、health 和只读边界。
