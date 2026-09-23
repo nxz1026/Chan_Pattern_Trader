@@ -814,3 +814,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - 新增 `cpt/application/dashboard_event_audit.py`，按 structure/revision 生成 before/after/changed_fields 只读审计记录。
 - Dashboard 增加事件审计列表，与现有回放和事件数据共享 snapshot。
+
+## 47. Dashboard Phase 2/5 对比增强（2026-09-27）
+
+- 增加 CPT/Oracle parity 对比图容器，数据缺失时保持隐藏，不伪造对照结果。
+- 新增 `cpt/application/dashboard_compare.py`，提供双 snapshot 的 run/hash/字段级差异摘要。
+- 双数据集对比服务保持只读，focused 测试通过。
