@@ -22,7 +22,6 @@ def test_all_subpackages_import() -> None:
         "cpt.domain",
         "cpt.adapters",
         "cpt.storage",
-        "cpt.llm",
     ):
         module = __import__(layer, fromlist=["__name__"])
         assert module.__name__ == layer

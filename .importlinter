@@ -2,14 +2,6 @@
 root_package = cpt
 include_external_packages = True
 
-[importlinter:contract:application-cannot-depend-on-llm]
-name = Application cannot depend on llm
-type = independence
-modules =
-    cpt.application
-unauthorized_modules =
-    cpt.llm
-
 [importlinter:contract:domain-has-no-third-party-deps]
 name = Domain has no third-party deps
 type = forbidden
@@ -50,4 +42,3 @@ source_modules =
 forbidden_modules =
     cpt.application
     cpt.adapters
-    cpt.llm
