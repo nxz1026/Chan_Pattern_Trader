@@ -138,6 +138,7 @@
     staleTimer: null,
     snapshotUrl: null,
     mode: new URLSearchParams(window.location.search).get("mode") || "research",
+    level: null,
     crosshair: null,
   };
 
@@ -1393,6 +1394,19 @@
 
   /* ------------------------------------------------------------ 生命周期 */
 
+  function installLevelFilter() {
+    const select = q("[data-testid=level-select]");
+    if (!select) return;
+    select.addEventListener("change", () => {
+      const level = select.value === "all" ? null : Number(select.value);
+      state.level = level;
+      root.dataset.level = level === null ? "all" : String(level);
+      renderStructureDefaults(state.snapshot);
+      drawChart();
+      root.dispatchEvent(new CustomEvent("cpt:level-changed", { detail: { level } }));
+    });
+  }
+
   function installIntervalSwitch() {
     const select = q("[data-testid=interval-select]");
     if (!select) return;
@@ -1632,6 +1646,7 @@
     installRuntimeStyle();
     installModeSwitch();
     installIntervalSwitch();
+    installLevelFilter();
     installCrosshair();
     ensureSelectionSection();
     installReplayControls();
