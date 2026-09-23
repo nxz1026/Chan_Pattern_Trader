@@ -533,6 +533,25 @@
     return `已选中 ${payload.kind}`;
   }
 
+  function renderSignalHistory(snapshot) {
+    const panel = q("[data-testid=event-panel]");
+    if (!panel) return;
+    let section = q("[data-testid=signal-history]");
+    if (!section) {
+      section = document.createElement("section");
+      section.dataset.testid = "signal-history";
+      const heading = document.createElement("h3");
+      heading.textContent = "信号历史";
+      section.appendChild(heading);
+      panel.appendChild(section);
+    }
+    while (section.children.length > 1) section.removeChild(section.lastChild);
+    const signal = snapshot && isObject(snapshot.signal) ? snapshot.signal : null;
+    const row = document.createElement("p");
+    row.textContent = signal ? `${signal.signal_id || "signal"} · ${signal.status || "none"} · ${signal.divergence_status || "—"}` : "暂无信号历史";
+    section.appendChild(row);
+  }
+
   function renderParity(snapshot) {
     const panel = q("[data-testid=event-panel]");
     if (!panel) return;
@@ -682,6 +701,7 @@
     renderResearchDetails(payload);
     renderLocalNote(payload);
     renderParity(state.snapshot);
+    renderSignalHistory(state.snapshot);
 
     if (payload.kind === "bi") renderBiSection(payload.raw);
     if (payload.kind === "zhongshu") {
@@ -1404,6 +1424,7 @@
     renderChrome(state.snapshot);
     renderEvents(state.snapshot);
     renderParity(state.snapshot);
+    renderSignalHistory(state.snapshot);
     renderStructureDefaults(state.snapshot);
     renderSelection();
     drawChart();
