@@ -1186,6 +1186,34 @@ noscript p {
   .event-timeline {
     max-height: 200px;
   }
+
+  /* 触摸目标：375px 下原控件高仅 19–22px，低于 WCAG 2.2 SC 2.5.8「目标尺寸
+     最小值」的 24×24 CSS px 要求，更远低于 44px 最佳实践。统一抬到 36px
+     并加大水平内边距，保证拇指可点。 */
+  button,
+  select,
+  [role="button"],
+  input:not([type="checkbox"]):not([type="radio"]) {
+    min-height: 36px;
+  }
+
+  select,
+  input:not([type="checkbox"]):not([type="radio"]) {
+    padding: var(--space-1) var(--space-2);
+  }
+
+  button,
+  [role="button"] {
+    padding: var(--space-1) var(--space-3);
+  }
+
+  .mode-switch button,
+  .time-range button,
+  .replay-controls > button,
+  .chart-zoom button {
+    min-height: 36px;
+    padding: var(--space-1) var(--space-3);
+  }
 }
 
 /* 打印：固定亮色（系统暗色偏好下也输出白底黑字），保留结构（只读报表场景） */
