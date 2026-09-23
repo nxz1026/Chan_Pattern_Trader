@@ -902,3 +902,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 环境缺少无头浏览器，已下载 Playwright Chromium 153.0.8010.12 ARM64，并链接 `$HOME/.local/bin/chromium`。
 - 新增真实 Chromium headless smoke：双模式、周期、级别和根节点契约通过。
 - HTTP adapter 扩展只读 `/api/dashboard/reproducibility`、`/api/dashboard/parity`、`/api/dashboard/runs`，并覆盖 focused 测试。
+
+## 62. Dashboard 多交易对 watchlist（2026-10-12）
+
+- 新增 `cpt/application/dashboard_watchlist.py`，对多 symbol 快照做稳定排序并投影 signal alert/candidate 状态。
+- 新增 focused 测试；watchlist 只消费上游市场快照，不执行行情请求或交易操作。
