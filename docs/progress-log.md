@@ -913,3 +913,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 前端增加 BTCUSDT/ETHUSDT/SOLUSDT 只读交易对选择器和 `cpt:symbol-changed` 事件。
 - 新增 `cpt/application/dashboard_config_compare.py`，提供 RulesConfig 字段级 diff。
 - 新增 focused 测试；配置对比不修改任何运行配置。
+
+## 64. Dashboard 实时切换与刷新（2026-10-14）
+
+- 新增 `cpt/application/dashboard_realtime.py`，按 symbol/interval 选择最新上游 snapshot，并投影 alert 状态。
+- Dashboard 增加只读“刷新实时快照”控件，发出 `cpt:realtime-refresh` 事件；真实网络请求继续由宿主 adapter 负责。
