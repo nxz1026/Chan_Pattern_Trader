@@ -474,3 +474,29 @@ M2 已完成“oracle 可执行性 + 三段真实数据诊断对照”子阶段�
 ### 结论
 
 M1 基础结构链路已具备“包含 → 分型 → 新笔 → 笔中枢”的纯 domain 算法骨架。下一阶段进入 M3：走势类型、递归与一买状态机。
+
+## 18. M3 走势类型第一步：分类器（2026-09-23）
+
+### 交付物
+
+- 新增 `cpt/domain/trend_type.py`：纯 domain `classify_trend()`。
+- 支持单中枢盘整、分离中枢趋势、`forming` 和边界 `open_end`。
+- 按冻结的 `zs_wzgx = zgd` 判断中枢上移/下移及离开笔方向。
+- `TrendType` 来源由成员中枢 `bi_ids` 与覆盖笔 `source_ids` 稳定去重生成。
+- 支持 level 继承和显式覆盖；拒绝非法笔方向和隐式跨级别输入。
+- 明确暂不实现一买、递归和级联重构。
+- 新增 `tests/test_trend_type.py`：5 个 focused 用例。
+
+### 独立验收
+
+- `pytest tests/test_trend_type.py -x -q`：**5 passed**。
+- `pytest tests -q`：**84 passed**。
+- `ruff check cpt tests scripts/compare_oracle.py`：**All checks passed**。
+- `ruff format --check`：**34 files already formatted**。
+- `mypy cpt`：**Success, 21 source files**。
+- `import-linter`：**5 contracts kept, 0 broken**。
+- `git diff --check`：通过。
+
+### 结论
+
+M3 已具备基础走势类型分类能力；下一步实现递归结构元素映射，再实现一买状态机和重构事件。
