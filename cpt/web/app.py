@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, urlsplit
+
+from cpt.adapters.binance_futures import resolve_interval_label
+
+_LOG = logging.getLogger("cpt.web.handler")
 
 SnapshotProvider = Callable[[], dict[str, Any]]
 
@@ -37,6 +42,20 @@ class RangeSource(Protocol):
     """Read-only provider that can rebuild a snapshot for an explicit time window."""
 
     def snapshot_for_range(self, start_ms: int, end_ms: int) -> dict[str, Any]: ...
+
+
+@runtime_checkable
+class SelectableSource(Protocol):
+    """Provider that supports hot-reloading the live symbol/interval.
+
+    Implemented by ``_RealtimeProvider`` so the HTTP layer can route
+    ``?symbol=`` / ``?interval_ms=`` requests to the live data stream
+    rather than the snapshot's cached market.symbol field only.
+    """
+
+    def select_symbol(self, symbol: str, interval: str) -> None: ...
+
+    def force_refresh(self) -> None: ...
 
 
 def make_handler(
@@ -69,17 +88,49 @@ def make_handler(
                 payload = dict(snapshot)
                 market = dict(payload.get("market", {}))
                 runtime = dict(payload.get("runtime", {}))
-                if query.get("symbol"):
-                    market["symbol"] = query["symbol"][0]
-                    runtime["symbol"] = query["symbol"][0]
-                if query.get("interval_ms"):
+                # 当 provider 支持 hot-reload（realtime 模式）时，把 ?symbol= / ?interval_ms=
+                # 透传给底层 provider，让下一次响应已经是新交易对的数据，
+                # 而不是只改 payload 字段、K 线仍为旧交易对。
+                # demo / fixture 模式 provider 没有 select_symbol，按下面 fallback 走。
+                provider_switched = False
+                provider_error: str | None = None
+                if query.get("symbol") and isinstance(provider, SelectableSource):
+                    requested_symbol = query["symbol"][0]
+                    requested_interval = runtime.get("interval") or "1h"
+                    if query.get("interval_ms"):
+                        try:
+                            interval_ms = int(query["interval_ms"][0])
+                        except ValueError:
+                            self.send_error(HTTPStatus.BAD_REQUEST, "interval_ms must be an integer")
+                            return
+                        requested_interval = resolve_interval_label(interval_ms)
                     try:
-                        market["interval_ms"] = int(query["interval_ms"][0])
-                    except ValueError:
-                        self.send_error(HTTPStatus.BAD_REQUEST, "interval_ms must be an integer")
-                        return
+                        provider.select_symbol(requested_symbol, requested_interval)
+                        provider.force_refresh()
+                        provider_switched = True
+                    except Exception as exc:  # noqa: BLE001
+                        provider_error = f"symbol_switch_failed:{exc}"
+                        _LOG.warning("provider.select_symbol failed: %s", exc)
+                    else:
+                        # 强制刷新后重读 snapshot（已经是新交易对）
+                        snapshot = provider.snapshot_payload()
+                        payload = dict(snapshot)
+                        market = dict(payload.get("market", {}))
+                        runtime = dict(payload.get("runtime", {}))
+                if not provider_switched:
+                    if query.get("symbol"):
+                        market["symbol"] = query["symbol"][0]
+                        runtime["symbol"] = query["symbol"][0]
+                    if query.get("interval_ms"):
+                        try:
+                            market["interval_ms"] = int(query["interval_ms"][0])
+                        except ValueError:
+                            self.send_error(HTTPStatus.BAD_REQUEST, "interval_ms must be an integer")
+                            return
                 payload["market"] = market
                 payload["runtime"] = runtime
+                if provider_error:
+                    payload["provider_warnings"] = [provider_error]
                 range_applied = False
                 if query.get("start_ms") or query.get("end_ms"):
                     raw_start = (query.get("start_ms") or [""])[0]

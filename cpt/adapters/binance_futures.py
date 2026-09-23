@@ -167,11 +167,31 @@ def resolve_interval_ms(interval: str) -> int:
     try:
         return INTERVAL_MS[interval]
     except KeyError as exc:
-        supported = ", ".join(sorted(INTERVAL_MS))
         raise ValueError(
-            f"不支持的 interval={interval!r}; 支持固定长度周期: {supported}; "
-            "区间不固定（如 '1M'）请显式传 interval_ms"
+            f"unsupported interval {interval!r}; pass interval_ms explicitly for month bars"
         ) from exc
+
+
+def resolve_interval_label(interval_ms: int) -> str:
+    """把毫秒数反向解析为 Binance 周期字符串。
+
+    Args:
+        interval_ms: 周期长度（毫秒）。
+
+    Returns:
+        对应的周期字符串（如 ``"1h"`` / ``"5m"``）。
+
+    Raises:
+        ValueError: ``interval_ms`` 不在 :data:`INTERVAL_MS` 的值集合中
+            （含无固定长度的 ``1M``，后者不能用毫秒精确表达）。
+    """
+    for label, ms in INTERVAL_MS.items():
+        if ms == interval_ms:
+            return label
+    raise ValueError(
+        f"unsupported interval_ms {interval_ms}; month bars (1M) cannot be "
+        "expressed as a fixed millisecond count"
+    )
 
 
 def _urlopen_bytes(url: str, timeout: float) -> bytes:

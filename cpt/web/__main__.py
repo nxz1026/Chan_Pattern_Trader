@@ -431,6 +431,13 @@ class _RealtimeProvider:
     domain structures for the B3 trace_containment wiring. Tracks signal status
     transitions across polls and exposes ``alerts`` in the snapshot for
     browser-side notification/audio triggers.
+
+    Supports hot-reloading ``symbol`` / ``interval`` via :meth:`select_symbol`.
+    The HTTP handler calls this whenever a request carries ``?symbol=`` or
+    ``?interval_ms=`` so the front-end symbol picker takes effect immediately
+    rather than waiting for the next 30s poll. The select call blocks ≤1 poll
+    cycle to give the caller a fresh snapshot to return; the background poll
+    thread remains alive and continues polling the new symbol.
     """
 
     def __init__(
@@ -451,11 +458,55 @@ class _RealtimeProvider:
         self._last_signal_status: str = "none"
         self._last_alert_at: float = 0.0
         self._stop = threading.Event()
+        # Set when select_symbol() flips symbol/interval; the poll loop
+        # clears cached bars + last-signal state at the start of the next poll.
+        self._switch_event = threading.Event()
         self._client = BinanceFuturesClient()
         self._config = RulesConfig()
         self._backend = NativeChanlunBackend()
         self._thread = threading.Thread(target=self._run, daemon=True, name="cpt-realtime")
         self._thread.start()
+
+    def select_symbol(self, symbol: str, interval: str) -> None:
+        """Switch the live symbol/interval on the next poll cycle.
+
+        No-op if the requested pair matches the current one. When different,
+        flip atomically under ``_lock`` and trigger the background thread to
+        rebuild the snapshot for the new pair on its next iteration. Callers
+        that need an immediate fresh snapshot for the new pair should invoke
+        ``force_refresh()`` (HTTP layer does this so the first response after
+        a switch is already on the new symbol).
+        """
+        with self._lock:
+            if self._symbol == symbol and self._interval == interval:
+                return
+            self._symbol = symbol
+            self._interval = interval
+            self._bars = ()
+            self._snapshot = demo_snapshot(symbol, interval)
+            self._last_signal_status = "none"
+            self._last_alert_at = 0.0
+        self._switch_event.set()
+
+    def current_symbol(self) -> tuple[str, str]:
+        """Return ``(symbol, interval)`` as currently configured."""
+        with self._lock:
+            return self._symbol, self._interval
+
+    def force_refresh(self) -> None:
+        """Run a single poll cycle synchronously and publish the result.
+
+        Used by the HTTP layer so the first response after ``select_symbol``
+        already reflects the new symbol rather than the stale 30s-old
+        snapshot. Safe to call concurrently with the background poller — the
+        poll body reads ``self._symbol`` under the lock that ``_run`` itself
+        doesn't take (it only mutates ``_snapshot`` / ``_bars`` under the
+        lock), so the new thread just races to publish last.
+        """
+        fresh, fresh_bars = self._poll_once()
+        with self._lock:
+            self._snapshot = fresh
+            self._bars = fresh_bars
 
     def stop(self) -> None:
         self._stop.set()
@@ -551,7 +602,13 @@ class _RealtimeProvider:
         return rebuilt
 
     def _run(self) -> None:
-        while not self._stop.wait(self._poll_seconds):
+        while not self._stop.is_set():
+            # 优先响应 select_symbol：切完立刻拉新数据，而不是等满 30s。
+            triggered = self._switch_event.wait(self._poll_seconds)
+            if self._stop.is_set():
+                return
+            if triggered:
+                self._switch_event.clear()
             try:
                 fresh, fresh_bars = self._poll_once()
             except Exception as exc:  # noqa: BLE001
@@ -562,19 +619,23 @@ class _RealtimeProvider:
                 self._bars = fresh_bars
 
     def _poll_once(self) -> tuple[dict[str, Any], tuple[CanonicalBar, ...]]:
+        # 在锁内快照当前 symbol/interval，避免 fetch 期间被 select_symbol 改写
+        # 导致 bars 与 market_24h 来自不同交易对。
+        with self._lock:
+            target_symbol = self._symbol
+            target_interval = self._interval
         try:
             bars = self._client.fetch_validated_klines(
-                self._symbol, self._interval, limit=self._limit
+                target_symbol, target_interval, limit=self._limit
             )
         except Exception:
-            return demo_snapshot(self._symbol, self._interval), ()
+            return demo_snapshot(target_symbol, target_interval), ()
         try:
             # 复用真实回放入口的数据守卫（去重/递增/缺口/OHLC 校验）。
             replay_bars(bars, config=self._config, backend=self._backend)
         except Exception:
-            return demo_snapshot(self._symbol, self._interval), ()
-        market_24h = self._safe_24h()
-        # 主叠加层独立计算：即使多级别递归失败，主图也必须有真实结构。
+            return demo_snapshot(target_symbol, target_interval), ()
+        market_24h = self._safe_24h_for(target_symbol)
         fractals, bis, zhongshus = _compute_domain_structures(
             tuple(bars), self._config, self._backend
         )
@@ -600,8 +661,8 @@ class _RealtimeProvider:
             config_compare=_compare_with_default(self._config),
             runtime={
                 "data_source": "binance_realtime",
-                "symbol": self._symbol,
-                "interval": self._interval,
+                "symbol": target_symbol,
+                "interval": target_interval,
                 "buffer_size": len(bars),
                 "window_size": len(bars),
                 "status": "confirmed",
@@ -609,18 +670,23 @@ class _RealtimeProvider:
                 "generated_at": _time.time() * 1000,
             },
         )
-        snapshot["market"]["symbol"] = self._symbol
-        snapshot["market"]["interval_ms"] = resolve_interval_ms(self._interval)
-        snapshot["runtime"]["symbol"] = self._symbol
-        snapshot["runtime"]["interval"] = self._interval
+        snapshot["market"]["symbol"] = target_symbol
+        snapshot["market"]["interval_ms"] = resolve_interval_ms(target_interval)
+        snapshot["runtime"]["symbol"] = target_symbol
+        snapshot["runtime"]["interval"] = target_interval
         snapshot["runtime"]["buffer_size"] = len(bars)
         snapshot["runtime"]["window_size"] = len(bars)
         snapshot["alerts"] = self._compute_alerts(snapshot)
         return snapshot, tuple(bars)
 
     def _safe_24h(self) -> dict[str, Any]:
+        with self._lock:
+            sym = self._symbol
+        return self._safe_24h_for(sym)
+
+    def _safe_24h_for(self, symbol: str) -> dict[str, Any]:
         try:
-            ticker = self._client.fetch_24h_ticker(self._symbol)
+            ticker = self._client.fetch_24h_ticker(symbol)
         except Exception:  # noqa: BLE001 — keep API alive on transient upstream errors
             return {"available": False, "reason": "upstream_ticker_unavailable"}
         return normalize_24h(ticker)
