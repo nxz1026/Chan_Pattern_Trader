@@ -14,7 +14,7 @@ class ContainmentDecision:
     source_bar_index: int
     target_source_indices: tuple[int, ...]
     direction: Literal["forward", "backward"]
-    decision: Literal["contained", "replaced", "merged"]
+    decision: Literal["contained", "merged"]
     resulting_high: float
     resulting_low: float
 

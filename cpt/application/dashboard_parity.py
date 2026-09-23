@@ -65,10 +65,13 @@ def build_parity_snapshot(
     fractals: tuple[dict[str, Any], ...] = (),
     bis: tuple[dict[str, Any], ...] = (),
     zhongshus: tuple[dict[str, Any], ...] = (),
+    oracle_fractals: tuple[dict[str, Any], ...] = (),
+    oracle_bis: tuple[dict[str, Any], ...] = (),
+    oracle_zhongshus: tuple[dict[str, Any], ...] = (),
 ) -> dict[str, Any]:
     """Build the dashboard parity object from three normalized comparisons."""
     return {
-        "fractals": build_parity_view(fractals, (), kind="fractal"),
-        "bis": build_parity_view(bis, (), kind="bi"),
-        "zhongshus": build_parity_view(zhongshus, (), kind="zhongshu"),
+        "fractals": build_parity_view(fractals, oracle_fractals, kind="fractal"),
+        "bis": build_parity_view(bis, oracle_bis, kind="bi"),
+        "zhongshus": build_parity_view(zhongshus, oracle_zhongshus, kind="zhongshu"),
     }

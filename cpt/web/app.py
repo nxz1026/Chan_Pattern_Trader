@@ -12,11 +12,19 @@ SnapshotProvider = Callable[[], dict[str, Any]]
 
 
 def make_handler(provider: SnapshotProvider) -> type[BaseHTTPRequestHandler]:
-    """Create a read-only handler bound to an application snapshot provider."""
+    """Create a read-only handler bound to a thread-safe snapshot provider.
+
+    The provider must use independent repository/connection state per request when
+    backed by SQLite; this adapter does not serialize concurrent calls for it.
+    """
 
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            snapshot = provider()
+            try:
+                snapshot = provider()
+            except Exception:  # noqa: BLE001
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "snapshot unavailable")
+                return
             if self.path == "/api/dashboard/health":
                 payload: dict[str, Any] = {"ok": True, "read_only": True}
             elif self.path == "/api/dashboard/snapshot":
@@ -34,7 +42,13 @@ def make_handler(provider: SnapshotProvider) -> type[BaseHTTPRequestHandler]:
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+            try:
+                encoded = json.dumps(
+                    payload, ensure_ascii=False, sort_keys=True, allow_nan=False
+                ).encode("utf-8")
+            except (TypeError, ValueError):
+                self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "snapshot is not JSON-safe")
+                return
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(encoded)))
