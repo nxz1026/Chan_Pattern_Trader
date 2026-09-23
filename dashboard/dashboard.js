@@ -577,6 +577,15 @@
   }
 
   function renderParity(snapshot) {
+    const chart = q("[data-testid=parity-chart]");
+    if (chart) {
+      const parityPresent = snapshot && isObject(snapshot.parity) && Object.values(snapshot.parity).some((value) => isObject(value) && isObject(value.summary));
+      chart.hidden = !parityPresent;
+      ["cpt", "oracle"].forEach((side) => {
+        const target = q(`[data-testid=parity-chart-${side}]`);
+        if (target) target.textContent = parityPresent ? `${side.toUpperCase()} overlay ready` : "";
+      });
+    }
     const panel = q("[data-testid=event-panel]");
     if (!panel) return;
     let section = q("[data-testid=parity-panel]");
