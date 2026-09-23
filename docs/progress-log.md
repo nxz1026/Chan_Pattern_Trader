@@ -918,3 +918,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - 新增 `cpt/application/dashboard_realtime.py`，按 symbol/interval 选择最新上游 snapshot，并投影 alert 状态。
 - Dashboard 增加只读“刷新实时快照”控件，发出 `cpt:realtime-refresh` 事件；真实网络请求继续由宿主 adapter 负责。
+
+## 65. Dashboard 实时提醒状态（2026-10-15）
+
+- 新增 `cpt/application/dashboard_alerts.py`，比较前后 snapshot signal status 并投影 triggered/reason；不发送通知、不产生交易操作。
+- Dashboard 增加实时提醒指示器，宿主收到新 snapshot 后可发出 `cpt:realtime-updated` 更新 UI。
