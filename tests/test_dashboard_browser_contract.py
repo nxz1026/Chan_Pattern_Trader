@@ -12,7 +12,7 @@ def test_browser_contract_contains_accessible_parity_selection_and_readonly_http
     assert 'data-testid="parity-selection"' in html
     assert 'data-testid="parity-chart-cpt"' in html
     assert 'data-testid="parity-chart-oracle"' in html
-    assert 'cpt:parity-selected' in js
-    assert 'data-parity-selected' in js
-    assert 'def do_POST' in http
-    assert 'METHOD_NOT_ALLOWED' in http
+    assert "cpt:parity-selected" in js
+    assert "data-parity-selected" in js
+    assert "def do_POST" in http
+    assert "METHOD_NOT_ALLOWED" in http
