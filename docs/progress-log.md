@@ -754,3 +754,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 新增 `cpt/application/dashboard_parity.py`：标准化 matched/missing/extra/mismatched 结果、差异字段和 match_rate。
 - 新增 `tests/test_dashboard_research_services.py`：parity 分类、config hash 和 snapshot diff focused 测试。
 - focused：**2 passed**；全量保持通过。
+
+## 36. Dashboard Phase 3 盯盘指标基础（2026-09-23）
+
+- 增加窗口涨跌幅、当前 K 线收盘倒计时占位和 watch/research 共用的模式基础。
+- 24h 统计仍严格不伪造：dashboard.v1 未提供真实 24h 聚合时保持明确不可用语义。
