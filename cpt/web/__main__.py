@@ -32,9 +32,11 @@ from cpt.adapters.reference_chanlun import (
     map_zhongshu,
 )
 from cpt.application.dashboard_alerts import alert_transition
+from cpt.application.dashboard_config_compare import compare_configs
 from cpt.application.dashboard_inspector import inspect_bar
 from cpt.application.dashboard_market import normalize_24h
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
+from cpt.application.multi_level import build_multi_level, structures_for_level
 from cpt.application.replay import replay_bars
 from cpt.domain.config import RulesConfig
 from cpt.domain.models import Bi, CanonicalBar, Fractal, ZhongShu
@@ -173,6 +175,37 @@ class _FixtureProvider:
     def snapshot_payload(self) -> dict[str, Any]:
         return dict(self._snapshot)
 
+    def snapshot_for_level(self, level: int) -> dict[str, Any]:
+        try:
+            multi = build_multi_level(
+                self._bars, self._config, self._backend, levels=tuple(self._config.levels)
+            )
+        except Exception:
+            multi = {
+                lv: {"fractals": (), "bis": (), "zhongshus": ()}
+                for lv in self._config.levels
+            }
+        fractals, bis, zhongshus = structures_for_level(multi, level)
+        rebuilt = build_dashboard_snapshot_v2(
+            self._config,
+            self._bars,
+            fractals=fractals,
+            bis=bis,
+            zhongshus=zhongshus,
+            mode="research",
+            status="confirmed",
+            data_source="native_fixture",
+            multi_level=_format_multi_level(multi),
+            config_compare=_compare_with_default(self._config),
+        )
+        rebuilt["market"]["symbol"] = self._symbol
+        rebuilt["market"]["interval"] = self._interval_ms
+        rebuilt["runtime"]["symbol"] = self._symbol
+        rebuilt["runtime"]["interval"] = self._interval
+        rebuilt["reproducibility"] = self._snapshot.get("reproducibility", {})
+        rebuilt["selected_level"] = level
+        return rebuilt
+
     def inspect(self, bar_index: int) -> dict[str, Any]:
         fractals, bis, zhongshus = _compute_domain_structures(
             self._bars, self._config, self._backend
@@ -184,9 +217,8 @@ class _FixtureProvider:
             payload = replay_bars(self._bars, config=self._config, backend=self._backend)
         except Exception:  # noqa: BLE001 — never let fixture mode crash the server
             return demo_snapshot(self._symbol, self._interval)
-        fractals, bis, zhongshus = _compute_domain_structures(
-            self._bars, self._config, self._backend
-        )
+        multi = self._compute_multi_level()
+        fractals, bis, zhongshus = structures_for_level(multi, self._config.levels[0])
         snapshot = build_dashboard_snapshot_v2(
             self._config,
             self._bars,
@@ -197,6 +229,8 @@ class _FixtureProvider:
             status="confirmed",
             data_source="native_fixture",
             market_24h={"available": False, "reason": "fixture_mode_no_upstream"},
+            multi_level=_format_multi_level(multi),
+            config_compare=_compare_with_default(self._config),
             runtime={"data_source": "native_fixture", "symbol": self._symbol, "interval": self._interval},
         )
         snapshot["market"]["symbol"] = self._symbol
@@ -205,6 +239,47 @@ class _FixtureProvider:
         snapshot["runtime"]["interval"] = self._interval
         snapshot["reproducibility"] = payload.get("metadata", {})
         return snapshot
+
+    def _compute_multi_level(self) -> dict[int, dict[str, tuple[Any, ...]]]:
+        try:
+            return build_multi_level(
+                self._bars,
+                self._config,
+                self._backend,
+                levels=tuple(self._config.levels),
+            )
+        except Exception:  # noqa: BLE001 — 多级别递归失败时退化空结构，不阻断主流程
+            return {
+                level: {"fractals": (), "bis": (), "zhongshus": ()}
+                for level in self._config.levels
+            }
+
+
+def _compare_with_default(config: RulesConfig) -> dict[str, Any]:
+    default = RulesConfig()
+    differences = compare_configs(default, config)
+    return {
+        "available": True,
+        "differences": tuple(differences),
+        "baseline": "default_rules_config()",
+    }
+
+
+def _format_multi_level(
+    multi: dict[int, dict[str, tuple[Any, ...]]],
+) -> dict[str, Any]:
+    levels: dict[str, dict[str, int]] = {}
+    for level, entry in sorted(multi.items()):
+        levels[str(level)] = {
+            "fractals": len(entry["fractals"]),
+            "bis": len(entry["bis"]),
+            "zhongshus": len(entry["zhongshus"]),
+        }
+    return {
+        "available": True,
+        "levels": levels,
+        "primary_level": min(multi.keys()) if multi else None,
+    }
 
 
 def fixture_provider(
@@ -263,6 +338,40 @@ class _RealtimeProvider:
         )
         return inspect_bar(bars, fractals, bis, zhongshus, bar_index)
 
+    def snapshot_for_level(self, level: int) -> dict[str, Any]:
+        with self._lock:
+            bars = self._bars
+            base = dict(self._snapshot)
+        if not bars:
+            return base
+        try:
+            multi = build_multi_level(
+                bars, self._config, self._backend, levels=tuple(self._config.levels)
+            )
+        except Exception:
+            multi = {
+                lv: {"fractals": (), "bis": (), "zhongshus": ()}
+                for lv in self._config.levels
+            }
+        fractals, bis, zhongshus = structures_for_level(multi, level)
+        rebuilt = build_dashboard_snapshot_v2(
+            self._config,
+            bars,
+            fractals=fractals,
+            bis=bis,
+            zhongshus=zhongshus,
+            mode="research",
+            status="confirmed",
+            data_source="binance_realtime",
+            multi_level=_format_multi_level(multi),
+            config_compare=_compare_with_default(self._config),
+        )
+        for key in ("market", "runtime", "reproducibility", "alerts", "market_24h"):
+            if key in base:
+                rebuilt[key] = base[key]
+        rebuilt["selected_level"] = level
+        return rebuilt
+
     def _run(self) -> None:
         while not self._stop.wait(self._poll_seconds):
             try:
@@ -286,9 +395,16 @@ class _RealtimeProvider:
         except Exception:
             return demo_snapshot(self._symbol, self._interval), ()
         market_24h = self._safe_24h()
-        fractals, bis, zhongshus = _compute_domain_structures(
-            tuple(bars), self._config, self._backend
-        )
+        try:
+            multi = build_multi_level(
+                tuple(bars), self._config, self._backend, levels=tuple(self._config.levels)
+            )
+        except Exception:
+            multi = {
+                level: {"fractals": (), "bis": (), "zhongshus": ()}
+                for level in self._config.levels
+            }
+        fractals, bis, zhongshus = structures_for_level(multi, self._config.levels[0])
         snapshot = build_dashboard_snapshot_v2(
             self._config,
             bars,
@@ -299,6 +415,8 @@ class _RealtimeProvider:
             status="confirmed",
             data_source="binance_realtime",
             market_24h=market_24h,
+            multi_level=_format_multi_level(multi),
+            config_compare=_compare_with_default(self._config),
             runtime={
                 "data_source": "binance_realtime",
                 "symbol": self._symbol,

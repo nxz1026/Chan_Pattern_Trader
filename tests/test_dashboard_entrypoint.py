@@ -100,3 +100,86 @@ def test_fixture_entrypoint_serves_inspect_endpoint() -> None:
     finally:
         process.terminate()
         process.wait(timeout=5)
+
+
+def test_fixture_entrypoint_serves_multi_level_and_config_compare() -> None:
+    """多级别真实叠加 + R8 config_compare：fixture 模式注入 multi_level + config_compare 字段。"""
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "cpt.web",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--mode",
+            "fixture",
+            "--limit",
+            "200",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    try:
+        deadline = time.monotonic() + 10
+        line = ""
+        while not line and time.monotonic() < deadline:
+            line = process.stdout.readline().strip()
+        port = int(re.search(r":(\d+)", line).group(1))
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/dashboard/snapshot"
+        ) as response:
+            payload = json.load(response)
+        assert payload["multi_level"]["available"] is True
+        # 默认 RulesConfig().levels = (5, 30)
+        assert "5" in payload["multi_level"]["levels"]
+        assert "30" in payload["multi_level"]["levels"]
+        assert payload["config_compare"]["available"] is True
+        # demo 模式（provider 无 snapshot_for_level）传 level 应被忽略
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/dashboard/snapshot?level=30"
+        ) as level_resp:
+            level_payload = json.load(level_resp)
+        assert level_payload["selected_level"] == 30
+        # level=30 应替换 structures 来自 30 分钟级别
+        assert level_payload["multi_level"]["available"] is True
+    finally:
+        process.terminate()
+        process.wait(timeout=5)
+
+
+def test_demo_entrypoint_parity_does_not_pretend_zero_match() -> None:
+    """A2：demo 模式下 parity 应为 available:false 而非假 0% 匹配的伪结果。"""
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "cpt.web",
+            "--host",
+            "127.0.0.1",
+            "--port",
+            "0",
+            "--mode",
+            "demo",
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert process.stdout is not None
+    try:
+        deadline = time.monotonic() + 5
+        line = ""
+        while not line and time.monotonic() < deadline:
+            line = process.stdout.readline().strip()
+        port = int(re.search(r":(\d+)", line).group(1))
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/api/dashboard/parity"
+        ) as response:
+            payload = json.load(response)
+        assert payload["available"] is False
+        assert "reason" in payload
+    finally:
+        process.terminate()
+        process.wait(timeout=5)

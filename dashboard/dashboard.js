@@ -2029,7 +2029,7 @@
     }
   }
 
-  function refreshSelectedSnapshot() {
+  function refreshSelectedSnapshot({ level } = {}) {
     const endpoint = snapshotEndpoint();
     if (!endpoint) {
       setConnection("offline", "当前为离线 demo；切换仅更新本地选择状态");
@@ -2040,6 +2040,7 @@
     const interval = q("[data-testid=interval-select]")?.value;
     if (symbol) url.searchParams.set("symbol", symbol);
     if (interval) url.searchParams.set("interval_ms", interval);
+    if (Number.isInteger(level)) url.searchParams.set("level", String(level));
     return loadSnapshot(url.toString());
   }
 
@@ -2074,9 +2075,17 @@
       const level = select.value === "all" ? null : Number(select.value);
       state.level = level;
       root.dataset.level = level === null ? "all" : String(level);
-      renderStructureDefaults(state.snapshot);
-      drawChart();
-      setConnection("live", level === null ? "已显示全部级别结构" : `已筛选级别：${level}`);
+      const hasEndpoint = Boolean(snapshotEndpoint());
+      if (level !== null && hasEndpoint) {
+        setConnection("connecting", `正在加载级别 ${level} 的真实叠加结构…`);
+        refreshSelectedSnapshot({ level }).then((result) => {
+          if (result) setConnection("live", `级别 ${level} 结构已加载（${result.structure_levels ? result.structure_levels.length : "—"} 根）`);
+        });
+      } else {
+        renderStructureDefaults(state.snapshot);
+        drawChart();
+        setConnection("live", level === null ? "已显示全部级别结构" : `已筛选级别：${level}`);
+      }
       root.dispatchEvent(new CustomEvent("cpt:level-changed", { detail: { level } }));
     });
   }

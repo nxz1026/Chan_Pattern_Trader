@@ -31,6 +31,8 @@ def build_dashboard_snapshot_v2(
     data_source: str = "fixture",
     parity: dict[str, Any] | None = None,
     market_24h: dict[str, Any] | None = None,
+    multi_level: dict[str, Any] | None = None,
+    config_compare: dict[str, Any] | None = None,
     runtime: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     """Compose v2 while retaining all stable v1 fields."""
@@ -56,8 +58,16 @@ def build_dashboard_snapshot_v2(
         "reason": "upstream_aggregate_unavailable",
     }
     v2["reproducibility"] = reproducibility_metadata(v1, config=config)
-    v2["parity"] = parity or {"fractals": {}, "bis": {}, "zhongshus": {}}
+    v2["parity"] = parity or {"available": False, "reason": "oracle_reference_unavailable"}
     v2["runs"] = []
+    v2["multi_level"] = multi_level or {
+        "available": False,
+        "reason": "multi_level_unavailable",
+    }
+    v2["config_compare"] = config_compare or {
+        "available": False,
+        "reason": "config_compare_unavailable",
+    }
     runtime_v1 = v1["runtime"] if isinstance(v1["runtime"], dict) else {}
     v2["runtime"] = {**runtime_v1, "mode": mode, "status": status, "data_source": data_source}
     v2["engine_state"] = runtime_panel(v2["runtime"])

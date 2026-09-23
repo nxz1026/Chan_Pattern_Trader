@@ -19,6 +19,13 @@ class SnapshotSource(Protocol):
 
 
 @runtime_checkable
+class MultiLevelSource(Protocol):
+    """Read-only provider that can rebuild a snapshot for a given level."""
+
+    def snapshot_for_level(self, level: int) -> dict[str, Any]: ...
+
+
+@runtime_checkable
 class InspectProvider(Protocol):
     """Read-only per-bar inspection contract for ``/api/dashboard/inspect``."""
 
@@ -66,6 +73,24 @@ def make_handler(
                         return
                 payload["market"] = market
                 payload["runtime"] = runtime
+                if query.get("level") and isinstance(provider, MultiLevelSource):
+                    try:
+                        level = int(query["level"][0])
+                    except ValueError:
+                        self.send_error(HTTPStatus.BAD_REQUEST, "level must be an integer")
+                        return
+                    try:
+                        payload = provider.snapshot_for_level(level)
+                    except Exception:  # noqa: BLE001
+                        self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "level rebuild failed")
+                        return
+                    payload = dict(payload)
+                    payload["market"] = dict(payload.get("market", {}))
+                    payload["runtime"] = dict(payload.get("runtime", {}))
+                    payload["market"]["symbol"] = query.get("symbol", [payload["market"].get("symbol", "")])[0] or payload["market"].get("symbol")
+                    payload["runtime"]["symbol"] = payload["runtime"]["symbol"]
+                    if query.get("interval_ms"):
+                        payload["market"]["interval_ms"] = int(query["interval_ms"][0])
             elif path.path == "/api/dashboard/reproducibility":
                 payload = snapshot.get("reproducibility", {})
             elif path.path == "/api/dashboard/parity":
