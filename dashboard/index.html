@@ -43,24 +43,21 @@
         <div class="meta-item">
           <dt>交易对</dt>
           <dd><select data-testid="symbol-select" aria-label="切换交易对"><option value="BTCUSDT" selected>BTCUSDT</option><option value="ETHUSDT">ETHUSDT</option><option value="SOLUSDT">SOLUSDT</option></select></dd>
-          <span data-testid="topbar-symbol" data-field="market.symbol">BTCUSDT</span>
+          <span data-testid="topbar-symbol" data-field="market.symbol" hidden>BTCUSDT</span>
         </div>
         <div class="meta-item">
           <dt>级别</dt>
           <dd><select data-testid="level-select" aria-label="筛选级别"><option value="all" selected>全部</option><option value="1">1</option><option value="2">2</option><option value="3">3</option></select></dd>
         </div>
-        <div class="meta-item">
-          <dt>周期</dt>
-          <dd data-testid="topbar-interval" data-field="market.interval_ms">5m</dd>
-        </div>
         <div class="meta-item interval-picker">
-          <dt>切换周期</dt>
+          <dt>周期</dt>
           <dd><select data-testid="interval-select" aria-label="切换周期">
             <option value="60000">1m</option>
             <option value="300000" selected>5m</option>
             <option value="900000">15m</option>
             <option value="3600000">1h</option>
           </select></dd>
+          <span data-testid="topbar-interval" data-field="market.interval_ms" hidden>5m</span>
         </div>
         <div class="meta-item">
           <dt>数据来源</dt>
@@ -207,10 +204,19 @@
           <div data-testid="chart-volume-region" class="chart-volume" aria-label="成交量区域">
             <p class="placeholder-note">成交量区域占位</p>
           </div>
+          <div data-testid="chart-macd-region" class="chart-macd" aria-label="MACD 副图">
+            <p class="placeholder-note">MACD 副图占位（背驰验证）</p>
+          </div>
+          <div data-testid="chart-zoom-controls" class="chart-zoom" role="group" aria-label="图表缩放">
+            <button type="button" data-zoom-action="out" data-testid="chart-zoom-out">− 缩</button>
+            <span data-testid="chart-zoom-level">全部</span>
+            <button type="button" data-zoom-action="in" data-testid="chart-zoom-in">＋ 放</button>
+            <button type="button" data-zoom-action="reset" data-testid="chart-zoom-reset">重置</button>
+          </div>
           <div data-testid="chart-time-axis" class="chart-time-axis" aria-label="时间轴">
             <p class="placeholder-note">时间轴占位（Unix 毫秒）</p>
           </div>
-          <section data-testid="parity-chart" class="parity-chart" hidden aria-label="CPT 与 Oracle 对比图">
+          <section data-testid="parity-chart" class="parity-chart" hidden data-only-mode="research" aria-label="CPT 与 Oracle 对比图">
             <h3>CPT / Oracle 对比</h3>
             <p data-testid="parity-selection">未选择差异项</p>
             <div data-testid="parity-chart-cpt"></div>
@@ -275,6 +281,7 @@
     <section
       data-testid="event-panel"
       class="panel event-panel"
+      data-only-mode="research"
       aria-labelledby="event-panel-title"
     >
       <h2 id="event-panel-title" class="panel-title">事件时间线与回放</h2>

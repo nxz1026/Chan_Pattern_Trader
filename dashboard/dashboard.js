@@ -140,6 +140,8 @@
     mode: new URLSearchParams(window.location.search).get("mode") || "research",
     level: null,
     crosshair: null,
+    zoomLevel: 0,
+    visibleWindow: null,
   };
 
   /* ------------------------------------------------------------ DOM 基础 */
@@ -370,9 +372,17 @@
     const first = candles.length ? candles[0] : null;
     const changeNode = q("[data-testid=market-change]");
     if (changeNode) {
-      const change = first && first.open ? ((last.close - first.open) / first.open) * 100 : null;
-      changeNode.textContent = change === null ? "—" : `${change >= 0 ? "+" : ""}${change.toFixed(2)}%`;
-      changeNode.dataset.state = change === null ? "flat" : change >= 0 ? "up" : "down";
+      const market24h = isObject(snapshot) && isObject(snapshot.market_24h) ? snapshot.market_24h : null;
+      const changePct = market24h && market24h.available === true && typeof market24h.price_change_pct === "number"
+        ? market24h.price_change_pct
+        : (first && first.open ? ((last.close - first.open) / first.open) * 100 : null);
+      changeNode.textContent = changePct === null ? "—" : `${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
+      changeNode.dataset.state = changePct === null ? "flat" : changePct >= 0 ? "up" : "down";
+      changeNode.dataset.source = market24h && market24h.available === true ? "24h" : "window";
+      changeNode.setAttribute(
+        "title",
+        market24h && market24h.available === true ? "上游 24h 涨跌幅" : "当前 snapshot 窗口涨跌幅（非 24h）",
+      );
     }
     const countdownNode = q("[data-testid=close-countdown]");
     if (countdownNode && last) {
@@ -562,6 +572,111 @@
     });
     section.append(heading, button);
     panel.appendChild(section);
+  }
+
+  function renderReproducibility(snapshot) {
+    const panel = q("[data-testid=event-panel]");
+    if (!panel) return;
+    let section = q("[data-testid=reproducibility-panel]");
+    if (!section) {
+      section = document.createElement("section");
+      section.dataset.testid = "reproducibility-panel";
+      section.className = "cpt-reproducibility-panel";
+      const heading = document.createElement("h3");
+      heading.textContent = "可复现性";
+      section.appendChild(heading);
+      panel.appendChild(section);
+    }
+    while (section.children.length > 1) section.removeChild(section.lastChild);
+    const list = document.createElement("dl");
+    list.className = "kv";
+    const data = isObject(snapshot) && isObject(snapshot.reproducibility) ? snapshot.reproducibility : {};
+    if (!Object.keys(data).length) {
+      const item = document.createElement("p");
+      item.textContent = "当前 snapshot 未包含 reproducibility 字段";
+      section.appendChild(item);
+      return;
+    }
+    [
+      ["config_hash", data.config_hash],
+      ["dataset_hash", data.dataset_hash],
+      ["config_version", data.config_version],
+      ["schema_version", data.schema_version],
+    ].forEach(([key, value]) => {
+      const row = document.createElement("div");
+      const dt = document.createElement("dt");
+      dt.textContent = key;
+      const dd = document.createElement("dd");
+      dd.textContent = value === undefined || value === null ? "—" : String(value);
+      row.append(dt, dd);
+      list.appendChild(row);
+    });
+    section.appendChild(list);
+  }
+
+  function renderConfigCompare(snapshot) {
+    const panel = q("[data-testid=event-panel]");
+    if (!panel) return;
+    let section = q("[data-testid=config-compare]");
+    if (!section) {
+      section = document.createElement("section");
+      section.dataset.testid = "config-compare";
+      section.className = "cpt-config-compare";
+      const heading = document.createElement("h3");
+      heading.textContent = "配置对比";
+      section.appendChild(heading);
+      panel.appendChild(section);
+    }
+    while (section.children.length > 1) section.removeChild(section.lastChild);
+    const data = isObject(snapshot) && isObject(snapshot.config_compare) ? snapshot.config_compare : null;
+    if (!data) {
+      const item = document.createElement("p");
+      item.textContent = "当前 snapshot 未提供 config_compare（可在 config_compare.json 中保存对照基准）";
+      section.appendChild(item);
+      return;
+    }
+    const list = document.createElement("ul");
+    (data.differences || []).forEach((entry) => {
+      const row = document.createElement("li");
+      row.textContent = `${entry.field}: ${JSON.stringify(entry.left)} → ${JSON.stringify(entry.right)}`;
+      list.appendChild(row);
+    });
+    if (!list.children.length) {
+      const empty = document.createElement("li");
+      empty.textContent = "无差异（与对照基准完全一致）";
+      list.appendChild(empty);
+    }
+    section.appendChild(list);
+  }
+
+  function renderRuns(snapshot) {
+    const panel = q("[data-testid=event-panel]");
+    if (!panel) return;
+    let section = q("[data-testid=runs-panel]");
+    if (!section) {
+      section = document.createElement("section");
+      section.dataset.testid = "runs-panel";
+      section.className = "cpt-runs-panel";
+      const heading = document.createElement("h3");
+      heading.textContent = "数据集运行索引";
+      section.appendChild(heading);
+      panel.appendChild(section);
+    }
+    while (section.children.length > 1) section.removeChild(section.lastChild);
+    const runs = isObject(snapshot) && Array.isArray(snapshot.runs) ? snapshot.runs : [];
+    if (!runs.length) {
+      const item = document.createElement("p");
+      item.textContent = "当前 snapshot 未包含 runs 索引";
+      section.appendChild(item);
+      return;
+    }
+    const list = document.createElement("ul");
+    runs.forEach((entry) => {
+      const row = document.createElement("li");
+      row.textContent = `${entry.run_id || entry.id || "—"} · ${entry.dataset_hash || ""} · ${entry.created_at || ""}`;
+      list.appendChild(row);
+    });
+    section.appendChild(list);
   }
 
   function renderSignalStats(snapshot) {
@@ -985,6 +1100,26 @@
     return { width, height, left, top, plotWidth, plotHeight, slot: plotWidth / count };
   };
 
+  function applyZoomWindow(candles) {
+    if (!candles.length) return candles;
+    const level = state.zoomLevel | 0;
+    if (level <= 0 || !state.visibleWindow) return candles;
+    const [start, end] = state.visibleWindow;
+    const clampedStart = Math.max(0, Math.min(start, candles.length - 1));
+    const clampedEnd = Math.max(clampedStart + 1, Math.min(end, candles.length));
+    return candles.slice(clampedStart, clampedEnd);
+  }
+
+  function updateZoomLabel() {
+    const label = q("[data-testid=chart-zoom-level]");
+    if (!label) return;
+    if (!state.snapshot || (state.zoomLevel | 0) === 0) {
+      label.textContent = "全部";
+    } else {
+      label.textContent = `×${state.zoomLevel + 1}`;
+    }
+  }
+
   /** 结构是否落在未收盘区间：snapshot 标记 alert 且结构覆盖了最后一根 K 线。 */
   const structureStateOf = (view, endTime) => {
     const runtime = isObject(state.snapshot) && isObject(state.snapshot.runtime) ? state.snapshot.runtime : {};
@@ -1407,6 +1542,179 @@
     volumeNode.appendChild(svg);
   }
 
+  function drawMacd(macdNode, view, macdHeight) {
+    const closes = view.candles.map((bar) => bar.close);
+    const series = computeMacd(closes);
+    if (!series) {
+      appendNote(macdNode, "K 线不足或无 close 字段，跳过 MACD");
+      macdNode.dataset.rendered = "false";
+      return;
+    }
+    const { dif, dea, histogram } = series;
+    const flatHist = histogram.map((value) => (value === null ? 0 : value));
+    const maxAbs = Math.max(1e-9, ...flatHist.map((value) => Math.abs(value)), Math.abs(dif), Math.abs(dea));
+    const width = view.geom.width;
+    const svg = createSvg("svg", {
+      class: "cpt-chart-svg",
+      viewBox: `0 0 ${width} ${macdHeight}`,
+      preserveAspectRatio: "none",
+      role: "presentation",
+    });
+    const group = createSvg("g", {});
+    svg.appendChild(group);
+    const zero = macdHeight / 2;
+    const bodyWidth = Math.max(1, Math.min(view.geom.slot * 0.62, 16));
+    histogram.forEach((value, index) => {
+      if (value === null) return;
+      const barHeight = (value / maxAbs) * (macdHeight * 0.4);
+      const y = value >= 0 ? zero - barHeight : zero;
+      const element = createSvg("rect", {
+        x: view.xForIndex(index) - bodyWidth / 2,
+        y,
+        width: bodyWidth,
+        height: Math.max(1, Math.abs(barHeight)),
+        "data-structure-kind": "macd",
+        "data-bar-index": index,
+        "data-open-time": view.candles[index].openTime,
+      });
+      paint(element, {
+        fill: value >= 0 ? "var(--color-up)" : "var(--color-down)",
+        "fill-opacity": "0.5",
+      });
+      group.appendChild(element);
+    });
+    const lineFor = (values, color, dasharray) => {
+      let previous = null;
+      values.forEach((value, index) => {
+        if (value === null) return;
+        const x = view.xForIndex(index);
+        const y = zero - (value / maxAbs) * (macdHeight * 0.4);
+        if (previous) {
+          const element = createSvg("line", {
+            x1: previous.x,
+            y1: previous.y,
+            x2: x,
+            y2: y,
+            "data-structure-kind": "macd",
+            "data-bar-index": index,
+          });
+          paint(element, { stroke: color, "stroke-width": "1.5", "stroke-dasharray": dasharray || "" });
+          group.appendChild(element);
+        }
+        previous = { x, y };
+      });
+    };
+    lineFor(dif, "var(--color-accent)", "");
+    lineFor(dea, "var(--color-confirmed)", "3 2");
+    group.appendChild(createSvg("line", {
+      x1: view.geom.left,
+      x2: view.geom.left + view.geom.plotWidth,
+      y1: zero,
+      y2: zero,
+    }));
+    group.appendChild(
+      paint(createSvg("text", { x: 6, y: 12 }, "MACD 12/26/9"), { fill: "var(--color-text-dim)" }),
+    );
+    macdNode.dataset.rendered = "true";
+    macdNode.appendChild(svg);
+  }
+
+  function computeMacd(closes) {
+    if (!Array.isArray(closes) || closes.length < 26) return null;
+    const ema = (period) => {
+      const k = 2 / (period + 1);
+      const series = [];
+      closes.forEach((close, index) => {
+        if (close === null || close === undefined) {
+          series.push(null);
+          return;
+        }
+        if (index === 0) {
+          series.push(close);
+        } else {
+          const previous = series[index - 1];
+          series.push(previous === null ? close : close * k + previous * (1 - k));
+        }
+      });
+      return series;
+    };
+    const fast = ema(12);
+    const slow = ema(26);
+    const dif = closes.map((_, index) => {
+      if (fast[index] === null || slow[index] === null) return null;
+      return fast[index] - slow[index];
+    });
+    const k9 = 2 / (9 + 1);
+    const dea = [];
+    dif.forEach((value, index) => {
+      if (value === null) {
+        dea.push(null);
+        return;
+      }
+      if (index === 0) {
+        dea.push(value);
+      } else {
+        const previous = dea[index - 1];
+        dea.push(previous === null ? value : value * k9 + previous * (1 - k9));
+      }
+    });
+    const histogram = dif.map((value, index) => {
+      if (value === null || dea[index] === null) return null;
+      return (value - dea[index]) * 2;
+    });
+    return { dif, dea, histogram };
+  }
+
+  function installZoomControls() {
+    const buttons = root.querySelectorAll("[data-zoom-action]");
+    buttons.forEach((button) => {
+      button.addEventListener("click", () => {
+        const action = button.dataset.zoomAction;
+        if (action === "in") zoomBy(1);
+        else if (action === "out") zoomBy(-1);
+        else if (action === "reset") resetZoom();
+        drawChart();
+      });
+    });
+    const canvas = q("[data-testid=chart-canvas-region]");
+    if (canvas) {
+      canvas.addEventListener("wheel", (event) => {
+        if (!event.ctrlKey && !event.metaKey) return;
+        event.preventDefault();
+        zoomBy(event.deltaY < 0 ? 1 : -1);
+        drawChart();
+      }, { passive: false });
+      canvas.addEventListener("dblclick", () => {
+        zoomBy(1);
+        drawChart();
+      });
+    }
+  }
+
+  function zoomBy(direction) {
+    const candles = state.snapshot ? normalizeCandles(state.snapshot.candles) : [];
+    if (!candles.length) return;
+    const target = Math.min(4, Math.max(0, (state.zoomLevel | 0) + direction));
+    if (target === 0) {
+      state.visibleWindow = null;
+      state.zoomLevel = 0;
+      return;
+    }
+    const half = Math.max(8, Math.round(candles.length / (target * 2)));
+    const center = state.visibleWindow
+      ? Math.round((state.visibleWindow[0] + state.visibleWindow[1]) / 2)
+      : candles.length - 1 - half;
+    const start = Math.max(0, center - half);
+    const end = Math.min(candles.length, start + half * 2);
+    state.visibleWindow = [start, end];
+    state.zoomLevel = target;
+  }
+
+  function resetZoom() {
+    state.zoomLevel = 0;
+    state.visibleWindow = null;
+  }
+
   function drawAxis(axisNode, view, axisHeight) {
     const svg = createSvg("svg", {
       class: "cpt-chart-svg",
@@ -1435,11 +1743,13 @@
   function drawChart() {
     const canvas = q("[data-testid=chart-canvas-region]");
     const volumeNode = q("[data-testid=chart-volume-region]");
+    const macdNode = q("[data-testid=chart-macd-region]");
     const axisNode = q("[data-testid=chart-time-axis]");
     if (!canvas || !volumeNode || !axisNode) return;
 
     const snapshot = state.snapshot;
-    const candles = normalizeCandles(snapshot && snapshot.candles);
+    const rawCandles = normalizeCandles(snapshot && snapshot.candles);
+    const candles = applyZoomWindow(rawCandles);
     const overlays = normalizeOverlays(snapshot && snapshot.overlays);
     const domain = priceDomain(candles, overlays);
     const rect = canvas.getBoundingClientRect();
@@ -1457,9 +1767,11 @@
           : "图形区尚未完成布局，等待下一次重绘",
       );
       appendNote(volumeNode, "暂无成交量数据");
+      if (macdNode) appendNote(macdNode, "暂无 MACD 数据");
       appendNote(axisNode, "时间轴：无数据（Unix 毫秒）");
       canvas.setAttribute("role", "img");
       canvas.setAttribute("aria-label", "K 线绘制区占位：分型、笔、中枢、走势类型由 dashboard.js 叠加渲染");
+      updateZoomLabel();
       return;
     }
 
@@ -1522,7 +1834,9 @@
     const volumeRect = volumeNode.getBoundingClientRect();
     const axisRect = axisNode.getBoundingClientRect();
     drawVolume(volumeNode, view, Math.max(48, Math.round(volumeRect.height) || 72));
+    if (macdNode) drawMacd(macdNode, view, Math.max(60, Math.round(macdNode.getBoundingClientRect().height) || 96));
     drawAxis(axisNode, view, Math.max(20, Math.round(axisRect.height) || 28));
+    updateZoomLabel();
 
     // 重绘会替换全部节点，按 kind + source_ids 找回当前选中元素并重新标记。
     state.selectedNode = null;
@@ -1553,14 +1867,22 @@
   /* ------------------------------------------------------------ 生命周期 */
 
   function installAlertObserver() {
+    const alert = q("[data-testid=realtime-alert]");
+    const refresh = q("[data-testid=realtime-refresh]");
+    const syncOffline = () => {
+      const realtime = root.dataset.runtimeMode === "realtime";
+      if (alert) alert.hidden = !realtime;
+      if (refresh) refresh.hidden = !realtime;
+    };
     root.addEventListener("cpt:realtime-updated", (event) => {
       const detail = event.detail || {};
-      const alert = q("[data-testid=realtime-alert]");
       if (alert) {
         alert.textContent = detail.triggered ? `信号提醒：${detail.currentStatus || "alert"}` : "无新信号提醒";
         alert.dataset.state = detail.triggered ? "alert" : "idle";
       }
     });
+    new MutationObserver(syncOffline).observe(root, { attributes: true, attributeFilter: ["data-runtime-mode"] });
+    syncOffline();
   }
 
   function snapshotEndpoint() {
@@ -1691,6 +2013,9 @@
     renderSignalHistory(state.snapshot);
     renderEventAudit(state.snapshot);
     renderSignalStats(state.snapshot);
+    renderReproducibility(state.snapshot);
+    renderConfigCompare(state.snapshot);
+    renderRuns(state.snapshot);
     installSliceExport();
     renderStructureDefaults(state.snapshot);
     renderEngineState(state.snapshot);
@@ -1871,12 +2196,13 @@
     installAlertObserver();
     installLevelFilter();
     installCrosshair();
+    installZoomControls();
     ensureSelectionSection();
     installReplayControls();
 
     if (typeof window.ResizeObserver === "function") {
       const observer = new window.ResizeObserver(() => scheduleDraw());
-      [q("[data-testid=chart-canvas-region]"), q("[data-testid=chart-volume-region]")].forEach((node) => {
+      [q("[data-testid=chart-canvas-region]"), q("[data-testid=chart-volume-region]"), q("[data-testid=chart-macd-region]")].forEach((node) => {
         if (node) observer.observe(node);
       });
     }

@@ -744,6 +744,9 @@ button {
 }
 
 /* 离线 demo 模式：图形区角标，明示非实时数据 */
+body[data-view-mode="watch"] [data-only-mode="research"] { display: none; }
+body[data-view-mode="research"] [data-only-mode="watch"] { display: none; }
+
 body[data-runtime-mode="offline"] .chart-canvas::after {
   content: "离线 demo";
   position: absolute;
