@@ -743,3 +743,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - Phase 0 完成双模式 URL 切换（`watch/research`）、共享十字线 OHLCV tooltip 和现有结构联动。
 - 新增 `cpt/application/dashboard_inspector.py` 与 focused 测试，提供 raw bar → merged bar → 结构引用的只读检查结果。
 - focused：**1 passed**；当前全量：**113 passed**。
+
+## 34. Dashboard 研究模式复现面板基础（2026-09-23）
+
+- 新增 `cpt/application/dashboard_reproducibility.py`：config hash、dataset hash、规则/引擎版本元数据和 snapshot 顶层 diff。
+- 研究模式的 R5 复现信息先以纯 application service 交付，不侵入 domain、不引入 HTTP 框架。
