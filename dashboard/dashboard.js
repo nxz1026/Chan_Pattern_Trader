@@ -136,6 +136,7 @@
     drawPending: false,
     replayIndex: null,
     replayTimer: null,
+    replay: { ready: false },
     pollTimer: null,
     staleTimer: null,
     snapshotUrl: null,
@@ -372,7 +373,8 @@
     setText("[data-testid=market-bar-count]", candles.length);
     setText("[data-testid=replay-schema-version]", (isObject(snapshot) && snapshot.schema_version) || SCHEMA_VERSION);
 
-    const stale = quality.stale === true;
+    const runtimeStale = runtime.stale === true;
+    const stale = quality.stale === true || runtimeStale;
     const gap = quality.gap === true;
     setState(setText("[data-testid=data-quality-stale]", stale ? "true" : "false"), stale ? "true" : "false");
     setState(setText("[data-testid=data-quality-gap]", gap ? "true" : "false"), gap ? "true" : "false");
@@ -384,15 +386,17 @@
     const changeNode = q("[data-testid=market-change]");
     if (changeNode) {
       const market24h = isObject(snapshot) && isObject(snapshot.market_24h) ? snapshot.market_24h : null;
-      const changePct = market24h && market24h.available === true && typeof market24h.price_change_pct === "number"
-        ? market24h.price_change_pct
+      const has24h = market24h && market24h.available === true;
+      const upstreamPct = has24h ? Number(market24h.price_change_pct) : NaN;
+      const changePct = Number.isFinite(upstreamPct)
+        ? upstreamPct
         : (first && first.open ? ((last.close - first.open) / first.open) * 100 : null);
       changeNode.textContent = changePct === null ? "—" : `${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
       changeNode.dataset.state = changePct === null ? "flat" : changePct >= 0 ? "up" : "down";
-      changeNode.dataset.source = market24h && market24h.available === true ? "24h" : "window";
+      changeNode.dataset.source = has24h && Number.isFinite(upstreamPct) ? "24h" : "window";
       changeNode.setAttribute(
         "title",
-        market24h && market24h.available === true ? "上游 24h 涨跌幅" : "当前 snapshot 窗口涨跌幅（非 24h）",
+        has24h && Number.isFinite(upstreamPct) ? "上游 24h 涨跌幅" : "当前 snapshot 窗口涨跌幅（非 24h）",
       );
     }
     const countdownNode = q("[data-testid=close-countdown]");
@@ -417,10 +421,26 @@
     if (high24) high24.setAttribute("title", market24hAvailable ? "上游 24h 聚合" : "上游未提供真实 24h 聚合");
     const low24 = setText("[data-testid=market-low-24h]", market24hAvailable ? formatPrice(market24h.low) : "不可用");
     if (low24) low24.setAttribute("title", market24hAvailable ? "上游 24h 聚合" : "上游未提供真实 24h 聚合");
-    const totalVolume = candles.reduce((sum, bar) => sum + (bar.volume === null ? 0 : bar.volume), 0);
-    const volumeNode = setText("[data-testid=market-volume]", candles.length ? formatVolume(totalVolume) : "—");
-    if (volumeNode && candles.length) {
-      volumeNode.setAttribute("title", "当前 snapshot 窗口累计成交量（非 24h）");
+    const quoteVolume = market24hAvailable ? Number(market24h.quote_volume) : NaN;
+    const volumeNode = q("[data-testid=market-volume]");
+    if (volumeNode) {
+      if (Number.isFinite(quoteVolume)) {
+        volumeNode.textContent = `${formatVolume(quoteVolume)} USDT`;
+        volumeNode.setAttribute("title", "上游 24h USDT 成交额");
+        volumeNode.dataset.source = "24h";
+      } else if (candles.length) {
+        const totalVolume = candles.reduce(
+          (sum, bar) => sum + (bar.volume === null ? 0 : bar.volume),
+          0
+        );
+        volumeNode.textContent = formatVolume(totalVolume);
+        volumeNode.setAttribute("title", "当前 snapshot 窗口累计成交量（非 24h）");
+        volumeNode.dataset.source = "window";
+      } else {
+        volumeNode.textContent = "—";
+        volumeNode.setAttribute("title", "上游未提供 24h 成交额");
+        volumeNode.dataset.source = "none";
+      }
     }
 
     let stateKey = "empty";
@@ -574,14 +594,23 @@
     button.type = "button";
     button.textContent = "导出当前快照 JSON";
     button.addEventListener("click", () => {
-      const payload = JSON.stringify(state.snapshot || {}, null, 2);
-      const blob = new Blob([payload], { type: "application/json" });
-      const url = URL.createObjectURL(blob);
-      const link = document.createElement("a");
-      link.href = url;
-      link.download = "cpt-dashboard-snapshot.json";
-      link.click();
-      URL.revokeObjectURL(url);
+      if (!state.snapshot) {
+        showError("snapshot 尚未加载，无法导出");
+        return;
+      }
+      try {
+        const payload = JSON.stringify(state.snapshot, null, 2);
+        const blob = new Blob([payload], { type: "application/json" });
+        const url = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url;
+        link.download = "cpt-dashboard-snapshot.json";
+        link.click();
+        URL.revokeObjectURL(url);
+        setConnection("live", `已导出当前 snapshot（${asArray(state.snapshot.candles).length} 根 K 线）`);
+      } catch (error) {
+        showError(`导出失败：${error && error.message ? error.message : String(error)}`);
+      }
     });
     section.append(heading, button);
     panel.appendChild(section);
@@ -2010,15 +2039,25 @@
     button.dataset.testid = "enable-browser-alerts";
     button.textContent = "启用浏览器通知 + 蜂鸣";
     button.addEventListener("click", async () => {
-      if (isNotificationSupported() && typeof window.Notification.requestPermission === "function") {
-        try {
-          const permission = await window.Notification.requestPermission();
-          state.notificationPermission = permission;
-        } catch (error) {
-          state.notificationPermission = "denied";
-        }
-      } else {
+      // denied 后 JS 再 requestPermission 也无效，避免死循环，直接引导用户去设置
+      const live = isNotificationSupported() && typeof window.Notification.permission === "string"
+        ? window.Notification.permission
+        : "default";
+      if (live === "denied") {
+        state.notificationPermission = "denied";
+        updateBrowserAlertsLabel();
+        return;
+      }
+      if (live === "unsupported") {
         state.notificationPermission = "unsupported";
+        updateBrowserAlertsLabel();
+        return;
+      }
+      try {
+        const permission = await window.Notification.requestPermission();
+        state.notificationPermission = permission;
+      } catch (error) {
+        state.notificationPermission = "denied";
       }
       updateBrowserAlertsLabel();
     });
@@ -2050,10 +2089,19 @@
     const button = q("[data-testid=enable-browser-alerts]");
     if (!button) return;
     const permission = state.notificationPermission;
-    if (permission === "granted") button.textContent = "浏览器通知已启用（点击重试蜂鸣）";
-    else if (permission === "denied") button.textContent = "浏览器通知被拒绝（可手动开启）";
-    else if (permission === "unsupported") button.textContent = "当前环境不支持浏览器通知（蜂鸣仍可用）";
-    else button.textContent = "启用浏览器通知 + 蜂鸣";
+    if (permission === "granted") {
+      button.textContent = "浏览器通知已启用（点击重试蜂鸣）";
+      button.setAttribute("title", "点击只重试蜂鸣，不再重复弹授权框");
+    } else if (permission === "denied") {
+      button.textContent = "浏览器通知已被拒绝 · 请到站点设置开启";
+      button.setAttribute("title", "浏览器 Notification.permission 已是 denied，无法用 JS 再弹授权；请到地址栏左侧锁形/站点设置中放行通知权限后刷新页面");
+    } else if (permission === "unsupported") {
+      button.textContent = "当前环境不支持浏览器通知（蜂鸣仍可用）";
+      button.setAttribute("title", "Notification API 不存在；蜂鸣仍可触发");
+    } else {
+      button.textContent = "启用浏览器通知 + 蜂鸣";
+      button.setAttribute("title", "首次点击会弹浏览器授权框；选择「允许」即可收到信号变化通知");
+    }
   }
 
   function snapshotEndpoint() {
@@ -2373,8 +2421,14 @@
     const runtime = snapshot && isObject(snapshot.runtime) ? snapshot.runtime : {};
     setText("[data-testid=replay-window-size]", runtime.window_size == null ? count : runtime.window_size);
     setState(setText("[data-testid=replay-truncated]", runtime.truncated === true ? "true" : "false"), runtime.truncated === true ? "true" : "false");
+    // D4 回放状态机尚未接线：所有按钮在此之前一律 disabled，避免误操作。
+    // 当状态机准备好时把 ``state.replay.ready`` 置 true 即可放开。
+    const ready = state.replay && state.replay.ready === true;
     root.querySelectorAll("[data-replay-action]").forEach((button) => {
-      button.disabled = count === 0;
+      button.disabled = !(ready && count > 0);
+      button.setAttribute("aria-disabled", button.disabled ? "true" : "false");
+      if (button.disabled) button.setAttribute("title", "回放状态机尚未接线（D4）");
+      else button.removeAttribute("title");
     });
   }
 

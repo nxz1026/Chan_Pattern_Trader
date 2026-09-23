@@ -6,7 +6,14 @@ from typing import Any
 
 
 def runtime_panel(runtime: dict[str, Any] | None) -> dict[str, Any]:
-    """Expose stable engine state fields without leaking engine objects."""
+    """Expose stable engine state fields without leaking engine objects.
+
+    The ``stale`` flag mirrors ``runtime["stale"]`` (default ``False``) so the
+    header / status badge / data-quality card can read the same boolean from a
+    single key instead of reconciling ``data_quality.stale`` against
+    ``runtime.status`` (which can be ``"alert"`` or ``"confirmed"`` and is a
+    different signal).
+    """
     value = runtime or {}
     return {
         "revision": value.get("revision"),
@@ -16,4 +23,5 @@ def runtime_panel(runtime: dict[str, Any] | None) -> dict[str, Any]:
         "truncated": bool(value.get("truncated", False)),
         "truncation_reason": value.get("truncation_reason"),
         "status": value.get("status", "unknown"),
+        "stale": bool(value.get("stale", False)),
     }

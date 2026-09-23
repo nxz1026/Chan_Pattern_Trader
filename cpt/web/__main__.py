@@ -602,6 +602,7 @@ class _RealtimeProvider:
                 "buffer_size": len(bars),
                 "window_size": len(bars),
                 "status": "confirmed",
+                "stale": False,
             },
         )
         snapshot["market"]["symbol"] = self._symbol
