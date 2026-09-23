@@ -940,3 +940,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 扩展静态 Chromium smoke 覆盖 symbol-select、realtime-refresh。
 - 新增 `tests/test_dashboard_chromium_interactions.py`，真实 headless dump-dom 验证 watch 模式交互契约。
 - 当前 smoke 不依赖网络和交易接口，保持只读。
+
+## 69. Dashboard HTTP 路由完整化（2026-10-19）
+
+- 只读 HTTP adapter 新增 `/api/dashboard/market-24h` 和 `/api/dashboard/engine-state`。
+- focused 测试覆盖五组 research/market 路由及只读边界。
