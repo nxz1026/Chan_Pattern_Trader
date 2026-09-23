@@ -797,3 +797,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - 新增 `cpt/application/dashboard_watch.py`：窗口涨跌幅、窗口高低和成交量投影。
 - 在没有真实 24h 聚合数据源时显式返回 `24h: None`，不再把窗口值冒充 24h 数据。
+
+## 44. Dashboard Phase 3-5 周期与质量增强（2026-09-25）
+
+- 前端增加只读周期选择器：1m/5m/15m/1h，切换通过 `cpt:interval-changed` 事件通知宿主，不复制行情请求逻辑。
+- 新增 `cpt/application/dashboard_quality.py`：gap、乱序和 stale 的结构化研究质量报告。
+- focused 测试通过；数据质量报告保持只读。
