@@ -64,7 +64,7 @@ git diff --check
 
 ## 已知边界
 
-- parity 已完成标准化结果服务、summary、双 SVG 逐元素绘制和差异选择事件；复杂的跨图时间轴联动仍属于后续视觉增强；
+- parity 已完成标准化结果服务、summary、双 SVG 逐元素绘制、键盘/鼠标差异选择、定位字段展示和 `cpt:parity-selected` 事件；定位通过 item 的 `start_time`/`bar_index` 字段保留；
 - 真实 24h 统计契约已落地：由上游注入完整聚合时显示，否则明确为 unavailable，不从窗口数据推导冒充；
 - 当前浏览器 smoke 以静态契约和离线 demo 为主，运行环境未提供 Chromium/Playwright，因此未引入新的浏览器测试框架；
 - 已提供标准库只读 HTTP adapter：`/api/dashboard/snapshot`、`/api/dashboard/health`；不提供任何写接口。

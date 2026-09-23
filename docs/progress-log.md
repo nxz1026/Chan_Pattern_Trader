@@ -876,3 +876,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - 新增 `cpt/application/dashboard_stats.py`，提供 signal status/divergence 分布、invalidated 数量和 alert→confirmed 基础比例。
 - Dashboard 增加信号统计摘要，仍为只读 projection；复杂统计图表可在后续数据集页面扩展。
+
+## 58. Dashboard parity 导航契约（2026-10-08）
+
+- 新增 `tests/test_dashboard_parity_navigation.py`，锁定 parity 元素的时间/索引定位字段、鼠标/键盘选择状态和事件契约。
+- 验收报告将 parity 限制更新为：定位字段已保留，暂无额外跨图时间轴状态模型。
