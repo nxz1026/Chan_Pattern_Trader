@@ -1107,3 +1107,8 @@ noscript p {
     transition-duration: 1ms;
   }
 }
+
+.mode-switch { display: inline-flex; gap: 4px; margin-left: auto; }
+.mode-switch button { border: 1px solid var(--color-border); background: var(--color-panel); color: var(--color-text-muted); padding: 4px 10px; border-radius: 4px; cursor: pointer; }
+.mode-switch button[aria-pressed="true"] { color: var(--color-text); border-color: var(--color-accent); background: var(--color-accent-soft); }
+.cpt-crosshair-tooltip { position: absolute; z-index: 10; pointer-events: none; padding: 6px 8px; color: var(--color-text); background: var(--color-panel-strong); border: 1px solid var(--color-border); border-radius: 4px; font: 11px var(--font-mono); white-space: nowrap; }

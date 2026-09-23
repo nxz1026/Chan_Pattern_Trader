@@ -137,6 +137,8 @@
     pollTimer: null,
     staleTimer: null,
     snapshotUrl: null,
+    mode: new URLSearchParams(window.location.search).get("mode") || "research",
+    crosshair: null,
   };
 
   /* ------------------------------------------------------------ DOM 基础 */
@@ -1213,6 +1215,43 @@
 
   /* ------------------------------------------------------------ 生命周期 */
 
+  function installModeSwitch() {
+    root.dataset.mode = state.mode;
+    root.querySelectorAll("[data-mode-action]").forEach((button) => {
+      button.setAttribute("aria-pressed", button.dataset.modeAction === state.mode ? "true" : "false");
+      button.addEventListener("click", () => {
+        state.mode = button.dataset.modeAction === "watch" ? "watch" : "research";
+        root.dataset.mode = state.mode;
+        root.querySelectorAll("[data-mode-action]").forEach((item) => item.setAttribute("aria-pressed", item.dataset.modeAction === state.mode ? "true" : "false"));
+        const url = new URL(window.location.href);
+        url.searchParams.set("mode", state.mode);
+        window.history.replaceState({}, "", url);
+        root.dispatchEvent(new CustomEvent("cpt:mode-changed", { detail: { mode: state.mode } }));
+      });
+    });
+  }
+
+  function installCrosshair() {
+    const canvas = q("[data-testid=chart-canvas-region]");
+    if (!canvas) return;
+    const tooltip = document.createElement("div");
+    tooltip.className = "cpt-crosshair-tooltip";
+    tooltip.hidden = true;
+    canvas.appendChild(tooltip);
+    canvas.addEventListener("mousemove", (event) => {
+      const candles = normalizeCandles(state.snapshot && state.snapshot.candles);
+      if (!candles.length) return;
+      const rect = canvas.getBoundingClientRect();
+      const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
+      const candle = candles[Math.min(candles.length - 1, Math.floor(ratio * candles.length))];
+      tooltip.textContent = `${formatDateTime(candle.openTime)}  O ${formatPrice(candle.open)} H ${formatPrice(candle.high)} L ${formatPrice(candle.low)} C ${formatPrice(candle.close)} V ${formatVolume(candle.volume || 0)}`;
+      tooltip.style.left = `${Math.max(4, event.clientX - rect.left + 8)}px`;
+      tooltip.style.top = `${Math.max(4, event.clientY - rect.top + 8)}px`;
+      tooltip.hidden = false;
+    });
+    canvas.addEventListener("mouseleave", () => { tooltip.hidden = true; });
+  }
+
   function installRuntimeStyle() {
     if (document.getElementById(RUNTIME_STYLE_ID)) return;
     const style = createHtml("style", { id: RUNTIME_STYLE_ID, "data-owner": "dashboard.js" });
@@ -1398,6 +1437,8 @@
 
   function boot() {
     installRuntimeStyle();
+    installModeSwitch();
+    installCrosshair();
     ensureSelectionSection();
     installReplayControls();
 
