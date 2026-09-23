@@ -601,6 +601,37 @@
     section.appendChild(row);
   }
 
+  function renderParityCharts(snapshot) {
+    const chart = q("[data-testid=parity-chart]");
+    if (!chart || !snapshot || !isObject(snapshot.parity)) return;
+    const series = ["fractals", "bis", "zhongshus"].flatMap((kind) => {
+      const value = snapshot.parity[kind];
+      return isObject(value) && Array.isArray(value.items) ? value.items.map((item) => ({ ...item, kind })) : [];
+    });
+    ["cpt", "oracle"].forEach((side) => {
+      const target = q(`[data-testid=parity-chart-${side}]`);
+      if (!target) return;
+      target.replaceChildren();
+      const svg = createSvg("svg", { class: "cpt-parity-svg", viewBox: "0 0 640 150", role: "img", "aria-label": `${side} parity elements` });
+      const title = createSvg("text", { x: 8, y: 18, class: "cpt-parity-title" }, side.toUpperCase());
+      svg.appendChild(title);
+      const visible = series.filter((item) => item[side] !== null && item[side] !== undefined);
+      visible.forEach((item, index) => {
+        const ref = item[side] || {};
+        const x = 12 + (index % 24) * 26;
+        const y = 45 + Math.floor(index / 24) * 35;
+        const status = item.status || "matched";
+        const node = createSvg("circle", { cx: x, cy: y, r: 7, class: `parity-${status}`, tabindex: "0", role: "button", "data-parity-kind": item.kind, "data-parity-status": status });
+        node.addEventListener("click", () => {
+          root.dataset.paritySelection = `${item.kind}:${status}:${JSON.stringify(ref)}`;
+          root.dispatchEvent(new CustomEvent("cpt:parity-selected", { detail: { side, kind: item.kind, status, cpt: item.cpt, oracle: item.oracle } }));
+        });
+        svg.appendChild(node);
+      });
+      target.appendChild(svg);
+    });
+  }
+
   function renderParity(snapshot) {
     const chart = q("[data-testid=parity-chart]");
     if (chart) {
@@ -759,6 +790,7 @@
     renderResearchDetails(payload);
     renderLocalNote(payload);
     renderParity(state.snapshot);
+    renderParityCharts(state.snapshot);
     renderSignalHistory(state.snapshot);
     renderEventAudit(state.snapshot);
 
@@ -1496,6 +1528,7 @@
     renderChrome(state.snapshot);
     renderEvents(state.snapshot);
     renderParity(state.snapshot);
+    renderParityCharts(state.snapshot);
     renderSignalHistory(state.snapshot);
     renderEventAudit(state.snapshot);
     installSliceExport();
