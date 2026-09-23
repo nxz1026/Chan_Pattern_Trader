@@ -645,3 +645,28 @@ M4 已具备可注入、可验证的 Binance 数据入口和缺口阻断；下�
 ### 限制
 
 现有历史人工 fixture 使用旧的 600ms 时间演示格式，不满足 Binance 5m 的 `close_time = open_time + 300000 - 1` 契约，因此继续由兼容的 `run_replay()` 测试；真实 Binance 数据与新回放入口使用 validators 严格校验。后续 M6 前应统一 fixture 时间契约。
+
+## 25. M5 实时增量与收盘升级（2026-09-23）
+
+### 交付物
+
+- 新增 `cpt/engine/realtime.py`：`RealtimeEngine`。
+- 支持窗口化增量输入、未收盘 bar 的 `alert` 预警、收盘 bar 的 `confirmed` 重建。
+- 支持重复未收盘 bar 就地更新、已收盘冲突拒绝、乱序/缺口拒绝和 `max_window` 截断。
+- 正式结构只使用当前窗口内已收盘 K 线；预警路径不生成正式结构。
+- 通过延迟导入复用 adapter/application 管线，同时保持 import-linter 的 engine 分层契约。
+- 新增 `tests/test_realtime.py`：3 个 focused 用例。
+
+### 独立验收
+
+- `pytest tests/test_realtime.py -x -q`：**3 passed**。
+- `pytest tests -q`：**107 passed**。
+- `ruff check cpt tests scripts/compare_oracle.py`：**All checks passed**。
+- `ruff format --check`：**46 files already formatted**。
+- `mypy cpt`：**Success, 27 source files**。
+- `import-linter`：**5 contracts kept, 0 broken**。
+- `git diff --check`：通过。
+
+### 结论
+
+M4 数据/回放和 M5 实时基础链路已完成；下一阶段进行 M6 质量验收、已知限制汇总和最终阶段提交。
