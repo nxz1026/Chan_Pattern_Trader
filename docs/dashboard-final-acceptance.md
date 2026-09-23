@@ -1,7 +1,7 @@
 # CPT Dashboard 最终阶段验收报告
 
-日期：2026-09-30
-状态：Phase 0-6 功能基础已落地，等待产品人工审核
+日期：2026-10-09
+状态：未完整项已逐项收敛，等待产品人工审核
 
 ## 已交付能力
 
@@ -22,7 +22,7 @@
 - raw bar 逐根检查；
 - merged bar 和 containment decision 溯源；
 - source_ids 结构树；
-- parity summary 和 CPT/Oracle 对比容器；
+- parity summary、CPT/Oracle 双 SVG 逐元素对比和差异选择定位；
 - dataset/config/rules/schema/engine 复现信息；
 - snapshot 字段 diff 和多运行 open_time 对齐；
 - 信号历史；
@@ -60,7 +60,7 @@ node --check dashboard/dashboard.js
 git diff --check
 ```
 
-验收结果：全部通过；当前测试总数为 126 passed。
+验收结果：全部通过；当前测试总数为 152 passed。
 
 ## 已知边界
 
