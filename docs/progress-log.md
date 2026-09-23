@@ -573,3 +573,27 @@ M3 已具备基础走势分类、一级递归映射和一买状态机。下一�
 ### 结论
 
 M3 的基础算法、一级递归、一买状态机与冻结约定下的重构机制已完成。下一阶段进入 M4：数据验证、Binance 回填接口与可复现回放。
+
+## 22. M4 数据验证第一步（2026-09-23）
+
+### 交付物
+
+- 新增 `cpt/adapters/validators.py`：`validate_canonical_bars()`。
+- 支持按 `open_time` 去重、顺序检查、固定间隔检查、OHLC 和时间边界校验。
+- 缺口抛出 `DataGapError`；乱序、非法数据和重复内容冲突抛出 `DataValidationError`。
+- 重复 K 线保留首次出现，不隐式重排乱序输入。
+- 新增 `tests/test_validators.py`：4 个 focused 用例。
+
+### 独立验收
+
+- `pytest tests/test_validators.py -x -q`：**4 passed**。
+- `pytest tests -q`：**101 passed**。
+- `ruff check cpt tests scripts/compare_oracle.py`：**All checks passed**。
+- `ruff format --check`：**42 files already formatted**。
+- `mypy cpt`：**Success, 25 source files**。
+- `import-linter`：**5 contracts kept, 0 broken**。
+- `git diff --check`：通过。
+
+### 结论
+
+M4 已具备回放入口所需的数据连续性与缺口阻断基础。下一步实现 Binance Futures 窄接口，然后补批量/单根回放。
