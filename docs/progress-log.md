@@ -695,3 +695,11 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - mypy：**28 source files**；import-linter：**5 contracts kept, 0 broken**。
 - `git diff --check`：通过。
 
+
+## 28. Dashboard D2-D3 页面与图表叠加（2026-09-23）
+
+- 新增 `dashboard/index.html` 与 `dashboard/dashboard.css`：只读深色交易终端页面骨架、响应式布局和状态样式。
+- 新增 `dashboard/dashboard.js`：零第三方依赖 SVG K 线、成交量、分型、笔、中枢和走势类型叠加。
+- 支持 `dashboard.v1` 离线 demo、snapshot 注入、结构点击选择和右侧详情更新。
+- 页面与 CSS 静态 smoke 通过；浏览器验收得到 SVG=3、K 线=60、分型=5、笔=4、中枢=1。
+- D2-D3 使用浏览器离线 demo 验收，无真实网络请求。
