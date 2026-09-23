@@ -597,3 +597,27 @@ M3 的基础算法、一级递归、一买状态机与冻结约定下的重构�
 ### 结论
 
 M4 已具备回放入口所需的数据连续性与缺口阻断基础。下一步实现 Binance Futures 窄接口，然后补批量/单根回放。
+
+## 23. M4 Binance Futures 窄接口（2026-09-23）
+
+### 交付物
+
+- 新增 `cpt/adapters/binance_futures.py`：标准库 urllib 窄接口。
+- 支持 Binance Futures `/fapi/v1/klines` 参数映射、数组字段解析、毫秒时间和可注入 `now_ms`。
+- 支持可注入 opener，测试不依赖真实网络；HTTP/JSON/字段异常统一为 `BinanceDataError`。
+- `fetch_validated_klines()` 与统一 validators 串接。
+- 新增 `tests/test_binance_futures.py`：3 个 mock focused 用例。
+
+### 独立验收
+
+- `pytest tests/test_binance_futures.py -x -vv`：**3 passed**。
+- `pytest tests -q`：**104 passed**。
+- `ruff check cpt tests scripts/compare_oracle.py`：**All checks passed**。
+- `ruff format --check`：**44 files already formatted**。
+- `mypy cpt`：**Success, 26 source files**。
+- `import-linter`：**5 contracts kept, 0 broken**。
+- `git diff --check`：通过。
+
+### 结论
+
+M4 已具备可注入、可验证的 Binance 数据入口和缺口阻断；下一步实现批量/单根回放并确保 schema v1 导出兼容。
