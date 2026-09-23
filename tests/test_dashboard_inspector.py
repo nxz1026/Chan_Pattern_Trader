@@ -16,7 +16,9 @@ def _containment_bars() -> tuple[Any, ...]:
         make_canonical_bar(open_time=0, close_time=299999, open=10, high=20, low=0, close=15),
         make_canonical_bar(open_time=300000, close_time=599999, open=11, high=15, low=8, close=12),
         make_canonical_bar(open_time=600000, close_time=899999, open=12, high=18, low=6, close=14),
-        make_canonical_bar(open_time=900000, close_time=1199999, open=13, high=22, low=12, close=20),
+        make_canonical_bar(
+            open_time=900000, close_time=1199999, open=13, high=22, low=12, close=20
+        ),
     )
 
 

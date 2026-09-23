@@ -57,7 +57,10 @@ def test_structures_for_level_falls_back_to_nearest() -> None:
 
 def test_multi_level_handles_empty_bars() -> None:
     out = build_multi_level((), RulesConfig(), NativeChanlunBackend(), levels=(5, 30))
-    assert out == {5: {"fractals": (), "bis": (), "zhongshus": ()}, 30: {"fractals": (), "bis": (), "zhongshus": ()}}
+    assert out == {
+        5: {"fractals": (), "bis": (), "zhongshus": ()},
+        30: {"fractals": (), "bis": (), "zhongshus": ()},
+    }
 
 
 def test_multi_level_rejects_empty_levels() -> None:

@@ -973,3 +973,27 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 本地注释 key 改为 symbol + level + kind + start_time/bar_index，避免 source_ids/revision 变化造成孤儿注释。
 - HTTP snapshot 路由现在接受 `symbol` 和 `interval_ms` 查询参数，并新增 focused 覆盖；Demo 仍明确标记 fixture/unavailable，不伪造实时数据。
 - 公网 `/cpt/` 静态镜像已同步，Nginx/systemd 服务继续保持可用。
+
+## 74. 功能评审 + 死代码审计一次性清零（2026-10-23）
+
+- **A1**：删除空 `cpt/llm/` 包；更新 `tests/test_imports.py` 移除 cpt.llm 层；`.importlinter` 移除两条引用 cpt.llm 的契约（保留 4 条 KEPT）；`docs/architecture.md` 加注脚说明 LLM 层是预留蓝图。
+- **A2**：`snapshot_v2.parity` 默认改为 `{"available": False, "reason": "oracle_reference_unavailable"}`，消除无 oracle 数据时的"假 0% 匹配"陷阱（审计原文）；前端 parity 面板对无 oracle 数据自动隐藏。`build_parity_snapshot` 签名已修（oracle 可显式传入），`tests/test_review_m7_fixes.py` 持续覆盖。
+- **A3/A4**：早先 M7 已修（A3 `min(positive_diffs)`；A4 `Literal["contained","merged"]` 收窄），回归测试保留。
+- **B1**：原生管线生产入口 — `python -m cpt.application.replay --backend native`（3ec3537）。
+- **B2**：`python -m cpt.web --mode {demo,fixture,realtime}` + `_FixtureProvider` / `_RealtimeProvider` 类对称暴露 `snapshot_payload` + `inspect` + `snapshot_for_level`。
+- **B3**：`inspect_bar` 内部用 `trace_containment` 产出 containment_chain（决策 + resulting_high/low + direction，非手工常量）；web `/api/dashboard/inspect?bar_index=N` 端点上线（demo 返回 `inspect_unavailable_in_mode`，fixture/realtime 真实返回）；前端 R2 检查器接后端（输入 bar_index → fetch → JSON 渲染）；测试 `tests/test_dashboard_inspector.py` 与 `tests/test_dashboard_entrypoint.py::test_fixture_entrypoint_serves_inspect_endpoint` 覆盖。
+- **C1/C2/C3/C4/C5/C6**：上轮已修（控件事件钩子、data-mode 拆双写、24h 优先、顶栏去重、提醒槽位隐藏、注释 key 稳定）。
+- **炒币者视图**：
+  - 图表缩放（`installZoomControls` + `applyZoomWindow` + `updateZoomLabel`）：7~8min 已提交（add 257af38）。
+  - MACD 副图（`drawMacd` + `computeMacd` EMA 12/26/9 + histogram ×2）：同上提交。
+  - 最新价标记线（`drawLastPrice` 横线 + 标签 + 未收盘 alert 状态）：原有实现 + 风格区分（已确认 vs 未收盘）。
+  - 24h 真实数据（`fetch_24h_ticker` + `normalize_24h`）：a29db93。
+  - 浏览器通知/声音：`installBrowserAlerts` + `playAlertBeep` (WebAudio 蜂鸣) + Notification API；bbd8b72。
+  - 多级别真实叠加：`cpt/application/multi_level.py::build_multi_level` 走完整递归链（backend 原生 → classify_trend → map_trend_types → detect_fractals/build_bis/build_zhongshus）；web `/api/dashboard/snapshot?level=N` 支持；前端 level-select 变更触发真实后端加载；f3c1a29。
+- **研究者视图**：
+  - R1 数据集浏览器（前端 `renderRuns` 面板）：原有 + f3c1a29 强化。
+  - R2 逐根检查器：b3 + R2 接后端 fetch：bbd8b72。
+  - R5 可复现性面板（`renderReproducibility`）：原有。
+  - R8 配置对比（`snapshot_v2.config_compare` + `renderConfigCompare`）：f3c1a29 注入。
+- **vulture CI**：`.github/workflows/ci.yml` 增加 vulture 步骤（min-confidence 80，白名单 `cpt/web/app.py:77` —— BaseHTTPRequestHandler 标准签名保留）。
+- **质量门**：全量 160 测试通过；mypy 55 文件全绿；ruff/format/import-linter 全绿。

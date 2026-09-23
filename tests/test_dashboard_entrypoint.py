@@ -128,9 +128,7 @@ def test_fixture_entrypoint_serves_multi_level_and_config_compare() -> None:
         while not line and time.monotonic() < deadline:
             line = process.stdout.readline().strip()
         port = int(re.search(r":(\d+)", line).group(1))
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/api/dashboard/snapshot"
-        ) as response:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/dashboard/snapshot") as response:
             payload = json.load(response)
         assert payload["multi_level"]["available"] is True
         # 默认 RulesConfig().levels = (5, 30)
@@ -174,9 +172,7 @@ def test_demo_entrypoint_parity_does_not_pretend_zero_match() -> None:
         while not line and time.monotonic() < deadline:
             line = process.stdout.readline().strip()
         port = int(re.search(r":(\d+)", line).group(1))
-        with urllib.request.urlopen(
-            f"http://127.0.0.1:{port}/api/dashboard/parity"
-        ) as response:
+        with urllib.request.urlopen(f"http://127.0.0.1:{port}/api/dashboard/parity") as response:
             payload = json.load(response)
         assert payload["available"] is False
         assert "reason" in payload

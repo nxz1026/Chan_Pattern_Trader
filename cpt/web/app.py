@@ -87,7 +87,9 @@ def make_handler(
                     payload = dict(payload)
                     payload["market"] = dict(payload.get("market", {}))
                     payload["runtime"] = dict(payload.get("runtime", {}))
-                    payload["market"]["symbol"] = query.get("symbol", [payload["market"].get("symbol", "")])[0] or payload["market"].get("symbol")
+                    payload["market"]["symbol"] = query.get(
+                        "symbol", [payload["market"].get("symbol", "")]
+                    )[0] or payload["market"].get("symbol")
                     payload["runtime"]["symbol"] = payload["runtime"]["symbol"]
                     if query.get("interval_ms"):
                         payload["market"]["interval_ms"] = int(query["interval_ms"][0])

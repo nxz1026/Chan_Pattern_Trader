@@ -181,10 +181,7 @@ class _FixtureProvider:
                 self._bars, self._config, self._backend, levels=tuple(self._config.levels)
             )
         except Exception:
-            multi = {
-                lv: {"fractals": (), "bis": (), "zhongshus": ()}
-                for lv in self._config.levels
-            }
+            multi = {lv: {"fractals": (), "bis": (), "zhongshus": ()} for lv in self._config.levels}
         fractals, bis, zhongshus = structures_for_level(multi, level)
         rebuilt = build_dashboard_snapshot_v2(
             self._config,
@@ -231,7 +228,11 @@ class _FixtureProvider:
             market_24h={"available": False, "reason": "fixture_mode_no_upstream"},
             multi_level=_format_multi_level(multi),
             config_compare=_compare_with_default(self._config),
-            runtime={"data_source": "native_fixture", "symbol": self._symbol, "interval": self._interval},
+            runtime={
+                "data_source": "native_fixture",
+                "symbol": self._symbol,
+                "interval": self._interval,
+            },
         )
         snapshot["market"]["symbol"] = self._symbol
         snapshot["market"]["interval"] = self._interval_ms
@@ -250,8 +251,7 @@ class _FixtureProvider:
             )
         except Exception:  # noqa: BLE001 — 多级别递归失败时退化空结构，不阻断主流程
             return {
-                level: {"fractals": (), "bis": (), "zhongshus": ()}
-                for level in self._config.levels
+                level: {"fractals": (), "bis": (), "zhongshus": ()} for level in self._config.levels
             }
 
 
@@ -282,9 +282,7 @@ def _format_multi_level(
     }
 
 
-def fixture_provider(
-    symbol: str, interval: str, *, limit: int = 600
-) -> _FixtureProvider:
+def fixture_provider(symbol: str, interval: str, *, limit: int = 600) -> _FixtureProvider:
     return _FixtureProvider(symbol=symbol, interval=interval, limit=limit)
 
 
@@ -333,9 +331,7 @@ class _RealtimeProvider:
             bars = self._bars
         if not bars:
             raise IndexError("inspect unavailable: no bars yet")
-        fractals, bis, zhongshus = _compute_domain_structures(
-            bars, self._config, self._backend
-        )
+        fractals, bis, zhongshus = _compute_domain_structures(bars, self._config, self._backend)
         return inspect_bar(bars, fractals, bis, zhongshus, bar_index)
 
     def snapshot_for_level(self, level: int) -> dict[str, Any]:
@@ -349,10 +345,7 @@ class _RealtimeProvider:
                 bars, self._config, self._backend, levels=tuple(self._config.levels)
             )
         except Exception:
-            multi = {
-                lv: {"fractals": (), "bis": (), "zhongshus": ()}
-                for lv in self._config.levels
-            }
+            multi = {lv: {"fractals": (), "bis": (), "zhongshus": ()} for lv in self._config.levels}
         fractals, bis, zhongshus = structures_for_level(multi, level)
         rebuilt = build_dashboard_snapshot_v2(
             self._config,
@@ -401,8 +394,7 @@ class _RealtimeProvider:
             )
         except Exception:
             multi = {
-                level: {"fractals": (), "bis": (), "zhongshus": ()}
-                for level in self._config.levels
+                level: {"fractals": (), "bis": (), "zhongshus": ()} for level in self._config.levels
             }
         fractals, bis, zhongshus = structures_for_level(multi, self._config.levels[0])
         snapshot = build_dashboard_snapshot_v2(
@@ -439,7 +431,6 @@ class _RealtimeProvider:
         return normalize_24h(ticker)
 
     def _compute_alerts(self, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
-        signal = snapshot.get("signal") if isinstance(snapshot, dict) else None
         transition = alert_transition({"signal": {"status": self._last_signal_status}}, snapshot)
         self._last_signal_status = transition["current_status"]
         alerts: list[dict[str, Any]] = []

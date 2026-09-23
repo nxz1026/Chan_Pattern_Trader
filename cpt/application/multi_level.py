@@ -21,7 +21,7 @@ single-level snapshot on the front-end (audit item: "多级别真实叠加数据
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from typing import Any, cast
 
 from cpt.adapters.native_chanlun import NativeChanlunBackend
@@ -33,7 +33,6 @@ from cpt.adapters.reference_chanlun import (
 )
 from cpt.domain.bi import build_bis
 from cpt.domain.config import RulesConfig
-from cpt.domain.contain import merge_contained_bars
 from cpt.domain.fractal import detect_fractals
 from cpt.domain.models import Bi, CanonicalBar, Fractal, ZhongShu
 from cpt.domain.recursion import map_trend_types
@@ -77,14 +76,19 @@ def _level_zero(
 
 
 def _next_level(
-    fractals_low: tuple[Fractal, ...],
     bis_low: tuple[Bi, ...],
     zhongshus_low: tuple[ZhongShu, ...],
     *,
     source_level: int,
     target_level: int,
 ) -> tuple[tuple[Fractal, ...], tuple[Bi, ...], tuple[ZhongShu, ...]]:
-    """Recurse one level up via trend-type classification and the recursion mapper."""
+    """Recurse one level up via trend-type classification and the recursion mapper.
+
+    Low-level fractals are intentionally not consumed here: the recursive chain
+    is driven by :func:`classify_trend` over the bis/zhongshus pair. Fractals
+    are produced for the higher level by re-running :func:`detect_fractals` on
+    the structure elements mapped by :func:`map_trend_types`.
+    """
     trends = classify_trend(bis_low, zhongshus_low, level=source_level)
     elements = map_trend_types(trends, target_level=target_level)
     fractals_high = detect_fractals(cast(Sequence[Any], elements), level=target_level)
@@ -117,9 +121,7 @@ def build_multi_level(
     if not requested:
         raise ValueError("at least one level is required")
     if not bars_tuple:
-        return {
-            level: {"fractals": (), "bis": (), "zhongshus": ()} for level in requested
-        }
+        return {level: {"fractals": (), "bis": (), "zhongshus": ()} for level in requested}
     out: dict[int, dict[str, tuple[Any, ...]]] = {}
     seed_level = requested[0]
     fractals, bis, zhongshus = _level_zero(bars_tuple, config, backend, level=seed_level)
@@ -127,7 +129,6 @@ def build_multi_level(
     source_level = seed_level
     for target_level in requested[1:]:
         fractals, bis, zhongshus = _next_level(
-            fractals,
             bis,
             zhongshus,
             source_level=source_level,
