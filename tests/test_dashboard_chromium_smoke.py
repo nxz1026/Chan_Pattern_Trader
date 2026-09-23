@@ -48,4 +48,6 @@ def test_dashboard_chromium_headless_smoke() -> None:
     assert 'data-testid="mode-switch"' in result.stdout
     assert 'data-testid="interval-select"' in result.stdout
     assert 'data-testid="level-select"' in result.stdout
+    assert 'data-testid="symbol-select"' in result.stdout
+    assert 'data-testid="realtime-refresh"' in result.stdout
     assert "window.CPTDashboard" not in result.stdout
