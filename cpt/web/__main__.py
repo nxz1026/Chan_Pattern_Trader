@@ -238,23 +238,56 @@ class _FixtureProvider:
     ) -> None:
         self._symbol = symbol
         self._interval = interval
+        self._limit = limit
         self._config = RulesConfig()
         self._backend = NativeChanlunBackend()
         self._interval_ms = resolve_interval_ms(interval)
+        self._lock = threading.Lock()
         self._bars: tuple[CanonicalBar, ...] = tuple(
             _synthetic_bar(index=index, interval_ms=self._interval_ms, symbol=symbol)
             for index in range(limit)
         )
         self._snapshot: dict[str, Any] = self._build_snapshot()
 
+    def select_symbol(self, symbol: str, interval: str) -> None:
+        """Switch the synthetic series to a new symbol/interval.
+
+        Unlike ``_RealtimeProvider`` there is no upstream fetch and no thread;
+        we just rebuild the synthetic bars + snapshot under the lock. The HTTP
+        layer's ``force_refresh`` call has no work to do because
+        ``snapshot_payload`` already returns the freshly-built snapshot.
+        """
+        if self._symbol == symbol and self._interval == interval:
+            return
+        interval_ms = resolve_interval_ms(interval)
+        bars = tuple(
+            _synthetic_bar(index=index, interval_ms=interval_ms, symbol=symbol)
+            for index in range(self._limit)
+        )
+        with self._lock:
+            self._symbol = symbol
+            self._interval = interval
+            self._interval_ms = interval_ms
+            self._bars = bars
+            self._snapshot = self._build_snapshot()
+
+    def current_symbol(self) -> tuple[str, str]:
+        with self._lock:
+            return self._symbol, self._interval
+
     def snapshot_payload(self) -> dict[str, Any]:
-        return dict(self._snapshot)
+        with self._lock:
+            return dict(self._snapshot)
 
     def snapshot_for_range(self, start_ms: int, end_ms: int) -> dict[str, Any]:
         """按 [start_ms, end_ms] 从合成序列切出窗口并重建快照。"""
-        window = tuple(bar for bar in self._bars if start_ms <= bar.open_time <= end_ms)
+        with self._lock:
+            symbol = self._symbol
+            interval = self._interval
+            bars = self._bars
+        window = tuple(bar for bar in bars if start_ms <= bar.open_time <= end_ms)
         if len(window) < 3:
-            empty = demo_snapshot(self._symbol, self._interval)
+            empty = demo_snapshot(symbol, interval)
             empty["range"] = {
                 "available": False,
                 "reason": "range_too_short",
@@ -267,8 +300,8 @@ class _FixtureProvider:
             self._config,
             self._backend,
             window,
-            symbol=self._symbol,
-            interval=self._interval,
+            symbol=symbol,
+            interval=interval,
             data_source="fixture_history",
         )
         snapshot["range"] = {
@@ -280,16 +313,22 @@ class _FixtureProvider:
         return snapshot
 
     def snapshot_for_level(self, level: int) -> dict[str, Any]:
+        with self._lock:
+            bars = self._bars
+            symbol = self._symbol
+            interval = self._interval
+            interval_ms = self._interval_ms
+            reproducibility = self._snapshot.get("reproducibility", {})
         try:
             multi = build_multi_level(
-                self._bars, self._config, self._backend, levels=tuple(self._config.levels)
+                bars, self._config, self._backend, levels=tuple(self._config.levels)
             )
         except Exception:
             multi = {lv: {"fractals": (), "bis": (), "zhongshus": ()} for lv in self._config.levels}
         fractals, bis, zhongshus = structures_for_level(multi, level)
         rebuilt = build_dashboard_snapshot_v2(
             self._config,
-            self._bars,
+            bars,
             fractals=fractals,
             bis=bis,
             zhongshus=zhongshus,
@@ -299,62 +338,72 @@ class _FixtureProvider:
             multi_level=_format_multi_level(multi),
             config_compare=_compare_with_default(self._config),
         )
-        rebuilt["market"]["symbol"] = self._symbol
-        rebuilt["market"]["interval"] = self._interval_ms
-        rebuilt["runtime"]["symbol"] = self._symbol
-        rebuilt["runtime"]["interval"] = self._interval
-        rebuilt["reproducibility"] = self._snapshot.get("reproducibility", {})
+        rebuilt["market"]["symbol"] = symbol
+        rebuilt["market"]["interval"] = interval_ms
+        rebuilt["runtime"]["symbol"] = symbol
+        rebuilt["runtime"]["interval"] = interval
+        rebuilt["reproducibility"] = reproducibility
         rebuilt["selected_level"] = level
         return rebuilt
 
     def inspect(self, bar_index: int) -> dict[str, Any]:
+        with self._lock:
+            bars = self._bars
         fractals, bis, zhongshus = _compute_domain_structures(
-            self._bars, self._config, self._backend
+            bars, self._config, self._backend
         )
-        return inspect_bar(self._bars, fractals, bis, zhongshus, bar_index)
+        return inspect_bar(bars, fractals, bis, zhongshus, bar_index)
 
     def _build_snapshot(self) -> dict[str, Any]:
+        # 调用者负责持锁（__init__ / select_symbol 内）
+        with self._lock:
+            bars = self._bars
+            symbol = self._symbol
+            interval = self._interval
+            interval_ms = self._interval_ms
+            config = self._config
+            backend = self._backend
         try:
             # 走一遍真实回放入口以复用其数据守卫（去重/递增/缺口/OHLC 校验）。
-            replay_bars(self._bars, config=self._config, backend=self._backend)
+            replay_bars(bars, config=config, backend=backend)
         except Exception:  # noqa: BLE001 — never let fixture mode crash the server
-            return demo_snapshot(self._symbol, self._interval)
+            return demo_snapshot(symbol, interval)
         fractals, bis, zhongshus = _compute_domain_structures(
-            self._bars, self._config, self._backend
+            bars, config, backend
         )
         multi = self._compute_multi_level()
-        if not multi.get(self._config.levels[0], {}).get("fractals"):
+        if not multi.get(config.levels[0], {}).get("fractals"):
             # 多级别递归失败（或退化）时，主级别仍使用真实结构。
-            multi = _fallback_multi_level(self._config, fractals, bis, zhongshus)
+            multi = _fallback_multi_level(config, fractals, bis, zhongshus)
         snapshot = build_dashboard_snapshot_v2(
-            self._config,
-            self._bars,
+            config,
+            bars,
             fractals=fractals,
             bis=bis,
             zhongshus=zhongshus,
-            trend_types=_compute_trend_types(bis, zhongshus, self._config),
+            trend_types=_compute_trend_types(bis, zhongshus, config),
             mode="watch",
             status="confirmed",
             data_source="native_fixture",
             market_24h={"available": False, "reason": "fixture_mode_no_upstream"},
             multi_level=_format_multi_level(multi),
-            config_compare=_compare_with_default(self._config),
+            config_compare=_compare_with_default(config),
             runtime={
                 "data_source": "native_fixture",
-                "symbol": self._symbol,
-                "interval": self._interval,
-                "buffer_size": len(self._bars),
-                "window_size": len(self._bars),
+                "symbol": symbol,
+                "interval": interval,
+                "buffer_size": len(bars),
+                "window_size": len(bars),
                 "status": "confirmed",
                 "generated_at": _time.time() * 1000,
             },
         )
-        snapshot["market"]["symbol"] = self._symbol
-        snapshot["market"]["interval"] = self._interval_ms
-        snapshot["runtime"]["symbol"] = self._symbol
-        snapshot["runtime"]["interval"] = self._interval
-        snapshot["runtime"]["buffer_size"] = len(self._bars)
-        snapshot["runtime"]["window_size"] = len(self._bars)
+        snapshot["market"]["symbol"] = symbol
+        snapshot["market"]["interval"] = interval_ms
+        snapshot["runtime"]["symbol"] = symbol
+        snapshot["runtime"]["interval"] = interval
+        snapshot["runtime"]["buffer_size"] = len(bars)
+        snapshot["runtime"]["window_size"] = len(bars)
         return snapshot
 
     def _compute_multi_level(self) -> dict[int, dict[str, tuple[Any, ...]]]:
@@ -743,16 +792,39 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+class _DemoProvider:
+    """Empty-snapshot provider for ``demo`` mode with hot-reload support.
+
+    The demo snapshot is schema-complete but contains no bars; switching the
+    symbol/interval only re-tags the payload fields. Implemented as a small
+    class (rather than a bare closure) so the HTTP ``SelectableSource`` duck
+    type can drive it like the other providers.
+    """
+
+    def __init__(self, symbol: str, interval: str) -> None:
+        self._lock = threading.Lock()
+        self._snapshot: dict[str, Any] = demo_snapshot(symbol, interval)
+
+    def select_symbol(self, symbol: str, interval: str) -> None:
+        with self._lock:
+            self._snapshot = demo_snapshot(symbol, interval)
+
+    def current_symbol(self) -> tuple[str, str]:
+        with self._lock:
+            snap = self._snapshot
+        return snap["runtime"]["symbol"], snap["runtime"]["interval"]
+
+    def snapshot_payload(self) -> dict[str, Any]:
+        with self._lock:
+            return dict(self._snapshot)
+
+
 def main(argv: list[str] | None = None) -> int:
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
     args = build_parser().parse_args(argv)
     provider_callable: object
     if args.mode == "demo":
-        snapshot = demo_snapshot(args.symbol, args.interval)
-
-        def provider_callable() -> dict[str, Any]:
-            return snapshot
-
+        provider_callable = _DemoProvider(args.symbol, args.interval)
     elif args.mode == "fixture":
         fixture = fixture_snapshot(args.symbol, args.interval, limit=args.limit)
         provider_callable = fixture
