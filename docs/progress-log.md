@@ -871,3 +871,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - parity SVG 元素支持鼠标/键盘选择，更新 `parity-selection` 详情和 `data-parity-selected` 状态，并发出 `cpt:parity-selected`。
 - 新增浏览器交互契约 focused 测试；当前环境没有 Chromium/Playwright，继续以可访问 DOM/JS 静态契约覆盖，不虚报真实浏览器运行。
+
+## 57. Dashboard 研究信号统计（2026-10-07）
+
+- 新增 `cpt/application/dashboard_stats.py`，提供 signal status/divergence 分布、invalidated 数量和 alert→confirmed 基础比例。
+- Dashboard 增加信号统计摘要，仍为只读 projection；复杂统计图表可在后续数据集页面扩展。

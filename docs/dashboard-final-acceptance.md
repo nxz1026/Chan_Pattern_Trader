@@ -28,6 +28,7 @@
 - 信号历史；
 - 事件 before/after/changed_fields 审计；
 - 本地注释（localStorage，不进入数据集/hash）；
+- 信号状态/背驰分布和转换率统计基础。
 - 时间范围切片服务。
 
 ### 盯盘模式
