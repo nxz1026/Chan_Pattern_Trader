@@ -748,3 +748,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - 新增 `cpt/application/dashboard_reproducibility.py`：config hash、dataset hash、规则/引擎版本元数据和 snapshot 顶层 diff。
 - 研究模式的 R5 复现信息先以纯 application service 交付，不侵入 domain、不引入 HTTP 框架。
+
+## 35. Dashboard Phase 2 parity 基础服务（2026-09-23）
+
+- 新增 `cpt/application/dashboard_parity.py`：标准化 matched/missing/extra/mismatched 结果、差异字段和 match_rate。
+- 新增 `tests/test_dashboard_research_services.py`：parity 分类、config hash 和 snapshot diff focused 测试。
+- focused：**2 passed**；全量保持通过。
