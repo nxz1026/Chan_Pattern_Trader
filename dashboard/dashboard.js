@@ -520,6 +520,37 @@
     return `已选中 ${payload.kind}`;
   }
 
+  function renderResearchDetails(payload) {
+    const panel = q("[data-testid=structure-panel]");
+    if (!panel) return;
+    let tree = q("[data-testid=provenance-tree]");
+    if (!tree) {
+      tree = document.createElement("section");
+      tree.dataset.testid = "provenance-tree";
+      tree.className = "cpt-provenance-tree";
+      const heading = document.createElement("h3");
+      heading.textContent = "结构溯源";
+      tree.appendChild(heading);
+      panel.appendChild(tree);
+    }
+    while (tree.children.length > 1) tree.removeChild(tree.lastChild);
+    const list = document.createElement("ul");
+    const sources = payload && Array.isArray(payload.sourceIds) ? payload.sourceIds : [];
+    if (!sources.length) {
+      const empty = document.createElement("li");
+      empty.textContent = "未选中结构或当前结构没有 source_ids";
+      list.appendChild(empty);
+    } else {
+      sources.forEach((source) => {
+        const item = document.createElement("li");
+        item.dataset.sourceId = String(source);
+        item.textContent = String(source);
+        list.appendChild(item);
+      });
+    }
+    tree.appendChild(list);
+  }
+
   function renderSelection() {
     ensureSelectionSection();
     const status = q("[data-testid=structure-selection-status]");
@@ -539,6 +570,7 @@
         "selection-source-ids",
       ].forEach((testid) => setText(`[data-testid=${testid}]`, "—"));
       delete root.dataset.selection;
+      renderResearchDetails(null);
       return;
     }
     if (status) {
@@ -558,6 +590,7 @@
     setText("[data-testid=selection-state]", payload.state);
     setText("[data-testid=selection-source-ids]", payload.sourceIds.join(" ") || "—");
     root.dataset.selection = payload.kind;
+    renderResearchDetails(payload);
 
     if (payload.kind === "bi") renderBiSection(payload.raw);
     if (payload.kind === "zhongshu") {
