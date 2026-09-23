@@ -58,6 +58,8 @@ dashboard/js/app.js
 
 ### R2 逐根检查器
 
+当前已交付 application inspector 与 containment provenance trace，前端逐字段检查器已接入。
+
 选择 raw bar 后展示：
 
 - 原始 OHLCV 全字段；
