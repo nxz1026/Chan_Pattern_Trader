@@ -681,25 +681,50 @@ button {
 }
 
 .chart-shell {
-  display: grid;
+  display: flex;
+  flex-direction: column;
   flex: 1 1 auto;
-  grid-template-rows: minmax(240px, 1fr) 72px 28px;
-  gap: var(--space-1);
   min-height: 0;
   padding: var(--space-3);
   border: var(--border-width) solid var(--color-border);
   border-radius: var(--radius-md);
   background-color: var(--color-bg-elevated);
+  position: relative;
+  gap: var(--space-1);
 }
 
-/* K 线占位图：网格 + 列对齐蜡烛纹理，纯 CSS，无图片资源 */
+.chart-canvas {
+  flex: 1 1 auto;
+  min-height: 240px;
+}
+.chart-volume {
+  flex: 0 0 72px;
+}
+.chart-macd {
+  position: relative;
+  overflow: hidden;
+  flex: 0 0 96px;
+  border-top: var(--border-width) solid var(--color-border);
+  background-color: var(--color-bg);
+}
+.chart-time-axis {
+  flex: 0 0 28px;
+}
+.chart-zoom-controls {
+  position: absolute;
+  bottom: var(--space-6);
+  left: var(--space-5);
+  display: flex;
+  gap: var(--space-1);
+  align-items: center;
+  z-index: 2;
+}
+
+/* K 线绘制区：真实 SVG 图表容器（占位假纹理已移除，见下） */
 .chart-canvas {
   position: relative;
-  display: flex;
-  align-items: center;
-  justify-content: center;
   overflow: hidden;
-  border: var(--border-width) dashed var(--color-border);
+  border: var(--border-width) solid var(--color-border);
   border-radius: var(--radius-sm);
   background-color: var(--color-bg);
   background-image:
@@ -707,40 +732,13 @@ button {
     repeating-linear-gradient(to bottom, var(--color-grid) 0 1px, transparent 1px 48px);
 }
 
-/* 蜡烛纹理层：列宽由 mask 限定，阳线/阴线/影线三层叠加 */
-.chart-canvas::before {
-  content: "";
+/* 真实图表 SVG：钉死在各自容器内，避免 viewBox 被拉伸成任意高度后溢出压到相邻区域 */
+.cpt-chart-svg {
   position: absolute;
   inset: 0;
-  background-image:
-    repeating-linear-gradient(
-      165deg,
-      transparent 0 40px,
-      var(--color-candle-up) 40px 88px,
-      transparent 88px 150px
-    ),
-    repeating-linear-gradient(
-      195deg,
-      transparent 0 96px,
-      var(--color-candle-down) 96px 132px,
-      transparent 132px 176px
-    ),
-    repeating-linear-gradient(
-      to right,
-      transparent 0 6px,
-      var(--color-candle-wick) 6px 8px,
-      transparent 8px 28px
-    );
-  background-size:
-    28px 150px,
-    28px 176px,
-    28px auto;
-  background-position:
-    0 0,
-    0 0,
-    0 0;
-  mask-image: repeating-linear-gradient(to right, #000 0 16px, transparent 16px 28px);
-  -webkit-mask-image: repeating-linear-gradient(to right, #000 0 16px, transparent 16px 28px);
+  display: block;
+  width: 100%;
+  height: 100%;
 }
 
 /* 离线 demo 模式：图形区角标，明示非实时数据 */
@@ -760,37 +758,17 @@ body[data-runtime-mode="offline"] .chart-canvas::after {
   font-size: var(--font-size-xs);
 }
 
-/* 成交量占位：涨跌交替柱状纹理 */
+/* 成交量区：真实 SVG 成交量柱 */
 .chart-volume {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  position: relative;
+  overflow: hidden;
   border-top: var(--border-width) solid var(--color-border);
   background-color: var(--color-bg);
-  background-image:
-    repeating-linear-gradient(
-      to right,
-      var(--color-volume-up) 0 5px,
-      transparent 5px 12px
-    ),
-    repeating-linear-gradient(
-      to right,
-      var(--color-volume-down) 0 5px,
-      transparent 5px 12px
-    );
-  background-position:
-    bottom left,
-    bottom 6px;
-  background-repeat: repeat-x;
-  background-size:
-    12px 58%,
-    12px 34%;
 }
 
 .chart-time-axis {
-  display: flex;
-  align-items: center;
-  justify-content: center;
+  position: relative;
+  overflow: hidden;
   border-top: var(--border-width) solid var(--color-border);
   color: var(--color-text-faint);
   font-family: var(--font-mono);

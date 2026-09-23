@@ -27,9 +27,7 @@ def normalize_24h(value: Mapping[str, Any] | None) -> dict[str, Any]:
     low = _pick(value, "low", "lowPrice")
     volume = _pick(value, "volume")
     quote_volume = _pick(value, "quote_volume", "quoteVolume")
-    price_change_pct = _pick(
-        value, "price_change_pct", "priceChangePercent", "priceChange"
-    )
+    price_change_pct = _pick(value, "price_change_pct", "priceChangePercent", "priceChange")
     if any(v is None for v in (high, low, volume, quote_volume, price_change_pct)):
         return {"available": False, "reason": "upstream_aggregate_incomplete"}
     return {

@@ -21,6 +21,7 @@ single-level snapshot on the front-end (audit item: "多级别真实叠加数据
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Sequence
 from typing import Any, cast
 
@@ -38,6 +39,8 @@ from cpt.domain.models import Bi, CanonicalBar, Fractal, ZhongShu
 from cpt.domain.recursion import map_trend_types
 from cpt.domain.trend_type import classify_trend
 from cpt.domain.zhongshu import build_zhongshus
+
+_LOG = logging.getLogger(__name__)
 
 
 def _ref_config(config: RulesConfig) -> ReferenceChanlunConfig:
@@ -128,12 +131,25 @@ def build_multi_level(
     out[seed_level] = {"fractals": fractals, "bis": bis, "zhongshus": zhongshus}
     source_level = seed_level
     for target_level in requested[1:]:
-        fractals, bis, zhongshus = _next_level(
-            bis,
-            zhongshus,
-            source_level=source_level,
-            target_level=target_level,
-        )
+        try:
+            fractals, bis, zhongshus = _next_level(
+                bis,
+                zhongshus,
+                source_level=source_level,
+                target_level=target_level,
+            )
+        except (ValueError, TypeError) as exc:
+            # 高级别递归失败（例如该窗口走势类型不足以构成高级分型）只影响该级别，
+            # 绝不能把已经算好的低级别结构一起清零（2026-09-23 真实行情实测教训：
+            # 一次宽 except 曾让 level 5 的 213 个分型全部消失）。
+            _LOG.warning(
+                "multi-level recursion failed at level %s (source level %s): %s",
+                target_level,
+                source_level,
+                exc,
+            )
+            out[target_level] = {"fractals": (), "bis": (), "zhongshus": ()}
+            continue
         out[target_level] = {"fractals": fractals, "bis": bis, "zhongshus": zhongshus}
         source_level = target_level
     return out

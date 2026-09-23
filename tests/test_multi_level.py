@@ -66,3 +66,36 @@ def test_multi_level_handles_empty_bars() -> None:
 def test_multi_level_rejects_empty_levels() -> None:
     with pytest.raises(ValueError):
         build_multi_level(_wave_bars(120), RulesConfig(), NativeChanlunBackend(), levels=())
+
+
+def test_higher_level_failure_does_not_wipe_seed_level(monkeypatch) -> None:
+    """回归（2026-09-23）：高级别递归失败只影响该级别，不能连坐低级别结构。
+
+    真实行情上一次宽 except 曾让 5m 的 213 个分型全部消失（看板显示“零结构”）。
+    """
+    import cpt.application.multi_level as ml
+
+    def boom(*args, **kwargs):
+        raise ValueError("StructureElement time/range invalid")
+
+    monkeypatch.setattr(ml, "map_trend_types", boom)
+    out = build_multi_level(_wave_bars(200), RulesConfig(), NativeChanlunBackend(), levels=(5, 30))
+    assert set(out.keys()) == {5, 30}
+    assert out[5]["fractals"], "低级别分型不得因高级别失败而清空"
+    assert out[5]["bis"], "低级别笔不得因高级别失败而清空"
+    assert out[30] == {"fractals": (), "bis": (), "zhongshus": ()}
+
+
+def test_fallback_multi_level_keeps_primary_structures() -> None:
+    """回归（2026-09-23）：多级别递归不可用时，主级别仍须带真实结构。"""
+    from cpt.web.__main__ import _fallback_multi_level
+
+    config = RulesConfig()
+    marker = ("fx",)
+    fallback = _fallback_multi_level(config, marker, ("bi",), ("zs",))  # type: ignore[arg-type]
+    primary = config.levels[0]
+    assert fallback[primary]["fractals"] == marker
+    assert fallback[primary]["bis"] == ("bi",)
+    assert fallback[primary]["zhongshus"] == ("zs",)
+    for level in config.levels[1:]:
+        assert fallback[level] == {"fractals": (), "bis": (), "zhongshus": ()}

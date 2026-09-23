@@ -49,17 +49,31 @@ class NativeChanlunBackend:
             for fractal in fractals
         )
 
-        def bar_index(timestamp: int) -> int:
-            return next(
-                (index for index, bar in enumerate(canonical_bars) if bar.open_time == timestamp),
-                0,
-            )
+        # 分型的时间来自**包含处理后**的 K 线：``start_time`` 是该合并 K 线的
+        # ``open_time``、``end_time`` 是它的 ``close_time``。笔的时间直接继承两端
+        # 分型，因此必须用分型时间反查原始下标——拿 close_time 去匹配原始
+        # ``open_time`` 会全部落空，退化成"所有笔 end_bar=0"的假结构（2026-09-23 实测）。
+        fractal_start_raw = {fractal.start_time: fractal.bar_index for fractal in fractals}
+        fractal_end_raw = {fractal.end_time: fractal.bar_index for fractal in fractals}
 
+        def resolve(mapping: dict[int, int], key: int, what: str) -> int:
+            value = mapping.get(key)
+            if value is None:
+                raise ValueError(
+                    f"native backend 无法把{what}时间 {key} 映射回原始 K 线下标"
+                    f"（分型 {len(fractals)} 个 / 笔 {len(bis)} 条）"
+                )
+            return value
+
+        bi_start_raw = {
+            bi.start_time: resolve(fractal_start_raw, bi.start_time, "笔起点") for bi in bis
+        }
+        bi_end_raw = {bi.end_time: resolve(fractal_end_raw, bi.end_time, "笔终点") for bi in bis}
         bi_raw = tuple(
             BiRaw(
                 direction=bi.direction,
-                start_bar=bar_index(bi.start_time),
-                end_bar=bar_index(bi.end_time),
+                start_bar=bi_start_raw[bi.start_time],
+                end_bar=bi_end_raw[bi.end_time],
                 high=bi.high,
                 low=bi.low,
                 level=bi.level,
@@ -68,8 +82,8 @@ class NativeChanlunBackend:
         )
         zs_raw = tuple(
             ZsRaw(
-                start_bar=bar_index(zhongshu.start_time),
-                end_bar=bar_index(zhongshu.end_time),
+                start_bar=bi_start_raw[zhongshu.start_time],
+                end_bar=bi_end_raw[zhongshu.end_time],
                 high=zhongshu.high,
                 low=zhongshu.low,
                 level=zhongshu.level,

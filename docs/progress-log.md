@@ -997,3 +997,30 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
   - R8 配置对比（`snapshot_v2.config_compare` + `renderConfigCompare`）：f3c1a29 注入。
 - **vulture CI**：`.github/workflows/ci.yml` 增加 vulture 步骤（min-confidence 80，白名单 `cpt/web/app.py:77` —— BaseHTTPRequestHandler 标准签名保留）。
 - **质量门**：全量 160 测试通过；mypy 55 文件全绿；ruff/format/import-linter 全绿。
+
+## 75. 图表不可读 + 悬浮无详情 + 真实结构全零（2026-09-23 线上实测修复）
+
+线上现象（用户报告）：图表肉眼无法判读、鼠标悬浮无 OHLCV 详情、K 线有数据但看不到任何缠论结构。
+
+用无头 Chromium + 同源 iframe 探针把"看不到"变成可核对的数字（本项目模型无法读图，禁止凭截图下结论）：
+
+| 缺陷 | 实测证据（修复前） | 根因 | 修复 |
+| --- | --- | --- | --- |
+| MACD 压在 K 线图上 | `macdSvg 768×1649 @ y=217`，而容器仅 `744×96 @ y=1697` | `.cpt-chart-svg` 无任何 CSS 尺寸约束，viewBox 被拉伸后溢出 96px 容器 | CSS 钉死 `.cpt-chart-svg { position:absolute; inset:0; width/height:100% }` + 四区 `overflow:hidden`；复测 `744×95 @ y=1698` 内嵌 |
+| 图表被假纹理糊住 | `.chart-canvas::before` 仍在，`backgroundImage=repeating-linear-gradient(165deg…)` | D3 阶段的占位蜡烛纹理从未移除，压在真实图之上 | 删除 `::before` 占位层；复测 `backgroundImage: none` |
+| 悬浮无详情 | 派发 mousemove 后 `tooltip.found=false` | tooltip 由 `canvas.appendChild` 挂在 canvas 内，`drawChart()` 每次 `clearRegion(canvas)` 把它删掉 | tooltip 宿主改 `[data-testid=chart-shell]`，定位改用宿主 rect；复测 `found/connected=true, hidden=false`，文本含 O/H/L/C/V |
+| 蜡烛 1px 不可读 | `candleCount=1200`（600 根 ×2）、`bodyWidth=1` | 默认视图平铺全部 600 根，`slot≈1.1px` | 新增 `DEFAULT_VISIBLE_BARS=180` 默认窗口 + 窗口长度缩放（右边缘锚定）+ 蜡烛宽度下限 1.5；复测 `180/600`、`bodyWidth 2.3` |
+| 结构全零（最严重） | `overlays.fractals/bis/zhongshus = 0`，而同一批 bars 直调后端为 **213/212/20** | `NativeChanlunBackend` 用笔的 `end_time`（**合并后**K 线的 close_time）去匹配原始 K 线 `open_time`，查不到就 fallback `0` → 212 条笔全部 `start>end`；`map_trend_types` 因此抛 `ValueError`，又被 provider 的宽 `except` 吞掉，连 5m 的 213 个分型一起清零 | 适配器按分型 `start_time`/`end_time` 建映射反查原始下标（查不到则**响亮抛错，不造 0**）；`build_multi_level` 按级别隔离失败；provider 主叠加层独立计算 + 多级别失败只降级多级别；复测 `213/212/20` |
+| 走势类型叠加层空转 | 图例有 `legend-trend-type`，`overlays.trend_types` 恒为 0 | `build_dashboard_snapshot_v2` 从未收到 `trend_types=` | 新增 `_compute_trend_types`（失败降级空元组）并接入两处 provider；复测 `trend_types=7` |
+
+验收（可复跑）：
+- 有头/无头探针：`renderedCounts = {candle:360, fractal:213, bi:212, zhongshu:20, trend_type:7, macd:538(独立区)}`，`insideCanvas == renderedCounts`，`overflowing=[]`，四区 `fitsSvg=true`。
+- 回归测试（都曾在旧实现上失败）：`tests/test_native_backend.py::test_native_backend_maps_structures_back_to_raw_bar_indices`（旧映射实测产出 `(2,0),(3,0),(4,0)`，3/3 非法）、`tests/test_multi_level.py::test_higher_level_failure_does_not_wipe_seed_level`、`tests/test_multi_level.py::test_fallback_multi_level_keeps_primary_structure`、`tests/test_dashboard_interaction_contract.py` 新增 3 条。
+- 质量门：`pytest tests` **170 passed**；ruff/format/mypy(55 files)/import-linter(4 kept) 全绿；公网 `dashboard.css/js/index.html` md5 与仓库一致。
+- 公网快照：`binance_realtime` / 600 根 / `{bis:212, fractals:213, trend_types:7, zhongshus:20}` / 24h `high 87247.30 low 85200.60 -1.023%`。
+
+踩坑记录：
+1. **计数断言会掩盖时间错误**：旧测试只断言"有笔"，而笔的时间全是垃圾（`end_bar=0`）。新增断言必须覆盖不变量（下标范围、起止有序、时间落在真实 bar 上）。
+2. **宽 `except Exception` 是数据杀手**：它把"高级别递归失败"变成"整张图零结构"，线上表现与"没有结构"无法区分。降级必须按层隔离，并且要 `_LOG.warning` 留痕。
+3. **OMP 派工必须让 worker 自己写 `.omp-logs/<tag>.done`**（整行哨兵），否则 dispatcher 判"哨兵未接受"并重试，可能二次改动同一文件；本次工单 A 因此重试了一次，被队长及时终止。
+4. **`pgrep -f '<tag>'` 会匹配到队长自己的 shell**，误杀过一次自己的命令；停调度器要用精确 pid。

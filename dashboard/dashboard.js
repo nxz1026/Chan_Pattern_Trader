@@ -28,6 +28,8 @@
   const SCHEMA_VERSION = "dashboard.v1";
   const MS_PER_MINUTE = 60000;
   const RUNTIME_STYLE_ID = "cpt-dashboard-runtime-style";
+  /* 默认只渲染最后 180 根：600 根平铺进约 670px 会把蜡烛压成 1px 发丝线，无法判读。 */
+  const DEFAULT_VISIBLE_BARS = 180;
 
   /*
    * 本阶段不修改 dashboard.css，因此把三条最小运行时样式随脚本注入：
@@ -873,6 +875,11 @@
       section.appendChild(summary);
       return;
     }
+    if (parity.available === false) {
+      summary.textContent = `Oracle 对比未启用：${parity.reason || "unavailable"}`;
+      section.appendChild(summary);
+      return;
+    }
     const parts = Object.entries(parity).map(([kind, value]) => {
       const item = isObject(value) && isObject(value.summary) ? value.summary : {};
       return `${kind}: ${item.matched || 0} matched / ${item.missing || 0} missing / ${item.extra || 0} extra`;
@@ -1139,23 +1146,35 @@
     return { width, height, left, top, plotWidth, plotHeight, slot: plotWidth / count };
   };
 
+  /**
+   * 渲染窗口：state.visibleWindow 显式指定时按其切片；未指定时是默认视图——
+   * 只取最后 DEFAULT_VISIBLE_BARS 根，长度不足则全部。
+   */
   function applyZoomWindow(candles) {
     if (!candles.length) return candles;
-    const level = state.zoomLevel | 0;
-    if (level <= 0 || !state.visibleWindow) return candles;
-    const [start, end] = state.visibleWindow;
-    const clampedStart = Math.max(0, Math.min(start, candles.length - 1));
-    const clampedEnd = Math.max(clampedStart + 1, Math.min(end, candles.length));
-    return candles.slice(clampedStart, clampedEnd);
+    if (state.visibleWindow) {
+      const [start, end] = state.visibleWindow;
+      const clampedStart = Math.max(0, Math.min(start, candles.length - 1));
+      const clampedEnd = Math.max(clampedStart + 1, Math.min(end, candles.length));
+      return candles.slice(clampedStart, clampedEnd);
+    }
+    if (candles.length > DEFAULT_VISIBLE_BARS) return candles.slice(candles.length - DEFAULT_VISIBLE_BARS);
+    return candles;
   }
 
   function updateZoomLabel() {
     const label = q("[data-testid=chart-zoom-level]");
     if (!label) return;
-    if (!state.snapshot || (state.zoomLevel | 0) === 0) {
+    const candles = state.snapshot ? normalizeCandles(state.snapshot.candles) : [];
+    const total = candles.length;
+    if (!total) {
       label.textContent = "全部";
+    } else if (state.visibleWindow) {
+      label.textContent = `${applyZoomWindow(candles).length} / ${total}`;
+    } else if (total > DEFAULT_VISIBLE_BARS) {
+      label.textContent = `最近 ${DEFAULT_VISIBLE_BARS} / ${total}`;
     } else {
-      label.textContent = `×${state.zoomLevel + 1}`;
+      label.textContent = `${total} / ${total}`;
     }
   }
 
@@ -1326,7 +1345,7 @@
   }
 
   function drawCandles(group, view) {
-    const bodyWidth = Math.max(1, Math.min(view.geom.slot * 0.62, 16));
+    const bodyWidth = Math.max(1.5, Math.min(view.geom.slot * 0.62, 16));
     view.candles.forEach((bar, index) => {
       const x = view.xForIndex(index);
       const alert = !bar.isClosed;
@@ -1591,7 +1610,14 @@
     }
     const { dif, dea, histogram } = series;
     const flatHist = histogram.map((value) => (value === null ? 0 : value));
-    const maxAbs = Math.max(1e-9, ...flatHist.map((value) => Math.abs(value)), Math.abs(dif), Math.abs(dea));
+    const flatDif = dif.map((value) => (value === null ? 0 : value));
+    const flatDea = dea.map((value) => (value === null ? 0 : value));
+    const maxAbs = Math.max(
+      1e-9,
+      ...flatHist.map((value) => Math.abs(value)),
+      ...flatDif.map((value) => Math.abs(value)),
+      ...flatDea.map((value) => Math.abs(value)),
+    );
     const width = view.geom.width;
     const svg = createSvg("svg", {
       class: "cpt-chart-svg",
@@ -1730,23 +1756,24 @@
     }
   }
 
+  /**
+   * 缩放按窗口长度操作，右边缘锚定最新一根：
+   * 放大 → 长度减半（下限 30）；缩小 → 长度翻倍（上限 = 总根数）。
+   * 缩到全量时 visibleWindow 记为 [0, 总数]（覆盖全部）而非 null，
+   * 这样 600 根数据缩到底也不会退回 1px 发丝线的默认视图。
+   * state.zoomLevel 只是派生值，供展示使用。
+   */
   function zoomBy(direction) {
     const candles = state.snapshot ? normalizeCandles(state.snapshot.candles) : [];
-    if (!candles.length) return;
-    const target = Math.min(4, Math.max(0, (state.zoomLevel | 0) + direction));
-    if (target === 0) {
-      state.visibleWindow = null;
-      state.zoomLevel = 0;
-      return;
-    }
-    const half = Math.max(8, Math.round(candles.length / (target * 2)));
-    const center = state.visibleWindow
-      ? Math.round((state.visibleWindow[0] + state.visibleWindow[1]) / 2)
-      : candles.length - 1 - half;
-    const start = Math.max(0, center - half);
-    const end = Math.min(candles.length, start + half * 2);
-    state.visibleWindow = [start, end];
-    state.zoomLevel = target;
+    const total = candles.length;
+    if (!total) return;
+    const current = applyZoomWindow(candles).length;
+    const next = direction > 0
+      ? Math.max(30, Math.round(current / 2))
+      : Math.min(total, Math.round(current * 2));
+    const end = total;
+    state.visibleWindow = [Math.max(0, end - next), end];
+    state.zoomLevel = Math.max(0, Math.round(total / next) - 1);
   }
 
   function resetZoom() {
@@ -1798,6 +1825,7 @@
     if (!candles.length || !domain || width < 40 || height < 40) {
       clearRegion(canvas);
       clearRegion(volumeNode);
+      if (macdNode) clearRegion(macdNode);
       clearRegion(axisNode);
       appendNote(
         canvas,
@@ -1829,6 +1857,7 @@
 
     clearRegion(canvas);
     clearRegion(volumeNode);
+    if (macdNode) clearRegion(macdNode);
     clearRegion(axisNode);
     canvas.dataset.rendered = "true";
     canvas.setAttribute("role", "group");
@@ -2160,19 +2189,27 @@
   function installCrosshair() {
     const canvas = q("[data-testid=chart-canvas-region]");
     if (!canvas) return;
+    /* 宿主必须是 canvas 之外的稳定容器：drawChart() 会 clearRegion(canvas) 清空 canvas 子节点。 */
+    const host = q("[data-testid=chart-shell]") || canvas.parentElement;
+    if (!host || host === canvas) return;
     const tooltip = document.createElement("div");
     tooltip.className = "cpt-crosshair-tooltip";
     tooltip.hidden = true;
-    canvas.appendChild(tooltip);
+    host.appendChild(tooltip);
     canvas.addEventListener("mousemove", (event) => {
-      const candles = normalizeCandles(state.snapshot && state.snapshot.candles);
-      if (!candles.length) return;
+      /* 索引换算必须与 drawChart() 渲染的窗口一致：画的是 applyZoomWindow() 之后的那一段。 */
+      const all = normalizeCandles(state.snapshot && state.snapshot.candles);
+      const shown = applyZoomWindow(all);
+      if (!shown.length) return;
+      const offset = all.indexOf(shown[0]);
+      if (offset < 0) return;
       const rect = canvas.getBoundingClientRect();
+      const shellRect = host.getBoundingClientRect();
       const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
-      const candle = candles[Math.min(candles.length - 1, Math.floor(ratio * candles.length))];
+      const candle = all[offset + Math.min(shown.length - 1, Math.floor(ratio * shown.length))];
       tooltip.textContent = `${formatDateTime(candle.openTime)}  O ${formatPrice(candle.open)} H ${formatPrice(candle.high)} L ${formatPrice(candle.low)} C ${formatPrice(candle.close)} V ${formatVolume(candle.volume || 0)}`;
-      tooltip.style.left = `${Math.max(4, event.clientX - rect.left + 8)}px`;
-      tooltip.style.top = `${Math.max(4, event.clientY - rect.top + 8)}px`;
+      tooltip.style.left = `${Math.max(4, event.clientX - shellRect.left + 8)}px`;
+      tooltip.style.top = `${Math.max(4, event.clientY - shellRect.top + 8)}px`;
       tooltip.hidden = false;
     });
     canvas.addEventListener("mouseleave", () => { tooltip.hidden = true; });

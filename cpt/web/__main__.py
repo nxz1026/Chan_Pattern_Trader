@@ -20,7 +20,7 @@ import math
 import sys
 import threading
 import time as _time
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 from cpt.adapters.binance_futures import BinanceFuturesClient, resolve_interval_ms
@@ -39,7 +39,8 @@ from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
 from cpt.application.multi_level import build_multi_level, structures_for_level
 from cpt.application.replay import replay_bars
 from cpt.domain.config import RulesConfig
-from cpt.domain.models import Bi, CanonicalBar, Fractal, ZhongShu
+from cpt.domain.models import Bi, CanonicalBar, Fractal, TrendType, ZhongShu
+from cpt.domain.trend_type import classify_trend
 from cpt.web.app import serve_snapshot
 
 _LOG = logging.getLogger("cpt.web")
@@ -151,6 +152,23 @@ def _compute_domain_structures(
     return fractals, bis, zhongshus
 
 
+def _compute_trend_types(
+    bis: Sequence[Bi],
+    zhongshus: Sequence[ZhongShu],
+    config: RulesConfig,
+) -> tuple[TrendType, ...]:
+    """按主级别对笔/中枢分类走势类型；失败只降级本叠加层，绝不向上抛。
+
+    走势类型是叠加层而非主图数据，分类异常必须退化成空元组——否则一个
+    走势类型边界问题会连带打掉整张快照。
+    """
+    try:
+        return classify_trend(bis, zhongshus, level=config.levels[0])
+    except (ValueError, TypeError) as exc:
+        _LOG.warning("trend type classification failed: %s", exc)
+        return ()
+
+
 class _FixtureProvider:
     """Static snapshot+inspect provider for ``fixture`` mode."""
 
@@ -211,17 +229,24 @@ class _FixtureProvider:
 
     def _build_snapshot(self) -> dict[str, Any]:
         try:
-            payload = replay_bars(self._bars, config=self._config, backend=self._backend)
+            # 走一遍真实回放入口以复用其数据守卫（去重/递增/缺口/OHLC 校验）。
+            replay_bars(self._bars, config=self._config, backend=self._backend)
         except Exception:  # noqa: BLE001 — never let fixture mode crash the server
             return demo_snapshot(self._symbol, self._interval)
+        fractals, bis, zhongshus = _compute_domain_structures(
+            self._bars, self._config, self._backend
+        )
         multi = self._compute_multi_level()
-        fractals, bis, zhongshus = structures_for_level(multi, self._config.levels[0])
+        if not multi.get(self._config.levels[0], {}).get("fractals"):
+            # 多级别递归失败（或退化）时，主级别仍使用真实结构。
+            multi = _fallback_multi_level(self._config, fractals, bis, zhongshus)
         snapshot = build_dashboard_snapshot_v2(
             self._config,
             self._bars,
             fractals=fractals,
             bis=bis,
             zhongshus=zhongshus,
+            trend_types=_compute_trend_types(bis, zhongshus, self._config),
             mode="watch",
             status="confirmed",
             data_source="native_fixture",
@@ -243,7 +268,6 @@ class _FixtureProvider:
         snapshot["runtime"]["interval"] = self._interval
         snapshot["runtime"]["buffer_size"] = len(self._bars)
         snapshot["runtime"]["window_size"] = len(self._bars)
-        snapshot["reproducibility"] = payload.get("metadata", {})
         return snapshot
 
     def _compute_multi_level(self) -> dict[int, dict[str, tuple[Any, ...]]]:
@@ -254,10 +278,32 @@ class _FixtureProvider:
                 self._backend,
                 levels=tuple(self._config.levels),
             )
-        except Exception:  # noqa: BLE001 — 多级别递归失败时退化空结构，不阻断主流程
+        except Exception as exc:  # noqa: BLE001 — 多级别失败只降级多级别，不阻断主流程
+            _LOG.warning("multi-level build failed in fixture mode: %s", exc)
             return {
                 level: {"fractals": (), "bis": (), "zhongshus": ()} for level in self._config.levels
             }
+
+
+def _fallback_multi_level(
+    config: RulesConfig,
+    fractals: tuple[Fractal, ...],
+    bis: tuple[Bi, ...],
+    zhongshus: tuple[ZhongShu, ...],
+) -> dict[int, dict[str, tuple[Any, ...]]]:
+    """多级别递归不可用时的退路：主级别保留真实结构，其余级别留空。
+
+    绝不允许"高级别失败"连坐主级别——那会让看板显示零结构，与真实数据矛盾。
+    """
+    primary = config.levels[0]
+    return {
+        level: (
+            {"fractals": fractals, "bis": bis, "zhongshus": zhongshus}
+            if level == primary
+            else {"fractals": (), "bis": (), "zhongshus": ()}
+        )
+        for level in config.levels
+    }
 
 
 def _compare_with_default(config: RulesConfig) -> dict[str, Any]:
@@ -389,25 +435,29 @@ class _RealtimeProvider:
         except Exception:
             return demo_snapshot(self._symbol, self._interval), ()
         try:
-            payload = replay_bars(bars, config=self._config, backend=self._backend)
+            # 复用真实回放入口的数据守卫（去重/递增/缺口/OHLC 校验）。
+            replay_bars(bars, config=self._config, backend=self._backend)
         except Exception:
             return demo_snapshot(self._symbol, self._interval), ()
         market_24h = self._safe_24h()
+        # 主叠加层独立计算：即使多级别递归失败，主图也必须有真实结构。
+        fractals, bis, zhongshus = _compute_domain_structures(
+            tuple(bars), self._config, self._backend
+        )
         try:
             multi = build_multi_level(
                 tuple(bars), self._config, self._backend, levels=tuple(self._config.levels)
             )
-        except Exception:
-            multi = {
-                level: {"fractals": (), "bis": (), "zhongshus": ()} for level in self._config.levels
-            }
-        fractals, bis, zhongshus = structures_for_level(multi, self._config.levels[0])
+        except Exception as exc:  # noqa: BLE001 — 多级别失败只降级多级别，不阻断已算好的主结构
+            _LOG.warning("multi-level build failed in realtime mode: %s", exc)
+            multi = _fallback_multi_level(self._config, fractals, bis, zhongshus)
         snapshot = build_dashboard_snapshot_v2(
             self._config,
             bars,
             fractals=fractals,
             bis=bis,
             zhongshus=zhongshus,
+            trend_types=_compute_trend_types(bis, zhongshus, self._config),
             mode="watch",
             status="confirmed",
             data_source="binance_realtime",
@@ -429,7 +479,6 @@ class _RealtimeProvider:
         snapshot["runtime"]["interval"] = self._interval
         snapshot["runtime"]["buffer_size"] = len(bars)
         snapshot["runtime"]["window_size"] = len(bars)
-        snapshot["reproducibility"] = payload.get("metadata", {})
         snapshot["alerts"] = self._compute_alerts(snapshot)
         return snapshot, tuple(bars)
 
