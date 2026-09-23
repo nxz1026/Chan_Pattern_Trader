@@ -16,13 +16,20 @@ def make_handler(provider: SnapshotProvider) -> type[BaseHTTPRequestHandler]:
 
     class DashboardHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
-            if self.path not in {"/api/dashboard/snapshot", "/api/dashboard/health"}:
+            snapshot = provider()
+            if self.path == "/api/dashboard/health":
+                payload: dict[str, Any] = {"ok": True, "read_only": True}
+            elif self.path == "/api/dashboard/snapshot":
+                payload = snapshot
+            elif self.path == "/api/dashboard/reproducibility":
+                payload = snapshot.get("reproducibility", {})
+            elif self.path == "/api/dashboard/parity":
+                payload = snapshot.get("parity", {})
+            elif self.path == "/api/dashboard/runs":
+                payload = {"runs": snapshot.get("runs", [])}
+            else:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            if self.path.endswith("/health"):
-                payload: dict[str, Any] = {"ok": True, "read_only": True}
-            else:
-                payload = provider()
             encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
             self.send_response(HTTPStatus.OK)
             self.send_header("Content-Type", "application/json; charset=utf-8")

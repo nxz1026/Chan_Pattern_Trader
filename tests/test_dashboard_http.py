@@ -9,7 +9,14 @@ from cpt.web.app import serve_snapshot
 
 
 def test_dashboard_http_adapter_is_read_only() -> None:
-    server = serve_snapshot(lambda: {"schema_version": "dashboard.v2"})
+    server = serve_snapshot(
+        lambda: {
+            "schema_version": "dashboard.v2",
+            "reproducibility": {"hashes": {}},
+            "parity": {"items": []},
+            "runs": [],
+        }
+    )
     thread = threading.Thread(target=server.serve_forever, daemon=True)
     thread.start()
     try:
@@ -18,6 +25,9 @@ def test_dashboard_http_adapter_is_read_only() -> None:
             assert json.load(response)["schema_version"] == "dashboard.v2"
         with urllib.request.urlopen(f"{base}/api/dashboard/health") as response:
             assert json.load(response)["read_only"] is True
+        for path, key in (("reproducibility", "hashes"), ("parity", "items"), ("runs", "runs")):
+            with urllib.request.urlopen(f"{base}/api/dashboard/{path}") as response:
+                assert key in json.load(response)
         request = urllib.request.Request(f"{base}/api/dashboard/snapshot", method="POST")
         try:
             urllib.request.urlopen(request)
