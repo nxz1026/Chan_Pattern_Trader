@@ -232,12 +232,17 @@ class _FixtureProvider:
                 "data_source": "native_fixture",
                 "symbol": self._symbol,
                 "interval": self._interval,
+                "buffer_size": len(self._bars),
+                "window_size": len(self._bars),
+                "status": "confirmed",
             },
         )
         snapshot["market"]["symbol"] = self._symbol
         snapshot["market"]["interval"] = self._interval_ms
         snapshot["runtime"]["symbol"] = self._symbol
         snapshot["runtime"]["interval"] = self._interval
+        snapshot["runtime"]["buffer_size"] = len(self._bars)
+        snapshot["runtime"]["window_size"] = len(self._bars)
         snapshot["reproducibility"] = payload.get("metadata", {})
         return snapshot
 
@@ -413,12 +418,17 @@ class _RealtimeProvider:
                 "data_source": "binance_realtime",
                 "symbol": self._symbol,
                 "interval": self._interval,
+                "buffer_size": len(bars),
+                "window_size": len(bars),
+                "status": "confirmed",
             },
         )
         snapshot["market"]["symbol"] = self._symbol
         snapshot["market"]["interval_ms"] = resolve_interval_ms(self._interval)
         snapshot["runtime"]["symbol"] = self._symbol
         snapshot["runtime"]["interval"] = self._interval
+        snapshot["runtime"]["buffer_size"] = len(bars)
+        snapshot["runtime"]["window_size"] = len(bars)
         snapshot["reproducibility"] = payload.get("metadata", {})
         snapshot["alerts"] = self._compute_alerts(snapshot)
         return snapshot, tuple(bars)

@@ -426,16 +426,18 @@
     setHidden("[data-testid=state-gap]", !(candles.length && gap));
 
     root.dataset.status = stateKey;
-    root.dataset.runtimeMode = typeof runtime.mode === "string" ? runtime.mode : "offline";
+    const dataSource = typeof runtime.data_source === "string" ? runtime.data_source.toLowerCase() : "";
+    const isRealtime = dataSource.includes("realtime") || dataSource.includes("binance");
+    root.dataset.runtimeMode = isRealtime ? "realtime" : "offline";
     root.dataset.viewMode = state.mode;
     root.dataset.dataSource = typeof runtime.data_source === "string" ? runtime.data_source : "unknown";
 
     if (!candles.length) {
       setConnection("offline", emptyMessage(snapshot));
-    } else if (typeof runtime.mode === "string" && runtime.mode !== "realtime") {
-      setConnection("offline", `离线 snapshot（${candles.length} 根 K 线）· 无网络请求`);
+    } else if (!isRealtime) {
+      setConnection("offline", `离线 snapshot（${candles.length} 根 K 线，${runtime.data_source || "fixture"}）· 无网络请求`);
     } else {
-      setConnection("live", `已渲染 snapshot（${candles.length} 根 K 线，runtime=${root.dataset.runtimeMode}）`);
+      setConnection("live", `实时 snapshot（${candles.length} 根 K 线，binance_realtime）`);
     }
   }
 
@@ -2068,6 +2070,40 @@
     });
   }
 
+  function refreshLevelSelect(snapshot) {
+    const select = q("[data-testid=level-select]");
+    if (!select) return;
+    const multi = isObject(snapshot) && isObject(snapshot.multi_level) ? snapshot.multi_level : null;
+    const available = multi && multi.available === true && isObject(multi.levels) ? multi.levels : null;
+    const previous = state.level;
+    select.replaceChildren();
+    const allOption = document.createElement("option");
+    allOption.value = "all";
+    allOption.textContent = "全部";
+    select.appendChild(allOption);
+    let restore = previous;
+    if (available) {
+      const levels = Object.keys(available)
+        .map((value) => Number(value))
+        .filter((value) => Number.isFinite(value))
+        .sort((a, b) => a - b);
+      levels.forEach((level) => {
+        const entry = available[String(level)] || {};
+        const total = (entry.fractals || 0) + (entry.bis || 0) + (entry.zhongshus || 0);
+        const option = document.createElement("option");
+        option.value = String(level);
+        option.textContent = `${level}m · ${total} 元素`;
+        select.appendChild(option);
+      });
+      if (previous !== null && previous !== undefined && !levels.includes(previous)) {
+        restore = null;
+      }
+    }
+    select.value = restore === null || restore === undefined ? "all" : String(restore);
+    state.level = select.value === "all" ? null : Number(select.value);
+    root.dataset.level = state.level === null ? "all" : String(state.level);
+  }
+
   function installLevelFilter() {
     const select = q("[data-testid=level-select]");
     if (!select) return;
@@ -2079,7 +2115,7 @@
       if (level !== null && hasEndpoint) {
         setConnection("connecting", `正在加载级别 ${level} 的真实叠加结构…`);
         refreshSelectedSnapshot({ level }).then((result) => {
-          if (result) setConnection("live", `级别 ${level} 结构已加载（${result.structure_levels ? result.structure_levels.length : "—"} 根）`);
+          if (result) setConnection("live", `级别 ${level} 结构已加载`);
         });
       } else {
         renderStructureDefaults(state.snapshot);
@@ -2156,6 +2192,7 @@
     state.selection = null;
     state.selectedNode = null;
     renderChrome(state.snapshot);
+    refreshLevelSelect(state.snapshot);
     renderEvents(state.snapshot);
     renderParity(state.snapshot);
     renderParityCharts(state.snapshot);
