@@ -771,3 +771,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 结构选中面板增加 `source_ids` 溯源树和 raw bar 逐字段检查器。
 - 所有检查器内容通过 DOM `textContent` 写入，保持只读和不注入 HTML 的边界。
 - 前端语法、全量 CPT 测试和 diff check 通过。
+
+## 39. Dashboard Phase 2-5 研究增强（2026-09-23）
+
+- Dashboard 增加 parity 摘要显示：matched/missing/extra，缺失数据时明确提示。
+- 增加浏览器 localStorage 研究注释，注释不进入 snapshot、dataset hash 或结构数据。
+- 保持只读红线：没有任何结构写入、交易或账户操作。
