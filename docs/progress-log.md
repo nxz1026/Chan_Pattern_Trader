@@ -837,3 +837,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - 新增 `docs/dashboard-final-acceptance.md`，汇总共享底座、研究者模式、盯盘模式、只读边界、自动化门禁和已知限制。
 - 明确 parity 完整逐元素 SVG 定位、真实 24h 聚合和浏览器框架测试仍是后续视觉/基础设施增强，不将其误报为已完成。
+
+## 51. Dashboard parity 逐元素视觉实现（2026-10-01）
+
+- parity 面板现在按 fractals/bis/zhongshus 的 normalized items 分别绘制 CPT/Oracle SVG 元素。
+- 每个元素包含 matched/missing/extra/mismatched 状态 class，并支持点击触发 `cpt:parity-selected` 和定位选择状态。
+- 没有 parity 数据时图表继续隐藏，不伪造对照结果。
