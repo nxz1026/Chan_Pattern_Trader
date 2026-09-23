@@ -929,3 +929,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - parity 元素选择现在包含 `anchor`（优先 `start_time`，否则 `bar_index`）。
 - 选择 parity 项后发出 `cpt:parity-selected`，并为与锚点相同 `data-open-time` 的主图元素设置 `data-parity-anchor` 高亮。
 - 新增跨图联动契约 focused 测试和 CSS 高亮。
+
+## 67. Dashboard 上游 24h 聚合包装（2026-10-17）
+
+- 新增 `cpt/application/dashboard_market_fetch.py`，为已有行情 adapter 提供 symbol/interval/24h aggregate 包装，不执行网络请求。
+- 上游完整聚合通过 `normalize_24h` 进入 dashboard.v2；缺失时保留 unavailable 语义。
