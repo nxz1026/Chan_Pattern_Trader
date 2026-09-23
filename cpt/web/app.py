@@ -27,6 +27,10 @@ def make_handler(provider: SnapshotProvider) -> type[BaseHTTPRequestHandler]:
                 payload = snapshot.get("parity", {})
             elif self.path == "/api/dashboard/runs":
                 payload = {"runs": snapshot.get("runs", [])}
+            elif self.path == "/api/dashboard/market-24h":
+                payload = snapshot.get("market_24h", {"available": False, "reason": "unavailable"})
+            elif self.path == "/api/dashboard/engine-state":
+                payload = snapshot.get("engine_state", {})
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
