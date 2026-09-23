@@ -562,6 +562,29 @@
       });
     }
     tree.appendChild(list);
+    let inspector = q("[data-testid=bar-inspector]");
+    if (!inspector) {
+      inspector = document.createElement("section");
+      inspector.dataset.testid = "bar-inspector";
+      inspector.className = "cpt-bar-inspector";
+      const heading = document.createElement("h3");
+      heading.textContent = "逐根检查器";
+      inspector.appendChild(heading);
+      panel.appendChild(inspector);
+    }
+    while (inspector.children.length > 1) inspector.removeChild(inspector.lastChild);
+    const raw = payload && payload.kind === "candle" ? payload.raw : null;
+    const rawList = document.createElement("dl");
+    [["open_time", raw && raw.open_time], ["open", raw && raw.open], ["high", raw && raw.high], ["low", raw && raw.low], ["close", raw && raw.close], ["volume", raw && raw.volume], ["is_closed", raw && raw.is_closed]].forEach(([key, value]) => {
+      const wrap = document.createElement("div");
+      const label = document.createElement("dt");
+      label.textContent = key;
+      const valueNode = document.createElement("dd");
+      valueNode.textContent = value == null ? "—" : String(value);
+      wrap.append(label, valueNode);
+      rawList.appendChild(wrap);
+    });
+    inspector.appendChild(rawList);
   }
 
   function renderSelection() {
