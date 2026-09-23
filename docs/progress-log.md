@@ -890,3 +890,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 研究增强：级别树、engine_state、信号统计、事件审计、范围导出、多运行对齐已完成。
 - 浏览器：静态/可访问交互契约已完成；当前环境没有 Chromium/Playwright，真实浏览器运行仍记录为环境限制。
 - 本轮全量测试实际为 **152 passed**，静态质量门全部通过。
+
+## 60. Chromium 无头浏览器与真实 smoke（2026-10-10）
+
+- 当前环境原先没有 Chromium/Chrome/Firefox；已通过 Playwright 下载 Chromium 153.0.8010.12 ARM64，并链接到 `$HOME/.local/bin/chromium`。
+- 新增 `tests/test_dashboard_chromium_smoke.py`，调用真实 Chromium headless dump-dom 验证 Dashboard 根节点、双模式、周期和级别选择器。
+- focused smoke：**1 passed**。
