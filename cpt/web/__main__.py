@@ -349,9 +349,7 @@ class _FixtureProvider:
     def inspect(self, bar_index: int) -> dict[str, Any]:
         with self._lock:
             bars = self._bars
-        fractals, bis, zhongshus = _compute_domain_structures(
-            bars, self._config, self._backend
-        )
+        fractals, bis, zhongshus = _compute_domain_structures(bars, self._config, self._backend)
         return inspect_bar(bars, fractals, bis, zhongshus, bar_index)
 
     def _build_snapshot(self) -> dict[str, Any]:
@@ -368,9 +366,7 @@ class _FixtureProvider:
             replay_bars(bars, config=config, backend=backend)
         except Exception:  # noqa: BLE001 — never let fixture mode crash the server
             return demo_snapshot(symbol, interval)
-        fractals, bis, zhongshus = _compute_domain_structures(
-            bars, config, backend
-        )
+        fractals, bis, zhongshus = _compute_domain_structures(bars, config, backend)
         multi = self._compute_multi_level()
         if not multi.get(config.levels[0], {}).get("fractals"):
             # 多级别递归失败（或退化）时，主级别仍使用真实结构。
@@ -506,6 +502,13 @@ class _RealtimeProvider:
         self._bars: tuple[CanonicalBar, ...] = ()
         self._last_signal_status: str = "none"
         self._last_alert_at: float = 0.0
+        # 上游健康状态：/api/dashboard/health 直接读这些字段，避免「永远 ok」
+        # 的静态健康端点掩盖上游不可达 / 静默降级。
+        self._last_poll_ok: bool = False
+        self._last_poll_error: str | None = "no_poll_yet"
+        self._last_poll_at: float = 0.0
+        self._consecutive_failures: int = 0
+        self._last_success_at: float = 0.0
         self._stop = threading.Event()
         # Set when select_symbol() flips symbol/interval; the poll loop
         # clears cached bars + last-signal state at the start of the next poll.
@@ -650,6 +653,68 @@ class _RealtimeProvider:
         rebuilt["selected_level"] = level
         return rebuilt
 
+    def _degraded_snapshot(self, symbol: str, interval: str, reason: str) -> dict[str, Any]:
+        """上游不可用时的降级快照：空结构，但**显式标记降级原因**。
+
+        原先这里直接 ``return demo_snapshot(...)``，前端只看到「图表保持空占位」，
+        无法区分「上游挂了」和「本来就没有数据」。现在把原因写进 runtime，
+        由 /api/dashboard/health 与前端状态区共同呈现。
+        """
+        snapshot = demo_snapshot(symbol, interval)
+        runtime = dict(snapshot.get("runtime", {}))
+        runtime["degraded"] = True
+        runtime["degraded_reason"] = reason
+        runtime["generated_at"] = _time.time() * 1000
+        snapshot["runtime"] = runtime
+        return snapshot
+
+    def _record_poll(self, *, ok: bool, error: str | None) -> None:
+        with self._lock:
+            self._last_poll_ok = ok
+            self._last_poll_error = None if ok else (error or "unknown_error")
+            self._last_poll_at = _time.time()
+            if ok:
+                self._consecutive_failures = 0
+                self._last_success_at = self._last_poll_at
+            else:
+                self._consecutive_failures += 1
+
+    def health(self) -> dict[str, Any]:
+        """真实健康状态（供 /api/dashboard/health 使用）。
+
+        ``ok`` 只在最近一次轮询成功时为 true；``degraded`` 表示当前展示的是
+        降级快照。``stale`` 表示最近一次成功已超过 2 个轮询周期。
+        """
+        with self._lock:
+            last_poll_ok = self._last_poll_ok
+            last_poll_error = self._last_poll_error
+            last_poll_at = self._last_poll_at
+            last_success_at = self._last_success_at
+            failures = self._consecutive_failures
+            symbol = self._symbol
+            interval = self._interval
+            snapshot = self._snapshot
+        runtime = snapshot.get("runtime", {}) if isinstance(snapshot, dict) else {}
+        degraded = bool(runtime.get("degraded", False)) or not last_poll_ok
+        stale = bool(
+            last_success_at
+            and (self._poll_seconds * 2) > 0
+            and (_time.time() - last_success_at) > (self._poll_seconds * 2)
+        )
+        return {
+            "ok": bool(last_poll_ok),
+            "read_only": True,
+            "degraded": degraded,
+            "stale": stale,
+            "symbol": symbol,
+            "interval": interval,
+            "poll_seconds": self._poll_seconds,
+            "last_poll_at": last_poll_at or None,
+            "last_success_at": last_success_at or None,
+            "consecutive_failures": failures,
+            "last_error": last_poll_error,
+        }
+
     def _run(self) -> None:
         while not self._stop.is_set():
             # 优先响应 select_symbol：切完立刻拉新数据，而不是等满 30s。
@@ -660,8 +725,16 @@ class _RealtimeProvider:
                 self._switch_event.clear()
             try:
                 fresh, fresh_bars = self._poll_once()
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: BLE001 — 轮询整体失败：记录健康状态，不静默吞掉
                 _LOG.warning("realtime poll failed: %s", exc)
+                reason = f"poll_failed:{type(exc).__name__}"
+                self._record_poll(ok=False, error=reason)
+                with self._lock:
+                    symbol = self._symbol
+                    interval = self._interval
+                with self._lock:
+                    self._snapshot = self._degraded_snapshot(symbol, interval, reason)
+                    self._bars = ()
                 continue
             with self._lock:
                 self._snapshot = fresh
@@ -677,13 +750,20 @@ class _RealtimeProvider:
             bars = self._client.fetch_validated_klines(
                 target_symbol, target_interval, limit=self._limit
             )
-        except Exception:
-            return demo_snapshot(target_symbol, target_interval), ()
+        except Exception as exc:  # noqa: BLE001 — 上游不可达：降级但必须留痕
+            _LOG.warning("upstream klines fetch failed for %s: %s", target_symbol, exc)
+            reason = f"upstream_fetch_failed:{type(exc).__name__}"
+            self._record_poll(ok=False, error=reason)
+            return self._degraded_snapshot(target_symbol, target_interval, reason), ()
         try:
             # 复用真实回放入口的数据守卫（去重/递增/缺口/OHLC 校验）。
             replay_bars(bars, config=self._config, backend=self._backend)
-        except Exception:
-            return demo_snapshot(target_symbol, target_interval), ()
+        except Exception as exc:  # noqa: BLE001 — 数据守卫拒绝：同样降级留痕
+            _LOG.warning("realtime bars rejected by guard for %s: %s", target_symbol, exc)
+            reason = f"data_guard_rejected:{type(exc).__name__}"
+            self._record_poll(ok=False, error=reason)
+            return self._degraded_snapshot(target_symbol, target_interval, reason), ()
+        self._record_poll(ok=True, error=None)
         market_24h = self._safe_24h_for(target_symbol)
         fractals, bis, zhongshus = _compute_domain_structures(
             tuple(bars), self._config, self._backend

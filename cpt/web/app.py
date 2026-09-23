@@ -83,7 +83,22 @@ def make_handler(
             path = urlsplit(self.path)
             query = parse_qs(path.query)
             if path.path == "/api/dashboard/health":
-                payload: dict[str, Any] = {"ok": True, "read_only": True}
+                # 有真实健康能力的 provider（realtime）优先：避免静态 "ok": true
+                # 掩盖上游不可达或降级。没有该能力的 provider 退回静态只读声明。
+                health_fn = getattr(provider, "health", None)
+                if callable(health_fn):
+                    try:
+                        payload: dict[str, Any] = dict(health_fn())
+                    except Exception as exc:  # noqa: BLE001 — 健康检查本身失败也要能返回
+                        _LOG.warning("provider.health() failed: %s", exc)
+                        payload = {
+                            "ok": False,
+                            "read_only": True,
+                            "degraded": True,
+                            "last_error": f"health_probe_failed:{type(exc).__name__}",
+                        }
+                else:
+                    payload = {"ok": True, "read_only": True, "degraded": False}
             elif path.path == "/api/dashboard/snapshot":
                 payload = dict(snapshot)
                 market = dict(payload.get("market", {}))

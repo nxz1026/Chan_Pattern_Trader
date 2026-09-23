@@ -120,11 +120,15 @@
     >
       <div data-testid="state-loading" class="state state-loading" data-state="loading" hidden>
         <h2>加载中</h2>
-        <p>正在读取 dashboard.v1 snapshot…</p>
+        <p>正在读取 dashboard.v2 snapshot…</p>
       </div>
       <div data-testid="state-empty" class="state state-empty" data-state="empty">
         <h2>暂无数据</h2>
         <p>离线 demo：未提供 K 线 snapshot，图表与结构面板保持空白占位。</p>
+      </div>
+      <div data-testid="state-degraded" class="state state-degraded" data-state="degraded" hidden>
+        <h2>上游降级</h2>
+        <p data-testid="state-degraded-message">上游数据不可用，当前展示为空占位。</p>
       </div>
       <div data-testid="state-error" class="state state-error" data-state="error" hidden>
         <h2>数据错误</h2>

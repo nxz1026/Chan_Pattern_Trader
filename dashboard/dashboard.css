@@ -103,6 +103,10 @@
   --color-error-bg: rgba(207, 34, 46, 0.1);
   --color-error-border: rgba(207, 34, 46, 0.5);
 
+  --color-degraded: #9a6700; /* 上游降级：介于 stale 与 error 之间，警示但不等于页面崩溃 */
+  --color-degraded-bg: rgba(154, 103, 0, 0.1);
+  --color-degraded-border: rgba(154, 103, 0, 0.5);
+
   --color-empty: #6e7781;
   --color-empty-bg: rgba(110, 119, 129, 0.08);
 
@@ -188,6 +192,10 @@
     --color-error: #f85149; /* = --bad */
     --color-error-bg: rgba(248, 81, 73, 0.14);
     --color-error-border: rgba(248, 81, 73, 0.5);
+
+    --color-degraded: #d29922;
+    --color-degraded-bg: rgba(210, 153, 34, 0.15);
+    --color-degraded-border: rgba(210, 153, 34, 0.5);
 
     --color-empty: #6e7681;
     --color-empty-bg: rgba(110, 118, 129, 0.12);
@@ -386,6 +394,10 @@ button {
   color: var(--color-error);
 }
 
+.topbar-meta dd[data-state="degraded"] {
+  color: var(--color-degraded);
+}
+
 .connection-status {
   flex: 0 0 auto;
   padding: 2px var(--space-2);
@@ -508,6 +520,12 @@ button {
   color: var(--color-gap);
   border-color: var(--color-gap-border);
   background-color: var(--color-gap-bg);
+}
+
+.state-degraded {
+  color: var(--color-degraded);
+  border-color: var(--color-degraded-border);
+  background-color: var(--color-degraded-bg);
 }
 
 /* loading 态左侧脉冲条（尊重 reduced-motion） */

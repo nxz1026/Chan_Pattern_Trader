@@ -355,6 +355,30 @@
     return "snapshot 未包含 K 线：图表与结构面板保持空占位。";
   }
 
+  // 降级原因（后端 runtime.degraded_reason）→ 面向用户的中文说明。
+  const DEGRADED_REASONS = {
+    upstream_fetch_failed: "无法连接行情上游（Binance），K 线与结构均不可用",
+    data_guard_rejected: "上游返回的 K 线未通过数据守卫（去重/递增/缺口/OHLC 校验）",
+    poll_failed: "实时轮询线程异常退出本轮采集",
+    no_poll_yet: "尚未完成首次行情采集",
+  };
+
+  function degradedMessage(reason) {
+    const key = String(reason || "").split(":")[0];
+    const base = DEGRADED_REASONS[key] || "上游数据不可用";
+    const detail = reason && String(reason).includes(":") ? `（${reason}）` : "";
+    return `${base}${detail} · 页面保持空占位，恢复后会自动刷新。`;
+  }
+
+  function showDegraded(reason) {
+    setText("[data-testid=state-degraded-message]", degradedMessage(reason));
+    setHidden("[data-testid=state-degraded]", false);
+    // 降级也是错误态：顶栏与连接文案同步，避免"看起来正常但没数据"
+    setState(setText("[data-testid=topbar-status]", "degraded"), "degraded");
+    root.dataset.status = "degraded";
+    setConnection("error", degradedMessage(reason));
+  }
+
   function renderChrome(snapshot) {
     const market = isObject(snapshot) && isObject(snapshot.market) ? snapshot.market : {};
     const quality = isObject(snapshot) && isObject(snapshot.data_quality) ? snapshot.data_quality : {};
@@ -458,14 +482,23 @@
       }
     }
 
+    // 上游降级：后端在 fetch 失败 / 数据守卫拒绝时返回带 degraded 标记的空快照。
+    // 必须显式呈现，否则用户只看到「图表保持空占位」，无法区分「上游挂了」和
+    // 「本来就没数据」。degraded 优先于 empty 态。
+    const degraded = runtime.degraded === true;
+    const degradedReason =
+      typeof runtime.degraded_reason === "string" ? runtime.degraded_reason : "";
+
     let stateKey = "empty";
     if (candles.length) {
       if (gap) stateKey = "gap";
       else if (stale) stateKey = "stale";
       else stateKey = runtime.status === "alert" ? "alert" : "confirmed";
     }
+    if (degraded) stateKey = "degraded";
     setState(setText("[data-testid=topbar-status]", stateKey), stateKey);
-    setHidden("[data-testid=state-empty]", candles.length > 0);
+    // 降级时不显示「暂无数据」空态：其文案是「离线 demo」，会掩盖真实原因
+    setHidden("[data-testid=state-empty]", candles.length > 0 || degraded);
     setHidden("[data-testid=state-stale]", !(candles.length && stale));
     setHidden("[data-testid=state-gap]", !(candles.length && gap));
 
@@ -476,12 +509,20 @@
     root.dataset.viewMode = state.mode;
     root.dataset.dataSource = typeof runtime.data_source === "string" ? runtime.data_source : "unknown";
 
-    if (!candles.length) {
-      setConnection("offline", emptyMessage(snapshot));
-    } else if (!isRealtime) {
-      setConnection("offline", `离线 snapshot（${candles.length} 根 K 线，${runtime.data_source || "fixture"}）· 无网络请求`);
+    root.dataset.degraded = degraded ? "true" : "false";
+    if (degraded) {
+      root.dataset.degradedReason = degradedReason || "unknown";
+      showDegraded(degradedReason);
     } else {
-      setConnection("live", `实时 snapshot（${candles.length} 根 K 线，binance_realtime）`);
+      root.removeAttribute("data-degraded-reason");
+      setHidden("[data-testid=state-degraded]", true);
+      if (!candles.length) {
+        setConnection("offline", emptyMessage(snapshot));
+      } else if (!isRealtime) {
+        setConnection("offline", `离线 snapshot（${candles.length} 根 K 线，${runtime.data_source || "fixture"}）· 无网络请求`);
+      } else {
+        setConnection("live", `实时 snapshot（${candles.length} 根 K 线，binance_realtime）`);
+      }
     }
   }
 
