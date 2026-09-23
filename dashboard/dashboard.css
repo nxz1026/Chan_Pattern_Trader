@@ -1144,3 +1144,20 @@ noscript p {
 .time-range [data-testid="range-status"][data-state="pinned"] {
   color: var(--color-accent);
 }
+
+.topbar-meta .time-range .range-quick {
+  gap: var(--space-1);
+  margin-top: 2px;
+}
+
+.time-range .range-quick button {
+  padding: 0 var(--space-2);
+  border-color: var(--color-border);
+  background-color: transparent;
+  color: var(--color-text-dim);
+}
+
+.time-range .range-quick button:hover {
+  border-color: var(--color-accent);
+  color: var(--color-accent);
+}

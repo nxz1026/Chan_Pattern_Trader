@@ -111,3 +111,40 @@ def test_interval_labels_cover_all_tiers() -> None:
     assert "INTERVAL_LABELS" in javascript
     for label in ('60000: "1m"', '3600000: "1h"', '86400000: "1d"', '604800000: "1w"'):
         assert label in javascript, f"周期标签表缺少 {label}"
+
+
+def test_quick_range_buttons_exist_with_frozen_dom_contract() -> None:
+    """回归（2026-09-23）：最近 1/7/30 天快选按钮（DOM 契约与 JS 绑定一致）。"""
+    html = (ROOT / "dashboard/index.html").read_text(encoding="utf-8")
+    assert 'data-testid="range-quick"' in html
+    for days in ("1d", "7d", "30d"):
+        assert f'data-range-quick="{days}"' in html, f"缺少快选按钮 {days}"
+    javascript = (ROOT / "dashboard/dashboard.js").read_text(encoding="utf-8")
+    assert "data-range-quick" in javascript
+
+
+def test_out_of_window_overlays_are_skipped_not_collapsed() -> None:
+    """回归（2026-09-23）：视窗外的区间型结构必须跳过，不能被压成通高竖条。
+
+    `timeIndexOf` 会把窗口外时间吸附到 0/末尾，走势类型/中枢因此被画成
+    宽约 slot(3.7px)、高约视窗高(1355px) 的橙色矩形（用户看到的"贯穿全高竖线"）。
+    """
+    javascript = (ROOT / "dashboard/dashboard.js").read_text(encoding="utf-8")
+    assert "const overlapsWindow = (view, startMs, endMs) =>" in javascript
+    assert "windowStart: candles[0].openTime" in javascript
+    assert "windowEnd: candles[candles.length - 1].openTime" in javascript
+    # 两处区间型结构都必须先过守卫
+    assert javascript.count("!overlapsWindow(view,") >= 2
+
+
+def test_trend_type_renders_as_top_strip_not_full_height() -> None:
+    """回归（2026-09-23）：走势类型画在顶部窄条带，不再铺满价格区。
+
+    铺底时窄的走势类型会变成"贯穿全高的色条"、宽的变成大块暗色背景
+    （视觉复审据此把可读性判为 3/5）；改为 10px 条带后复审给 5/5。
+    """
+    javascript = (ROOT / "dashboard/dashboard.js").read_text(encoding="utf-8")
+    assert "TREND_STRIP_HEIGHT" in javascript
+    assert "height: TREND_STRIP_HEIGHT," in javascript
+    # 不得再出现铺满绘图区高度的走势类型矩形
+    assert "height: view.geom.plotHeight," not in javascript

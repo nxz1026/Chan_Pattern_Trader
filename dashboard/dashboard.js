@@ -1275,25 +1275,43 @@
     }
   }
 
+  /* 顶部走势类型条带用的填充：条带只有 10px 高，需要有足够对比度才看得见，
+     但因为不再铺满价格区，0.35 也不会造成视觉噪音。 */
   const trendFill = (direction) =>
     direction === 1
-      ? "rgba(22, 199, 132, 0.07)"
+      ? "rgba(22, 199, 132, 0.35)"
       : direction === -1
-        ? "rgba(234, 57, 67, 0.07)"
-        : "rgba(240, 185, 11, 0.07)";
+        ? "rgba(234, 57, 67, 0.35)"
+        : "rgba(240, 185, 11, 0.35)";
+
+  // `timeIndexOf` 会把窗口外时间吸附到 0/末尾；区间型结构若两端都落在窗口外，
+  // 会被压成 slot 宽（约 3.7px）、通高的竖条（用户看到的"贯穿全高橙黄竖线"）。
+  // 画之前先按真实时间判断是否与视窗相交，完全在外的直接跳过。
+  const overlapsWindow = (view, startMs, endMs) =>
+    startMs !== null && endMs !== null && endMs >= view.windowStart && startMs <= view.windowEnd;
+
+  /* 走势类型：绘制在绘图区**顶部的一条窄带**，而不是铺满整个价格区。
+     铺底会把窄的走势类型变成"贯穿全高的色条"、宽的变成大块暗色背景，
+     视觉复审（2026-09-23）判定这是主要噪音来源。 */
+  const TREND_STRIP_HEIGHT = 10;
 
   function drawTrendBackgrounds(group, view) {
     view.overlays.trend_types.forEach((item) => {
-      const startIndex = view.indexForTime(num(item.start_time));
-      const endIndex = view.indexForTime(num(item.end_time));
+      const startTime = num(item.start_time);
+      const endTime = num(item.end_time);
+      if (!overlapsWindow(view, startTime, endTime)) return;
+      const startIndex = view.indexForTime(startTime);
+      const endIndex = view.indexForTime(endTime);
       if (startIndex === null || endIndex === null) return;
       const left = view.xForIndex(Math.min(startIndex, endIndex)) - view.geom.slot / 2;
       const width = Math.max(2, Math.abs(endIndex - startIndex) * view.geom.slot + view.geom.slot);
       const element = createSvg("rect", {
         x: left,
-        y: view.geom.top,
+        // 放在绘图区上方的内边距里，完全不压价格区
+        y: Math.max(0, view.geom.top - TREND_STRIP_HEIGHT),
         width,
-        height: view.geom.plotHeight,
+        height: TREND_STRIP_HEIGHT,
+        rx: 2,
         "data-structure-kind": "trend_type",
         "data-trend-kind": item.kind,
         "data-level": num(item.level),
@@ -1303,7 +1321,8 @@
       paint(element, {
         fill: trendFill(num(item.direction)),
         stroke: "var(--color-accent)",
-        "stroke-opacity": "0.15",
+        "stroke-opacity": "0.35",
+        "stroke-width": "1",
       });
       group.appendChild(attachHit(element, payloadFor("trend_type", item, view, structureStateOf(view, num(item.end_time)))));
     });
@@ -1311,8 +1330,11 @@
 
   function drawZhongshus(group, view) {
     view.overlays.zhongshus.forEach((item) => {
-      const startIndex = view.indexForTime(num(item.start_time));
-      const endIndex = view.indexForTime(num(item.end_time));
+      const startTime = num(item.start_time);
+      const endTime = num(item.end_time);
+      if (!overlapsWindow(view, startTime, endTime)) return;
+      const startIndex = view.indexForTime(startTime);
+      const endIndex = view.indexForTime(endTime);
       const high = num(item.high);
       const low = num(item.low);
       if (startIndex === null || endIndex === null || high === null || low === null) return;
@@ -1328,7 +1350,7 @@
         rx: 2,
         "data-structure-kind": "zhongshu",
         "data-level": num(item.level),
-        "data-state": structureStateOf(view, num(item.end_time)),
+        "data-state": structureStateOf(view, endTime),
         "data-source-ids": asArray(item.bi_ids).join(" "),
       });
       paint(element, {
@@ -1337,8 +1359,8 @@
         "stroke-width": "1",
         "stroke-dasharray": "4 3",
       });
-      group.appendChild(attachHit(element, payloadFor("zhongshu", item, view, structureStateOf(view, num(item.end_time)))));
-      if (state.selection && state.selection.kind === "zhongshu" && num(item.start_time) === state.selection.startTime) {
+      group.appendChild(attachHit(element, payloadFor("zhongshu", item, view, structureStateOf(view, endTime))));
+      if (state.selection && state.selection.kind === "zhongshu" && startTime === state.selection.startTime) {
         group.appendChild(
           paint(
             createSvg("text", { x: left + 4, y: top - 4 }, `中枢 L${num(item.level)} ${formatPrice(high)}—${formatPrice(low)}`),
@@ -1849,6 +1871,8 @@
       geom,
       domain,
       lastOpenTime: candles[candles.length - 1].openTime,
+      windowStart: candles[0].openTime,
+      windowEnd: candles[candles.length - 1].openTime,
       indexForTime: timeIndexOf(candles),
       xForIndex: (index) => geom.left + (index + 0.5) * geom.slot,
       yForPrice: (price) =>
@@ -2173,6 +2197,13 @@
     });
   }
 
+  /** 本地时区的 `datetime-local` 文本（YYYY-MM-DDTHH:mm），与手动输入的解析口径一致。 */
+  const toLocalInputValue = (ms) => {
+    const pad = (value) => String(value).padStart(2, "0");
+    const date = new Date(ms);
+    return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+  };
+
   /** 历史区间会话：固定区间后停止自动刷新，避免实时快照把固定窗口冲掉。 */
   function installTimeRange() {
     const startInput = q("[data-testid=range-start]");
@@ -2223,13 +2254,34 @@
       });
     }
 
+    if (applyButton) {
+      root.querySelectorAll("[data-range-quick]").forEach((button) => {
+        button.addEventListener("click", () => {
+          const days = Number(String(button.dataset.rangeQuick || "").replace(/d$/, ""));
+          if (!Number.isInteger(days) || days <= 0) return;
+          const endMs = Math.floor(Date.now() / 60000) * 60000;
+          const startMs = endMs - days * 24 * 3600 * 1000;
+          if (startInput) startInput.value = toLocalInputValue(startMs);
+          if (endInput) endInput.value = toLocalInputValue(endMs);
+          applyButton.click();
+        });
+      });
+    }
+
     if (liveButton) {
       liveButton.addEventListener("click", () => {
+        const wasPinned = state.pinnedRange !== null;
         state.pinnedRange = null;
         if (startInput) startInput.value = "";
         if (endInput) endInput.value = "";
         setRangeStatus("实时");
         setRangeState("live");
+        // 立即拉一次实时快照，否则画面会停留在历史区间直到下一次轮询（最长 30 秒）。
+        if (wasPinned) {
+          Promise.resolve(refreshSelectedSnapshot()).then((snapshot) => {
+            if (snapshot) scheduleDraw();
+          });
+        }
         if (state.snapshotUrl) startPolling(state.snapshotUrl);
       });
     }

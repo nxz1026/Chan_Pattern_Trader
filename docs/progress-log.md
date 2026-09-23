@@ -1046,3 +1046,22 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 教训（补）：`<pre>` 里抓探针输出不能用 `sed 's/.*PROBE_JSON://'`，会命中内联脚本里的字面量；必须先定位 `<pre id="out">` 再解析。
 
 质量门：`pytest tests` **175 passed**；ruff/format/mypy(55 files)/import-linter(4 kept) 全绿；公网三文件 md5 与仓库一致。
+
+## 77. 通高竖线归零 + 走势类型条带化 + 快选区间（2026-09-23）
+
+用户诉求：①修掉图上贯穿全高的橙黄竖线；②加快捷时间范围按钮。
+
+**竖线定位（不猜，用探针按"高瘦元素"特征抓）**：`timeIndexOf()` 对窗口外时间做边界吸附（`if (ms <= times[0]) return 0;`），默认窗口只画最近 180 根，完全落在窗口**之外**的走势类型因此 start/end 双双吸附到同一索引，`drawTrendBackgrounds` 用 `Math.max(2, |end-start|*slot + slot)` 画出 **宽 3.7px、高 1355px 的橙色矩形**（探针实测 6 个 `rect[data-structure-kind=trend_type]` 全挤在 x=64.83、stroke=rgb(240,185,11)）。中枢同理。
+
+| 改动 | 内容 | 验收证据 |
+| --- | --- | --- |
+| 视窗守卫 | `view` 增加 `windowStart/windowEnd`；新增 `overlapsWindow()`；走势类型与中枢绘制前先判相交，窗口外直接跳过（不改 `timeIndexOf` 的吸附语义，分型/笔端点对齐仍依赖它） | 探针：`tall` 里 `trend_type` 由 6 → **0**；视觉复审："没有贯穿全高的竖直线条" |
+| 走势类型条带化 | 全高铺底（`height: plotHeight`、fill α=0.07）改为绘图区上方 **10px 窄条带**（`TREND_STRIP_HEIGHT`、fill α=0.35、圆角），保留 `data-*` 与 `attachHit` 点击选中 | 视觉复审：顶部条带"左红褐 / 右侧绿"分段清晰；可读性由 **3/5 → 5/5**、"明显的改善" |
+| 快选区间 | 顶栏加「最近 1 天 / 7 天 / 30 天」（`data-range-quick`），点击回填起止输入并复用既有"应用"逻辑 | 探针：三个按钮文本/属性正确；点 7 天 → 请求带 `start_ms&end_ms`、`bar_count=168`、渲染 **168 根**；点 1 天 → `bar_count=24`、渲染 **24 根**；状态 `pinned` |
+| 回到实时即时恢复 | 原先清空 `pinnedRange` 后要等下一次 30 秒轮询才回到实时；改为立即拉一次实时快照 | 探针：点「回到实时」后 `renderedCandles` 由 24 → **180**（实时默认窗口） |
+
+流程（OMP 派工）：
+- 工单 `dashboard-viewfix`（唯一文件 `dashboard/dashboard.js`，两件事：视窗守卫 + 快选绑定），哨兵 `GATEKEEPER_ACCEPTED dashboard-viewfix-IMPLEMENT` 写入 `.omp-logs/dashboard-viewfix.done` 后被 dispatcher 接受；队长独立复跑 `node --check` 与 11 个 focused 测试。
+- 队长自己完成：`index.html`（快选按钮 + DOM 契约）、`dashboard.css`（快选样式）、走势类型条带化、回到实时即时刷新、3 条新契约测试。
+
+质量门：`pytest tests` **178 passed**；ruff/format/mypy(55 files)/import-linter(4 kept) 全绿；公网三文件与仓库一致，探针文件已清理。
