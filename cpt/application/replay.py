@@ -46,6 +46,7 @@ from itertools import pairwise
 from pathlib import Path
 from typing import Any, Final
 
+from cpt.adapters.native_chanlun import NativeChanlunBackend
 from cpt.adapters.reference_chanlun import (
     ChanlunBackend,
     InMemoryChanlunBackend,
@@ -395,6 +396,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--input", required=True, help="Path to fixture JSON.")
     parser.add_argument(
+        "--backend",
+        choices=("fixture", "native"),
+        default="fixture",
+        help="Structure backend: fixture placeholder or CPT native domain pipeline.",
+    )
+    parser.add_argument(
         "--output",
         help=(
             "Path to write the exported schema v1 JSON payload. "
@@ -433,7 +440,8 @@ def main(argv: list[str] | None = None) -> int:
             )
             return 0
 
-        payload = replay_bars(bars, config, metadata=metadata)
+        backend = NativeChanlunBackend() if args.backend == "native" else None
+        payload = replay_bars(bars, config, backend=backend, metadata=metadata)
         # Path(parent) 确保父目录存在;复用同一序列化参数(allow_nan=False)。
         out_path = Path(args.output)
         out_path.parent.mkdir(parents=True, exist_ok=True)
