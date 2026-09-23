@@ -1,6 +1,8 @@
 /*
  * CPT Dashboard · 只读缠论复盘看板
- * 深色交易终端风格（自定义，非任何交易所品牌资源复制）。
+ * GitHub 风格（自定义，非任何交易所品牌资源复制）；亮/暗双套跟随系统偏好。
+ * 主题机制：默认作用域 = 亮色，@media (prefers-color-scheme: dark) = 暗色。
+ * 禁止 JS 开关 / localStorage / data-theme：纯 CSS 媒体查询。
  * 约束：零第三方依赖、零网络字体、零远程资源；所有色值走 CSS 变量。
  * 消费方：dashboard/index.html（class + data-testid + data-state 契约）。
  */
@@ -8,17 +10,15 @@
 /* ---------------------------------------------------------------- tokens */
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 
   /* 版面 */
   --font-sans:
-    ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "PingFang SC",
-    "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
-  --font-mono:
-    ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+    -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Noto Sans CJK SC", sans-serif;
+  --font-mono: ui-monospace, "SF Mono", "JetBrains Mono", Consolas, monospace;
   --font-size-xs: 11px;
   --font-size-sm: 12px;
-  --font-size-md: 13px;
+  --font-size-md: 14px;
   --font-size-lg: 15px;
   --font-size-xxl: 28px;
   --line-tight: 1.25;
@@ -32,64 +32,87 @@
 
   --radius-sm: 4px;
   --radius-md: 6px;
-  --radius-lg: 10px;
+  --radius-lg: 6px;
   --border-width: 1px;
 
-  --shadow-panel: 0 1px 0 rgba(0, 0, 0, 0.4), 0 8px 24px rgba(0, 0, 0, 0.28);
+  /* 阴影退役：统一改用 1px 边框分层 */
+  --shadow-panel: none;
 
-  /* 三层底色 + 边框 */
-  --color-bg: #0a0d11;
-  --color-bg-elevated: #12161c;
-  --color-surface: #171c23;
-  --color-surface-alt: #1d232b;
-  --color-border: #262d36;
-  --color-border-strong: #333c47;
-  --color-grid: #1f252d;
+  /* ---- GitHub 契约语义色：亮色（默认作用域，与 portal/app.py 同名单值）---- */
+  --bg: #ffffff;
+  --fg: #1f2328;
+  --muted: #59636e;
+  --border: #d0d7de;
+  --subtle: #f6f8fa;
+  --link: #0969da;
+  --ok: #1a7f37;
+  --bad: #cf222e;
+  --warn-bg: #fff8c5;
+  --warn-border: #bf8700;
+  --btn-bg: #f6f8fa;
+  --btn-hover: #eef1f4;
+  --code-bg: #f6f8fa;
 
-  --color-text: #e6e9ee;
-  --color-text-dim: #9aa4b2;
-  --color-text-faint: #6b7684;
+  /* ---- 三层底色 + 边框（页面→--bg，卡片/面板→--subtle，分隔→--border）---- */
+  --color-bg: #ffffff; /* = --bg */
+  --color-bg-elevated: #f6f8fa; /* = --subtle（下沉区：状态条/统计格/图表壳/事件条） */
+  --color-surface: #f6f8fa; /* = --subtle（卡片/面板/顶栏） */
+  --color-surface-alt: #f6f8fa; /* = --btn-bg（按钮/行情方向筹码底） */
+  --color-border: #d0d7de; /* = --border */
+  --color-border-strong: #afb8c1;
+  --color-grid: #eaeef2;
 
-  /* 方向色 */
-  --color-up: #16c784;
-  --color-down: #ea3943;
-  --color-flat: #9aa4b2;
+  --color-text: #1f2328; /* = --fg */
+  --color-text-dim: #59636e; /* = --muted */
+  --color-text-faint: #6e7781;
 
-  /* K 线 / 成交量占位纹理 */
-  --color-candle-up: rgba(22, 199, 132, 0.18);
-  --color-candle-down: rgba(234, 57, 67, 0.16);
-  --color-candle-wick: rgba(154, 164, 178, 0.28);
-  --color-volume-up: rgba(22, 199, 132, 0.22);
-  --color-volume-down: rgba(234, 57, 67, 0.18);
+  /* 方向色：A 股口径 红涨绿跌（亮/暗两套均不得反色） */
+  --color-up: #cf222e; /* 涨 = --bad 红系 */
+  --color-down: #1a7f37; /* 跌 = --ok 绿系 */
+  --color-flat: #59636e; /* 平 = --muted */
 
-  /* 状态色：alert / confirmed / stale / gap / loading / error */
-  --color-alert: #f0a020;
-  --color-alert-bg: rgba(240, 160, 32, 0.12);
-  --color-alert-border: rgba(240, 160, 32, 0.45);
+  /* K 线 / 成交量占位纹理（方向同上，随主题调明度/透明度） */
+  --color-candle-up: rgba(207, 34, 46, 0.18);
+  --color-candle-down: rgba(26, 127, 55, 0.16);
+  --color-candle-wick: rgba(89, 99, 110, 0.28);
+  --color-volume-up: rgba(207, 34, 46, 0.22);
+  --color-volume-down: rgba(26, 127, 55, 0.18);
 
-  --color-confirmed: #1fb6a6;
-  --color-confirmed-bg: rgba(31, 182, 166, 0.12);
-  --color-confirmed-border: rgba(31, 182, 166, 0.45);
+  /* 状态色：alert→--warn-*，confirmed→--ok，loading→--link，error/gap→--bad，
+     stale→--muted，empty→--color-text-faint */
+  --color-alert: #9a6700;
+  --color-alert-bg: #fff8c5; /* = --warn-bg */
+  --color-alert-border: #bf8700; /* = --warn-border */
 
-  --color-stale: #8b7fe8;
-  --color-stale-bg: rgba(139, 127, 232, 0.12);
-  --color-stale-border: rgba(139, 127, 232, 0.45);
+  --color-confirmed: #1a7f37; /* = --ok */
+  --color-confirmed-bg: rgba(26, 127, 55, 0.1);
+  --color-confirmed-border: rgba(26, 127, 55, 0.4);
 
-  --color-gap: #e0507a;
-  --color-gap-bg: rgba(224, 80, 122, 0.12);
-  --color-gap-border: rgba(224, 80, 122, 0.45);
+  --color-stale: #59636e; /* = --muted */
+  --color-stale-bg: rgba(89, 99, 110, 0.08);
+  --color-stale-border: rgba(89, 99, 110, 0.4);
 
-  --color-loading: #4c9be8;
-  --color-loading-bg: rgba(76, 155, 232, 0.12);
+  --color-gap: #cf222e; /* = --bad；较 error 低一档强度，用于区分缺口态 */
+  --color-gap-bg: rgba(207, 34, 46, 0.06);
+  --color-gap-border: rgba(207, 34, 46, 0.4);
 
-  --color-error: #ea3943;
-  --color-error-bg: rgba(234, 57, 67, 0.14);
-  --color-error-border: rgba(234, 57, 67, 0.5);
+  --color-loading: #0969da; /* = --link */
+  --color-loading-bg: rgba(9, 105, 218, 0.1);
 
-  --color-empty: #6b7684;
-  --color-empty-bg: rgba(107, 118, 132, 0.1);
+  --color-error: #cf222e; /* = --bad */
+  --color-error-bg: rgba(207, 34, 46, 0.1);
+  --color-error-border: rgba(207, 34, 46, 0.5);
 
-  --color-accent: #f0b90b;
+  --color-empty: #6e7781;
+  --color-empty-bg: rgba(110, 119, 129, 0.08);
+
+  --color-accent: #0969da; /* = --link（链接/主强调） */
+
+  /* 遗留变量名保留：原文件已引用但从未定义，现按语义绑定到契约 token */
+  --color-panel: #f6f8fa; /* = --btn-bg（模式切换按钮底） */
+  --color-panel-strong: #f6f8fa; /* = --subtle（十字光标浮层底） */
+  --color-text-muted: #59636e; /* = --muted */
+  --color-accent-soft: #eef1f4; /* = --btn-hover（按钮按下态底） */
 
   /* 布局骨架 */
   --topbar-height: 56px;
@@ -98,6 +121,84 @@
   --sidebar-right: 340px;
   --body-gap: var(--space-3);
   --transition-fast: 120ms ease-out;
+}
+
+/* GitHub 语义色：暗色（系统偏好驱动，纯 CSS，无开关） */
+@media (prefers-color-scheme: dark) {
+  :root {
+    color-scheme: dark;
+
+    --bg: #0d1117;
+    --fg: #e6edf3;
+    --muted: #9198a1;
+    --border: #30363d;
+    --subtle: #161b22;
+    --link: #2f81f7;
+    --ok: #3fb950;
+    --bad: #f85149;
+    --warn-bg: #2b2306;
+    --warn-border: #9e6a03;
+    --btn-bg: #21262d;
+    --btn-hover: #30363d;
+    --code-bg: #161b22;
+
+    /* 三层底色 + 边框 */
+    --color-bg: #0d1117; /* = --bg */
+    --color-bg-elevated: #161b22; /* = --subtle */
+    --color-surface: #161b22; /* = --subtle */
+    --color-surface-alt: #21262d; /* = --btn-bg */
+    --color-border: #30363d; /* = --border */
+    --color-border-strong: #484f58;
+    --color-grid: #21262d;
+
+    --color-text: #e6edf3; /* = --fg */
+    --color-text-dim: #9198a1; /* = --muted */
+    --color-text-faint: #6e7681;
+
+    /* 方向色：A 股口径 红涨绿跌（与亮色同向，只提明度） */
+    --color-up: #f85149; /* 涨 = --bad 红系 */
+    --color-down: #3fb950; /* 跌 = --ok 绿系 */
+    --color-flat: #9198a1; /* 平 = --muted */
+
+    --color-candle-up: rgba(248, 81, 73, 0.2);
+    --color-candle-down: rgba(63, 185, 80, 0.18);
+    --color-candle-wick: rgba(145, 152, 161, 0.28);
+    --color-volume-up: rgba(248, 81, 73, 0.24);
+    --color-volume-down: rgba(63, 185, 80, 0.2);
+
+    --color-alert: #d29922;
+    --color-alert-bg: #2b2306; /* = --warn-bg */
+    --color-alert-border: #9e6a03; /* = --warn-border */
+
+    --color-confirmed: #3fb950; /* = --ok */
+    --color-confirmed-bg: rgba(63, 185, 80, 0.15);
+    --color-confirmed-border: rgba(63, 185, 80, 0.4);
+
+    --color-stale: #9198a1; /* = --muted */
+    --color-stale-bg: rgba(145, 152, 161, 0.1);
+    --color-stale-border: rgba(145, 152, 161, 0.4);
+
+    --color-gap: #f85149; /* = --bad；较 error 低一档强度 */
+    --color-gap-bg: rgba(248, 81, 73, 0.08);
+    --color-gap-border: rgba(248, 81, 73, 0.35);
+
+    --color-loading: #2f81f7; /* = --link */
+    --color-loading-bg: rgba(47, 129, 247, 0.15);
+
+    --color-error: #f85149; /* = --bad */
+    --color-error-bg: rgba(248, 81, 73, 0.14);
+    --color-error-border: rgba(248, 81, 73, 0.5);
+
+    --color-empty: #6e7681;
+    --color-empty-bg: rgba(110, 118, 129, 0.12);
+
+    --color-accent: #2f81f7; /* = --link */
+
+    --color-panel: #21262d; /* = --btn-bg */
+    --color-panel-strong: #161b22; /* = --subtle */
+    --color-text-muted: #9198a1; /* = --muted */
+    --color-accent-soft: #30363d; /* = --btn-hover */
+  }
 }
 
 /* ---------------------------------------------------------------- reset */
@@ -192,7 +293,6 @@ button {
   padding: var(--space-2) var(--space-4);
   border-bottom: var(--border-width) solid var(--color-border);
   background-color: var(--color-surface);
-  box-shadow: var(--shadow-panel);
 }
 
 .topbar-nav {
@@ -206,10 +306,10 @@ button {
   padding: 2px var(--space-2);
   border-radius: var(--radius-sm);
   background-color: var(--color-accent);
-  color: #16181d;
+  color: var(--bg);
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
-  font-weight: 700;
+  font-weight: 600;
   letter-spacing: 0.08em;
 }
 
@@ -290,7 +390,7 @@ button {
   flex: 0 0 auto;
   padding: 2px var(--space-2);
   border: var(--border-width) solid var(--color-border-strong);
-  border-radius: 999px;
+  border-radius: var(--radius-sm);
   color: var(--color-text-dim);
   font-size: var(--font-size-xs);
   white-space: nowrap;
@@ -334,7 +434,7 @@ button {
 
 .badge-readonly {
   border-color: var(--color-accent);
-  background-color: rgba(240, 185, 11, 0.12);
+  background-color: var(--btn-hover);
   color: var(--color-accent);
 }
 
@@ -364,6 +464,12 @@ button {
 
 .state[hidden] {
   display: none;
+}
+
+/* ``[hidden]`` 全局兜底：覆盖任何把 display 改成 flex/grid 的规则，
+   确保 hidden 属性始终生效（DOM 子树整块折叠）。 */
+[hidden] {
+  display: none !important;
 }
 
 .state > h2 {
@@ -459,7 +565,6 @@ button {
   border: var(--border-width) solid var(--color-border);
   border-radius: var(--radius-lg);
   background-color: var(--color-surface);
-  box-shadow: var(--shadow-panel);
 }
 
 .panel-title {
@@ -646,9 +751,9 @@ button {
 .chart-legend li[data-testid="legend-zhongshu"]::before {
   width: 10px;
   height: 8px;
-  border-radius: 1px;
-  background-color: rgba(76, 155, 232, 0.35);
-  box-shadow: inset 0 0 0 1px var(--color-loading);
+  border: var(--border-width) solid var(--color-loading);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-loading-bg);
 }
 
 .chart-legend li[data-testid="legend-trend-type"]::before {
@@ -727,9 +832,6 @@ button {
   border: var(--border-width) solid var(--color-border);
   border-radius: var(--radius-sm);
   background-color: var(--color-bg);
-  background-image:
-    repeating-linear-gradient(to right, var(--color-grid) 0 1px, transparent 1px 64px),
-    repeating-linear-gradient(to bottom, var(--color-grid) 0 1px, transparent 1px 48px);
 }
 
 /* 真实图表 SVG：钉死在各自容器内，避免 viewBox 被拉伸成任意高度后溢出压到相邻区域 */
@@ -779,7 +881,7 @@ body[data-runtime-mode="offline"] .chart-canvas::after {
   position: relative;
   padding: var(--space-1) var(--space-2);
   border-radius: var(--radius-sm);
-  background-color: rgba(10, 13, 17, 0.72);
+  background-color: var(--color-surface);
   color: var(--color-text-faint);
   font-size: var(--font-size-xs);
   text-align: center;
@@ -945,7 +1047,7 @@ body[data-runtime-mode="offline"] .chart-canvas::after {
 
 .replay-controls > button:hover:not(:disabled) {
   border-color: var(--color-accent);
-  background-color: var(--color-surface);
+  background-color: var(--btn-hover);
 }
 
 .replay-controls > button:disabled {
@@ -1054,27 +1156,83 @@ noscript p {
   }
 }
 
-/* 打印：去底色，保留结构（只读报表场景） */
+/* 打印：固定亮色（系统暗色偏好下也输出白底黑字），保留结构（只读报表场景） */
 @media print {
   :root {
     color-scheme: light;
+
+    /* 与默认作用域同值：打印不跟随系统暗色偏好 */
+    --bg: #ffffff;
+    --fg: #1f2328;
+    --muted: #59636e;
+    --border: #d0d7de;
+    --subtle: #f6f8fa;
+    --link: #0969da;
+    --ok: #1a7f37;
+    --bad: #cf222e;
+    --warn-bg: #fff8c5;
+    --warn-border: #bf8700;
+    --btn-bg: #f6f8fa;
+    --btn-hover: #eef1f4;
+    --code-bg: #f6f8fa;
+
+    --color-bg: #ffffff;
+    --color-bg-elevated: #f6f8fa;
+    --color-surface: #f6f8fa;
+    --color-surface-alt: #f6f8fa;
+    --color-border: #d0d7de;
+    --color-border-strong: #afb8c1;
+    --color-grid: #eaeef2;
+    --color-text: #1f2328;
+    --color-text-dim: #59636e;
+    --color-text-faint: #6e7781;
+    --color-up: #cf222e;
+    --color-down: #1a7f37;
+    --color-flat: #59636e;
+    --color-candle-up: rgba(207, 34, 46, 0.18);
+    --color-candle-down: rgba(26, 127, 55, 0.16);
+    --color-candle-wick: rgba(89, 99, 110, 0.28);
+    --color-volume-up: rgba(207, 34, 46, 0.22);
+    --color-volume-down: rgba(26, 127, 55, 0.18);
+    --color-alert: #9a6700;
+    --color-alert-bg: #fff8c5;
+    --color-alert-border: #bf8700;
+    --color-confirmed: #1a7f37;
+    --color-confirmed-bg: rgba(26, 127, 55, 0.1);
+    --color-confirmed-border: rgba(26, 127, 55, 0.4);
+    --color-stale: #59636e;
+    --color-stale-bg: rgba(89, 99, 110, 0.08);
+    --color-stale-border: rgba(89, 99, 110, 0.4);
+    --color-gap: #cf222e;
+    --color-gap-bg: rgba(207, 34, 46, 0.06);
+    --color-gap-border: rgba(207, 34, 46, 0.4);
+    --color-loading: #0969da;
+    --color-loading-bg: rgba(9, 105, 218, 0.1);
+    --color-error: #cf222e;
+    --color-error-bg: rgba(207, 34, 46, 0.1);
+    --color-error-border: rgba(207, 34, 46, 0.5);
+    --color-empty: #6e7781;
+    --color-empty-bg: rgba(110, 119, 129, 0.08);
+    --color-accent: #0969da;
+    --color-panel: #f6f8fa;
+    --color-panel-strong: #f6f8fa;
+    --color-text-muted: #59636e;
+    --color-accent-soft: #eef1f4;
   }
 
   body {
     padding: 0;
-    background-color: #ffffff;
-    color: #16181d;
+    background-color: var(--color-bg);
+    color: var(--color-text);
   }
 
   .topbar {
     position: static;
-    box-shadow: none;
   }
 
   .panel,
   .state,
   .dashboard-footer {
-    box-shadow: none;
     break-inside: avoid;
   }
 }
@@ -1114,7 +1272,6 @@ noscript p {
   color: var(--color-text);
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
-  color-scheme: dark;
 }
 
 .time-range .range-sep {
@@ -1125,7 +1282,7 @@ noscript p {
   padding: 1px var(--space-2);
   border: var(--border-width) solid var(--color-border);
   border-radius: var(--radius-sm);
-  background-color: var(--color-surface);
+  background-color: var(--btn-bg);
   color: var(--color-text);
   font-size: var(--font-size-xs);
   cursor: pointer;

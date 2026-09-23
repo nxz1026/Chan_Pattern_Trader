@@ -57,7 +57,7 @@ def build_dashboard_snapshot_v2(
         "available": False,
         "reason": "upstream_aggregate_unavailable",
     }
-    v2["reproducibility"] = reproducibility_metadata(v1, config=config)
+    v2["reproducibility"] = reproducibility_metadata(v2, config=config)
     v2["parity"] = parity or {"available": False, "reason": "oracle_reference_unavailable"}
     v2["runs"] = []
     v2["multi_level"] = multi_level or {

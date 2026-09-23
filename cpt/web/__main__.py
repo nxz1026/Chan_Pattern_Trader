@@ -65,6 +65,7 @@ def demo_snapshot(symbol: str, interval: str) -> dict[str, Any]:
             "symbol": symbol,
             "interval": interval,
             "status": "empty",
+            "generated_at": _time.time() * 1000,
         },
     )
     snapshot["market"]["symbol"] = symbol
@@ -215,6 +216,7 @@ def _snapshot_from_bars(
             "buffer_size": len(bars),
             "window_size": len(bars),
             "status": status,
+            "generated_at": _time.time() * 1000,
         },
     )
     snapshot["market"]["symbol"] = symbol
@@ -344,6 +346,7 @@ class _FixtureProvider:
                 "buffer_size": len(self._bars),
                 "window_size": len(self._bars),
                 "status": "confirmed",
+                "generated_at": _time.time() * 1000,
             },
         )
         snapshot["market"]["symbol"] = self._symbol
@@ -603,6 +606,7 @@ class _RealtimeProvider:
                 "window_size": len(bars),
                 "status": "confirmed",
                 "stale": False,
+                "generated_at": _time.time() * 1000,
             },
         )
         snapshot["market"]["symbol"] = self._symbol

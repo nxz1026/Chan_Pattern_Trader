@@ -14,7 +14,7 @@
  *   window.CPTDashboard.clear()               → 回到 empty 状态
  *   window.CPTDashboard.getSnapshot()         → 当前 snapshot
  *   window.CPTDashboard.getSelection()        → 当前选中结构 payload
- *   window.CPTDashboard.schemaVersion         → "dashboard.v1"
+ *   window.CPTDashboard.schemaVersion         → "dashboard.v2"
  * 事件：cpt:dashboard-ready / cpt:structure-selected
  *
  * 数据流：snapshot → 归一化 → 像素布局（实测容器尺寸）→ SVG 元素；
@@ -25,7 +25,7 @@
   "use strict";
 
   const SVG_NS = "http://www.w3.org/2000/svg";
-  const SCHEMA_VERSION = "dashboard.v1";
+  const SCHEMA_VERSION = "dashboard.v2";
   const MS_PER_MINUTE = 60000;
   const RUNTIME_STYLE_ID = "cpt-dashboard-runtime-style";
   /* 默认只渲染最后 180 根：600 根平铺进约 670px 会把蜡烛压成 1px 发丝线，无法判读。 */
@@ -61,7 +61,7 @@
    */
   const DEMO_FIXTURE_JSON = `
 {
-  "schema_version": "dashboard.v1",
+  "schema_version": "dashboard.v2",
   "market": {"symbol": "DEMOUSDT", "interval_ms": 300000, "last_price": 60345.0, "first_open_time": 1756000000000, "last_open_time": 1756008700000, "bar_count": 30},
   "candles": [
     {"open_time": 1756000000000, "open": 60000.0, "high": 60118.0, "low": 59992.0, "close": 60110.0, "volume": 67.5, "close_time": 1756000299999, "quote_volume": 2400000.0, "trade_count": 120, "taker_buy_base_volume": 18.0, "taker_buy_quote_volume": 1100000.0, "is_closed": true, "direction": 1},
@@ -366,7 +366,21 @@
 
     const firstOpen = num(market.first_open_time);
     const lastOpen = num(market.last_open_time);
-    setText("[data-testid=topbar-updated-at]", formatDateTime(lastOpen));
+    // 更新时间读 snapshot 的生成时刻（runtime.generated_at），不是 K 线窗口起点；
+    // 这样 30s 轮询时显示会真实滚动，反映 snapshot 何时被生成。
+    const generatedAt = num(runtime.generated_at) || num(snapshot && snapshot.reproducibility && snapshot.reproducibility.generated_at);
+    const updatedNode = setText(
+      "[data-testid=topbar-updated-at]",
+      generatedAt !== null ? formatDateTime(generatedAt) : "—",
+    );
+    if (updatedNode) {
+      updatedNode.setAttribute(
+        "title",
+        generatedAt !== null
+          ? "snapshot 生成时刻（runtime.generated_at）"
+          : "上游未注入 generated_at 时间戳",
+      );
+    }
     setText("[data-testid=market-time-range]", firstOpen === null || lastOpen === null
       ? "—"
       : `${formatDateTime(firstOpen)} → ${formatDateTime(lastOpen)}`);
@@ -536,6 +550,11 @@
       "aria-live": "polite",
       "data-state": "none",
     });
+    const guide = createHtml("p", {
+      "data-testid": "structure-selection-guide",
+      class: "cpt-selection-guide",
+    });
+    guide.textContent = "尚未选中结构。点击 K 线上的分型/笔/笔中枢/走势类型后此处显示详情。";
     const list = createHtml("dl", { class: "kv" });
     const rows = [
       ["selection-testid", "selection-kind", "kind"],
@@ -554,7 +573,9 @@
     });
     section.appendChild(title);
     section.appendChild(status);
+    section.appendChild(guide);
     section.appendChild(list);
+    section.dataset.hasSelection = "false";
     panel.appendChild(section);
   }
 
@@ -707,11 +728,11 @@
     while (section.children.length > 1) section.removeChild(section.lastChild);
     const runs = isObject(snapshot) && Array.isArray(snapshot.runs) ? snapshot.runs : [];
     if (!runs.length) {
-      const item = document.createElement("p");
-      item.textContent = "当前 snapshot 未包含 runs 索引";
-      section.appendChild(item);
+      // 空索引直接整块折叠，避免反复展示"暂无"占位
+      section.hidden = true;
       return;
     }
+    section.hidden = false;
     const list = document.createElement("ul");
     runs.forEach((entry) => {
       const row = document.createElement("li");
@@ -735,7 +756,13 @@
     }
     while (section.children.length > 1) section.removeChild(section.lastChild);
     const signal = snapshot && isObject(snapshot.signal) ? snapshot.signal : null;
-    const text = signal ? `当前：${signal.status || "unknown"} · 背驰：${signal.divergence_status || "unknown"}` : "暂无信号统计";
+    if (!signal || !signal.status) {
+      // 没有一买信号时整块折叠，避免"暂无信号统计"占位
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    const text = `当前：${signal.status || "unknown"} · 背驰：${signal.divergence_status || "unknown"}`;
     const summary = document.createElement("p");
     summary.textContent = text;
     section.appendChild(summary);
@@ -807,13 +834,18 @@
     }
     while (section.children.length > 1) section.removeChild(section.lastChild);
     const events = snapshot && Array.isArray(snapshot.events) ? snapshot.events : [];
+    if (!events.length) {
+      // 空事件列表整块折叠
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
     const list = document.createElement("ul");
     events.slice(-20).forEach((event) => {
       const item = document.createElement("li");
       item.textContent = `${event.event_type || "event"} · ${event.structure_id || "—"} · rev ${event.revision ?? "—"}`;
       list.appendChild(item);
     });
-    if (!list.children.length) list.appendChild(document.createElement("li")).textContent = "暂无事件";
     section.appendChild(list);
   }
 
@@ -831,8 +863,13 @@
     }
     while (section.children.length > 1) section.removeChild(section.lastChild);
     const signal = snapshot && isObject(snapshot.signal) ? snapshot.signal : null;
+    if (!signal || !signal.status) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
     const row = document.createElement("p");
-    row.textContent = signal ? `${signal.signal_id || "signal"} · ${signal.status || "none"} · ${signal.divergence_status || "—"}` : "暂无信号历史";
+    row.textContent = `${signal.signal_id || "signal"} · ${signal.status || "none"} · ${signal.divergence_status || "—"}`;
     section.appendChild(row);
   }
 
@@ -1048,12 +1085,18 @@
   function renderSelection() {
     ensureSelectionSection();
     const status = q("[data-testid=structure-selection-status]");
+    const guide = q("[data-testid=structure-selection-guide]");
+    const list = q("[data-testid=structure-selection] dl");
+    const section = q("[data-testid=structure-selection]");
     const payload = state.selection;
     if (!payload) {
       if (status) {
         status.textContent = "未选中：点击图中分型 / 笔 / 中枢 / 走势类型 / K 线查看结构详情。";
         status.setAttribute("data-state", "none");
       }
+      if (guide) guide.hidden = false;
+      if (list) list.hidden = true;
+      if (section) section.dataset.hasSelection = "false";
       [
         "selection-kind",
         "selection-level",
@@ -1067,6 +1110,9 @@
       renderResearchDetails(null);
       return;
     }
+    if (guide) guide.hidden = true;
+    if (list) list.hidden = false;
+    if (section) section.dataset.hasSelection = "true";
     if (status) {
       status.textContent = selectionText(payload);
       status.setAttribute("data-state", payload.state);
