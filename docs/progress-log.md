@@ -682,3 +682,16 @@ M4 数据/回放和 M5 实时基础链路已完成；下一阶段进行 M6 质�
 - `docs/implementation-plan.md` 已更新 M0-M6 当前状态和后续限制收敛路线。
 
 M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保留人工 fixture 时间契约、背驰计算、实时性能优化和 M-LLM 未实现等限制，不宣称生产级完成。
+
+## 27. Dashboard D0-D1（2026-09-23）
+
+- 新增 `docs/dashboard-plan.md`，冻结 Dashboard D0-D6 实施路线。
+- D0 盘点确认仓库当前无 `package.json`、Vite/React 或现成 HTTP 服务；先采用纯 Python application service，不引入 Web 框架。
+- 新增 `cpt/application/dashboard.py`：稳定只读 `DashboardSnapshot` 构造与 `dashboard_json()`。
+- snapshot 顶层包含 schema_version、market、candles、overlays、signal、events、data_quality、runtime。
+- 新增 `tests/test_dashboard.py`：2 个 focused 用例，验证 schema、未收盘质量状态和重复序列化稳定性。
+- D1 focused：**2 passed**；全量：**109 passed**。
+- ruff：**All checks passed**；format：**48 files already formatted**。
+- mypy：**28 source files**；import-linter：**5 contracts kept, 0 broken**。
+- `git diff --check`：通过。
+

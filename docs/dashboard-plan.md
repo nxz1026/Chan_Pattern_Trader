@@ -142,8 +142,17 @@ git diff --check
 
 ## 4. 当前状态
 
-- D0：本文件落地，待补现有 Web 基础盘点结果。
-- D1-D6：未开始。
+- D0：已完成。仓库当前为纯 Python CPT，没有 `package.json`、Vite、React 或现成 HTTP 服务；因此先交付可被未来 HTTP 层调用的 application service，不引入 Web 框架。
+- D1：已完成基础 snapshot service，见 `cpt/application/dashboard.py`；暂未创建 HTTP server。
+- D2-D6：未开始。
+
+D1 当前契约入口：
+
+```python
+from cpt.application.dashboard import build_dashboard_snapshot, dashboard_json
+```
+
+该入口可消费 CanonicalBar、Fractal、Bi、ZhongShu、TrendType、Signal 和 StructureEvent，输出稳定的 `dashboard.v1` JSON-compatible snapshot。
 
 ## 5. 后续限制
 
