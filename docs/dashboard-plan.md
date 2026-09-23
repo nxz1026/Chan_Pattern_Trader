@@ -146,7 +146,8 @@ git diff --check
 - D1：已完成基础 snapshot service，见 `cpt/application/dashboard.py`；暂未创建 HTTP server。
 - D2：已完成静态页面骨架、深色终端布局、响应式状态样式和无第三方 SVG 图表容器。
 - D3：已完成手写 SVG K 线、成交量、分型、笔、中枢和走势类型叠加；支持点击结构查看详情。
-- D4-D6：未开始。
+- D4：已完成离线事件时间线与播放/暂停/单步/重置/跳转控制。
+- D5-D6：未开始。
 
 D1 当前契约入口：
 
