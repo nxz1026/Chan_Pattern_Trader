@@ -46,6 +46,15 @@
           <dt>周期</dt>
           <dd data-testid="topbar-interval" data-field="market.interval_ms">5m</dd>
         </div>
+        <div class="meta-item interval-picker">
+          <dt>切换周期</dt>
+          <dd><select data-testid="interval-select" aria-label="切换周期">
+            <option value="60000">1m</option>
+            <option value="300000" selected>5m</option>
+            <option value="900000">15m</option>
+            <option value="3600000">1h</option>
+          </select></dd>
+        </div>
         <div class="meta-item">
           <dt>数据来源</dt>
           <dd data-testid="topbar-source" data-field="runtime.data_source">fixture（离线演示）</dd>

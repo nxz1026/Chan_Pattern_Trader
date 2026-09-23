@@ -1339,6 +1339,18 @@
 
   /* ------------------------------------------------------------ 生命周期 */
 
+  function installIntervalSwitch() {
+    const select = q("[data-testid=interval-select]");
+    if (!select) return;
+    select.addEventListener("change", () => {
+      const labels = { "60000": "1m", "300000": "5m", "900000": "15m", "3600000": "1h" };
+      const label = labels[select.value] || select.value;
+      setText("[data-testid=topbar-interval]", label);
+      root.dataset.intervalMs = select.value;
+      root.dispatchEvent(new CustomEvent("cpt:interval-changed", { detail: { intervalMs: Number(select.value), label } }));
+    });
+  }
+
   function installModeSwitch() {
     root.dataset.mode = state.mode;
     root.querySelectorAll("[data-mode-action]").forEach((button) => {
@@ -1563,6 +1575,7 @@
   function boot() {
     installRuntimeStyle();
     installModeSwitch();
+    installIntervalSwitch();
     installCrosshair();
     ensureSelectionSection();
     installReplayControls();
