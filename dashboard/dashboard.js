@@ -131,12 +131,12 @@
 
   const state = {
     snapshot: null,
+    fullSnapshot: null,
     selection: null,
     selectedNode: null,
     drawPending: false,
     replayIndex: null,
     replayTimer: null,
-    replay: { ready: false },
     pollTimer: null,
     staleTimer: null,
     snapshotUrl: null,
@@ -2434,10 +2434,16 @@
     document.head.appendChild(style);
   }
 
-  function render(snapshot) {
+  function render(snapshot, options = {}) {
+    // 回放渲染（options.replay=true）只替换"当前展示"的 state.snapshot，
+    // 不能覆盖权威全量快照、也不能重置回放指针——否则回放会自我吞噬。
+    const isReplay = options && options.replay === true;
     state.snapshot = isObject(snapshot) ? snapshot : null;
-    state.replayIndex = state.snapshot ? asArray(state.snapshot.candles).length : null;
-    renderReplayControls(state.snapshot);
+    if (!isReplay) {
+      state.fullSnapshot = state.snapshot;
+      state.replayIndex = state.snapshot ? asArray(state.snapshot.candles).length : null;
+    }
+    renderReplayControls();
     state.selection = null;
     state.selectedNode = null;
     renderChrome(state.snapshot);
@@ -2460,21 +2466,37 @@
     return state.snapshot;
   }
 
-  function renderReplayControls(snapshot) {
-    const count = snapshot ? asArray(snapshot.candles).length : 0;
+  function renderReplayControls() {
+    // 进度分母取权威全量快照（回放时 state.snapshot 已被切成前缀）
+    const full = state.fullSnapshot || state.snapshot;
+    const count = full ? asArray(full.candles).length : 0;
     const index = state.replayIndex == null ? 0 : state.replayIndex;
     setText("[data-testid=replay-progress]", `${index} / ${count}`);
-    const runtime = snapshot && isObject(snapshot.runtime) ? snapshot.runtime : {};
+    const runtime = full && isObject(full.runtime) ? full.runtime : {};
     setText("[data-testid=replay-window-size]", runtime.window_size == null ? count : runtime.window_size);
     setState(setText("[data-testid=replay-truncated]", runtime.truncated === true ? "true" : "false"), runtime.truncated === true ? "true" : "false");
-    // D4 回放状态机尚未接线：所有按钮在此之前一律 disabled，避免误操作。
-    // 当状态机准备好时把 ``state.replay.ready`` 置 true 即可放开。
-    const ready = state.replay && state.replay.ready === true;
+    // D4 回放状态机已接通：play / pause / step / reset / seek 全部可用。
+    // - 播放中：只留 pause 可点（step/reset/seek 跳帧会乱）
+    // - 非播放中：全部可点；play 在末尾仍可用，点击自动从第 1 根重播
+    const isPlaying = state.replayTimer !== null;
     root.querySelectorAll("[data-replay-action]").forEach((button) => {
-      button.disabled = !(ready && count > 0);
-      button.setAttribute("aria-disabled", button.disabled ? "true" : "false");
-      if (button.disabled) button.setAttribute("title", "回放状态机尚未接线（D4）");
-      else button.removeAttribute("title");
+      const action = button.dataset.replayAction;
+      const disabled = isPlaying ? action !== "pause" : count === 0;
+      button.disabled = disabled;
+      button.setAttribute("aria-disabled", disabled ? "true" : "false");
+      if (disabled) {
+        button.setAttribute("title", isPlaying ? "回放进行中，先「暂停」" : "等待 snapshot 加载");
+      } else {
+        const atEnd = index >= count && count > 0;
+        const titles = {
+          play: atEnd ? "从头重播" : "开始回放",
+          pause: "暂停回放",
+          step: "前进 1 根 K 线",
+          reset: "回到第 1 根 K 线",
+          seek: "跳到末根 K 线",
+        };
+        button.setAttribute("title", titles[action] || "");
+      }
     });
   }
 
@@ -2498,7 +2520,8 @@
   }
 
   function replayPrefix(index) {
-    const snapshot = state.snapshot;
+    // 始终从权威全量快照切片（不能用 state.snapshot——回放时它已是前缀）
+    const snapshot = state.fullSnapshot || state.snapshot;
     if (!snapshot) return null;
     const candles = asArray(snapshot.candles);
     const prefix = Math.max(0, Math.min(index, candles.length));
@@ -2513,12 +2536,12 @@
   }
 
   function applyReplay(index) {
-    if (!state.snapshot) return;
-    state.replayIndex = Math.max(0, Math.min(index, asArray(state.snapshot.candles).length));
+    const full = state.fullSnapshot || state.snapshot;
+    if (!full) return;
+    const count = asArray(full.candles).length;
+    state.replayIndex = Math.max(0, Math.min(index, count));
     const next = replayPrefix(state.replayIndex);
-    render(next);
-    renderEvents(next);
-    renderReplayControls(state.snapshot);
+    render(next, { replay: true });
   }
 
   function stopPolling() {
@@ -2553,15 +2576,27 @@
     root.querySelectorAll("[data-replay-action]").forEach((button) => {
       button.addEventListener("click", () => {
         const action = button.dataset.replayAction;
-        const count = state.snapshot ? asArray(state.snapshot.candles).length : 0;
+        const full = state.fullSnapshot || state.snapshot;
+        const count = full ? asArray(full.candles).length : 0;
         if (action === "play") {
+          // 若已到末尾，先回到起点
+          if ((state.replayIndex ?? 0) >= count) {
+            applyReplay(0);
+          }
           stopReplay();
           state.replayTimer = window.setInterval(() => {
-            if ((state.replayIndex ?? 0) >= count) return stopReplay();
+            if ((state.replayIndex ?? 0) >= count) {
+              stopReplay();
+              renderReplayControls();
+              return;
+            }
             applyReplay((state.replayIndex ?? 0) + 1);
           }, 250);
-        } else if (action === "pause") stopReplay();
-        else if (action === "step") applyReplay((state.replayIndex ?? 0) + 1);
+          renderReplayControls();
+        } else if (action === "pause") {
+          stopReplay();
+          renderReplayControls();
+        } else if (action === "step") applyReplay((state.replayIndex ?? 0) + 1);
         else if (action === "reset") applyReplay(0);
         else if (action === "seek") applyReplay(count);
       });
