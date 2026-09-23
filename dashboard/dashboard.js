@@ -134,6 +134,9 @@
     drawPending: false,
     replayIndex: null,
     replayTimer: null,
+    pollTimer: null,
+    staleTimer: null,
+    snapshotUrl: null,
   };
 
   /* ------------------------------------------------------------ DOM 基础 */
@@ -1286,6 +1289,26 @@
     renderReplayControls(state.snapshot);
   }
 
+  function stopPolling() {
+    if (state.pollTimer !== null) {
+      window.clearInterval(state.pollTimer);
+      state.pollTimer = null;
+    }
+    if (state.staleTimer !== null) {
+      window.clearTimeout(state.staleTimer);
+      state.staleTimer = null;
+    }
+  }
+
+  function startPolling(url, intervalMs = 5000) {
+    stopPolling();
+    state.snapshotUrl = url;
+    state.pollTimer = window.setInterval(() => {
+      loadSnapshot(url).catch(() => undefined);
+    }, Math.max(1000, Number(intervalMs) || 5000));
+    return state.pollTimer;
+  }
+
   function stopReplay() {
     if (state.replayTimer !== null) {
       window.clearInterval(state.replayTimer);
@@ -1335,6 +1358,12 @@
       render(snapshot);
       setHidden("[data-testid=state-error]", true);
       setConnection("live", `已加载 snapshot：${url}`);
+      if (state.staleTimer !== null) window.clearTimeout(state.staleTimer);
+      state.staleTimer = window.setTimeout(() => {
+        root.dataset.connection = "stale";
+        setState(setText("[data-testid=topbar-status]", "stale"), "stale");
+        setHidden("[data-testid=state-stale]", false);
+      }, 15000);
       return snapshot;
     } catch (error) {
       // 与 D2 行为一致：错误只体现在状态区，不向调用方抛出。
@@ -1398,6 +1427,8 @@
     clear,
     getSnapshot: () => state.snapshot,
     getSelection: () => state.selection,
+    startPolling,
+    stopPolling,
   };
 
   boot();
