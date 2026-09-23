@@ -782,3 +782,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - 新增 `cpt/domain/containment_trace.py`：将 merged bar 的 source_indices 转换为稳定的包含/合并决策记录。
 - 新增 focused 测试，研究模式可以从 raw bar 解释到 merged bar 的决策链。
+
+## 41. Dashboard 盯盘指标服务（2026-09-24）
+
+- 新增 `cpt/application/dashboard_indicators.py`：基于 RulesConfig 的确定性 EMA/MACD 只读序列。
+- 新增 focused 测试，确认长度、字段和重复运行稳定。
