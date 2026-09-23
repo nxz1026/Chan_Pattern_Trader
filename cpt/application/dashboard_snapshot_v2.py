@@ -29,6 +29,7 @@ def build_dashboard_snapshot_v2(
     status: str = "confirmed",
     data_source: str = "fixture",
     parity: dict[str, Any] | None = None,
+    market_24h: dict[str, Any] | None = None,
     runtime: dict[str, object] | None = None,
 ) -> dict[str, Any]:
     """Compose v2 while retaining all stable v1 fields."""
@@ -49,6 +50,10 @@ def build_dashboard_snapshot_v2(
     v2: dict[str, Any] = dict(v1)
     v2["schema_version"] = SCHEMA_VERSION
     v2["indicators"] = {"macd": list(macd_series(bars, config))}
+    v2["market_24h"] = market_24h or {
+        "available": False,
+        "reason": "upstream_aggregate_unavailable",
+    }
     v2["reproducibility"] = reproducibility_metadata(v1, config=config)
     v2["parity"] = parity or {"fractals": {}, "bis": {}, "zhongshus": {}}
     v2["runs"] = []

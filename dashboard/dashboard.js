@@ -386,11 +386,12 @@
       last && previous ? directionState(trendDirection) : "flat",
     );
 
-    // dashboard.v1 不提供 24h 聚合，保持 "—" 并说明来源，不伪造区间统计。
-    const high24 = setText("[data-testid=market-high-24h]", "—");
-    if (high24) high24.setAttribute("title", "dashboard.v1 snapshot 未提供 24h 聚合字段");
-    const low24 = setText("[data-testid=market-low-24h]", "—");
-    if (low24) low24.setAttribute("title", "dashboard.v1 snapshot 未提供 24h 聚合字段");
+    const market24h = isObject(snapshot) && isObject(snapshot.market_24h) ? snapshot.market_24h : null;
+    const market24hAvailable = market24h && market24h.available === true;
+    const high24 = setText("[data-testid=market-high-24h]", market24hAvailable ? formatPrice(market24h.high) : "不可用");
+    if (high24) high24.setAttribute("title", market24hAvailable ? "上游 24h 聚合" : "上游未提供真实 24h 聚合");
+    const low24 = setText("[data-testid=market-low-24h]", market24hAvailable ? formatPrice(market24h.low) : "不可用");
+    if (low24) low24.setAttribute("title", market24hAvailable ? "上游 24h 聚合" : "上游未提供真实 24h 聚合");
     const totalVolume = candles.reduce((sum, bar) => sum + (bar.volume === null ? 0 : bar.volume), 0);
     const volumeNode = setText("[data-testid=market-volume]", candles.length ? formatVolume(totalVolume) : "—");
     if (volumeNode && candles.length) {
