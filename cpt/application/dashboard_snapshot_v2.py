@@ -9,6 +9,7 @@ from typing import Any
 from cpt.application.dashboard import build_dashboard_snapshot
 from cpt.application.dashboard_indicators import macd_series
 from cpt.application.dashboard_reproducibility import reproducibility_metadata
+from cpt.application.dashboard_runtime import runtime_panel
 from cpt.domain.config import RulesConfig
 from cpt.domain.models import Bi, CanonicalBar, Fractal, Signal, StructureEvent, TrendType, ZhongShu
 
@@ -59,6 +60,7 @@ def build_dashboard_snapshot_v2(
     v2["runs"] = []
     runtime_v1 = v1["runtime"] if isinstance(v1["runtime"], dict) else {}
     v2["runtime"] = {**runtime_v1, "mode": mode, "status": status, "data_source": data_source}
+    v2["engine_state"] = runtime_panel(v2["runtime"])
     v2["summary"] = {
         "structure_counts": {
             "fractals": len(fractals),
