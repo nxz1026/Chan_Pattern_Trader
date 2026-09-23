@@ -792,3 +792,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - 新增 `cpt/application/dashboard_snapshot_v2.py`，在兼容 dashboard.v1 字段基础上加入 reproducibility、MACD indicators、parity、runs 和 summary。
 - 新增 v2 focused 测试，确认稳定 hash、v1 字段保留和指标长度一致。
+
+## 43. Dashboard 盯盘数据真实性边界（2026-09-24）
+
+- 新增 `cpt/application/dashboard_watch.py`：窗口涨跌幅、窗口高低和成交量投影。
+- 在没有真实 24h 聚合数据源时显式返回 `24h: None`，不再把窗口值冒充 24h 数据。
