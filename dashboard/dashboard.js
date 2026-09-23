@@ -559,6 +559,31 @@
     panel.appendChild(section);
   }
 
+  function renderLevelTree(snapshot) {
+    const panel = q("[data-testid=structure-panel]");
+    if (!panel) return;
+    let section = q("[data-testid=level-tree]");
+    if (!section) {
+      section = document.createElement("section");
+      section.dataset.testid = "level-tree";
+      const heading = document.createElement("h3");
+      heading.textContent = "级别递归";
+      section.appendChild(heading);
+      panel.appendChild(section);
+    }
+    while (section.children.length > 1) section.removeChild(section.lastChild);
+    const items = Object.values(normalizeOverlays(snapshot && snapshot.overlays)).flat();
+    const levels = [...new Set(items.map((item) => item.level).filter((level) => Number.isInteger(level)))].sort((a, b) => a - b);
+    const list = document.createElement("ul");
+    levels.forEach((level) => {
+      const item = document.createElement("li");
+      item.textContent = `level ${level} · ${items.filter((entry) => entry.level === level).length} elements`;
+      list.appendChild(item);
+    });
+    if (!list.children.length) list.appendChild(document.createElement("li")).textContent = "暂无级别结构";
+    section.appendChild(list);
+  }
+
   function renderEventAudit(snapshot) {
     const panel = q("[data-testid=event-panel]");
     if (!panel) return;
@@ -789,6 +814,7 @@
     setText("[data-testid=selection-source-ids]", payload.sourceIds.join(" ") || "—");
     root.dataset.selection = payload.kind;
     renderResearchDetails(payload);
+    renderLevelTree(state.snapshot);
     renderLocalNote(payload);
     renderParity(state.snapshot);
     renderParityCharts(state.snapshot);
@@ -1534,6 +1560,7 @@
     renderEventAudit(state.snapshot);
     installSliceExport();
     renderStructureDefaults(state.snapshot);
+    renderLevelTree(state.snapshot);
     renderSelection();
     drawChart();
     return state.snapshot;
