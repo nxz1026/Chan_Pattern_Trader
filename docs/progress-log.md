@@ -787,3 +787,8 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - 新增 `cpt/application/dashboard_indicators.py`：基于 RulesConfig 的确定性 EMA/MACD 只读序列。
 - 新增 focused 测试，确认长度、字段和重复运行稳定。
+
+## 42. Dashboard v2 契约组合（2026-09-24）
+
+- 新增 `cpt/application/dashboard_snapshot_v2.py`，在兼容 dashboard.v1 字段基础上加入 reproducibility、MACD indicators、parity、runs 和 summary。
+- 新增 v2 focused 测试，确认稳定 hash、v1 字段保留和指标长度一致。
