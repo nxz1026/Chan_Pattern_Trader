@@ -945,3 +945,10 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - 只读 HTTP adapter 新增 `/api/dashboard/market-24h` 和 `/api/dashboard/engine-state`。
 - focused 测试覆盖五组 research/market 路由及只读边界。
+
+## 70. Dashboard 新目标最终验收（2026-10-20）
+
+- 完成 HTTP 七组只读 GET 路由：snapshot、health、reproducibility、parity、runs、market-24h、engine-state。
+- 完成 Chromium ARM64 下载、PATH 链接和真实 headless smoke 矩阵。
+- 完成 parity 双 SVG、差异选择、跨图时间锚点、24h 契约、多交易对选择/实时刷新/提醒、配置 diff、研究增强。
+- 本轮最终全量：**206 passed**；Chromium smoke：**2 passed**；质量门全部通过。

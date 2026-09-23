@@ -60,12 +60,12 @@ node --check dashboard/dashboard.js
 git diff --check
 ```
 
-验收结果：全部通过；当前测试总数为 152 passed。
+验收结果：全部通过；当前测试总数为 206 passed，另有真实 Chromium headless smoke 2 passed。
 
 ## 已知边界
 
 - parity 已完成标准化结果服务、summary、双 SVG 逐元素绘制、键盘/鼠标差异选择、定位字段展示和 `cpt:parity-selected` 事件；定位通过 item 的 `start_time`/`bar_index` 字段保留；
 - 真实 24h 统计契约已落地：由上游注入完整聚合时显示，否则明确为 unavailable，不从窗口数据推导冒充；
 - 已安装 Chromium 153.0.8010.12 ARM64 至 `$HOME/.local/bin/chromium`；真实 headless dump-dom smoke 已通过，复杂交互仍由静态契约覆盖；
-- HTTP adapter 现提供 snapshot、health、reproducibility、parity、runs 五组只读 GET 路由；
-- 已提供标准库只读 HTTP adapter：`/api/dashboard/snapshot`、`/api/dashboard/health`；不提供任何写接口。
+- HTTP adapter 现提供 snapshot、health、reproducibility、parity、runs、market-24h、engine-state 七组只读 GET 路由；
+- 已提供标准库只读 HTTP adapter；不提供任何写接口。
