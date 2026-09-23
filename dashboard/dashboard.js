@@ -533,6 +533,30 @@
     return `已选中 ${payload.kind}`;
   }
 
+  function renderEventAudit(snapshot) {
+    const panel = q("[data-testid=event-panel]");
+    if (!panel) return;
+    let section = q("[data-testid=event-audit]");
+    if (!section) {
+      section = document.createElement("section");
+      section.dataset.testid = "event-audit";
+      const heading = document.createElement("h3");
+      heading.textContent = "事件审计";
+      section.appendChild(heading);
+      panel.appendChild(section);
+    }
+    while (section.children.length > 1) section.removeChild(section.lastChild);
+    const events = snapshot && Array.isArray(snapshot.events) ? snapshot.events : [];
+    const list = document.createElement("ul");
+    events.slice(-20).forEach((event) => {
+      const item = document.createElement("li");
+      item.textContent = `${event.event_type || "event"} · ${event.structure_id || "—"} · rev ${event.revision ?? "—"}`;
+      list.appendChild(item);
+    });
+    if (!list.children.length) list.appendChild(document.createElement("li")).textContent = "暂无事件";
+    section.appendChild(list);
+  }
+
   function renderSignalHistory(snapshot) {
     const panel = q("[data-testid=event-panel]");
     if (!panel) return;
@@ -702,6 +726,7 @@
     renderLocalNote(payload);
     renderParity(state.snapshot);
     renderSignalHistory(state.snapshot);
+    renderEventAudit(state.snapshot);
 
     if (payload.kind === "bi") renderBiSection(payload.raw);
     if (payload.kind === "zhongshu") {
@@ -1425,6 +1450,7 @@
     renderEvents(state.snapshot);
     renderParity(state.snapshot);
     renderSignalHistory(state.snapshot);
+    renderEventAudit(state.snapshot);
     renderStructureDefaults(state.snapshot);
     renderSelection();
     drawChart();
