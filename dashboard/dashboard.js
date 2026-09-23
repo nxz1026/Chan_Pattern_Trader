@@ -142,6 +142,7 @@
     snapshotUrl: null,
     notificationPermission: "default",
     lastAlertSignature: "",
+    lastAlertDetail: null,
     mode: new URLSearchParams(window.location.search).get("mode") || "research",
     level: null,
     crosshair: null,
@@ -2044,13 +2045,44 @@
     installBrowserAlerts(alert);
     root.addEventListener("cpt:realtime-updated", (event) => {
       const detail = event.detail || {};
-      if (alert) {
-        alert.textContent = detail.triggered ? `信号提醒：${detail.currentStatus || "alert"}` : "无新信号提醒";
-        alert.dataset.state = detail.triggered ? "alert" : "idle";
+      if (!alert) return;
+      if (detail.triggered) state.lastAlertDetail = detail;
+      // 保留最近一次提醒：后端只在状态切换那一轮带上 alerts，
+      // 后续轮询 alerts 为空，不能因此把已显示的提醒刷回 idle。
+      const shown = state.lastAlertDetail;
+      if (shown) {
+        alert.textContent = `信号提醒：${shown.currentStatus || "alert"}`;
+        alert.dataset.state = "alert";
+        if (shown.at != null) alert.setAttribute("data-alert-at", String(shown.at));
+      } else {
+        alert.textContent = "无新信号提醒";
+        alert.dataset.state = "idle";
+        alert.removeAttribute("data-alert-at");
       }
     });
     new MutationObserver(syncOffline).observe(root, { attributes: true, attributeFilter: ["data-runtime-mode"] });
     syncOffline();
+  }
+
+  // 消费 snapshot.alerts（后端 _RealtimeProvider 仅在信号状态切换那一轮填充）
+  // 并转成 ``cpt:realtime-updated`` 事件——这是通知/蜂鸣/文案的唯一触发源。
+  function syncAlerts(snapshot) {
+    const alerts = snapshot && Array.isArray(snapshot.alerts) ? snapshot.alerts : [];
+    const first = alerts.find((item) => isObject(item)) || null;
+    root.dispatchEvent(
+      new CustomEvent("cpt:realtime-updated", {
+        detail: first
+          ? {
+              triggered: true,
+              kind: first.kind || "signal_transition",
+              currentStatus: first.status || null,
+              previousStatus: first.previous_status || null,
+              reason: first.reason || null,
+              at: first.at == null ? null : first.at,
+            }
+          : { triggered: false },
+      }),
+    );
   }
 
   function isNotificationSupported() {
@@ -2447,6 +2479,8 @@
     state.selection = null;
     state.selectedNode = null;
     renderChrome(state.snapshot);
+    // 回放渲染不重放提醒（前缀快照沿用同一 alerts，重复触发无意义）
+    if (!isReplay) syncAlerts(state.snapshot);
     refreshLevelSelect(state.snapshot);
     renderEvents(state.snapshot);
     renderParity(state.snapshot);
