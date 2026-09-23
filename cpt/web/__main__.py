@@ -7,17 +7,11 @@ not enabled until a complete application provider is wired to the engine.
 from __future__ import annotations
 
 import argparse
-from collections.abc import Mapping
 from typing import Any
 
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
 from cpt.domain.config import RulesConfig
 from cpt.web.app import serve_snapshot
-
-
-def _query_value(query: Mapping[str, list[str]], key: str, fallback: str) -> str:
-    value = query.get(key, [fallback])[0]
-    return value or fallback
 
 
 def demo_snapshot(symbol: str, interval: str) -> dict[str, Any]:
