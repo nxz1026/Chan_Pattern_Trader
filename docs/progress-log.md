@@ -958,3 +958,10 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 更新 `docs/reference-audit.md`，登记 `czsc`（waditu）和 `chan.py`（Vespa314）为主要在线参考入口。
 - 同时保留 `chanlun-pro`、`chanlun.rs`、`chanlun_pine` 的许可证、作者/实现和复用边界说明。
 - CPT 核心算法仍由自身 `domain/engine` 冻结；Star/Fork 只作社区热度参考，不作为正确性或授权依据。
+
+## 72. 本地 Dashboard 上线入口与部署模板（2026-10-22）
+
+- 新增 `cpt/web/__main__.py`：提供 `python -m cpt.web` 的 demo 启动入口和 schema-complete 空 snapshot。
+- 新增 `deploy/nginx/cpt-dashboard.conf`、`deploy/systemd/cpt-dashboard.service`、`deploy/env/cpt-dashboard.env.example` 与 `deploy/README.md`。
+- README 增加本地启动、质量门和真实 realtime provider 尚未接线的明确边界。
+- realtime 模式主动拒绝启动，避免把 fixture 空快照伪装成真实行情。

@@ -48,9 +48,28 @@ llm/           独立 LLM 服务层（可关闭、可审计、永不回写结构
 
 ## 当前状态
 
-设计阶段完成，代码未开始。下一步见 `docs/implementation-plan.md` §12（M0：固化基线 + import-linter + PyPI MIT 版 chanlun 验证）。
+CPT 核心算法、只读 Dashboard、研究服务和 HTTP adapter 已实现；本地 Demo Dashboard 可通过 `python -m cpt.web` 启动。真实行情 engine provider 尚未接入启动入口，`--mode realtime` 会明确拒绝启动，不会伪造实时数据。
 
-首版非目标：自动下单、线段、多交易所、Web UI、LLM 参与结构判断。
+## 本地 Dashboard Demo
+
+```bash
+cp deploy/env/cpt-dashboard.env.example deploy/env/cpt-dashboard.env
+.venv/bin/python -m cpt.web --host 127.0.0.1 --port 8000 --mode demo
+```
+
+Dashboard 静态文件位于 `dashboard/`。Nginx/systemd 模板和上线说明见 `deploy/README.md`。API 只读，不提供自动下单、撤单、账户、持仓或订单簿接口。
+
+## 质量门
+
+```bash
+.venv/bin/python -m pytest tests -q -rs
+.venv/bin/python -m ruff check cpt tests scripts/compare_oracle.py
+.venv/bin/python -m ruff format --check cpt tests scripts/compare_oracle.py
+.venv/bin/python -m mypy cpt
+.venv/bin/python -m import-linter lint --config .importlinter
+```
+
+首版非目标：自动下单、多交易所、LLM 参与结构判断。
 
 ## 风险声明
 

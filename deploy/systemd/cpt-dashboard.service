@@ -1,0 +1,18 @@
+[Unit]
+Description=CPT read-only Dashboard API
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/work/Chan_Pattern_Trader
+EnvironmentFile=-/home/ubuntu/work/Chan_Pattern_Trader/deploy/env/cpt-dashboard.env
+ExecStart=/home/ubuntu/work/Chan_Pattern_Trader/.venv/bin/python -m cpt.web --host ${CPT_HOST} --port ${CPT_PORT} --mode ${CPT_MODE} --symbol ${CPT_SYMBOL} --interval ${CPT_INTERVAL}
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
