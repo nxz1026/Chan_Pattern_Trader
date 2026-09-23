@@ -223,11 +223,33 @@
     );
   };
 
-  const formatAxisTime = (ms) => {
+  const DAY_MS = 86400000;
+
+  /**
+   * x 轴刻度文案（自适应）。
+   *
+   * 原实现固定输出 ``MM-DD HH:mm``，在两类场景下会误读：
+   * - 窗口跨年时没有年份，``12-31`` 与次年 ``01-01`` 看起来像同一年；
+   * - 日线及以上级别仍输出 ``:00`` 分钟，噪音大。
+   *
+   * @param {number|null} ms Unix 毫秒
+   * @param {{showDate?: boolean, showTime?: boolean, showYear?: boolean}} [options]
+   */
+  const formatAxisTime = (ms, options = {}) => {
     if (ms === null) return "—";
     const date = new Date(ms);
+    const showDate = options.showDate !== false;
+    const showTime = options.showTime !== false;
+    const showYear = options.showYear === true;
+    const month = pad2(date.getUTCMonth() + 1);
+    const day = pad2(date.getUTCDate());
     const clock = `${pad2(date.getUTCHours())}:${pad2(date.getUTCMinutes())}`;
-    return `${pad2(date.getUTCMonth() + 1)}-${pad2(date.getUTCDate())} ${clock}`;
+    const datePart = showYear
+      ? `${date.getUTCFullYear()}-${month}-${day}`
+      : `${month}-${day}`;
+    if (showDate && showTime) return `${datePart} ${clock}`;
+    if (showDate) return datePart;
+    return clock;
   };
 
   const formatNumber = (value, digits) => {
@@ -1929,18 +1951,50 @@
     });
     const group = createSvg("g", { class: "cpt-chart-axis" });
     svg.appendChild(group);
-    const step = Math.max(1, Math.ceil(view.candles.length / 6));
-    for (let index = step - 1; index < view.candles.length; index += step) {
+    const candles = view.candles;
+    const step = Math.max(1, Math.ceil(candles.length / 6));
+
+    // 级别：优先用相邻 bar 间隔推断（不依赖 runtime.interval_ms 是否存在）
+    const intervalMs =
+      candles.length > 1 ? Math.abs(candles[1].openTime - candles[0].openTime) : 0;
+    const daily = intervalMs >= DAY_MS;
+    // 窗口跨年时必须带年份，否则 12-31 与次年 01-01 无法区分
+    const firstDate = candles.length ? new Date(candles[0].openTime) : null;
+    const lastDate = candles.length
+      ? new Date(candles[candles.length - 1].openTime)
+      : null;
+    const spansYear = Boolean(
+      firstDate && lastDate && firstDate.getUTCFullYear() !== lastDate.getUTCFullYear(),
+    );
+
+    let previousDayKey = null;
+    let labelIndex = 0;
+    for (let index = step - 1; index < candles.length; index += step) {
+      const openTime = candles[index].openTime;
+      const date = new Date(openTime);
+      const dayKey = `${date.getUTCFullYear()}-${date.getUTCMonth()}-${date.getUTCDate()}`;
+      const dayChanged = dayKey !== previousDayKey;
+      previousDayKey = dayKey;
+      // 日线以上只给日期；盘中在跨日的那根给日期，其余只给时间（金融图惯例）
+      const showDate = daily || dayChanged || labelIndex === 0;
+      const label = formatAxisTime(openTime, {
+        showDate,
+        showTime: !daily,
+        showYear: spansYear,
+      });
       group.appendChild(
         createSvg("text", {
           x: view.xForIndex(index),
           y: axisHeight - 9,
           "text-anchor": "middle",
           "data-bar-index": index,
-          "data-open-time": view.candles[index].openTime,
-        }, formatAxisTime(view.candles[index].openTime)),
+          "data-open-time": openTime,
+        }, label),
       );
+      labelIndex += 1;
     }
+    // 全站时间为 UTC；在轴上标出来，避免被读成本地时间
+    axisNode.dataset.timezone = "UTC";
     axisNode.dataset.rendered = "true";
     axisNode.appendChild(svg);
   }
@@ -2492,7 +2546,7 @@
       const shellRect = host.getBoundingClientRect();
       const ratio = Math.max(0, Math.min(1, (event.clientX - rect.left) / rect.width));
       const candle = all[offset + Math.min(shown.length - 1, Math.floor(ratio * shown.length))];
-      tooltip.textContent = `${formatDateTime(candle.openTime)}  O ${formatPrice(candle.open)} H ${formatPrice(candle.high)} L ${formatPrice(candle.low)} C ${formatPrice(candle.close)} V ${formatVolume(candle.volume || 0)}`;
+      tooltip.textContent = `${formatDateTime(candle.openTime)} UTC  O ${formatPrice(candle.open)} H ${formatPrice(candle.high)} L ${formatPrice(candle.low)} C ${formatPrice(candle.close)} V ${formatVolume(candle.volume || 0)}`;
       tooltip.style.left = `${Math.max(4, event.clientX - shellRect.left + 8)}px`;
       tooltip.style.top = `${Math.max(4, event.clientY - shellRect.top + 8)}px`;
       tooltip.hidden = false;

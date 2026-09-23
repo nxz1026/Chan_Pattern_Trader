@@ -895,6 +895,20 @@ body[data-runtime-mode="offline"] .chart-canvas::after {
   font-size: var(--font-size-xs);
 }
 
+/* 全站时间为 UTC；轴上标出来，避免被读成本地时间。
+   放在上边缘，与下边缘的刻度文案分行，不重叠。 */
+.chart-time-axis[data-timezone="UTC"]::after {
+  content: "UTC";
+  position: absolute;
+  top: 1px;
+  right: var(--space-2);
+  font-size: 10px;
+  letter-spacing: 0.04em;
+  color: var(--color-text-faint);
+  opacity: 0.75;
+  pointer-events: none;
+}
+
 .placeholder-note {
   position: relative;
   padding: var(--space-1) var(--space-2);
