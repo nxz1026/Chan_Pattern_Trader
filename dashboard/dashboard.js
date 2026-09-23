@@ -1536,6 +1536,16 @@
 
   /* ------------------------------------------------------------ 生命周期 */
 
+  function installRealtimeRefresh() {
+    const button = q("[data-testid=realtime-refresh]");
+    if (!button) return;
+    button.addEventListener("click", () => {
+      root.dispatchEvent(new CustomEvent("cpt:realtime-refresh", { detail: { symbol: state.symbol || q("[data-testid=symbol-select]")?.value || "BTCUSDT" } }));
+      button.textContent = "已请求刷新";
+      window.setTimeout(() => { button.textContent = "刷新实时快照"; }, 1200);
+    });
+  }
+
   function installSymbolSwitch() {
     const select = q("[data-testid=symbol-select]");
     if (!select) return;
@@ -1805,6 +1815,7 @@
     installModeSwitch();
     installIntervalSwitch();
     installSymbolSwitch();
+    installRealtimeRefresh();
     installLevelFilter();
     installCrosshair();
     ensureSelectionSection();
