@@ -2,7 +2,7 @@
  * CPT Dashboard · 只读看板前端脚本（D3：K 线 / 成交量 / 缠论结构叠加渲染）
  *
  * 边界（docs/dashboard-plan.md）：
- * - 只消费 dashboard.v1 snapshot，不复制 domain 算法，不新增行情 HTTP 逻辑；
+ * - 只消费 dashboard.v2 snapshot，不复制 domain 算法，不新增行情 HTTP 逻辑；
  * - 零第三方依赖：手写 SVG，无 CDN、无网络字体、无远程资源；
  * - 只读：不提供任何下单/撤单/仓位入口。
  *
@@ -1927,7 +1927,7 @@
       appendNote(
         canvas,
         !candles.length
-          ? "暂无 K 线：等待 dashboard.v1 snapshot（empty）"
+          ? "暂无 K 线：等待 dashboard.v2 snapshot（empty）"
           : "图形区尚未完成布局，等待下一次重绘",
       );
       appendNote(volumeNode, "暂无成交量数据");
@@ -2579,33 +2579,99 @@
 
   function setLoading(visible) {
     setHidden("[data-testid=state-loading]", !visible);
-    if (visible) setConnection("connecting", "正在读取 dashboard.v1 snapshot…");
+    if (visible) setConnection("connecting", "正在读取 dashboard.v2 snapshot…");
   }
 
-  async function loadSnapshot(url) {
-    setLoading(true);
-    try {
-      const response = await fetch(url, { headers: { Accept: "application/json" } });
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      const snapshot = await response.json();
-      render(snapshot);
-      setHidden("[data-testid=state-error]", true);
-      setConnection("live", `已加载 snapshot：${url}`);
-      if (state.staleTimer !== null) window.clearTimeout(state.staleTimer);
-      state.staleTimer = window.setTimeout(() => {
-        root.dataset.connection = "stale";
-        setState(setText("[data-testid=topbar-status]", "stale"), "stale");
-        setHidden("[data-testid=state-stale]", false);
-      }, 15000);
-      return snapshot;
-    } catch (error) {
-      // 与 D2 行为一致：错误只体现在状态区，不向调用方抛出。
-      showError(error && error.message ? error.message : String(error));
+  // 短 TTL 缓存：同一 URL 在 3 秒内重复请求直接命中，避免多余 round-trip。
+  // 同时记录 in-flight Promise，避免并发请求都走 cache miss path
+  // （典型场景：用户连点两次刷新按钮，两次都在第一次返回前触发）。
+  // 条目按 LRU 淘汰（最多 8 项）。
+  const SNAPSHOT_CACHE_MAX = 8;
+  const SNAPSHOT_CACHE_TTL_MS = 3000;
+  const snapshotCache = new Map();
+  const inflightFetches = new Map();
+
+  function cacheGet(url) {
+    const entry = snapshotCache.get(url);
+    if (!entry) return null;
+    if (Date.now() - entry.at > SNAPSHOT_CACHE_TTL_MS) {
+      snapshotCache.delete(url);
       return null;
-    } finally {
-      setLoading(false);
-      setHidden("[data-testid=state-loading]", true);
     }
+    // LRU touch
+    snapshotCache.delete(url);
+    snapshotCache.set(url, entry);
+    return entry.snapshot;
+  }
+
+  function cachePut(url, snapshot) {
+    snapshotCache.set(url, { at: Date.now(), snapshot });
+    while (snapshotCache.size > SNAPSHOT_CACHE_MAX) {
+      const oldest = snapshotCache.keys().next().value;
+      if (oldest === url) break;
+      snapshotCache.delete(oldest);
+    }
+  }
+
+  async function _fetchSnapshot(url) {
+    const response = await fetch(url, { headers: { Accept: "application/json" } });
+    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+    return await response.json();
+  }
+
+  async function loadSnapshot(url, { force = false } = {}) {
+    if (!force) {
+      const cached = cacheGet(url);
+      if (cached) {
+        // 命中缓存：同步渲染旧数据，同时在后台静默刷新一次
+        render(cached);
+        setHidden("[data-testid=state-error]", true);
+        setConnection("live", `已加载 snapshot（缓存）· 正在后台刷新：${url}`);
+        _fetchSnapshot(url)
+          .then((fresh) => {
+            cachePut(url, fresh);
+            // 后台刷新只在用户当前没切走时回写（避免用新 BTC 数据覆盖刚加载的 ETH）
+            if (state.snapshotUrl === url) {
+              render(fresh);
+              setConnection("live", `后台刷新完成：${url}`);
+            }
+          })
+          .catch(() => undefined);
+        return cached;
+      }
+      // 没有缓存但有 in-flight fetch：复用同一个 Promise，避免重复网络请求
+      const inflight = inflightFetches.get(url);
+      if (inflight) {
+        return inflight;
+      }
+    }
+    setLoading(true);
+    const promise = (async () => {
+      try {
+        const snapshot = await _fetchSnapshot(url);
+        cachePut(url, snapshot);
+        render(snapshot);
+        setHidden("[data-testid=state-error]", true);
+        setConnection("live", `已加载 snapshot：${url}`);
+        if (state.staleTimer !== null) window.clearTimeout(state.staleTimer);
+        state.staleTimer = window.setTimeout(() => {
+          root.dataset.connection = "stale";
+          setState(setText("[data-testid=topbar-status]", "stale"), "stale");
+          setHidden("[data-testid=state-stale]", false);
+        }, 15000);
+        return snapshot;
+      } catch (error) {
+        // 与 D2 行为一致：错误只体现在状态区，不向调用方抛出。
+        showError(error && error.message ? error.message : String(error));
+        return null;
+      } finally {
+        inflightFetches.delete(url);
+        setLoading(false);
+        setHidden("[data-testid=state-loading]", true);
+      }
+    })();
+    if (!force) inflightFetches.set(url, promise);
+    return promise;
   }
 
   function demoSnapshot() {
