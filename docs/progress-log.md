@@ -965,3 +965,11 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 新增 `deploy/nginx/cpt-dashboard.conf`、`deploy/systemd/cpt-dashboard.service`、`deploy/env/cpt-dashboard.env.example` 与 `deploy/README.md`。
 - README 增加本地启动、质量门和真实 realtime provider 尚未接线的明确边界。
 - realtime 模式主动拒绝启动，避免把 fixture 空快照伪装成真实行情。
+
+## 73. Dashboard 审计问题接线修复（2026-10-23）
+
+- 控件切换现在提供可见连接状态，并在存在 snapshot URL 时按 symbol/interval 重新请求 snapshot；level 在前端按结构级别过滤并反馈。
+- 拆分 `data-runtime-mode` 与 `data-view-mode`，避免 offline/realtime 和 watch/research 双写同一属性。
+- 本地注释 key 改为 symbol + level + kind + start_time/bar_index，避免 source_ids/revision 变化造成孤儿注释。
+- HTTP snapshot 路由现在接受 `symbol` 和 `interval_ms` 查询参数，并新增 focused 覆盖；Demo 仍明确标记 fixture/unavailable，不伪造实时数据。
+- 公网 `/cpt/` 静态镜像已同步，Nginx/systemd 服务继续保持可用。

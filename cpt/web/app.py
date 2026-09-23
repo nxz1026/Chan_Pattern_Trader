@@ -7,6 +7,7 @@ from collections.abc import Callable
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
+from urllib.parse import parse_qs, urlsplit
 
 SnapshotProvider = Callable[[], dict[str, Any]]
 
@@ -25,19 +26,34 @@ def make_handler(provider: SnapshotProvider) -> type[BaseHTTPRequestHandler]:
             except Exception:  # noqa: BLE001
                 self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "snapshot unavailable")
                 return
-            if self.path == "/api/dashboard/health":
+            path = urlsplit(self.path)
+            query = parse_qs(path.query)
+            if path.path == "/api/dashboard/health":
                 payload: dict[str, Any] = {"ok": True, "read_only": True}
-            elif self.path == "/api/dashboard/snapshot":
-                payload = snapshot
-            elif self.path == "/api/dashboard/reproducibility":
+            elif path.path == "/api/dashboard/snapshot":
+                payload = dict(snapshot)
+                market = dict(payload.get("market", {}))
+                runtime = dict(payload.get("runtime", {}))
+                if query.get("symbol"):
+                    market["symbol"] = query["symbol"][0]
+                    runtime["symbol"] = query["symbol"][0]
+                if query.get("interval_ms"):
+                    try:
+                        market["interval_ms"] = int(query["interval_ms"][0])
+                    except ValueError:
+                        self.send_error(HTTPStatus.BAD_REQUEST, "interval_ms must be an integer")
+                        return
+                payload["market"] = market
+                payload["runtime"] = runtime
+            elif path.path == "/api/dashboard/reproducibility":
                 payload = snapshot.get("reproducibility", {})
-            elif self.path == "/api/dashboard/parity":
+            elif path.path == "/api/dashboard/parity":
                 payload = snapshot.get("parity", {})
-            elif self.path == "/api/dashboard/runs":
+            elif path.path == "/api/dashboard/runs":
                 payload = {"runs": snapshot.get("runs", [])}
-            elif self.path == "/api/dashboard/market-24h":
+            elif path.path == "/api/dashboard/market-24h":
                 payload = snapshot.get("market_24h", {"available": False, "reason": "unavailable"})
-            elif self.path == "/api/dashboard/engine-state":
+            elif path.path == "/api/dashboard/engine-state":
                 payload = snapshot.get("engine_state", {})
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)

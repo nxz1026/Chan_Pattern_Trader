@@ -315,11 +315,15 @@
 
   function normalizeOverlays(raw) {
     const source = isObject(raw) ? raw : {};
+    const selectedLevel = state.level;
+    const filter = (items) => selectedLevel === null || selectedLevel === undefined
+      ? structures(items)
+      : structures(items).filter((item) => Number(item.level) === selectedLevel);
     return {
-      fractals: structures(source.fractals),
-      bis: structures(source.bis),
-      zhongshus: structures(source.zhongshus),
-      trend_types: structures(source.trend_types),
+      fractals: filter(source.fractals),
+      bis: filter(source.bis),
+      zhongshus: filter(source.zhongshus),
+      trend_types: filter(source.trend_types),
     };
   }
 
@@ -410,7 +414,8 @@
     setHidden("[data-testid=state-gap]", !(candles.length && gap));
 
     root.dataset.status = stateKey;
-    root.dataset.mode = typeof runtime.mode === "string" ? runtime.mode : "offline";
+    root.dataset.runtimeMode = typeof runtime.mode === "string" ? runtime.mode : "offline";
+    root.dataset.viewMode = state.mode;
     root.dataset.dataSource = typeof runtime.data_source === "string" ? runtime.data_source : "unknown";
 
     if (!candles.length) {
@@ -418,7 +423,7 @@
     } else if (typeof runtime.mode === "string" && runtime.mode !== "realtime") {
       setConnection("offline", `离线 snapshot（${candles.length} 根 K 线）· 无网络请求`);
     } else {
-      setConnection("live", `已渲染 snapshot（${candles.length} 根 K 线，mode=${root.dataset.mode}）`);
+      setConnection("live", `已渲染 snapshot（${candles.length} 根 K 线，runtime=${root.dataset.runtimeMode}）`);
     }
   }
 
@@ -757,6 +762,14 @@
     section.appendChild(summary);
   }
 
+  function noteKey(payload) {
+    const start = payload && (payload.start_time ?? payload.startTime ?? payload.bar_index ?? "none");
+    const level = payload && payload.level != null ? payload.level : "none";
+    const kind = payload && payload.kind ? payload.kind : "none";
+    const symbol = state.snapshot && state.snapshot.market ? state.snapshot.market.symbol : "unknown";
+    return `cpt-note:${symbol}:${level}:${kind}:${start}`;
+  }
+
   function renderLocalNote(payload) {
     const panel = q("[data-testid=structure-panel]");
     if (!panel) return;
@@ -772,13 +785,13 @@
       input.placeholder = "仅保存浏览器本地，不进入数据集或 hash";
       input.rows = 3;
       input.addEventListener("input", () => {
-        if (state.selection) localStorage.setItem(`cpt-note:${state.selection.kind}:${state.selection.sourceIds.join(",")}`, input.value);
+        if (state.selection) localStorage.setItem(noteKey(state.selection), input.value);
       });
       section.append(heading, input);
       panel.appendChild(section);
     }
     const input = q("[data-testid=local-note-input]");
-    if (input) input.value = payload ? localStorage.getItem(`cpt-note:${payload.kind}:${payload.sourceIds.join(",")}`) || "" : "";
+    if (input) input.value = payload ? localStorage.getItem(noteKey(payload)) || "" : "";
   }
 
   function renderResearchDetails(payload) {
@@ -1550,11 +1563,30 @@
     });
   }
 
+  function snapshotEndpoint() {
+    return state.snapshotUrl || root.dataset.snapshotUrl || new URLSearchParams(window.location.search).get("snapshot");
+  }
+
+  function refreshSelectedSnapshot() {
+    const endpoint = snapshotEndpoint();
+    if (!endpoint) {
+      setConnection("offline", "当前为离线 demo；切换仅更新本地选择状态");
+      return Promise.resolve(null);
+    }
+    const url = new URL(endpoint, window.location.href);
+    const symbol = q("[data-testid=symbol-select]")?.value;
+    const interval = q("[data-testid=interval-select]")?.value;
+    if (symbol) url.searchParams.set("symbol", symbol);
+    if (interval) url.searchParams.set("interval_ms", interval);
+    return loadSnapshot(url.toString());
+  }
+
   function installRealtimeRefresh() {
     const button = q("[data-testid=realtime-refresh]");
     if (!button) return;
     button.addEventListener("click", () => {
-      root.dispatchEvent(new CustomEvent("cpt:realtime-refresh", { detail: { symbol: state.symbol || q("[data-testid=symbol-select]")?.value || "BTCUSDT" } }));
+      root.dispatchEvent(new CustomEvent("cpt:realtime-refresh", { detail: { symbol: q("[data-testid=symbol-select]")?.value || "BTCUSDT" } }));
+      refreshSelectedSnapshot();
       button.textContent = "已请求刷新";
       window.setTimeout(() => { button.textContent = "刷新实时快照"; }, 1200);
     });
@@ -1567,7 +1599,9 @@
       const symbol = select.value;
       setText("[data-testid=topbar-symbol]", symbol);
       root.dataset.symbol = symbol;
+      setConnection("connecting", `正在切换交易对：${symbol}`);
       root.dispatchEvent(new CustomEvent("cpt:symbol-changed", { detail: { symbol } }));
+      refreshSelectedSnapshot();
     });
   }
 
@@ -1580,6 +1614,7 @@
       root.dataset.level = level === null ? "all" : String(level);
       renderStructureDefaults(state.snapshot);
       drawChart();
+      setConnection("live", level === null ? "已显示全部级别结构" : `已筛选级别：${level}`);
       root.dispatchEvent(new CustomEvent("cpt:level-changed", { detail: { level } }));
     });
   }
@@ -1592,22 +1627,25 @@
       const label = labels[select.value] || select.value;
       setText("[data-testid=topbar-interval]", label);
       root.dataset.intervalMs = select.value;
+      setConnection("connecting", `正在切换周期：${label}`);
       root.dispatchEvent(new CustomEvent("cpt:interval-changed", { detail: { intervalMs: Number(select.value), label } }));
+      refreshSelectedSnapshot();
     });
   }
 
   function installModeSwitch() {
-    root.dataset.mode = state.mode;
+    root.dataset.viewMode = state.mode;
     root.querySelectorAll("[data-mode-action]").forEach((button) => {
       button.setAttribute("aria-pressed", button.dataset.modeAction === state.mode ? "true" : "false");
       button.addEventListener("click", () => {
         state.mode = button.dataset.modeAction === "watch" ? "watch" : "research";
-        root.dataset.mode = state.mode;
+        root.dataset.viewMode = state.mode;
         root.querySelectorAll("[data-mode-action]").forEach((item) => item.setAttribute("aria-pressed", item.dataset.modeAction === state.mode ? "true" : "false"));
         const url = new URL(window.location.href);
         url.searchParams.set("mode", state.mode);
         window.history.replaceState({}, "", url);
         root.dispatchEvent(new CustomEvent("cpt:mode-changed", { detail: { mode: state.mode } }));
+        setConnection("live", `视图模式：${state.mode === "watch" ? "盯盘" : "研究"}`);
       });
     });
   }
@@ -1846,8 +1884,10 @@
 
     const params = new URLSearchParams(window.location.search);
     const snapshotUrl = root.dataset.snapshotUrl || params.get("snapshot");
-    if (snapshotUrl) loadSnapshot(snapshotUrl);
-    else if (params.get("demo") !== "off") loadDemo();
+    if (snapshotUrl) {
+      state.snapshotUrl = snapshotUrl;
+      loadSnapshot(snapshotUrl);
+    } else if (params.get("demo") !== "off") loadDemo();
     else render(null);
 
     root.dispatchEvent(new CustomEvent("cpt:dashboard-ready"));

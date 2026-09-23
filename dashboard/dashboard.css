@@ -744,7 +744,7 @@ button {
 }
 
 /* 离线 demo 模式：图形区角标，明示非实时数据 */
-body[data-mode="offline"] .chart-canvas::after {
+body[data-runtime-mode="offline"] .chart-canvas::after {
   content: "离线 demo";
   position: absolute;
   top: var(--space-2);
