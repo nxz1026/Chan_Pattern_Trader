@@ -765,3 +765,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 新增 `cpt/application/dashboard_runs.py` 与运行索引 focused 测试。
 - Phase 1 已具备运行索引、逐根检查、溯源树交互、复现 hash/diff、parity 标准化服务。
 - 当前全量：**115 passed**；ruff、format、mypy、import-linter、JS syntax 和 diff check 均通过。
+
+## 38. Dashboard 研究模式逐根检查器 UI（2026-09-23）
+
+- 结构选中面板增加 `source_ids` 溯源树和 raw bar 逐字段检查器。
+- 所有检查器内容通过 DOM `textContent` 写入，保持只读和不注入 HTML 的边界。
+- 前端语法、全量 CPT 测试和 diff check 通过。
