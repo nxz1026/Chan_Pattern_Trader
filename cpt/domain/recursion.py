@@ -109,6 +109,12 @@ class StructureElement:
     source_revision: int
     status: str
 
+    def __post_init__(self) -> None:
+        if self.level < 0 or self.direction not in (-1, 0, 1):
+            raise ValueError("StructureElement level/direction invalid")
+        if self.open_time > self.close_time or self.high < self.low:
+            raise ValueError("StructureElement time/range invalid")
+
     # BarLike 协议暴露（时间别名）
     @property
     def start_time(self) -> int:

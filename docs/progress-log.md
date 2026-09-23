@@ -728,3 +728,11 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - focused：**4 passed**；全量：**112 passed**。
 - oracle 对照当前环境：**2 passed**，未跳过。
 - ruff、format、mypy、import-linter、git diff --check 全部通过。
+
+## 32. 代码复审剩余项收敛（2026-09-23）
+
+- 新增 `.github/workflows/ci.yml`：unit job 使用 `pytest -rsq` 显示 skip；独立 `oracle-parity` job 固定安装 `chanlun==2606.73` 并运行对照测试。
+- oracle 对照测试发现非固定版本时失败，避免错误版本静默跳过；未安装仍给出带 CI 指引的显式 skip。
+- `StructureElement` 增加时间、区间、级别和方向值域校验。
+- 其余复审修复已保持：signals 外键迁移、oracle 浮点时间换算、统一 PLACEHOLDER_TIME。
+- 当前全量测试、ruff、format、mypy、import-linter 和 diff check 均通过。

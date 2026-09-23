@@ -22,9 +22,12 @@ def test_rust_oracle_counts_are_reproducible_for_frozen_sample() -> None:
     try:
         version = importlib.metadata.version("chanlun")
     except importlib.metadata.PackageNotFoundError:
-        pytest.skip("optional chanlun oracle is not installed")
+        pytest.skip("optional chanlun oracle is not installed; run the oracle-parity CI job")
     if version != "2606.73":
-        pytest.skip(f"expected optional chanlun==2606.73, found {version}")
+        pytest.fail(
+            f"expected optional chanlun==2606.73, found {version}; "
+            "parity requires the pinned oracle"
+        )
 
     path = DEFAULT_DATA_DIR / "btcusdt_5m_2024-02-01.csv"
     rows, _ = load_snapshot(path)
