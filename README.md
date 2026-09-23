@@ -33,7 +33,8 @@ llm/           独立 LLM 服务层（可关闭、可审计、永不回写结构
 | `docs/rules.md` | 规则口径唯一事实来源（含 §9 已冻结约定） |
 | `docs/architecture.md` | 软件结构设计（分层、模块、数据模型、复用映射、测试策略） |
 | `docs/implementation-plan.md` | 实施计划（M0–M6 垂直切片里程碑 + M-LLM 独立线） |
-| `docs/reference-audit.md` | 参考仓库许可证与复用边界（M0 交付，待补） |
+| `docs/reference-audit.md` | 参考仓库许可证与复用边界 |
+| `docs/m2-oracle-diagnostic.md` | M2 诊断对照：固定版真实行情快照与 MIT Rust oracle（非算法等价验收） |
 
 ## 参考仓库
 

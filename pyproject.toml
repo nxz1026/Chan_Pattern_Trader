@@ -25,6 +25,7 @@ dev = [
     "import-linter>=2.0",
     "types-requests",
 ]
+oracle = ["chanlun==2606.73"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

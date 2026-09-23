@@ -326,3 +326,151 @@ e3ecbe8 M0: baseline toolchain + reference audit + fetch script
 - ⏸ push 到 origin/main（inbox 2 项待用户凭据；SKILL §6 明确"push 用现成 askpass，不现场拼凭据"）
 
 **决策**：goal 标 complete。push 待办已显式入 inbox，待用户处理。
+
+## 13. M2 第一阶段：诊断 oracle 对照（2026-09-23）
+
+### 用户确认与范围
+
+- 用户确认先做“诊断对照”，不把 M1 占位后端与独立 oracle 的差异宣称为正式算法验收。
+- 采用 PyPI `chanlun==2606.73` MIT Rust/PyO3 版作黑盒 oracle；原计划固定版 chanlun-pro `78ffa470f1e9463809d8fe2a2802e9e84b896dfe` 仍因缺少 PyArmor 运行许可无法执行，未绕过授权。
+
+### 交付物
+
+- `scripts/compare_oracle.py`：抓取缺失的 Binance 窗口、冻结 CSV 快照、离线重跑 Rust oracle 与 `InMemoryChanlunBackend`，拒绝覆盖既有快照。
+- `tests/fixtures/oracle/`：3 个 BTCUSDT 永续 5m 窗口，各 1000 根连续 K 线，带 SHA-256。
+- `tests/test_compare_oracle.py`：快照连续性与 Rust oracle 重复运行稳定性测试。
+- `docs/m2-oracle-diagnostic.md`：结果、差异归因、限制、外部证据与踩坑记录。
+- `pyproject.toml`：新增可选依赖组 `oracle = ["chanlun==2606.73"]`；安装命令见报告。
+- `README.md`：补充 M2 诊断报告导航。
+
+### 实测结果
+
+| 窗口 | oracle 分型/笔/笔中枢 | M1 占位分型/笔/笔中枢 | 精确分型匹配 / oracle-only / CPT-only |
+|---|---:|---:|---:|
+| 2024-02-01 | 58 / 57 / 9 | 287 / 286 / 0 | 39 / 19 / 248 |
+| 2024-09-01 | 62 / 61 / 8 | 333 / 332 / 0 | 50 / 12 / 283 |
+| 2025-04-01 | 60 / 59 / 8 | 357 / 356 / 0 | 50 / 10 / 307 |
+
+### 验收
+
+- `pytest tests -q`: **60 passed**。
+- `ruff check scripts/compare_oracle.py tests/test_compare_oracle.py cpt tests`: **All checks passed**。
+- `mypy cpt`: **Success, no issues found in 15 source files**。
+- `import-linter lint --config .importlinter`: **5 contracts kept, 0 broken**。
+- 报告离线二次复跑 `cmp`: **字节一致**。
+- `git diff --check`: **通过**。
+
+### 结论
+
+M2 已完成“oracle 可执行性 + 三段真实数据诊断对照”子阶段；**正式 M2 仍未完成**，因为 CPT 尚无正式缠K包含/新笔/笔中枢算法，且 chanlun-pro 固定版缺运行许可。下一阶段应先实现正式基础算法，再把同一快照升级为逐结构可归因 diff。
+
+### M2-01 Rust oracle 适配层（2026-09-23）
+
+- 新增 `cpt/adapters/rust_chanlun.py`，固定 `chanlun==2606.73`，延迟导入并严格校验版本。
+- `RustChanlunBackend` 将 Rust/PyO3 中文对象映射为 CPT `Fractal` / `Bi`；中枢暂只输出数量，未伪造 `ZhongShu.bi_ids`。
+- `scripts/compare_oracle.py` 已改为只通过该适配层运行 Rust oracle，不再在诊断脚本内重复实现外部对象解析。
+- focused：`pytest tests/test_compare_oracle.py -x -vv` → **2 passed**。
+- 全量：`pytest tests -q` → **60 passed**；ruff、mypy（16 source files）、import-linter 全绿。
+- 报告二次离线运行字节一致；三段真实窗口结果与接入前一致：oracle 分型/笔/笔中枢分别为 58/57/9、62/61/8、60/59/8。
+- 当前 M2 仍是 Rust oracle 接入与诊断子阶段；尚未宣称 CPT 正式算法与 oracle 等价。
+
+## 14. M3 基础算法第一步：缠K包含处理（2026-09-23）
+
+### 交付物
+
+- 新增 `cpt/domain/contain.py`：纯 domain `MergedBar` 与 `merge_contained_bars()`。
+- 包含处理支持 `forward` / `backward` 方向、严格/等边界包含、趋势推断、OHLCV 累加、`source_indices` 原始追溯。
+- 输入同时支持 `CanonicalBar` 与仅实现 `BarLike` 的高级结构元素；后者量能按 0、中间价补齐，不虚构交易数据。
+- 新增 `tests/test_contain.py`：8 个 focused 用例，覆盖方向、连续包含、非包含、边界、非法参数、BarLike 映射和收盘状态。
+
+### 独立验收
+
+- `pytest tests/test_contain.py -x -q`：**8 passed**。
+- 三段冻结快照：1000 根分别合并为 704、744、774 根；每段 `source_indices` 并集覆盖全部输入，包含组分别 222、203、183。
+- `ruff check cpt tests scripts/compare_oracle.py`：**All checks passed**。
+- `ruff format --check`：**26 files already formatted**。
+- `mypy cpt`：**Success, 17 source files**。
+- `import-linter`：**5 contracts kept, 0 broken**。
+- `pytest tests -q`：**64 passed**。
+- `git diff --check`：通过。
+
+### 结论
+
+缠K包含处理已从 M1 占位链路独立出来，下一步可在其输出上实现正式分型与新笔；Rust chanlun 仍作为唯一可执行 oracle。
+
+## 15. M3 基础算法第二步：三根缠K分型（2026-09-23）
+
+### 交付物
+
+- 新增 `cpt/domain/fractal.py`：纯 domain `detect_fractals()`。
+- 按 `fx_qy_middle` + `fx_qj_ck` 识别连续三根缠K窗口。
+- 顶分型要求中间 high/low 均严格高于左右；底分型要求中间 high/low 均严格低于左右；相等不成型。
+- `bar_index` 从 `MergedBar.source_indices` 追溯到原始 K 线，缺失时退化为窗口中间索引；`source_ids` 稳定可复现。
+- 模块只识别原始三根窗口，不承担同类分型过滤和新笔端点确认。
+- 新增 `tests/test_fractal.py`：5 个 focused 用例。
+
+### 独立验收
+
+- `pytest tests/test_fractal.py -x -q`：**5 passed**。
+- `pytest tests -q`：**69 passed**。
+- `ruff check cpt tests scripts/compare_oracle.py`：**All checks passed**。
+- `ruff format --check`：**28 files already formatted**。
+- `mypy cpt`：**Success, 18 source files**。
+- `import-linter`：**5 contracts kept, 0 broken**。
+- `git diff --check`：通过。
+
+### 结论
+
+正式分型识别已独立于 M1 占位后端；下一步实现新笔过滤/确认，再实现笔中枢。Rust chanlun 继续作为独立对照。
+
+## 16. M3 基础算法第三步：新笔候选过滤（2026-09-23）
+
+### 交付物
+
+- 新增 `cpt/domain/bi.py`：纯 domain `build_bis()`。
+- 同类分型只保留更极端端点；极值相等保留较早端点。
+- 异类端点形成候选笔：底到顶为 `+1`，顶到底为 `-1`。
+- `Bi` 的时间、价格区间和 `source_ids` 均由端点稳定推导。
+- 支持端点级别继承和显式级别覆盖，禁止负级别与隐式跨级别拼接。
+- 不在底层笔模块加入“至少 5 根 K 线”门槛；该门槛属于高级别递归工程参数。
+- 新增 `tests/test_bi.py`：5 个 focused 用例。
+
+### 独立验收
+
+- `pytest tests/test_bi.py -x -q`：**5 passed**。
+- `pytest tests -q`：**74 passed**。
+- `ruff check cpt tests scripts/compare_oracle.py`：**All checks passed**。
+- `ruff format --check`：**30 files already formatted**。
+- `mypy cpt`：**Success, 19 source files**。
+- `import-linter`：**5 contracts kept, 0 broken**。
+- `git diff --check`：通过。
+
+### 结论
+
+新笔候选过滤已独立于 M1 占位后端。下一步实现三笔重叠基础算法，随后再接入笔中枢与走势类型。Rust chanlun 继续作为独立对照。
+
+## 17. M3 基础算法第四步：笔中枢三笔重叠（2026-09-23）
+
+### 交付物
+
+- 新增 `cpt/domain/zhongshu.py`：纯 domain `build_zhongshus()`。
+- 连续三笔方向交替且价格区间存在严格共同重叠时建枢。
+- 中枢区间为三笔交集；后续与当前中枢重叠的笔会收缩区间并延伸结束时间。
+- 中枢不重叠时从结束笔重新扫描，避免笔跨中枢重复复用。
+- `bi_ids` 按笔首个 `source_id` 稳定去重；支持级别继承和显式覆盖。
+- 明确不在本模块处理 `zs_wzgx` 档位、中枢合并、背驰比较与走势类型。
+- 新增 `tests/test_zhongshu.py`：5 个 focused 用例。
+
+### 独立验收
+
+- `pytest tests/test_zhongshu.py -x -q`：**5 passed**。
+- `pytest tests -q`：**79 passed**。
+- `ruff check cpt tests scripts/compare_oracle.py`：**All checks passed**。
+- `ruff format --check`：**32 files already formatted**。
+- `mypy cpt`：**Success, 20 source files**。
+- `import-linter`：**5 contracts kept, 0 broken**。
+- `git diff --check`：通过。
+
+### 结论
+
+M1 基础结构链路已具备“包含 → 分型 → 新笔 → 笔中枢”的纯 domain 算法骨架。下一阶段进入 M3：走势类型、递归与一买状态机。
