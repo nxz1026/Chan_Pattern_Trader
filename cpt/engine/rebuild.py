@@ -64,6 +64,9 @@ _CONFIRMED: Final[str] = "confirmed"
 #: 版本化来源引用分隔符：``<source_id>@r<revision>``（:func:`scan_stale_dependents` 约定）。
 _REVISION_SEPARATOR: Final[str] = "@r"
 
+#: 来源引用的 ``kind`` 前缀分隔符，与 ``b:`` / ``fx:`` / ``bi:`` 引用风格一致。
+_KIND_PREFIX_SEPARATOR: Final[str] = ":"
+
 #: 未设置时间哨兵：epoch 毫秒 0 不是真实行情观测时间（``docs/rules.md`` §8.5 UTC）。
 _UNSET_TIME: Final[int] = 0
 
@@ -362,20 +365,32 @@ def make_rebuild_events(
     return tuple(events)
 
 
-def _parse_referenced_revision(entry: str, source_id: str) -> int | None:
-    """解析版本化引用 ``<source_id>@r<revision>`` 编码的 ``revision``。
+def _parse_versioned_reference(entry: str) -> tuple[str, int] | None:
+    """解析版本化引用 ``[*kind*:]<source_id>@r<revision>`` → ``(source_id, revision)``。
 
-    非该 ``source_id``、或缺少 ``@r<数字>`` 后缀（如裸 id）时返回 ``None``。
+    分隔符取最后一处 ``@r``；缺少该后缀（如裸 ``id``）或后缀非十进制数字时返回
+    ``None``——裸引用无法判断滞后，见 :func:`scan_stale_dependents` 语义 4。
     """
-    if not entry.startswith(source_id):
+    target, separator, digits = entry.rpartition(_REVISION_SEPARATOR)
+    if not separator or not target or not digits.isdigit():
         return None
-    suffix = entry[len(source_id) :]
-    if not suffix.startswith(_REVISION_SEPARATOR):
+    return target, int(digits)
+
+
+def _referenced_revision(entry: str, source_id: str) -> int | None:
+    """条目引用 ``source_id`` 时返回其编码 ``revision``，否则 ``None``。
+
+    接受两种写法：``<source_id>@r<n>``（引用 id 原样）与
+    ``<kind>:<source_id>@r<n>``（带 ``kind`` 前缀，与 ``b:`` / ``fx:`` / ``bi:``
+    引用一致）。
+    """
+    parsed = _parse_versioned_reference(entry)
+    if parsed is None:
         return None
-    digits = suffix[len(_REVISION_SEPARATOR) :]
-    if not digits.isdigit():
-        return None
-    return int(digits)
+    target, revision = parsed
+    if target == source_id or target.endswith(_KIND_PREFIX_SEPARATOR + source_id):
+        return revision
+    return None
 
 
 def scan_stale_dependents(
@@ -394,7 +409,8 @@ def scan_stale_dependents(
 
     1. 只考察 ``id != changed_source_id`` 的状态——结构不是自身的依赖。
     2. 依赖关系记录在 ``source_ids`` 中，版本化引用约定为
-       ``<source_id>@r<revision>``（如 ``"bi:7@r3"``）。
+       ``[*kind*:]<source_id>@r<revision>``（如 ``"bi:7@r3"``、``"source:s1@r1"``）；
+       ``kind`` 前缀与 ``b:`` / ``fx:`` / ``bi:`` 引用风格一致。
     3. 某条 ``source_ids`` 项指向 ``changed_source_id`` 且编码 ``revision``
        **小于** ``changed_source_revision`` 时，该状态标记为依赖滞后；编码
        ``revision`` 不小于上游最新版本时视为已同步。
@@ -419,7 +435,7 @@ def scan_stale_dependents(
         if state.id == changed_source_id:
             continue
         for entry in state.source_ids:
-            revision = _parse_referenced_revision(entry, changed_source_id)
+            revision = _referenced_revision(entry, changed_source_id)
             if revision is not None and revision < changed_source_revision:
                 stale.append(state)
                 break
