@@ -1,0 +1,303 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-view="readonly">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
+    <meta
+      name="description"
+      content="CPT 缠论结构只读看板：行情概览、K 线叠加、结构详情与离线回放，不提供任何交易能力。"
+    />
+    <title>CPT Dashboard · 只读缠论复盘</title>
+    <link rel="stylesheet" href="./dashboard.css" />
+  </head>
+  <body
+    data-testid="dashboard-root"
+    data-schema-version="dashboard.v1"
+    data-mode="offline"
+    data-status="empty"
+    data-connection="offline"
+  >
+    <a class="skip-link" href="#chart-panel">跳转到 K 线区域</a>
+
+    <header data-testid="topbar" class="topbar">
+      <nav data-testid="topbar-nav" class="topbar-nav" aria-label="看板全局导航">
+        <span data-testid="topbar-brand" class="topbar-brand">CPT</span>
+        <span data-testid="topbar-title" class="topbar-title">缠论结构看板</span>
+        <span data-testid="topbar-readonly-badge" class="badge badge-readonly" role="note">
+          只读 · 无交易入口
+        </span>
+      </nav>
+
+      <dl data-testid="topbar-meta" class="topbar-meta">
+        <div class="meta-item">
+          <dt>模式</dt>
+          <dd data-testid="topbar-mode" data-field="runtime.mode">offline</dd>
+        </div>
+        <div class="meta-item">
+          <dt>交易对</dt>
+          <dd data-testid="topbar-symbol" data-field="market.symbol">BTCUSDT</dd>
+        </div>
+        <div class="meta-item">
+          <dt>周期</dt>
+          <dd data-testid="topbar-interval" data-field="market.interval_ms">5m</dd>
+        </div>
+        <div class="meta-item">
+          <dt>数据来源</dt>
+          <dd data-testid="topbar-source" data-field="runtime.data_source">fixture（离线演示）</dd>
+        </div>
+        <div class="meta-item">
+          <dt>更新时间</dt>
+          <dd data-testid="topbar-updated-at" data-field="market.last_open_time">—</dd>
+        </div>
+        <div class="meta-item">
+          <dt>结构状态</dt>
+          <dd data-testid="topbar-status" data-field="runtime.status" data-state="empty">empty</dd>
+        </div>
+      </dl>
+
+      <p
+        data-testid="topbar-connection"
+        class="connection-status"
+        data-connection="offline"
+        role="status"
+        aria-live="polite"
+      >
+        未连接 · 离线 demo（等待 ./dashboard.js 注入真实状态）
+      </p>
+    </header>
+
+    <section
+      data-testid="state-region"
+      class="state-region"
+      aria-label="数据状态"
+      aria-live="polite"
+    >
+      <div data-testid="state-loading" class="state state-loading" data-state="loading" hidden>
+        <h2>加载中</h2>
+        <p>正在读取 dashboard.v1 snapshot…</p>
+      </div>
+      <div data-testid="state-empty" class="state state-empty" data-state="empty">
+        <h2>暂无数据</h2>
+        <p>离线 demo：未提供 K 线 snapshot，图表与结构面板保持空白占位。</p>
+      </div>
+      <div data-testid="state-error" class="state state-error" data-state="error" hidden>
+        <h2>数据错误</h2>
+        <p data-testid="state-error-message">尚未捕获错误信息。</p>
+      </div>
+      <div data-testid="state-stale" class="state state-stale" data-state="stale" hidden>
+        <h2>数据陈旧</h2>
+        <p>最后一根 K 线已超过允许延迟，展示内容可能滞后。</p>
+      </div>
+      <div data-testid="state-gap" class="state state-gap" data-state="gap" hidden>
+        <h2>数据缺口</h2>
+        <p>序列存在时间缺口，缺口两侧不生成正式结构。</p>
+      </div>
+    </section>
+
+    <div data-testid="dashboard-body" class="dashboard-body">
+      <aside
+        data-testid="market-overview"
+        class="panel market-overview"
+        aria-labelledby="market-overview-title"
+      >
+        <h2 id="market-overview-title" class="panel-title">市场概览</h2>
+
+        <div data-testid="market-price" class="market-price">
+          <span data-testid="market-last-price" data-field="market.last_price">—</span>
+          <span data-testid="market-price-direction" data-state="flat">持平</span>
+        </div>
+
+        <dl class="market-stats">
+          <div class="stat">
+            <dt>24h 最高</dt>
+            <dd data-testid="market-high-24h">—</dd>
+          </div>
+          <div class="stat">
+            <dt>24h 最低</dt>
+            <dd data-testid="market-low-24h">—</dd>
+          </div>
+          <div class="stat">
+            <dt>成交量</dt>
+            <dd data-testid="market-volume">—</dd>
+          </div>
+          <div class="stat">
+            <dt>K 线根数</dt>
+            <dd data-testid="market-bar-count" data-field="market.bar_count">0</dd>
+          </div>
+          <div class="stat">
+            <dt>时间范围</dt>
+            <dd data-testid="market-time-range">—</dd>
+          </div>
+        </dl>
+
+        <section data-testid="data-quality" class="data-quality" aria-labelledby="data-quality-title">
+          <h3 id="data-quality-title">数据质量</h3>
+          <ul class="quality-list">
+            <li>
+              <span>stale</span>
+              <span data-testid="data-quality-stale" data-field="data_quality.stale">false</span>
+            </li>
+            <li>
+              <span>gap</span>
+              <span data-testid="data-quality-gap" data-field="data_quality.gap">false</span>
+            </li>
+            <li>
+              <span>已收盘</span>
+              <span data-testid="data-quality-closed" data-field="data_quality.closed_bar_count">0</span>
+            </li>
+            <li>
+              <span>未收盘</span>
+              <span data-testid="data-quality-unclosed" data-field="data_quality.unclosed_bar_count">0</span>
+            </li>
+          </ul>
+        </section>
+      </aside>
+
+      <main
+        data-testid="chart-panel"
+        id="chart-panel"
+        class="panel chart-panel"
+        aria-labelledby="chart-panel-title"
+      >
+        <header class="panel-header">
+          <h2 id="chart-panel-title" class="panel-title">K 线与缠论结构</h2>
+          <ul data-testid="chart-legend" class="chart-legend" aria-label="图形图例">
+            <li data-testid="legend-fractal">分型</li>
+            <li data-testid="legend-bi">笔</li>
+            <li data-testid="legend-zhongshu">笔中枢</li>
+            <li data-testid="legend-trend-type">走势类型</li>
+            <li data-testid="legend-alert" data-state="alert">alert 未收盘</li>
+            <li data-testid="legend-confirmed" data-state="confirmed">confirmed 已确认</li>
+          </ul>
+        </header>
+
+        <section data-testid="chart-shell" class="chart-shell" aria-label="K 线图表容器">
+          <div
+            data-testid="chart-canvas-region"
+            class="chart-canvas"
+            role="img"
+            aria-label="K 线绘制区占位：分型、笔、中枢、走势类型由 ./dashboard.js 叠加渲染"
+          >
+            <p class="placeholder-note">K 线绘制区占位（D3 阶段接入叠加渲染）</p>
+          </div>
+          <div data-testid="chart-volume-region" class="chart-volume" aria-label="成交量区域">
+            <p class="placeholder-note">成交量区域占位</p>
+          </div>
+          <div data-testid="chart-time-axis" class="chart-time-axis" aria-label="时间轴">
+            <p class="placeholder-note">时间轴占位（Unix 毫秒）</p>
+          </div>
+        </section>
+      </main>
+
+      <aside
+        data-testid="structure-panel"
+        class="panel structure-panel"
+        aria-labelledby="structure-panel-title"
+      >
+        <h2 id="structure-panel-title" class="panel-title">结构详情</h2>
+
+        <section data-testid="structure-trend-type" aria-labelledby="structure-trend-type-title">
+          <h3 id="structure-trend-type-title">走势类型</h3>
+          <dl class="kv">
+            <div><dt>kind</dt><dd data-testid="trend-type-kind" data-field="overlays.trend_types[-1].kind">—</dd></div>
+            <div><dt>方向</dt><dd data-testid="trend-type-direction">—</dd></div>
+            <div><dt>level</dt><dd data-testid="trend-type-level">—</dd></div>
+            <div><dt>revision</dt><dd data-testid="trend-type-revision">—</dd></div>
+          </dl>
+        </section>
+
+        <section data-testid="structure-bi" aria-labelledby="structure-bi-title">
+          <h3 id="structure-bi-title">当前笔</h3>
+          <dl class="kv">
+            <div><dt>方向</dt><dd data-testid="bi-direction">—</dd></div>
+            <div><dt>起点</dt><dd data-testid="bi-start-time">—</dd></div>
+            <div><dt>终点</dt><dd data-testid="bi-end-time">—</dd></div>
+            <div><dt>high / low</dt><dd data-testid="bi-range">—</dd></div>
+          </dl>
+        </section>
+
+        <section data-testid="structure-zhongshu" aria-labelledby="structure-zhongshu-title">
+          <h3 id="structure-zhongshu-title">笔中枢</h3>
+          <dl class="kv">
+            <div><dt>数量</dt><dd data-testid="zhongshu-count">0</dd></div>
+            <div><dt>区间</dt><dd data-testid="zhongshu-range">—</dd></div>
+            <div><dt>level</dt><dd data-testid="zhongshu-level">—</dd></div>
+          </dl>
+        </section>
+
+        <section data-testid="structure-signal" aria-labelledby="structure-signal-title">
+          <h3 id="structure-signal-title">一买信号</h3>
+          <dl class="kv">
+            <div>
+              <dt>status</dt>
+              <dd data-testid="signal-status" data-field="signal.status" data-state="none">none</dd>
+            </div>
+            <div><dt>背驰</dt><dd data-testid="signal-divergence-status">—</dd></div>
+            <div><dt>revision</dt><dd data-testid="signal-source-revision">—</dd></div>
+            <div><dt>关联结构</dt><dd data-testid="signal-structure-id">—</dd></div>
+            <div><dt>source_ids</dt><dd data-testid="signal-source-ids">—</dd></div>
+          </dl>
+          <p class="hint">alert 与 confirmed 必须区分展示；未收盘不得显示为 confirmed。</p>
+        </section>
+      </aside>
+    </div>
+
+    <section
+      data-testid="event-panel"
+      class="panel event-panel"
+      aria-labelledby="event-panel-title"
+    >
+      <h2 id="event-panel-title" class="panel-title">事件时间线与回放</h2>
+
+      <div class="event-panel-body">
+        <section data-testid="event-timeline-region" aria-labelledby="event-timeline-title">
+          <h3 id="event-timeline-title">结构事件</h3>
+          <ol data-testid="event-timeline" class="event-timeline">
+            <li data-testid="event-timeline-empty" data-state="empty">
+              暂无事件（离线 demo 未提供 StructureEvent）
+            </li>
+          </ol>
+        </section>
+
+        <section data-testid="replay-panel" aria-labelledby="replay-panel-title">
+          <h3 id="replay-panel-title">回放控制</h3>
+          <div data-testid="replay-controls" class="replay-controls" role="group" aria-label="回放控制">
+            <button type="button" data-testid="replay-play" data-replay-action="play" disabled>播放</button>
+            <button type="button" data-testid="replay-pause" data-replay-action="pause" disabled>暂停</button>
+            <button type="button" data-testid="replay-step" data-replay-action="step" disabled>单步</button>
+            <button type="button" data-testid="replay-reset" data-replay-action="reset" disabled>重置</button>
+            <button type="button" data-testid="replay-seek" data-replay-action="seek" disabled>跳转</button>
+          </div>
+          <p class="hint">
+            回放控制仅驱动本地离线数据，不发送任何交易指令；按钮在 D4 接线前保持 disabled。
+          </p>
+          <dl class="kv">
+            <div><dt>进度</dt><dd data-testid="replay-progress">0 / 0</dd></div>
+            <div><dt>窗口大小</dt><dd data-testid="replay-window-size">—</dd></div>
+            <div>
+              <dt>截断</dt>
+              <dd data-testid="replay-truncated" data-state="false">false</dd>
+            </div>
+            <div><dt>schema</dt><dd data-testid="replay-schema-version">dashboard.v1</dd></div>
+          </dl>
+        </section>
+      </div>
+    </section>
+
+    <footer data-testid="dashboard-footer" class="dashboard-footer">
+      <p data-testid="footer-readonly-notice">
+        本页面为只读分析与离线回放界面，不提供下单、撤单、仓位或账户操作。
+      </p>
+      <p data-testid="footer-schema-version">schema dashboard.v1 · 静态骨架（D2）</p>
+    </footer>
+
+    <noscript>
+      <p data-testid="noscript-notice">
+        未启用 JavaScript：页面仅显示离线占位骨架，不加载 ./dashboard.js 的数据注入。
+      </p>
+    </noscript>
+
+    <script src="./dashboard.js" defer></script>
+  </body>
+</html>
