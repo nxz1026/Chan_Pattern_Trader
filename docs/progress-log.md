@@ -820,3 +820,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 增加 CPT/Oracle parity 对比图容器，数据缺失时保持隐藏，不伪造对照结果。
 - 新增 `cpt/application/dashboard_compare.py`，提供双 snapshot 的 run/hash/字段级差异摘要。
 - 双数据集对比服务保持只读，focused 测试通过。
+
+## 48. Dashboard Phase 3/6 筛选与导出（2026-09-28）
+
+- 增加只读多级别筛选器，并通过 `cpt:level-changed` 事件通知宿主。
+- 新增 `cpt/application/dashboard_export.py`，支持不修改原 snapshot 的时间范围切片。
+- Dashboard 增加当前 snapshot JSON 导出控件，未引入任何结构写入。
