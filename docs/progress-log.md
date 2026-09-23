@@ -907,3 +907,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - 新增 `cpt/application/dashboard_watchlist.py`，对多 symbol 快照做稳定排序并投影 signal alert/candidate 状态。
 - 新增 focused 测试；watchlist 只消费上游市场快照，不执行行情请求或交易操作。
+
+## 63. Dashboard 配置对比与交易对切换（2026-10-13）
+
+- 前端增加 BTCUSDT/ETHUSDT/SOLUSDT 只读交易对选择器和 `cpt:symbol-changed` 事件。
+- 新增 `cpt/application/dashboard_config_compare.py`，提供 RulesConfig 字段级 diff。
+- 新增 focused 测试；配置对比不修改任何运行配置。
