@@ -24,6 +24,7 @@ from typing import Any
 
 from cpt.adapters.binance_futures import BinanceFuturesClient, resolve_interval_ms
 from cpt.adapters.native_chanlun import NativeChanlunBackend
+from cpt.application.dashboard_market import normalize_24h
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
 from cpt.application.replay import replay_bars
 from cpt.domain.config import RulesConfig
@@ -189,7 +190,11 @@ class _RealtimeProvider:
         return snapshot
 
     def _safe_24h(self) -> dict[str, Any]:
-        return {"available": False, "reason": "upstream_ticker_unavailable"}
+        try:
+            ticker = self._client.fetch_24h_ticker(self._symbol)
+        except Exception:  # noqa: BLE001 — keep API alive on transient upstream errors
+            return {"available": False, "reason": "upstream_ticker_unavailable"}
+        return normalize_24h(ticker)
 
 
 def realtime_snapshot(

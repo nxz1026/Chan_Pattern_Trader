@@ -80,6 +80,9 @@ BINANCE_FAPI_BASE_URL: Final[str] = "https://fapi.binance.com"
 #: K 线端点路径（``GET``，query 参数：symbol/interval/startTime/endTime/limit）。
 KLINES_PATH: Final[str] = "/fapi/v1/klines"
 
+#: 24h ticker 端点（``GET /fapi/v1/ticker/24hr?symbol=...``）。
+TICKER_24H_PATH: Final[str] = "/fapi/v1/ticker/24hr"
+
 #: 单次请求允许的最大 K 线根数（Binance 硬上限，实测与文档一致）。
 MAX_KLINES_LIMIT: Final[int] = 1500
 
@@ -423,6 +426,20 @@ class BinanceFuturesClient:
             ) from exc
         except OSError as exc:  # URLError / 超时 / DNS / 连接被拒
             raise BinanceDataError(f"网络请求失败: {url} {exc}") from exc
+
+    def fetch_24h_ticker(self, symbol: str) -> dict[str, Any]:
+        """拉取 24h ticker（``GET /fapi/v1/ticker/24hr?symbol=...``）。
+
+        返回 Binance 原始字段（``highPrice``/``lowPrice``/``volume``/
+        ``quoteVolume``/``priceChangePercent`` 等），调用方负责映射到
+        :func:`cpt.application.dashboard_market.normalize_24h`。
+        """
+        if not symbol:
+            raise ValueError("symbol 不能为空")
+        payload = self._get_json(TICKER_24H_PATH, {"symbol": symbol})
+        if not isinstance(payload, dict):
+            raise BinanceDataError(f"24h ticker 响应必须是 dict, 收到 {type(payload).__name__}")
+        return payload
 
 
 def _http_error_detail(exc: urllib.error.HTTPError) -> str:
