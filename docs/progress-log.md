@@ -500,3 +500,28 @@ M1 基础结构链路已具备“包含 → 分型 → 新笔 → 笔中枢”�
 ### 结论
 
 M3 已具备基础走势类型分类能力；下一步实现递归结构元素映射，再实现一买状态机和重构事件。
+
+## 19. M3 递归第一步：结构元素映射（2026-09-23）
+
+### 交付物
+
+- 新增 `cpt/domain/recursion.py`：`StructureElement` 与 `map_trend_types()`。
+- 已确认方向的低级别走势类型可映射为上一级 `BarLike` 结构元素。
+- 保留 `source_structure_ids`、`source_revision`、状态和整体高低区间，支持追溯。
+- 方向未定的走势类型跳过；时间重叠候选保留较早元素。
+- 校验 `target_level` 与 `min_elements`；“至少 5 个元素”只作为递归参数校验，不在此层裁剪。
+- 新增 `tests/test_recursion.py`：4 个 focused 用例。
+
+### 独立验收
+
+- `pytest tests/test_recursion.py -x -q`：**4 passed**。
+- `pytest tests -q`：**88 passed**。
+- `ruff check cpt tests scripts/compare_oracle.py`：**All checks passed**。
+- `ruff format --check`：**36 files already formatted**。
+- `mypy cpt`：**Success, 22 source files**。
+- `import-linter`：**5 contracts kept, 0 broken**。
+- `git diff --check`：通过。
+
+### 结论
+
+M3 已具备走势类型到高级别候选结构元素的映射基础；下一步实现一买状态机与重构事件。
