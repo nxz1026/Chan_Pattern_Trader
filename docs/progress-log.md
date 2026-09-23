@@ -934,3 +934,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 
 - 新增 `cpt/application/dashboard_market_fetch.py`，为已有行情 adapter 提供 symbol/interval/24h aggregate 包装，不执行网络请求。
 - 上游完整聚合通过 `normalize_24h` 进入 dashboard.v2；缺失时保留 unavailable 语义。
+
+## 68. Dashboard Chromium 回归矩阵扩展（2026-10-18）
+
+- 扩展静态 Chromium smoke 覆盖 symbol-select、realtime-refresh。
+- 新增 `tests/test_dashboard_chromium_interactions.py`，真实 headless dump-dom 验证 watch 模式交互契约。
+- 当前 smoke 不依赖网络和交易接口，保持只读。
