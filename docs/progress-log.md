@@ -710,3 +710,10 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 支持播放、暂停、单步、重置、跳转，所有操作基于当前 snapshot，不发网络请求。
 - 回放进度、窗口大小、截断状态和事件列表随 snapshot 更新。
 - JS 语法检查通过，保留只读边界。
+
+## 30. Dashboard D5 实时状态（2026-09-23）
+
+- `dashboard/dashboard.js` 增加 `startPolling(url, intervalMs)` / `stopPolling()`。
+- 轮询复用只读 snapshot API，不复制 Binance 请求逻辑，不执行交易操作。
+- 加入请求失败状态和 15 秒无更新后的 stale 状态提示。
+- 保留离线 demo 与回放模式，默认页面仍不发起外部网络请求。
