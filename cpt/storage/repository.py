@@ -138,7 +138,35 @@ class SQLiteRepository:
         conn = self._conn
         for stmt in ddl_statements():
             conn.execute(stmt)
+        self._migrate_signals_foreign_key()
         conn.commit()
+
+    def _migrate_signals_foreign_key(self) -> None:
+        """为已有 v0 数据库补上 signals.structure_id 外键约束。"""
+        conn = self._conn
+        if not conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='signals'"
+        ).fetchone():
+            return
+        columns = conn.execute("PRAGMA foreign_key_list(signals)").fetchall()
+        if any(row[2] == "structure_states" and row[3] == "structure_id" for row in columns):
+            return
+        orphan = conn.execute(
+            "SELECT signal_id FROM signals "
+            "WHERE structure_id NOT IN (SELECT structure_id FROM structure_states) LIMIT 1"
+        ).fetchone()
+        if orphan is not None:
+            raise sqlite3.IntegrityError(
+                f"cannot add signals foreign key: orphan signal {orphan[0]!r}"
+            )
+        conn.execute("PRAGMA foreign_keys = OFF")
+        try:
+            conn.execute("ALTER TABLE signals RENAME TO signals__legacy")
+            conn.execute(ddl_statements()[5])
+            conn.execute("INSERT INTO signals SELECT * FROM signals__legacy")
+            conn.execute("DROP TABLE signals__legacy")
+        finally:
+            conn.execute("PRAGMA foreign_keys = ON")
 
     # -- raw bars --------------------------------------------------------------
 

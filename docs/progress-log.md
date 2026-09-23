@@ -717,3 +717,14 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - 轮询复用只读 snapshot API，不复制 Binance 请求逻辑，不执行交易操作。
 - 加入请求失败状态和 15 秒无更新后的 stale 状态提示。
 - 保留离线 demo 与回放模式，默认页面仍不发起外部网络请求。
+
+## 31. 代码复审问题修复（2026-09-23）
+
+- 修复 `signals.structure_id` 外键缺口；新 schema 和已有 v0 数据库迁移均指向 `structure_states`。
+- 对已有数据库迁移前检查孤儿 signal，发现孤儿时拒绝迁移，避免静默丢弃或制造伪完整性。
+- 新增 `tests/test_storage_foreign_keys.py`：幽灵 signal 拒绝和旧 schema 自动迁移。
+- 修复 Rust oracle 秒级浮点时间戳换算：先换算毫秒再四舍五入。
+- 统一 `PLACEHOLDER_TIME` 到 `cpt.domain.types`，export 与 reference adapter 共享同一常量。
+- focused：**4 passed**；全量：**112 passed**。
+- oracle 对照当前环境：**2 passed**，未跳过。
+- ruff、format、mypy、import-linter、git diff --check 全部通过。

@@ -7,9 +7,11 @@
 
 from __future__ import annotations
 
-from typing import Protocol, runtime_checkable
+from typing import Final, Protocol, runtime_checkable
 
-__all__ = ["BarLike"]
+PLACEHOLDER_TIME: Final[int] = -1
+
+__all__ = ["BarLike", "PLACEHOLDER_TIME"]
 
 
 @runtime_checkable

@@ -159,7 +159,7 @@ def _to_milliseconds(seconds: object) -> int:
     """oracle 时间戳单位是秒（整数），统一换算为毫秒。"""
     if not isinstance(seconds, (int, float, str)):
         raise ValueError(f"oracle 时间戳类型不支持: {type(seconds).__name__}")
-    return int(seconds) * 1000
+    return round(float(seconds) * 1000)
 
 
 def _infer_interval_seconds(bars: Sequence[CanonicalBar]) -> int:

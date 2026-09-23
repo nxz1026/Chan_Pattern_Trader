@@ -28,7 +28,7 @@ TABLE_LLM_CALLS: str = "llm_calls"
 # ---------------------------------------------------------------------------
 
 _DDL_RAW_BARS: str = """\
-CREATE TABLE raw_bars (
+CREATE TABLE IF NOT EXISTS raw_bars (
     bar_id                 INTEGER PRIMARY KEY AUTOINCREMENT,
     symbol                 TEXT    NOT NULL,
     interval_minutes       INTEGER NOT NULL,
@@ -50,7 +50,7 @@ CREATE TABLE raw_bars (
 """
 
 _DDL_NORMALIZED_BARS: str = """\
-CREATE TABLE normalized_bars (
+CREATE TABLE IF NOT EXISTS normalized_bars (
     norm_id    INTEGER PRIMARY KEY AUTOINCREMENT,
     raw_bar_id INTEGER NOT NULL REFERENCES raw_bars (bar_id),
     direction  INTEGER NOT NULL,
@@ -60,7 +60,7 @@ CREATE TABLE normalized_bars (
 """
 
 _DDL_STRUCTURE_STATES: str = """\
-CREATE TABLE structure_states (
+CREATE TABLE IF NOT EXISTS structure_states (
     structure_id   TEXT    PRIMARY KEY,
     level          INTEGER NOT NULL,
     kind           TEXT    NOT NULL,
@@ -79,7 +79,7 @@ CREATE TABLE structure_states (
 """
 
 _DDL_STRUCTURE_EVENTS: str = """\
-CREATE TABLE structure_events (
+CREATE TABLE IF NOT EXISTS structure_events (
     event_id     INTEGER PRIMARY KEY AUTOINCREMENT,
     structure_id TEXT    NOT NULL REFERENCES structure_states (structure_id),
     event_type   TEXT    NOT NULL,
@@ -93,17 +93,17 @@ CREATE TABLE structure_events (
 """
 
 _DDL_INDEX_EVENTS: str = """\
-CREATE INDEX idx_events_sid_time
+CREATE INDEX IF NOT EXISTS idx_events_sid_time
     ON structure_events(structure_id, occurred_at, event_id)
 """
 
 _DDL_SIGNALS: str = """\
-CREATE TABLE signals (
+CREATE TABLE IF NOT EXISTS signals (
     signal_id         TEXT    PRIMARY KEY,
     level             INTEGER NOT NULL,
     signal_type       TEXT    NOT NULL,
     status            TEXT    NOT NULL,
-    structure_id      TEXT    NOT NULL,
+    structure_id      TEXT    NOT NULL REFERENCES structure_states (structure_id),
     center_ids        TEXT    NOT NULL,
     divergence_status TEXT    NOT NULL,
     alert_time        INTEGER,
@@ -117,7 +117,7 @@ CREATE TABLE signals (
 """
 
 _DDL_LLM_CALLS: str = """\
-CREATE TABLE llm_calls (
+CREATE TABLE IF NOT EXISTS llm_calls (
     call_id        INTEGER PRIMARY KEY AUTOINCREMENT,
     prompt_hash    TEXT    NOT NULL,
     model          TEXT    NOT NULL,

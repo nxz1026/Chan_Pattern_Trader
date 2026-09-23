@@ -23,6 +23,7 @@ from cpt.domain.models import (
     StructureEvent,
     ZhongShu,
 )
+from cpt.domain.types import PLACEHOLDER_TIME
 
 __all__ = [
     "EXPORT_SCHEMA_VERSION",
@@ -44,7 +45,7 @@ EXPORT_SCHEMA_URL: str = (
 #: 占位时间戳哨兵:``cpt.adapters.reference_chanlun.PLACEHOLDER_TIME``。
 #: 任何结构对象的 ``start_time`` / ``end_time`` 等于此值时, ``export_dataset``
 #: 拒绝导出,防止占位语义污染已冻结的 schema v1。
-_EXPORT_PLACEHOLDER_TIME: int = -1
+_EXPORT_PLACEHOLDER_TIME: int = PLACEHOLDER_TIME
 
 
 def _bar_to_dict(bar: CanonicalBar) -> dict[str, Any]:
@@ -68,7 +69,7 @@ def _reject_placeholders(
         for field in fields:
             if getattr(obj, field, None) == _EXPORT_PLACEHOLDER_TIME:
                 raise ValueError(
-                    f"{name}[{idx}].{field} 是占位时间戳 ({-1}); "
+                    f"{name}[{idx}].{field} 是占位时间戳 ({PLACEHOLDER_TIME}); "
                     f"schema v1 不接受占位语义。请在反腐层传入 bars 参数解析。"
                 )
 

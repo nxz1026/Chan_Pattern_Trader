@@ -24,7 +24,7 @@ from dataclasses import dataclass
 from typing import Protocol, runtime_checkable
 
 from cpt.domain.models import Bi, Fractal, ZhongShu
-from cpt.domain.types import BarLike
+from cpt.domain.types import PLACEHOLDER_TIME, BarLike
 
 __all__ = [
     "ReferenceChanlunConfig",
@@ -124,7 +124,7 @@ class ChanlunBackend(Protocol):
 #: ``start_time``/``end_time`` 哨兵值,表示"尚未解析为毫秒时间戳"。
 #: 导出侧 (``cpt.application.export.export_dataset``) 会拒绝把含此值的
 #: 结构放进 schema v1 输出,防止占位语义污染已冻结格式。
-PLACEHOLDER_TIME: int = -1
+# PLACEHOLDER_TIME is defined in the dependency-free domain types module.
 
 
 def _resolve_time(bar_index: int, bars: Sequence[BarLike] | None) -> int:
