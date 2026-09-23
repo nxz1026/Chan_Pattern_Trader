@@ -736,3 +736,10 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - `StructureElement` 增加时间、区间、级别和方向值域校验。
 - 其余复审修复已保持：signals 外键迁移、oracle 浮点时间换算、统一 PLACEHOLDER_TIME。
 - 当前全量测试、ruff、format、mypy、import-linter 和 diff check 均通过。
+
+## 33. Dashboard 产品路线 Phase 0-1 开始（2026-09-23）
+
+- 新增 `docs/dashboard-product-roadmap.md`，完整冻结产品审核报告中的双模式、研究者、盯盘和深化路线。
+- Phase 0 完成双模式 URL 切换（`watch/research`）、共享十字线 OHLCV tooltip 和现有结构联动。
+- 新增 `cpt/application/dashboard_inspector.py` 与 focused 测试，提供 raw bar → merged bar → 结构引用的只读检查结果。
+- focused：**1 passed**；当前全量：**113 passed**。

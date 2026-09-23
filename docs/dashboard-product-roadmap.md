@@ -48,6 +48,8 @@ dashboard/js/app.js
 
 ## Phase 1：研究者模式 P0
 
+已开始实现：`cpt/application/dashboard_inspector.py` 提供 raw bar → merged bar → 结构引用的只读检查服务。
+
 研究模式北极星指标：三次点击内回答“这个结构为什么长这样”。
 
 ### R1 数据集/运行浏览器
