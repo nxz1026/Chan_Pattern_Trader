@@ -1,7 +1,7 @@
 # CPT 参考仓库审计报告
 
 版本：v0.1 · 2026-09-22
-状态：M0-02 交付物。记录三个参考仓库的元数据、复用边界与许可证合规结论。
+状态：M0-02 交付物。记录缠论参考仓库的元数据、复用边界与许可证合规结论。当前以后续仍在线维护、社区影响力较高的仓库为主要参考入口；Star/Fork 仅作热度参考，不作为算法正确性证明。
 验证脚本：`scripts/fetch_references.sh`（一键 clone + 固定 commit 校验，见 §6）。
 
 ## 1. 参考仓库元数据
@@ -11,6 +11,8 @@
 | chanlun-pro | https://github.com/yijixiuxin/chanlun-pro | `78ffa470f1e9463809d8fe2a2802e9e84b896dfe` | Apache-2.0（`LICENSE`） | 依赖级复用基础口径（分型/新笔/笔中枢/`level`/`zs_wzgx`）+ oracle 对照 |
 | chanlun.py | https://github.com/YuYuKunKun/chanlun.py | `2e4fa135b19eaa201fca7bfcc8ca4a86cbde7815` | MIT（含 `NOTICE`） | 借鉴级联重建与配置序列化逻辑，不复制 |
 | chanlun_pine | https://github.com/Ye-Yu-Mo/chanlun_pine | `0c028ef52fa8474b212b9a234aabbf22c3f45b4e` | GPL-3.0（`LICENSE`） | 仅视觉交叉校验，不复制代码 |
+| czsc | https://github.com/waditu/czsc | 记录时以仓库默认分支/发布版本为准，需在引用前固定 commit | MIT（以仓库 LICENSE 为准） | 主要在线参考：Rust + PyO3 缠论核心、多级别、信号/事件、回测和可视化生态 |
+| chan.py | https://github.com/Vespa314/chan.py | 记录时以仓库默认分支/发布版本为准，需在引用前固定 commit | MIT（以仓库 LICENSE 为准） | 主要在线参考：Python 缠论结构、多级别、线段、买卖点、回放与策略扩展 |
 
 > chanlun.py 的 `NOTICE` 声明 Signal/Factor/Event 等部分逻辑源自 czsc（Apache-2.0），因此其 LICENSE 记为「MIT（含 NOTICE）」。
 
@@ -21,14 +23,28 @@
 | chanlun-pro | 依赖级复用基础口径：分型/新笔/笔中枢/`level`/`zs_wzgx`；经反腐层 `adapters/reference_chanlun.py` 调用公开接口，结果映射回 CPT 领域对象 | 对象不泄漏进 `domain/`；不破解 `cl.py` 加密核心 | oracle 对照：同输入 diff 基础结构序列 |
 | chanlun.py | 借鉴级联重建（尾部弹出 + 回溯重算）与配置序列化（to_dict/to_json/保存/加载/对比）的工程思路 | 不复制代码，不整体依赖 | — |
 | chanlun_pine | — | 一行代码都不抄；不与 CPT 静态/动态链接 | 仅视觉交叉校验信号生命周期与图表呈现 |
+| czsc | 允许阅读公开文档、API 和许可证范围内的源码；必要时固定 commit 做行为实验 | 不整体复制、不把 czsc 作为 CPT domain 依赖，不把其 Rust/PyO3 实现当作 CPT 正确性权威 | 结构、信号、事件、多级别和可视化行为对照 |
+| chan.py | 允许阅读公开源码和文档、固定版本做行为对照 | 不复制代码、不整体依赖、不将外部策略/交易系统引入 CPT | 分型/笔/线段/中枢/买卖点/回放工程行为对照 |
 
-## 3. 许可证合规要点
+## 3. 主要在线参考优先级
+
+缠论是 CPT 的核心算法领域。以后进行算法、字段和交互研究时，优先查看仍在线维护且社区影响力较高的公开仓库：
+
+1. **czsc**：https://github.com/waditu/czsc —— 当前主要在线参考，覆盖 Rust/PyO3 核心、多级别、信号/事件、回测和可视化生态。
+2. **chan.py**：https://github.com/Vespa314/chan.py —— Python 结构、线段、买卖点、多级别、回放和策略扩展参考。
+3. **chanlun-pro**：https://github.com/yijixiuxin/chanlun-pro —— 公开接口和字段口径参考，核心 `cl.py` 受许可证/加密边界约束。
+4. **chanlun.rs**：https://github.com/YuYuKunKun/chanlun.rs —— MIT Rust/PyO3 独立 oracle，作为黑盒行为对照。
+5. **chanlun_pine**：https://github.com/Ye-Yu-Mo/chanlun_pine —— GPL-3.0，仅离线视觉交叉校验。
+
+Star/Fork 只用于判断社区热度，不等于算法正确性、许可证授权或 CPT 兼容性。每次真正引用代码/字段前仍须固定 commit、核验 LICENSE 并记录差异。
+
+## 4. 许可证合规要点
 
 - **Apache-2.0（chanlun-pro）**：保留原版权声明与 LICENSE；对修改过的部分需注明修改。依赖级复用（非复制源码进仓库）不触发传染义务。
 - **MIT + NOTICE（chanlun.py）**：保留 `NOTICE` 与版权声明即可；MIT 无传染性，CPT 不因借鉴逻辑而改变自身许可证。
 - **GPL-3.0（chanlun_pine）**：强传染。CPT 必须与 chanlun_pine 保持零静态/动态链接、零代码复制，仅做**离线视觉对照**。若违反（引入其代码或链接其产物），将触发 GPL-3.0 的源码分发义务，污染 CPT 整体许可证。
 
-## 4. chanlun-pro 加密核心风险
+## 5. chanlun-pro 加密核心风险
 
 `chanlun-pro/src/chanlun/cl_interface.py` 中以下两个函数设计为**可覆盖**，是 CPT 注入自定义背驰口径的合法扩展点：
 
@@ -37,7 +53,7 @@
 
 CPT 不直接破解加密核心 `cl.py`；而是通过 `user_custom_mmd` 扩展点注入 CPT 一买对照逻辑，实现「用 CPT 口径验证 chanlun-pro 结构序列」的 oracle 对照，避免触碰加密实现。
 
-## 5. PyPI MIT 版 chanlun 旧包验证
+## 6. PyPI MIT 版 chanlun 旧包验证
 
 **结论：不可用（M0-04 实测）**。PyPI 上不存在「MIT 许可的旧版 Python `chanlun` 包」；当前该包名指向作者 YuYuKunKun 的 **Rust 重写版 `chanlun.rs`**（PyO3 绑定），与旧 Python 项目 `chanlun.py`（固定 `2e4fa135`）不是同一发行物。
 
@@ -82,6 +98,6 @@ CPT 不直接破解加密核心 `cl.py`；而是通过 `user_custom_mmd` 扩展�
   2. **覆盖不全**：缺 `走势类型`，且不含 chanlun-pro 的 `level`/`zs_wzgx` 等对照口径，无法覆盖现有 oracle 对照面。
 - **遗留 TODO（不阻塞 M0）**：若 M2 需 MIT oracle，Rust 版 `chanlun` `2606.73` 是候选，但需补齐走势类型对照并接受 PyO3 调用形态；本结论留待 M2 oracle 切换策略评估。
 
-## 6. 验证脚本
+## 7. 验证脚本
 
 - `scripts/fetch_references.sh`：一键 clone 三个仓库到 `references/` 并 checkout 到固定 commit；已存在则 fetch + checkout；最后打印每个仓库实际 HEAD 与期望 commit 比对，不一致则退出码非 0；并打印各仓库 LICENSE 路径供审计。
