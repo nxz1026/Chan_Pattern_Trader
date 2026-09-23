@@ -843,3 +843,9 @@ M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保�
 - parity 面板现在按 fractals/bis/zhongshus 的 normalized items 分别绘制 CPT/Oracle SVG 元素。
 - 每个元素包含 matched/missing/extra/mismatched 状态 class，并支持点击触发 `cpt:parity-selected` 和定位选择状态。
 - 没有 parity 数据时图表继续隐藏，不伪造对照结果。
+
+## 52. Dashboard 24h 数据契约（2026-10-02）
+
+- 新增 `cpt/application/dashboard_market.py`，定义上游真实 24h 聚合的 available/incomplete/unavailable 契约。
+- dashboard.v2 增加 `market_24h`；未提供上游聚合时返回明确 reason，前端显示“不可用”，不显示永久破折号或窗口值冒充 24h。
+- 完整聚合接入仍由未来 Binance adapter/application caller 注入，Dashboard 不复制行情 HTTP 逻辑。
