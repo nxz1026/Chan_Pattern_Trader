@@ -670,3 +670,15 @@ M4 已具备可注入、可验证的 Binance 数据入口和缺口阻断；下�
 ### 结论
 
 M4 数据/回放和 M5 实时基础链路已完成；下一阶段进行 M6 质量验收、已知限制汇总和最终阶段提交。
+
+## 26. M6 质量验收（2026-09-23）
+
+- 新增 `docs/m6-quality-report.md`，记录自动化验收、已完成能力和已知限制。
+- 全量测试：**107 passed**。
+- ruff：**All checks passed**；format：**46 files already formatted**。
+- mypy：**27 source files，无问题**。
+- import-linter：**5 contracts kept，0 broken**。
+- `git diff --check`：通过。
+- `docs/implementation-plan.md` 已更新 M0-M6 当前状态和后续限制收敛路线。
+
+M0-M5 主线已具备可复现的基础实现和验证门；M6 报告明确保留人工 fixture 时间契约、背驰计算、实时性能优化和 M-LLM 未实现等限制，不宣称生产级完成。
