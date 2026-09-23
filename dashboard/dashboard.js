@@ -533,6 +533,59 @@
     return `已选中 ${payload.kind}`;
   }
 
+  function renderParity(snapshot) {
+    const panel = q("[data-testid=event-panel]");
+    if (!panel) return;
+    let section = q("[data-testid=parity-panel]");
+    if (!section) {
+      section = document.createElement("section");
+      section.dataset.testid = "parity-panel";
+      section.className = "cpt-parity-panel";
+      const heading = document.createElement("h3");
+      heading.textContent = "Oracle 对比";
+      section.appendChild(heading);
+      panel.appendChild(section);
+    }
+    while (section.children.length > 1) section.removeChild(section.lastChild);
+    const parity = snapshot && isObject(snapshot.parity) ? snapshot.parity : null;
+    const summary = document.createElement("p");
+    if (!parity) {
+      summary.textContent = "当前 snapshot 未提供 parity 结果。";
+      section.appendChild(summary);
+      return;
+    }
+    const parts = Object.entries(parity).map(([kind, value]) => {
+      const item = isObject(value) && isObject(value.summary) ? value.summary : {};
+      return `${kind}: ${item.matched || 0} matched / ${item.missing || 0} missing / ${item.extra || 0} extra`;
+    });
+    summary.textContent = parts.join(" · ") || "无对比项";
+    section.appendChild(summary);
+  }
+
+  function renderLocalNote(payload) {
+    const panel = q("[data-testid=structure-panel]");
+    if (!panel) return;
+    let section = q("[data-testid=local-note]");
+    if (!section) {
+      section = document.createElement("section");
+      section.dataset.testid = "local-note";
+      section.className = "cpt-local-note";
+      const heading = document.createElement("h3");
+      heading.textContent = "本地研究注释";
+      const input = document.createElement("textarea");
+      input.dataset.testid = "local-note-input";
+      input.placeholder = "仅保存浏览器本地，不进入数据集或 hash";
+      input.rows = 3;
+      input.addEventListener("input", () => {
+        if (state.selection) localStorage.setItem(`cpt-note:${state.selection.kind}:${state.selection.sourceIds.join(",")}`, input.value);
+      });
+      section.append(heading, input);
+      panel.appendChild(section);
+    }
+    const input = q("[data-testid=local-note-input]");
+    if (input) input.value = payload ? localStorage.getItem(`cpt-note:${payload.kind}:${payload.sourceIds.join(",")}`) || "" : "";
+  }
+
   function renderResearchDetails(payload) {
     const panel = q("[data-testid=structure-panel]");
     if (!panel) return;
@@ -627,6 +680,8 @@
     setText("[data-testid=selection-source-ids]", payload.sourceIds.join(" ") || "—");
     root.dataset.selection = payload.kind;
     renderResearchDetails(payload);
+    renderLocalNote(payload);
+    renderParity(state.snapshot);
 
     if (payload.kind === "bi") renderBiSection(payload.raw);
     if (payload.kind === "zhongshu") {
@@ -1336,6 +1391,7 @@
     state.selectedNode = null;
     renderChrome(state.snapshot);
     renderEvents(state.snapshot);
+    renderParity(state.snapshot);
     renderStructureDefaults(state.snapshot);
     renderSelection();
     drawChart();
