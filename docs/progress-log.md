@@ -775,3 +775,15 @@ evidence 里带 `missing_weekdays` / `median_bars_per_day` / `low_coverage_days`
 P0 = 0、P2 = 0、外部请求 0、页面异常 0、四画布计数仍全等。审计脚本原本只校验
 status 合法（`degraded` 合法所以被放过），已改成**把 degraded 顶成 P1** ——
 合法状态不等于健康状态。
+
+### 台账可归属化
+
+`~/.cache/cpt/wind_quota.jsonl` 里除我自己那 2 条 `ok:true` 之外，还有 13 条
+**空参数 + `duration_ms=0.0` 的 `TIMEOUT`** 记录。这不是本模块能产生的：本模块的
+超时路径记的是 `~timeout` 毫秒（默认 90000），而 0.0ms 意味着执行器瞬间抛
+`TimeoutExpired`；且公开方法（`fetch_daily_bars` / `fetch_adjust_factors`）都不可能
+发出空参数。全盘 grep 确认只有 `cpt/adapters/wind_source.py` 引用该路径，且当时
+无其它进程在跑 Wind。
+
+结论：**台账是共享追加文件，存在无法归属的写入方**。已给每条记录加 `pid` 字段，
+后续任何一笔额度消耗都能定位到进程，不再靠推断。

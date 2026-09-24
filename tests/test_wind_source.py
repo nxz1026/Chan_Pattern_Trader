@@ -7,6 +7,7 @@ Wind 的取数代价是真实积分，所以这一组测试的存在意义就是
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
@@ -128,6 +129,8 @@ def test_call_parses_success_envelope_and_records_ledger(tmp_path: Path) -> None
     assert entry["tool_name"] == "get_stock_kline"
     assert "windcode" not in json.dumps(entry)
     assert len(entry["params_digest"]) == 16
+    # 台账是共享追加文件，必须能归属到进程
+    assert entry["pid"] == os.getpid()
 
 
 def test_call_raises_quota_error_distinctly(tmp_path: Path) -> None:

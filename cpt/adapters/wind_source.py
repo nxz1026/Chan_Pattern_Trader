@@ -326,6 +326,10 @@ class WindSourceClient:
             return
         entry = {
             "ts": datetime.now(tz=UTC).isoformat(),
+            # 进程号：台账是**共享**的追加文件，没有 pid 就无法归属"这条是谁花的额度"。
+            # 实测台账里出现过 13 条空参数 + duration_ms=0.0 的 TIMEOUT 记录，本模块的
+            # 超时路径只可能记出 ~timeout 毫秒，说明另有写入方 —— 加 pid 便于追溯。
+            "pid": os.getpid(),
             "server_type": server_type,
             "tool_name": tool_name,
             "params_digest": hashlib.sha256(
