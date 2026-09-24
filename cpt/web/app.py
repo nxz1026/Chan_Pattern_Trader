@@ -225,6 +225,21 @@ def make_handler(
                 except Exception:  # noqa: BLE001
                     self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "inspect failed")
                     return
+            elif path.path == "/api/dashboard/sources":
+                # R17 数据源能力注册表 + 探活。默认**不**碰消耗额度的源（Wind）：
+                # 一次探测就是一次真实额度，必须显式 ?include_quota=1 才允许。
+                # 探活结果有 60s 进程内缓存，?refresh=1 强制重探。
+                from cpt.adapters.source_registry import (  # noqa: PLC0415
+                    capabilities_payload,
+                    clear_cache,
+                )
+
+                include_quota = (query.get("include_quota") or ["0"])[0] not in {"0", "false", ""}
+                if (query.get("refresh") or ["0"])[0] not in {"0", "false", ""}:
+                    clear_cache()
+                markets_raw = (query.get("markets") or [""])[0]
+                markets = tuple(part for part in markets_raw.split(",") if part) or None
+                payload = capabilities_payload(include_quota=include_quota, markets=markets)
             elif path.path == "/api/canvas/wbt":
                 # 画布 D（R16-5）：服务端用 wbt 的 HtmlReportBuilder 渲染报告片段。
                 # 客户端必须传可视窗口（start_ms/end_ms），否则只画窗口的 A/B/C

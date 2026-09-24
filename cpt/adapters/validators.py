@@ -46,6 +46,7 @@ from typing import Final
 from cpt.domain.models import CanonicalBar
 
 __all__ = [
+    "A_SHARE_DAILY_INTERVAL_MS",
     "DEFAULT_INTERVAL_MS",
     "DataGapError",
     "DataValidationError",
@@ -56,6 +57,10 @@ __all__ = [
 
 #: 首版底层周期：5 分钟（``docs/rules.md`` §8.5），单位毫秒。
 DEFAULT_INTERVAL_MS: Final[int] = 300_000
+#: A 股日线周期（毫秒）。``validate_ashare_bars`` 的默认值 —— 该函数只服务 A 股
+#: 日线，用 5 分钟默认值会让调用方在"忘了传 interval_ms"时收到一条
+#: ``open_time+300000-1`` 的契约报错（R17 实测踩到），属于纯粹的坑。
+A_SHARE_DAILY_INTERVAL_MS: Final[int] = 86_400_000
 
 
 class DataValidationError(ValueError):
@@ -129,7 +134,7 @@ def validate_canonical_bars(
 
 def validate_ashare_bars(
     bars: Sequence[CanonicalBar],
-    interval_ms: int = DEFAULT_INTERVAL_MS,
+    interval_ms: int = A_SHARE_DAILY_INTERVAL_MS,
 ) -> tuple[CanonicalBar, ...]:
     """校验 A 股日线序列 —— **不做连续性检查**（R15/R16，C3/C5）。
 

@@ -128,9 +128,13 @@ class AShareLocalClient:
         ``920025`` → ``920025.BJ``。"""
         if "." in code:
             return code
+        # 顺序敏感：`92`（北交所 920xxx）必须早于 `9`（沪 B），否则 920025 会被
+        # 推成 920025.SH，Wind 那边直接查无此码（R17 修）。
+        if code.startswith(("92", "43", "83", "87", "88")):
+            return f"{code}.BJ"
         if code.startswith(("6", "9", "5")):
             return f"{code}.SH"
-        if code.startswith(("4", "92")):
+        if code.startswith("4"):
             return f"{code}.BJ"
         return f"{code}.SZ"
 

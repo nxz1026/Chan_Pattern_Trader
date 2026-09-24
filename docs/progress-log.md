@@ -591,3 +591,109 @@ body 里，`_CDN_RE` 会对残留外链响亮失败而不是静默降级）。
 (128 files) / mypy(62 files) / vulture / import-linter(4 kept, 0 broken) 全绿。
 CI 无 wbt ⇒ 画布 D 的渲染断言 `importorskip`（已用 meta_path 屏蔽 wbt 模拟 CI：
 13 passed, 2 skipped）。
+
+## R17 — 数据源扩充
+
+**目标（总计划 §7）**：加密走 czsc `ccxt_connector` 那条路（ccxt 公开端点，
+无鉴权）；A 股以 **Wind 为主通道**，公开源只作兜底。
+
+### 第一件事不是"再加一个源"，而是把源的状态变成一等对象
+
+R15/R16 的踩坑都是同一类 —— **某个源悄悄不可用，链路静默降级**：A 股快照
+`overlays` 恒为空没报错；R14 的 czsc 后端从未接进生产没报错；A 股 98.2% 的代码
+缺复权因子只在取数时才暴露。所以 R17 先落地
+`cpt/adapters/source_registry.py` + `GET /api/dashboard/sources`：
+
+- `SOURCES` 是**声明**（静态、可单测、不联网）：id / 市场 / 角色（primary /
+  fallback / local）/ 提供的能力 / 需要的可选依赖 / **额度代价**；
+- `probe_source()` 是**实测**：任何异常都折叠成 `status`（ok / degraded /
+  unavailable / skipped），**绝不让 `/api/dashboard/sources` 500**；
+- **Wind 默认 `skipped`**：一次探测就是一次真实万得额度，必须显式
+  `?include_quota=1` 才允许 —— 默认路径绝不花配额（有专门的测试钉这条纪律）；
+- 探活结果 60s 进程内缓存，`?refresh=1` 强制重探（别把看板刷成 DDoS）；
+- `known_dead_endpoints` 留档已知不可用端点，避免每轮重复侦察。
+
+### 四个新数据源
+
+| 源 | 文件 | 角色 | 依赖 | 实测 |
+|---|---|---|---|---|
+| ccxt 统一交易所接口 | `cpt/adapters/ccxt_source.py` | 加密兜底 | extra `crypto` | ok，255ms |
+| 腾讯 fqkline 后复权日线 | `cpt/adapters/a_share_public.py` | A 股兜底 | 无 | ok，285ms |
+| 新浪 hq.sinajs.cn 快照 | `cpt/adapters/a_share_public.py` | A 股兜底 | 无 | ok，394ms |
+| Wind CLI 主通道 | `cpt/adapters/wind_source.py` | A 股主通道 | wind CLI + key | **skipped（默认不探测）** |
+
+**ccxt** 不转手 czsc 的 `ccxt_connector`：那个模块 ① 顶层 `import ccxt`（缺依赖时
+连 czsc 都导入失败）② 依赖 loguru ③ 返回 pandas DataFrame。CPT 要的是"请求 →
+CanonicalBar"的窄接口，所以直接用 ccxt，只沿用它的选所与代理约定。
+
+**Wind** 的通道形态是实测出来的：本机没有 WindPy，取数走
+`cd <wind-mcp-skill> && node scripts/cli.mjs call <server_type> <tool> '<params_json>'`，
+成功时数据在 `content[0].text`（JSON 字符串），失败时 stdout 是
+`{"ok":false,"code":...}`。**额度不足必须与"源坏了"分开报**：实测 Wind 的
+"试用已到期"不带任何英文关键词，所以 `_QUOTA_MARKERS` 专门收录了中文提示，
+否则运维会去查网络而不是去充值。
+
+### 三个必须写进代码的坑（都有回归测试）
+
+1. **腾讯 `fqkline` 的字段顺序是 `[日期, 开, 收, 高, 低, 量]`，不是 OHLC**。
+   实测 `["2026-09-24","8838.081","8764.863","8872.523","8731.378","31239"]` 是
+   开 8838.081 / 收 8764.863 / 高 8872.523 / 低 8731.378。按 OHLC 解析会得到
+   "最高价 < 收盘价"的坏数据**且不会报错**。适配器逐根做 OHLC 自洽校验，
+   不自洽就报错。
+2. **复权口径必须与本地库一致**：`public.daily_bar × asel.ref_adjust_factor` 是
+   **后复权**，所以腾讯侧请求 `hfq`（同一天后复权 8838.081 vs 不复权 1250.010，
+   因子 ≈ 7.07）、Wind 侧 `aftype="1"`。口径不一致会让兜底源和主源画出完全不同的笔。
+3. **`validate_ashare_bars` 的默认周期**原本是 5 分钟（`DEFAULT_INTERVAL_MS`），
+   调用方忘传 `interval_ms` 就会收到 `open_time+300000-1` 的契约报错 —— 已改为
+   新增的 `A_SHARE_DAILY_INTERVAL_MS = 86_400_000`。
+
+### 顺带修掉的真 bug
+
+- `cpt/adapters/a_share_local.py::_to_wind_code` 的**前缀判断顺序**错误：
+  `code.startswith(("6","9","5"))` 排在 `("4","92")` 前面，导致北交所新代码段
+  `920025` 被推成 `920025.SH`，Wind 查无此码。已把 `92/43/83/87/88` 提前，
+  公开源适配器同口径（并拒绝未知交易所后缀，而不是静默丢掉 `.XX`）。
+
+### 端到端验证：公开源真的能喂进结构引擎
+
+腾讯后复权日线 300 根 → `validate_ashare_bars` → `compute_domain_structures`
+（`RulesConfig()`，两个后端）：
+
+| 代码 | 后端 | bars | 分型 | 笔 | 中枢 | 笔中位跨度 | 短跨度(<4天)占比 |
+|---|---|---|---|---|---|---|---|
+| 600519 | native | 300 | 99 | 98 | 16 | **3 天** | **51.0%** |
+| 600519 | czsc | 300 | 96 | 14 | 2 | **21 天** | **0.0%** |
+| 300059 | native | 300 | 113 | 112 | 21 | **3 天** | **54.5%** |
+| 300059 | czsc | 300 | 110 | 24 | 4 | **15 天** | **0.0%** |
+
+与 R14（oracle fixture）/ R16（本机真库 64 根）的结论完全同向：**自研 native
+后端产出的笔严重退化**（中位跨度 3 天、过半笔短于 4 天），czsc 后端正常
+（中位 15–21 天、短跨度 0%）。这次是**通过完全独立的公开数据通道**复现的。
+
+### 验收证据（Playwright，`audit_R17.js`，真机 `https://127.0.0.1/cpt/`）
+
+| 源 | 角色 | 状态 | 延迟 | 额度 |
+|---|---|---|---|---|
+| binance_futures | primary | ok | 32 ms | none |
+| ccxt | fallback | ok | 256 ms | none |
+| tencent_kline | fallback | ok | 285 ms | none |
+| sina_quote | fallback | ok | 394 ms | none |
+| a_share_local | local | ok | 164 ms | none |
+| wind | primary | **skipped** | 6 ms | **wind** |
+
+- `/cpt/api/dashboard/sources` 200、`schema_version=sources.v1`、6 个源齐全
+- `?markets=crypto` → `[binance_futures, ccxt]`；`?markets=a_share` →
+  `[a_share_local, sina_quote, tencent_kline, wind]`
+- **Wind 默认 `skipped`**（额度纪律），`include_quota=false`
+- **R16 四画布不回归**：A/B/C/D 计数仍然全等（180/66/10/2/2）
+- `externalRequests=0`、consoleErrors=0、pageErrors=0、**P0/P1/P2 = 0/0/0**
+- 产物：`screenshot-R17-sources.png`、`audit_R17.json`
+
+**验收**：`370 passed`（R16-5 的 305 + 65）；ruff check / ruff format --check
+(136 files) / mypy(66 files) / vulture / import-linter(4 kept, 0 broken) 全绿。
+CI 无 ccxt/wbt/psycopg/pandas/plotly ⇒ 用 meta_path 屏蔽这些包模拟 CI：
+77 passed, 3 skipped（全部落在 `importorskip`）。
+
+**待人类拍板（消耗真实额度，未擅自执行）**：是否花 1 次 Wind 额度实探当前
+`WIND_API_KEY` 是否有效；以及 98.2% 缺复权因子的 backfill 规模（Wind 不返回
+因子，`fetch_adjust_factors` 需要**每只标的 2 次调用**，5225 只 ≈ 10450 次）。

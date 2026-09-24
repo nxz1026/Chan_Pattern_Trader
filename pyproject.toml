@@ -31,6 +31,9 @@ chan = ["czsc==1.0.1"]
 # 画布 D（R16-5）：wbt 报告外壳。核心 dependencies 保持为空 ——
 # 没有 wbt 时 /api/canvas/wbt 返回 available=false，其余三个画布照常工作。
 report = ["wbt==0.9.1"]
+# 加密第二通道（R17）：ccxt 公开端点。主通道 binance_futures 零依赖，
+# 未装 ccxt 时注册表把它标成 unavailable，不影响实时看板。
+crypto = ["ccxt>=4.0"]
 # A 股本地数据层（R15-2 / R16-3）：只读连 PostgreSQL。
 # 核心 dependencies 同样保持为空；只有需要跑 A 股真实链路时才装本 extra。
 db = ["psycopg[binary]>=3.1"]
