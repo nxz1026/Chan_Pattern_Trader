@@ -7,6 +7,7 @@ from typing import Any
 
 from cpt.web.a_share import (
     DEFAULT_WIDTH_K,
+    _empty_snapshot,
     build_ashare_snapshot,
 )
 
@@ -113,3 +114,62 @@ def test_provider_caches_snapshot_within_ttl():
 
 def test_provider_default_width_k_matches_plan():
     assert DEFAULT_WIDTH_K == 30
+
+
+def test_empty_and_real_paths_have_same_schema_shape():
+    """回归：degraded（空/DB错）路径与正常路径的 schema 形状必须一致。
+
+    实测踩过：空快照曾把 ``overlays`` 返回成 ``[]``（真实路径是 dict）、
+    ``signal`` 返回成 ``{}``（真实路径是 ``None``）——前端在 degraded 分支会崩。
+    """
+    real = build_ashare_snapshot("600519", client=_FakeClient(_bars_for("600519", n=40)))
+    empty = _empty_snapshot("600519", "no_data")
+    broken = build_ashare_snapshot("600519", client=_BrokenClient())
+
+    for name, snap in (("real", real), ("empty", empty), ("broken", broken)):
+        assert isinstance(snap["candles"], list), name
+        assert isinstance(snap["overlays"], dict), f"{name}: overlays 必须是 dict"
+        assert set(snap["overlays"]) == {"fractals", "bis", "zhongshus", "trend_types"}, name
+        assert snap["signal"] is None or isinstance(snap["signal"], dict), name
+        assert isinstance(snap["events"], list), name
+        assert isinstance(snap["runtime"], dict), name
+        assert snap["schema_version"] == "dashboard.v2", name
+        # market 必备键
+        for key in ("symbol", "kind", "interval_ms", "bar_count"):
+            assert key in snap["market"], f"{name}: market 缺 {key}"
+
+
+class _BrokenClient:
+    def fetch_validated_klines(self, code: str, start_ms: int, end_ms: int):
+        raise RuntimeError("connection lost")
+
+
+def _zigzag_bars(*, n: int = 120) -> list[Any]:
+    """正弦式振荡序列 —— 保证能出分型与笔（单调序列出不来）。"""
+    import math
+
+    end_ms = int(datetime(2026, 9, 24, tzinfo=UTC).timestamp() * 1000)
+    return [
+        _make_canonical(
+            end_ms - (n - 1 - i) * 24 * 3600 * 1000,
+            10.0 + 3.0 * math.sin(i / 3.0),
+        )
+        for i in range(n)
+    ]
+
+
+def test_overlays_are_populated_from_replay_payload():
+    """回归：overlays 必须真的取到结构元素（不能静默全空）。
+
+    实测踩过：``run_replay`` 返回 ``export_dataset`` 的 schema v1 payload，结构
+    元素嵌在 ``payload["data"]`` 下；写成 ``payload.get("fractals")`` 会静默拿到
+    ``None`` → 前端 overlays 全空，K 线上一个笔/中枢都不画（而 snapshot 仍是
+    合法 v2 schema，不会报错）。
+    """
+    snap = build_ashare_snapshot("600519", client=_FakeClient(_zigzag_bars(n=120)))
+    assert snap["market"]["bar_count"] == 120
+    assert len(snap["overlays"]["fractals"]) > 0, "分型为空 → replay payload 没解包"
+    assert len(snap["overlays"]["bis"]) > 0, "笔为空 → replay payload 没解包"
+    # 每根笔必须带端点时间（前端画线要用），且端点落在 K 线时间范围内
+    first = snap["overlays"]["bis"][0]
+    assert first["start_time"] < first["end_time"]

@@ -23,25 +23,20 @@ import time as _time
 from collections.abc import Sequence
 from typing import Any
 
+from cpt.adapters.backend_factory import BACKEND_CHOICES, DEFAULT_BACKEND, resolve_backend
 from cpt.adapters.binance_futures import (
     MAX_KLINES_LIMIT,
     BinanceFuturesClient,
     resolve_interval_ms,
 )
-from cpt.adapters.native_chanlun import NativeChanlunBackend
-from cpt.adapters.reference_chanlun import (
-    ReferenceChanlunConfig,
-    map_bi,
-    map_fractal,
-    map_zhongshu,
-)
+from cpt.adapters.reference_chanlun import ChanlunBackend
 from cpt.application.dashboard_alerts import alert_transition
 from cpt.application.dashboard_config_compare import compare_configs
 from cpt.application.dashboard_inspector import inspect_bar
 from cpt.application.dashboard_market import normalize_24h
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
 from cpt.application.multi_level import build_multi_level, structures_for_level
-from cpt.application.replay import replay_bars
+from cpt.application.replay import compute_domain_structures, replay_bars
 from cpt.domain.config import RulesConfig
 from cpt.domain.models import Bi, CanonicalBar, Fractal, TrendType, ZhongShu
 from cpt.domain.trend_type import classify_trend
@@ -75,7 +70,13 @@ def demo_snapshot(symbol: str, interval: str) -> dict[str, Any]:
     return snapshot
 
 
-def fixture_snapshot(symbol: str, interval: str, *, limit: int = 600) -> _FixtureProvider:
+def fixture_snapshot(
+    symbol: str,
+    interval: str,
+    *,
+    limit: int = 600,
+    backend: ChanlunBackend | None = None,
+) -> _FixtureProvider:
     """Run a synthetic 1m fixture through the native backend and project a snapshot.
 
     Returns a fixture provider (callable for the snapshot payload plus an
@@ -83,7 +84,7 @@ def fixture_snapshot(symbol: str, interval: str, *, limit: int = 600) -> _Fixtur
     canonical domain objects so ``/api/dashboard/inspect`` can rebuild
     containment provenance via :func:`trace_containment`.
     """
-    return fixture_provider(symbol, interval, limit=limit)
+    return fixture_provider(symbol, interval, limit=limit, backend=backend)
 
 
 def _synthetic_bar(*, index: int, interval_ms: int, symbol: str) -> Any:
@@ -106,55 +107,18 @@ def _synthetic_bar(*, index: int, interval_ms: int, symbol: str) -> Any:
     )
 
 
-def _reference_config(config: RulesConfig) -> ReferenceChanlunConfig:
-    return ReferenceChanlunConfig(
-        use_fx_qy_middle=config.fx_qy_middle,
-        use_fx_qj_ck=config.fx_qj_ck,
-        use_bi_type_new=config.bi_type_new,
-        zs_wzgx=config.zs_wzgx,
-        macd_fast=config.macd_fast,
-        macd_slow=config.macd_slow,
-        macd_signal=config.macd_signal,
-    )
-
-
 def _compute_domain_structures(
     bars: tuple[CanonicalBar, ...],
     config: RulesConfig,
-    backend: NativeChanlunBackend,
+    backend: ChanlunBackend,
 ) -> tuple[tuple[Fractal, ...], tuple[Bi, ...], tuple[ZhongShu, ...]]:
-    """Resolve domain objects from a native backend pass for live inspection."""
-    ref_config = _reference_config(config)
-    primary_level = config.levels[0]
-    result = backend.compute_structures(list(bars), ref_config)
-    fractals = tuple(
-        map_fractal(
-            fx,
-            level=primary_level,
-            source_ids=(f"b:{fx.bar_index}",),
-            bars=bars,
-        )
-        for fx in result.fx_list
-    )
-    bis = tuple(
-        map_bi(
-            bi,
-            level=primary_level,
-            source_ids=(f"fx:{bi.start_bar}", f"fx:{bi.end_bar}"),
-            bars=bars,
-        )
-        for bi in result.bi_list
-    )
-    zhongshus = tuple(
-        map_zhongshu(
-            zs,
-            level=primary_level,
-            source_ids=tuple(f"bi:{i}" for i in zs.bi_indices),
-            bars=bars,
-        )
-        for zs in result.zs_list
-    )
-    return fractals, bis, zhongshus
+    """Resolve domain objects from a native backend pass for live inspection.
+
+    实现已上移到 :func:`cpt.application.replay.compute_domain_structures`
+    （R16-3）——A 股 web 适配器需要同一份 dataclass 映射，不能再各写一份。
+    本包装保留原签名，避免改动 5 处调用点。
+    """
+    return compute_domain_structures(bars, config, backend)
 
 
 def _compute_trend_types(
@@ -176,7 +140,7 @@ def _compute_trend_types(
 
 def _snapshot_from_bars(
     config: RulesConfig,
-    backend: NativeChanlunBackend,
+    backend: ChanlunBackend,
     bars: tuple[CanonicalBar, ...],
     *,
     symbol: str,
@@ -235,12 +199,16 @@ class _FixtureProvider:
         symbol: str,
         interval: str,
         limit: int,
+        backend: ChanlunBackend | None = None,
     ) -> None:
         self._symbol = symbol
         self._interval = interval
         self._limit = limit
         self._config = RulesConfig()
-        self._backend = NativeChanlunBackend()
+        # R16-4：后端由 ``--backend`` 决定（默认 auto = 装了 czsc 就用 czsc）。
+        self._backend: ChanlunBackend = backend or resolve_backend(
+            DEFAULT_BACKEND, min_bi_len=self._config.min_bi_len
+        )
         self._interval_ms = resolve_interval_ms(interval)
         self._lock = threading.Lock()
         self._bars: tuple[CanonicalBar, ...] = tuple(
@@ -465,8 +433,14 @@ def _format_multi_level(
     }
 
 
-def fixture_provider(symbol: str, interval: str, *, limit: int = 600) -> _FixtureProvider:
-    return _FixtureProvider(symbol=symbol, interval=interval, limit=limit)
+def fixture_provider(
+    symbol: str,
+    interval: str,
+    *,
+    limit: int = 600,
+    backend: ChanlunBackend | None = None,
+) -> _FixtureProvider:
+    return _FixtureProvider(symbol=symbol, interval=interval, limit=limit, backend=backend)
 
 
 class _RealtimeProvider:
@@ -492,6 +466,7 @@ class _RealtimeProvider:
         interval: str,
         limit: int,
         poll_seconds: float,
+        backend: ChanlunBackend | None = None,
     ) -> None:
         self._symbol = symbol
         self._interval = interval
@@ -515,7 +490,10 @@ class _RealtimeProvider:
         self._switch_event = threading.Event()
         self._client = BinanceFuturesClient()
         self._config = RulesConfig()
-        self._backend = NativeChanlunBackend()
+        # R16-4：同 _FixtureProvider，后端走 ``--backend``（默认 auto）。
+        self._backend: ChanlunBackend = backend or resolve_backend(
+            DEFAULT_BACKEND, min_bi_len=self._config.min_bi_len
+        )
         self._thread = threading.Thread(target=self._run, daemon=True, name="cpt-realtime")
         self._thread.start()
 
@@ -839,10 +817,19 @@ class _RealtimeProvider:
 
 
 def realtime_snapshot(
-    symbol: str, interval: str, *, limit: int = 600, poll_seconds: float = 30.0
+    symbol: str,
+    interval: str,
+    *,
+    limit: int = 600,
+    poll_seconds: float = 30.0,
+    backend: ChanlunBackend | None = None,
 ) -> _RealtimeProvider:
     return _RealtimeProvider(
-        symbol=symbol, interval=interval, limit=limit, poll_seconds=poll_seconds
+        symbol=symbol,
+        interval=interval,
+        limit=limit,
+        poll_seconds=poll_seconds,
+        backend=backend,
     )
 
 
@@ -868,6 +855,15 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=600,
         help="K-line limit per upstream request (realtime mode).",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=BACKEND_CHOICES,
+        default=DEFAULT_BACKEND,
+        help=(
+            "缠论后端：auto=装了 czsc 就用 czsc（默认）；czsc=强制 czsc"
+            "（未安装即报错）；native=CPT 自研（回放/对照）。"
+        ),
     )
     return parser
 
@@ -906,7 +902,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.mode == "demo":
         provider_callable = _DemoProvider(args.symbol, args.interval)
     elif args.mode == "fixture":
-        fixture = fixture_snapshot(args.symbol, args.interval, limit=args.limit)
+        fixture = fixture_snapshot(
+            args.symbol, args.interval, limit=args.limit, backend=resolve_backend(args.backend)
+        )
         provider_callable = fixture
     else:
         rt_provider = realtime_snapshot(
@@ -914,6 +912,7 @@ def main(argv: list[str] | None = None) -> int:
             args.interval,
             limit=args.limit,
             poll_seconds=args.poll_seconds,
+            backend=resolve_backend(args.backend),
         )
         provider_callable = rt_provider
     server = serve_snapshot(provider_callable, host=args.host, port=args.port)

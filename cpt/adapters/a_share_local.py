@@ -21,6 +21,7 @@ OHLC，转为 :class:`~cpt.domain.models.CanonicalBar`。
 
 from __future__ import annotations
 
+import pathlib
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -41,6 +42,45 @@ _CODE_COL: Final[str] = "code"
 _OHLC_COLS: Final[tuple[str, ...]] = ("open", "high", "low", "close")
 _VOL_COL: Final[str] = "volume"
 _AMT_COL: Final[str] = "amount"
+
+#: ``~/.dbconfig`` 位置（与 ``scripts/factor_backfill.py`` / ``a_share_pool.py`` 同源）
+_DB_CONFIG_FILE: Final[pathlib.Path] = pathlib.Path.home() / ".dbconfig"
+
+
+def _read_dbconfig() -> dict[str, str]:
+    """解析 ``~/.dbconfig`` 的 ``$KEY=value`` 行。
+
+    与 ``asel.storage.dbconfig.read_dbconfig`` 同口径，但**本模块自带实现**——
+    不 import ``asel``（该包只存在于 ``a_share_emotion_leader/`` 项目里，CPT 与
+    长龙 venv 都没有）。这是刻意的：``cpt/`` 只依赖 ``psycopg``（可选）+
+    ``~/.dbconfig`` 这一个文件约定，跨项目边界最小。
+    """
+    if not _DB_CONFIG_FILE.exists():
+        return {}
+    out: dict[str, str] = {}
+    for line in _DB_CONFIG_FILE.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if line.startswith("$") and "=" in line:
+            key, _, value = line.partition("=")
+            out[key.strip()] = value.strip()
+    return out
+
+
+def connection_kwargs() -> dict[str, Any]:
+    """构造 psycopg3 连接参数（与 ``asel.storage.dbconfig.connection_kwargs`` 同口径）。"""
+    cfg = _read_dbconfig()
+    if not cfg.get("$RDSHOST") or not cfg.get("$DB_PW"):
+        raise AShareLocalError(f"~/.dbconfig 缺失 $RDSHOST 或 $DB_PW。位置: {_DB_CONFIG_FILE}")
+    ssl_cert = pathlib.Path.home() / "global-bundle.pem"
+    return {
+        "host": cfg["$RDSHOST"],
+        "port": int(cfg.get("$DBPORT", "5432")),
+        "dbname": cfg.get("$DBNAME", "longkonglong"),
+        "user": cfg.get("$USER", "postgres"),
+        "password": cfg["$DB_PW"],
+        "connect_timeout": 15,
+        **({"sslrootcert": str(ssl_cert)} if ssl_cert.exists() else {}),
+    }
 
 
 class AShareLocalError(RuntimeError):
@@ -76,7 +116,6 @@ class AShareLocalClient:
         if self._conn is None:
             if self._conn_factory is None:
                 import psycopg  # noqa: PLC0415
-                from asel.storage.dbconfig import connection_kwargs  # noqa: PLC0415
 
                 self._conn = psycopg.connect(**connection_kwargs())
             else:

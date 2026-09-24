@@ -65,7 +65,7 @@ DB_CONFIG_FILE = pathlib.Path.home() / ".dbconfig"
 SOURCE_TX = "tx:fqkline"
 TX_ENDPOINT = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 UA = "Mozilla/5.0"
-DEFAULT_KLINE_DAYS = 30
+DEFAULT_KLINE_DAYS = 800  # 腾讯单次上限 801 根（实测 count=800 → 801 根，覆盖 2023-06 至今）
 
 logger = logging.getLogger("factor_backfill")
 
@@ -232,44 +232,45 @@ def latest_factor_date(conn, code: str) -> str | None:
     return d.isoformat() if d else None
 
 
-def upsert_factor_rows(
-    conn, rows: Iterable[FactorRow], dry_run: bool
-) -> int:
+def upsert_factor_rows(conn, rows: Iterable[FactorRow], dry_run: bool) -> int:
+    """幂等 upsert 整批因子行（主键 ``(code, trade_date)``）。
+
+    用 ``executemany`` 批量写入——**不要**逐行 ``execute``：每只票 800 行、
+    94 只就是 7.5 万条语句，逐行会慢到不可用（实测）。
+    """
     now = datetime.now(UTC)
-    inserted = 0
+    payload = [
+        (
+            row.code,
+            row.trade_date,
+            row.hfq_factor,
+            row.source,
+            TX_ENDPOINT,
+            row.source_ref,
+            now,  # as_of
+            now,  # available_at
+            now,  # fetched_at
+        )
+        for row in rows
+    ]
+    if dry_run:
+        return len(payload)
     with conn.cursor() as cur:
-        for row in rows:
-            if dry_run:
-                inserted += 1
-                continue
-            # 主键 (code, trade_date)；同交易日重拉到因子即覆盖
-            cur.execute(
-                """INSERT INTO asel.ref_adjust_factor
-                     (code, trade_date, hfq_factor, source, source_url, source_ref,
-                      as_of, available_at, fetched_at)
-                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                   ON CONFLICT (code, trade_date) DO UPDATE SET
-                     hfq_factor=EXCLUDED.hfq_factor,
-                     source=EXCLUDED.source,
-                     source_url=EXCLUDED.source_url,
-                     source_ref=EXCLUDED.source_ref,
-                     fetched_at=EXCLUDED.fetched_at""",
-                (
-                    row.code,
-                    row.trade_date,
-                    row.hfq_factor,
-                    row.source,
-                    TX_ENDPOINT,
-                    row.source_ref,
-                    now,  # as_of
-                    now,  # available_at
-                    now,  # fetched_at
-                ),
-            )
-            inserted += 1
-    if not dry_run:
-        conn.commit()
-    return inserted
+        cur.executemany(
+            """INSERT INTO asel.ref_adjust_factor
+                 (code, trade_date, hfq_factor, source, source_url, source_ref,
+                  as_of, available_at, fetched_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
+               ON CONFLICT (code, trade_date) DO UPDATE SET
+                 hfq_factor=EXCLUDED.hfq_factor,
+                 source=EXCLUDED.source,
+                 source_url=EXCLUDED.source_url,
+                 source_ref=EXCLUDED.source_ref,
+                 fetched_at=EXCLUDED.fetched_at""",
+            payload,
+        )
+    conn.commit()
+    return len(payload)
 
 
 # --------------------------------------------------------------------------- #

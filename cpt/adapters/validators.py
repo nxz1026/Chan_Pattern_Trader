@@ -49,6 +49,7 @@ __all__ = [
     "DEFAULT_INTERVAL_MS",
     "DataGapError",
     "DataValidationError",
+    "validate_ashare_bars",
     "validate_canonical_bars",
     "validate_no_gap_segment",
 ]
@@ -123,6 +124,48 @@ def validate_canonical_bars(
     deduped = _dedup_by_open_time(bars)
     _require_strictly_increasing(deduped)
     _require_contiguous(deduped, interval_ms)
+    return deduped
+
+
+def validate_ashare_bars(
+    bars: Sequence[CanonicalBar],
+    interval_ms: int = DEFAULT_INTERVAL_MS,
+) -> tuple[CanonicalBar, ...]:
+    """校验 A 股日线序列 —— **不做连续性检查**（R15/R16，C3/C5）。
+
+    与 :func:`validate_canonical_bars` 的唯一差别是**跳过第 4 步**：
+
+    1. 逐根契约校验（OHLC 合法 + ``close_time`` 边界）—— 同 crypto；
+    2. 按 ``open_time`` 去重 —— 同 crypto；
+    3. 严格递增 —— 同 crypto；
+    4. ~~周期连续~~ —— **跳过**。
+
+    **为什么跳过连续性**：``validate_canonical_bars`` 的连续契约是**加密市场
+    假设**（BTC 24/7 无休）。A 股的日历缺口全部是合法的：
+
+    - **C5 非交易日**：周末与法定节假日不开市（实测踩到 2026-08-14 → 08-17
+      的 3 天间隔就是周末）；
+    - **C3 停牌**：个股停牌期间无行情。
+
+    这两种缺口**不是数据缺失**，不能被 ``DataGapError`` 拦下，也绝不能填 0 或
+    补假日（``docs/rules.md`` §5.3：非交易日不出图、不用 0 填充）。因此 A 股走
+    本函数 + :func:`cpt.application.replay.run_replay`，而不是 ``replay_bars``。
+
+    Args:
+        bars: 待校验 A 股日线，顺序按调用方给定。
+        interval_ms: 契约周期（毫秒），A 股日线为 ``86400000``。
+
+    Returns:
+        去重后、严格递增的 K 线元组（**允许日历缺口**）。
+
+    Raises:
+        DataValidationError: 逐根契约非法、重复内容冲突、乱序、``interval_ms`` 非正。
+    """
+    _require_positive_interval(interval_ms)
+    for index, bar in enumerate(bars):
+        _validate_bar_contract(bar, index, interval_ms)
+    deduped = _dedup_by_open_time(bars)
+    _require_strictly_increasing(deduped)
     return deduped
 
 

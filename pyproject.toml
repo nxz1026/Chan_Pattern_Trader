@@ -28,6 +28,9 @@ dev = [
 # 分型/笔的参考实现（R14，方案 C）。核心 dependencies 保持为空；
 # 只有需要 czsc 后端（生产/交叉验证）时才安装本 extra。
 chan = ["czsc==1.0.1"]
+# A 股本地数据层（R15-2 / R16-3）：只读连 PostgreSQL。
+# 核心 dependencies 同样保持为空；只有需要跑 A 股真实链路时才装本 extra。
+db = ["psycopg[binary]>=3.1"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

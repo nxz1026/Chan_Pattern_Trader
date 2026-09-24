@@ -8,7 +8,8 @@
 ## 数据流
 1. ``AShareLocalClient.fetch_validated_klines(code, start_ms, end_ms)`` → 后复权
    ``CanonicalBar`` 列表；
-2. ``cpt.application.replay.replay_bars`` → 缠论结构（分型/笔/中枢）；
+2. ``cpt.application.replay.compute_domain_structures`` → 缠论结构（分型/笔/中枢，
+   返回 dataclass，**不是** schema v1 payload）；
 3. ``build_dashboard_snapshot_v2`` → 与加密侧完全相同的 dashboard snapshot。
 
 ## 与加密侧的区别
@@ -34,8 +35,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 from cpt.adapters.a_share_local import AShareLocalClient
+from cpt.adapters.backend_factory import BACKEND_CHOICES, DEFAULT_BACKEND, resolve_backend
+from cpt.adapters.reference_chanlun import ChanlunBackend
+from cpt.adapters.validators import validate_ashare_bars
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
-from cpt.application.replay import replay_bars
+from cpt.application.replay import compute_domain_structures
 from cpt.domain.config import RulesConfig
 from cpt.web.app import serve_snapshot
 
@@ -53,15 +57,17 @@ def build_ashare_snapshot(
     *,
     width_k: int = DEFAULT_WIDTH_K,
     client: AShareLocalClient | None = None,
+    backend: ChanlunBackend | None = None,
 ) -> dict[str, Any]:
     """为 ``code`` 构造 dashboard snapshot（v2 schema，与加密侧同）。
 
     :param code: A 股 6 位裸码（如 ``"600519"``）。
     :param width_k: 最近多少根 K 线（默认 30）。
     :param client: 可选注入的 :class:`AShareLocalClient`。不传时 lazy 默认连接
-        —— **这需要运行 venv 装 psycopg**（如 ``longkonglong`` 的 venv）。
-        CPT 自身的 venv 不装 psycopg，所以本模块的 HTTP 服务端默认**期望在
-        装了 psycopg 的环境里运行**。模块 docstring 说明。
+        —— **这需要运行 venv 装 psycopg**。CPT 的 ``db`` extra 提供
+        （``pip install -e ".[db]"``）。
+    :param backend: 缠论后端；``None`` 时走 :func:`resolve_backend` 的 ``auto``
+        档（装了 czsc 就用 czsc）。传 ``NativeChanlunBackend()`` 可做对照。
     """
     owns_client = client is None
     if owns_client:
@@ -85,14 +91,34 @@ def build_ashare_snapshot(
         if owns_client:
             active_client.close()
 
-    domain = replay_bars(canonical, config=RulesConfig())
+    # A 股走专用校验（允许周末/节假日/停牌的日历缺口，见
+    # cpt.adapters.validators.validate_ashare_bars）。
+    # 不能用 replay_bars —— 它的连续性契约是加密市场假设，A 股会误报 DataGapError。
+    try:
+        validated = validate_ashare_bars(canonical, interval_ms=_INTERVAL_MS)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("A 股序列校验失败 %s: %s", code, exc)
+        return _empty_snapshot(code, f"invalid_bars:{type(exc).__name__}")
+
+    # 用 ``compute_domain_structures`` 拿 **dataclass** 结构对象（分型/笔/中枢）。
+    # 不能改用 ``run_replay``：它返回 ``export_dataset`` 的 schema v1 payload，
+    # 结构元素在 ``payload["data"]`` 下且已 ``asdict`` 成普通 dict —— 直接喂给
+    # ``build_dashboard_snapshot_v2`` 会在 ``asdict(f)`` 处炸
+    # ``TypeError: asdict() should be called on dataclass instances``；写成
+    # ``payload.get("fractals")`` 更糟：静默 ``None`` → overlays 全空、K 线上
+    # 一条笔都不画（实测两者都踩过）。
+    # 走势类型（``trend_types``）是 CPT 自研、尚未接入 replay，保持空元组。
+    active_backend = backend or resolve_backend(
+        DEFAULT_BACKEND, min_bi_len=RulesConfig().min_bi_len
+    )
+    fractals, bis, zhongshus = compute_domain_structures(validated, RulesConfig(), active_backend)
     snapshot = build_dashboard_snapshot_v2(
         config=RulesConfig(),
-        bars=canonical,
-        fractals=domain.get("fractals", ()),
-        bis=domain.get("bis", ()),
-        zhongshus=domain.get("zhongshus", ()),
-        trend_types=domain.get("trend_types", ()),
+        bars=validated,
+        fractals=fractals,
+        bis=bis,
+        zhongshus=zhongshus,
+        trend_types=(),
         mode="watch",
         status="confirmed",
         data_source="db_local",
@@ -123,8 +149,10 @@ def _empty_snapshot(code: str, reason: str) -> dict[str, Any]:
             "bar_count": 0,
         },
         "candles": [],
-        "overlays": [],
-        "signal": {},
+        # 形状必须与真实路径一致（dict of 4 keys），否则前端在
+        # degraded 分支会崩（实测踩到：空快照曾返回 []）
+        "overlays": {"fractals": [], "bis": [], "zhongshus": [], "trend_types": []},
+        "signal": None,  # 真实路径无信号时也是 None（保持一致，见 _market/_overlays 注释）
         "events": [],
         "data_quality": {"degraded": True, "reason": reason},
         "runtime": {
@@ -143,9 +171,20 @@ def _empty_snapshot(code: str, reason: str) -> dict[str, Any]:
 class AShareSnapshotProvider:
     """``SnapshotProvider`` 实现（见 ``cpt.web.app`` 的 ``SnapshotProvider`` Protocol）。"""
 
-    def __init__(self, code: str, *, width_k: int = DEFAULT_WIDTH_K) -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        width_k: int = DEFAULT_WIDTH_K,
+        backend: ChanlunBackend | None = None,
+    ) -> None:
         self._code = code
         self._width_k = width_k
+        # 后端实例**只建一次**：czsc 后端每次构造都要走版本校验 + 导入，
+        # 而 provider 是长驻对象（60s TTL 缓存），不该每轮重建。
+        self._backend: ChanlunBackend = backend or resolve_backend(
+            DEFAULT_BACKEND, min_bi_len=RulesConfig().min_bi_len
+        )
         self._cached: dict[str, Any] | None = None
         self._cached_at: float = 0.0
         self._cache_ttl_s: float = 60.0  # A 股日线 60s 缓存足够
@@ -153,15 +192,19 @@ class AShareSnapshotProvider:
     def snapshot_payload(self) -> dict[str, Any]:
         now = _time.time()
         if self._cached is None or (now - self._cached_at) > self._cache_ttl_s:
-            self._cached = build_ashare_snapshot(self._code, width_k=self._width_k)
+            self._cached = build_ashare_snapshot(
+                self._code, width_k=self._width_k, backend=self._backend
+            )
             self._cached_at = now
         return dict(self._cached)
 
 
-def _serve(code: str, host: str, port: int, width_k: int) -> None:
+def _serve(
+    code: str, host: str, port: int, width_k: int, backend: ChanlunBackend | None = None
+) -> None:
     from http.server import HTTPServer
 
-    provider = AShareSnapshotProvider(code, width_k=width_k)
+    provider = AShareSnapshotProvider(code, width_k=width_k, backend=backend)
     handler_cls = serve_snapshot.__wrapped__ if hasattr(serve_snapshot, "__wrapped__") else None
     # ``serve_snapshot`` 是 ``cpt.web.app`` 的模块级函数；直接构造 handler 类
     from cpt.web.app import make_handler
@@ -179,6 +222,12 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8011)
     parser.add_argument("--width-k", type=int, default=DEFAULT_WIDTH_K, help="最近多少根 K 线")
+    parser.add_argument(
+        "--backend",
+        choices=BACKEND_CHOICES,
+        default=DEFAULT_BACKEND,
+        help="缠论后端：auto（默认）/ czsc / native",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args()
 
@@ -186,7 +235,7 @@ def main() -> None:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s %(message)s",
     )
-    _serve(args.code, args.host, args.port, args.width_k)
+    _serve(args.code, args.host, args.port, args.width_k, resolve_backend(args.backend))
 
 
 if __name__ == "__main__":

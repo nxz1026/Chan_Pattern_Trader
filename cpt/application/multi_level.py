@@ -4,7 +4,8 @@ Wires the recursive chain (``docs/rules.md`` §3 / §8.3) into a single
 producer:
 
 * level 0 structures come from the native backend via
-  :func:`cpt.adapters.native_chanlun.NativeChanlunBackend.compute_structures`
+  :func:`cpt.adapters.reference_chanlun.ChanlunBackend.compute_structures`（协议；实现见
+  ``native_chanlun`` / ``czsc_chanlun``）
   (B1 activation);
 * level ≥ 1 structures are derived by feeding low-level trend types
   (:func:`cpt.domain.trend_type.classify_trend`) through the recursion mapper
@@ -25,8 +26,8 @@ import logging
 from collections.abc import Sequence
 from typing import Any, cast
 
-from cpt.adapters.native_chanlun import NativeChanlunBackend
 from cpt.adapters.reference_chanlun import (
+    ChanlunBackend,
     ReferenceChanlunConfig,
     map_bi,
     map_fractal,
@@ -58,7 +59,7 @@ def _ref_config(config: RulesConfig) -> ReferenceChanlunConfig:
 def _level_zero(
     bars: tuple[CanonicalBar, ...],
     config: RulesConfig,
-    backend: NativeChanlunBackend,
+    backend: ChanlunBackend,
     *,
     level: int,
 ) -> tuple[tuple[Fractal, ...], tuple[Bi, ...], tuple[ZhongShu, ...]]:
@@ -103,7 +104,7 @@ def _next_level(
 def build_multi_level(
     bars: Sequence[CanonicalBar],
     config: RulesConfig,
-    backend: NativeChanlunBackend,
+    backend: ChanlunBackend,
     *,
     levels: Sequence[int] = (5, 30),
 ) -> dict[int, dict[str, tuple[Any, ...]]]:
