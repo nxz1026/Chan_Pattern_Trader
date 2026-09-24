@@ -288,3 +288,57 @@ mypy（55 files）/ vulture / import-linter 全绿。
 | R14-3 | `RulesConfig.min_bi_len = 6` | 4–7 区间笔数不敏感，8 起急降；取上游默认不自造 |
 | R14-4 | `cpt/domain/first_buy.py` + 力度度量 | 与 czsc 信号模板逐 n 交叉验证 **6/6**，含正例 |
 | R14-5 | 5 个活文档 + 3 个代码文件同步 | 残留终检只剩有意保留的历史记录 |
+
+## R15 — A股接入（进行中）
+
+### R15-1 复权因子工具 ✅
+
+**关键决策**：用户 2026-09-24 反馈 Wind 1000 积分/天不够 5850 只全量覆盖。
+- **被否决路径**：
+  - akshare sina `stock_zh_a_daily(adjust="hfq-factor")` 实测本机境外 IP 节流
+    ~1 次/分钟，5850 只 = 100 小时（**不可行**）；
+  - akshare 东财 `stock_zh_a_hist` `RemoteDisconnected`（与 plan §5 已记
+    `push2.eastmoney.com 502` 同源）；
+  - `public.daily_bar.pre_close` 经与 Wind 因子交叉验证**证伪为朴素前收**（茅台
+    2023-12-20 特别分红日，Wind 因子跳 1.154%，DB `pre_close=1675.000` 等于
+    朴素前收）。
+- **采用路径**：腾讯财经 K 线（`web.ifzq.gtimg.cn/appstock/app/fqkline/get`）—
+  一次请求**同时**回吐 `day`（raw）和 `hfqday`（后复权），同源同对 →
+  `hfq_factor = hfq/raw` 绝对自洽。绝对值与 Wind/sina 不同仅因"起算点"不同，
+  **不影响"避免假跳空"的目标**。
+
+**产出**：
+
+- `scripts/factor_backfill.py`：幂等增量 backfill
+  - `--mode {full,incremental}`：全市场 vs 每日（热门池 + 连板 + 新股 + 已有覆盖）
+  - DB 连接自实现（`~/.dbconfig` 5 行解析），不依赖长龙 venv 的 asel 包
+  - 失败分类：`ValueError`=永久跳过 / `URLError+JSONDecode+RuntimeError`=网络
+  - 实测：incremental 105 只中 33 成功（主板），72 失败（688/920 腾讯 501），
+    **990 行因子写入** `asel.ref_adjust_factor`（33×30 天）
+
+**已知限制**：腾讯对**科创板 688/北交所 920** 回 501 Not Implemented。
+R15-1 不再继续尝试（避免无限重试）——这些票在主板热门池里很少，影响有限。
+如需补，留作 R15-6 之后的离线 batch 用 sina（每周 1 次即可，节流可接受）。
+
+### R15-2 A股 本地数据层 adapter ✅
+
+**产出**：
+
+- `cpt/adapters/a_share_local.py`：`AShareLocalClient`，**只读** DB →
+  后复权 `CanonicalBar`。与 `BinanceFuturesClient` 同协议
+  （`fetch_validated_klines(code, start_ms, end_ms)`）。
+- `tests/test_a_share_local.py`：8 个 mock 测试，**不依赖 psycopg**（保持
+  cpt `dependencies = []` 干净）。
+- DB 连接通过 `conn_factory` 注入；默认 lazy 连。
+
+**关键设计取舍**：
+
+- **量保留不复权**：成交量复权在缠论里无意义（除权日反复"补偿"成交量
+  反而是噪声），仅 OHLC × 因子。
+- **缺口拒绝而非填补**：因子缺失的日期**不静默用 1.0 填**（那会产生假跳空）；
+  而是放进 `skipped_no_factor` 让上层做可观测性。区间内全缺 → 抛
+  `AShareLocalError`（响亮失败）。
+- **停牌不需处理**：`public.daily_bar` 是交易日表，停牌日本来就没行。
+
+**验收**：`234 passed`（R14 的 226 + 8）；ruff check / ruff format --check
+(115 files) / mypy(57 files) / vulture / import-linter(4 kept, 0 broken) 全绿。
