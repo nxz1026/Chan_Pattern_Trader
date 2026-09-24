@@ -1,9 +1,10 @@
 """笔中枢三笔重叠基础算法（纯 domain 计算）。
 
 位于 ``docs/architecture.md`` §3.1 的 ``Bi[] → ZhongShu[]`` 环节：消费
-:func:`cpt.domain.bi.build_bis` 产出的交替笔序列，按 ``docs/rules.md`` §7
-（首版继承的「笔中枢三笔重叠基础算法」）与 §9.5（``zs_wzgx = zgd``）的口径
-生成笔中枢，为走势类型（§8.1）与一买状态（§8.2）提供结构输入。
+:func:`cpt.domain.bi.build_bis` 产出的交替笔序列，按缠论原文的中枢定义
+（连续三段走势类型的共同重叠部分）与 ``docs/rules.md`` §9.5
+（``zs_wzgx = zgd``）的口径生成笔中枢，为走势类型（§8.1）与一买状态（§8.2）
+提供结构输入。
 
 首版冻结口径：
 
@@ -18,12 +19,15 @@
    （``zg`` / ``zd``）；``bi_ids`` 优先取三笔各自的**首个** ``source_id`` 并保序
    去重（即「三项去重」）；三笔都没有 ``source_id`` 时，退化为三笔
    ``source_ids`` 拼接保序去重后的首个 id，仍为空则给出空元组。
-4. **向后延伸**：后续笔与**当前**中枢区间重叠（``bi.high >= low`` 且
+4. **向后延伸（不收缩区间）**：后续笔与中枢区间重叠（``bi.high >= low`` 且
    ``bi.low <= high``，闭区间，与 ``zs_wzgx = zgd`` 的「高点比 ``zg``、低点比
-   ``zd``」同构）时，更新 ``high = min(high, bi.high)``、
-   ``low = max(low, bi.low)``、``end_time = bi.end_time``，并把该笔首个
-   ``source_id`` 追加进 ``bi_ids``。更新后仍须保持 ``high > low``，否则该笔视为
-   不重叠、延伸就此停止（闭区间只擦边时会出现这种情况）。
+   ``zd``」同构）时纳入该笔：``end_time = bi.end_time``，并把该笔首个
+   ``source_id`` 追加进 ``bi_ids``。**``high`` / ``low`` 保持不变**——中枢区间
+   由建枢的前三笔唯一确定，这是缠论原文口径（中枢区间＝前三段的共同重叠部分，
+   延伸只延长中枢、不收缩区间）。2026-09-24 之前本模块会把区间单调收缩成
+   ``high = min(...)`` / ``low = max(...)``，那会把一个中枢切成多个窄区间、
+   并产出宽度趋零的畸形中枢（实测有宽度 4.5 的）；改为不收缩后，与 czsc
+   ``get_zs_seq`` 逐项一致（区间宽与纳入笔数全对上）。
 5. **延伸结束后的重扫**：不重叠时以结束笔（未能进入当前中枢的那一笔）起的最近
    三笔为新候选窗口继续扫描。已计入上一中枢的笔不重复使用，因此相邻中枢不共享
    笔——``docs/rules.md`` §8.1 的趋势判定以「两个中枢不构成重叠」为前提，若允许
@@ -94,24 +98,21 @@ def _resolve_level(bis: Sequence[Bi], level: int | None) -> int:
     return levels[0]
 
 
-def _extend(bis: Sequence[Bi], end: int, high: float, low: float) -> tuple[int, float, float]:
-    """从 ``end`` 起向后延伸中枢，返回 ``(新的开区间下标, high, low)``。
+def _extend(bis: Sequence[Bi], end: int, high: float, low: float) -> int:
+    """从 ``end`` 起向后延伸中枢，返回延伸后的开区间下标。
 
-    逐笔按输入顺序尝试：与当前区间闭区间重叠且更新后仍严格 ``high > low`` 就
-    纳入并收缩区间，否则停下（该笔不属于本中枢）。区间收缩是单调的，因此后续
-    笔一律与收缩后的最新区间比较。
+    逐笔按输入顺序尝试：与中枢闭区间重叠就纳入并后移 ``end``；否则停下
+    （该笔不属于本中枢）。
+
+    **延伸不改变 ``zg`` / ``zd``**——中枢区间由建枢的前三笔唯一确定，这是缠论
+    原文口径（中枢区间＝前三段的共同重叠部分；延伸只延长中枢，不收缩区间）。
+    2026-09-24 之前本函数把区间单调收缩成 ``high = min(...)`` /
+    ``low = max(...)``，会把一个中枢切成多个窄区间并产出宽度趋零的畸形中枢；
+    改为不收缩后与 czsc ``get_zs_seq`` 逐项一致。
     """
-    while end < len(bis):
-        candidate = bis[end]
-        if not _covers(candidate, high, low):
-            break
-        next_high = min(high, candidate.high)
-        next_low = max(low, candidate.low)
-        if next_high <= next_low:
-            break
-        high, low = next_high, next_low
+    while end < len(bis) and _covers(bis[end], high, low):
         end += 1
-    return end, high, low
+    return end
 
 
 def build_zhongshus(bis: Sequence[Bi], level: int | None = None) -> tuple[ZhongShu, ...]:
@@ -124,9 +125,9 @@ def build_zhongshus(bis: Sequence[Bi], level: int | None = None) -> tuple[ZhongS
     :raises ValueError: 显式 ``level < 0``；存在 ``direction`` 不是 ``1`` / ``-1``
         的笔；``level=None`` 且输入笔级别不一致。
     :returns: 按建枢顺序排列的中枢元组。每个中枢由连续三笔的重叠区间定义，
-        后续重叠笔使区间收缩、``end_time`` 后移、``bi_ids`` 追加；不重叠时从
-        该结束笔起重新扫描新窗口，笔不跨中枢复用。本函数不计算 ``zs_wzgx``
-        档位，不做中枢合并，不生成走势类型与信号。
+        区间一经建枢即固定，后续重叠笔只使 ``end_time`` 后移、``bi_ids`` 追加；
+        不重叠时从该结束笔起重新扫描新窗口，笔不跨中枢复用。本函数不计算
+        ``zs_wzgx`` 档位，不做中枢合并，不生成走势类型与信号。
     """
     if level is not None and level < 0:
         raise ValueError(f"level 必须 >= 0 或 None, 实测 {level}")
@@ -147,7 +148,7 @@ def build_zhongshus(bis: Sequence[Bi], level: int | None = None) -> tuple[ZhongS
             continue
 
         high, low = region
-        end, high, low = _extend(bis, start + 3, high, low)
+        end = _extend(bis, start + 3, high, low)
         bi_ids = _initial_ids(first, second, third)
         for bi in bis[start + 3 : end]:
             bi_id = _bi_id(bi)

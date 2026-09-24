@@ -124,9 +124,47 @@ CPT 笔端点中位跨度 = **2 根原始K线**；跨度 <4 根的笔占比 **66
 **验收**：`198 passed`（R13 的 180 + 18 新增）；ruff check / ruff format --check（111 files）/
 mypy（55 files）/ vulture / import-linter 全绿。
 
+#### R14-2 中枢延伸改为不收缩 ✅
+
+**改动**：`cpt/domain/zhongshu.py` 的 `_extend` 不再做 `high = min(...)` /
+`low = max(...)`。中枢区间由**建枢的前三笔唯一确定**，延伸只把后续重叠笔纳入
+（后移 `end_time`、追加 `bi_ids`）。返回值由 `(end, high, low)` 简化为 `end`。
+
+**依据（缠论原文）**：中枢区间＝连续三段走势类型的**共同重叠部分**；延伸只延长
+中枢，不收缩区间。旧口径是"与**当前**（已收缩的）区间比较后继续收缩"，收敛到
+一个越来越窄的核，会把一个中枢切成多个窄区间。
+
+**实测对照（3 个 oracle fixture）**：
+
+| fixture | 旧口径（收缩） | 新口径（不收缩） | czsc `get_zs_seq` |
+|---|---|---|---|
+| 2024-02-01 | 6 个，宽 `[117.8, 78.0, 19.4, 14.9, 66.5, 17.2]` | 3 个，宽 `[151.0, 66.5, 17.2]`，笔数 `[38, 6, 5]` | **逐项一致** |
+| 2024-09-01 | 6 个 | 5 个，宽 `[247.7, 258.5, 291.0, 232.7, 396.7]` | 区间宽逐项一致 |
+| 2025-04-01 | 6 个 | 6 个，宽 `[356.4, 613.6, 720.3, 467.5, 754.3, 307.5]` | 区间宽逐项一致 |
+
+**畸形区间消失**：最小宽度由 **4.5** 提升到 **17.2 / 232.7 / 307.5**。
+
+**新增/改动测试**：
+
+- `tests/test_zhongshu.py`：原 `test_overlapping_followup_bi_extends_and_shrinks_zone`
+  断言的是旧收缩行为（`(9.5, 7.5)`），改写为
+  `..._extends_without_shrinking_zone`（断言 `(10, 7)`）；新增
+  `test_zone_range_is_immutable_under_long_extension`（延伸几十笔区间不变）与
+  `test_extension_never_produces_degenerate_zero_width_zone`
+- `tests/test_czsc_backend.py`：新增
+  `test_cpt_zhongshu_matches_czsc_get_zs_seq`（czsc 最长连续合法中枢段的区间宽
+  必须是 CPT 的连续子序列）与
+  `test_cpt_zhongshu_matches_czsc_exactly_on_clean_fixture`（fixture1 无中间退化
+  中枢，严格逐项比对区间宽 + 纳入笔数）与
+  `test_cpt_zhongshu_extension_never_shrinks_the_zone`
+
+> 纳入笔数在 czsc 退化中枢的**边界**处会差 1：czsc 把一个 <3 笔的"中枢"插在
+> 序列中间并吃掉笔，CPT 要求至少 3 笔。区间宽不受影响，所以交叉验证比区间宽。
+
+**验收**：`203 passed`（R14-1 的 198 + 5）；全门禁绿。
+
 #### R14 剩余子任务
 
-- R14-2 中枢延伸改为**不收紧**（对齐缠论原文；实测改后与 czsc 中枢逐项一致）
 - R14-3 `RulesConfig.min_bi_len = 6`（去包含后K线根数，与 `min_elements_for_higher_bi` 量纲不同）
 - R14-4 一买移植（`Bi` 加 `power_volume`；czsc `BI` 已直接暴露 `length`/`power_price`/`power_volume`）
 - R14-5 重写 `docs/rules.md` §7 + 修 `config.py:6`/`signal.py:14` 的 chanlun 溯源

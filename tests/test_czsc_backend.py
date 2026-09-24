@@ -66,6 +66,30 @@ def _fixture_paths() -> list[Path]:
     return sorted(FIXTURE_DIR.glob("*.csv"))
 
 
+def _czsc_analyzer(path: Path) -> object:
+    """按与适配器相同的口径构造 czsc 分析器（供交叉验证用）。"""
+    from datetime import UTC, datetime  # noqa: PLC0415
+
+    from czsc._native import CZSC, Freq, RawBar  # noqa: PLC0415
+
+    raw = [
+        RawBar(
+            symbol="CPT",
+            id=i,
+            dt=datetime.fromtimestamp(bar.open_time / 1000, tz=UTC).replace(tzinfo=None),
+            freq=Freq.F5,
+            open=bar.open,
+            close=bar.close,
+            high=bar.high,
+            low=bar.low,
+            vol=bar.volume,
+            amount=bar.quote_volume,
+        )
+        for i, bar in enumerate(_load_fixture(path))
+    ]
+    return CZSC(raw, max_bi_num=0, min_bi_len=DEFAULT_MIN_BI_LEN)
+
+
 # --------------------------------------------------------------------------- #
 # 不依赖 czsc：纯逻辑
 # --------------------------------------------------------------------------- #
@@ -217,6 +241,88 @@ def test_real_fixture_zhongshu_requires_at_least_three_bis(czsc_module: object) 
             assert len(zs.bi_indices) >= 3, f"{path.name}: 中枢只吸收 {len(zs.bi_indices)} 笔"
             assert zs.high > zs.low, f"{path.name}: 中枢区间非正 (high={zs.high}, low={zs.low})"
             assert zs.start_bar <= zs.end_bar
+
+
+def _longest_legal_run(entries: list[tuple[float, int]]) -> list[tuple[float, int]]:
+    """取序列里最长的一段连续合法中枢（笔数 ≥ 3）。"""
+    best: list[tuple[float, int]] = []
+    current: list[tuple[float, int]] = []
+    for entry in entries:
+        if entry[1] >= 3:
+            current.append(entry)
+        else:
+            if len(current) > len(best):
+                best = current
+            current = []
+    return current if len(current) > len(best) else best
+
+
+def _is_contiguous_subsequence(
+    needle: list[tuple[float, int]], hay: list[tuple[float, int]]
+) -> bool:
+    if not needle:
+        return True
+    return any(hay[i : i + len(needle)] == needle for i in range(len(hay) - len(needle) + 1))
+
+
+def test_cpt_zhongshu_matches_czsc_get_zs_seq(czsc_module: object) -> None:
+    """交叉验证：CPT 自研中枢（延伸不收缩）的**区间宽**必须与 czsc ``get_zs_seq`` 对齐。
+
+    这正是"延伸不收缩"改动的验收依据——2026-09-24 改成不收缩后，区间宽与
+    czsc 逐项相同（改之前 CPT 会把区间一路压窄，产出宽度 4.5 的畸形中枢）。
+
+    纳入笔数只允许在 czsc 退化中枢的**边界**处相差，因为 czsc 会把一个 <3 笔的
+    "中枢"插在序列中间并吃掉笔，而 CPT 要求至少 3 笔。因此取 czsc 最长的一段
+    连续合法中枢，断言其区间宽序列是 CPT 的连续子序列。
+    """
+    for path in _fixture_paths():
+        analyzer = _czsc_analyzer(path)
+        theirs_all = [(round(zs.zg - zs.zd, 6), len(zs.bis)) for zs in analyzer.zs_list]
+        theirs = _longest_legal_run(theirs_all)
+
+        result = CzscChanlunBackend().compute_structures(_load_fixture(path), CONFIG)
+        ours = [(round(zs.high - zs.low, 6), len(zs.bi_indices)) for zs in result.zs_list]
+
+        assert theirs, f"{path.name}: czsc 未产出任何合法中枢"
+        assert _is_contiguous_subsequence(
+            [width for width, _ in theirs], [width for width, _ in ours]
+        ), f"{path.name}\n  CPT:  {ours}\n  czsc(最长合法段): {theirs}\n  czsc(全部): {theirs_all}"
+
+
+def test_cpt_zhongshu_matches_czsc_exactly_on_clean_fixture(czsc_module: object) -> None:
+    """fixture1 的中枢序列里没有夹在中间的退化中枢，因此可以**严格逐项**比对。
+
+    比对内容包括区间宽与纳入笔数；czsc 的 <3 笔退化中枢只允许出现在**尾部**。
+    """
+    path = FIXTURE_DIR / "btcusdt_5m_2024-02-01.csv"
+    analyzer = _czsc_analyzer(path)
+    theirs_all = [(round(zs.zg - zs.zd, 6), len(zs.bis)) for zs in analyzer.zs_list]
+
+    result = CzscChanlunBackend().compute_structures(_load_fixture(path), CONFIG)
+    ours = [(round(zs.high - zs.low, 6), len(zs.bi_indices)) for zs in result.zs_list]
+
+    assert ours == theirs_all[: len(ours)], f"CPT:  {ours}\n  czsc: {theirs_all[: len(ours)]}"
+    tail = theirs_all[len(ours) :]
+    assert all(bi_count < 3 for _, bi_count in tail), f"尾部只应有退化中枢，实测 {tail}"
+
+
+def test_cpt_zhongshu_extension_never_shrinks_the_zone(czsc_module: object) -> None:
+    """延伸不收缩：区间宽必须严格为正且不随延伸变小。
+
+    旧收缩口径在 fixture1 上产出过宽度 **4.5** 的畸形中枢；新口径最小宽度
+    是 17.2 / 232.7 / 307.5。
+    """
+    floors = {
+        "btcusdt_5m_2024-02-01.csv": 17.2,
+        "btcusdt_5m_2024-09-01.csv": 232.7,
+        "btcusdt_5m_2025-04-01.csv": 307.5,
+    }
+    for name, floor in floors.items():
+        bars = _load_fixture(FIXTURE_DIR / name)
+        result = CzscChanlunBackend().compute_structures(bars, CONFIG)
+        widths = [round(zs.high - zs.low, 6) for zs in result.zs_list]
+        assert widths, name
+        assert min(widths) >= floor, f"{name}: 最小宽度 {min(widths)} < {floor}"
 
 
 def test_real_fixture_zhongshu_never_has_negative_width(czsc_module: object) -> None:
