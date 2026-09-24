@@ -11,9 +11,11 @@
 2. **结构准备条件**：``has_two_centers``（当前级别存在至少两个同级中枢）与
    ``has_divergence_leg``（第二中枢之后存在继续沿原趋势方向运行的一笔，即背驰段）
    同时成立，才算结构准备就绪（§8.2 第 1、2、3 条）。
-3. **背驰不是硬门槛**：``divergence_status`` 只记录 ``chanlun-pro`` 的背驰比较
-   结果，取值 ``not_checked`` / ``not_detected`` / ``detected``；它**不参与**结构
-   准备判断（§8.2「背驰是否成立不作为一买候选的硬门槛」）。
+3. **背驰不是硬门槛**：``divergence_status`` 只记录背驰比较结果，取值
+   ``not_checked`` / ``not_detected`` / ``detected``；它**不参与**结构
+   准备判断（§8.2「背驰是否成立不作为一买候选的硬门槛」）。背驰本身由
+   :mod:`cpt.domain.first_buy` 的 :func:`~cpt.domain.first_buy.check_first_buy`
+   判定（R14 移植自 czsc）。
 4. **反向结构是确认门槛**：结构准备就绪且 ``has_reversal_bi``（背驰段之后出现反向
    新笔，§8.2 第 4 条）成立时进入 ``confirmed``；否则停在结构侧状态。
 5. **状态阶梯只升不降**：``structure_ready → alert → candidate → confirmed``，而

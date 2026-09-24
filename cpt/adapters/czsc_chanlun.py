@@ -162,7 +162,8 @@ class CzscChanlunBackend:
         """跑 czsc 分型/笔 + CPT 中枢，产出反腐层的 Raw 结构。
 
         ``config`` 只用于接口兼容；czsc 的笔口径由 ``min_bi_len`` 控制，
-        与 ``ReferenceChanlunConfig`` 的 chanlun-pro 参数无关。
+        与 ``ReferenceChanlunConfig`` 的历史字段（``use_fx_*`` / ``use_bi_type_new``）
+        无关——czsc 的分型/笔规则固定，不接受这些开关。
         """
         czsc = _import_czsc()
         # czsc 需要 open/close/volume，而 ``BarLike`` 协议只有高低与时间；

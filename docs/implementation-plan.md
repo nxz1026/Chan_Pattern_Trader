@@ -1,7 +1,13 @@
 # CPT 实施计划
 
-版本：v0.1 · 2026-09-22
+版本：v0.1 · 2026-09-22（里程碑内容为**历史记录**，未随 2026-09-24 的参照变更重写）
 状态：替代旧 `plan.md`（已删除）。架构见 `docs/architecture.md`，规则口径见 `docs/rules.md`。
+
+> **⚠️ 参照变更（2026-09-24，G1 决议）**：M0–M2 中出现的 `chanlun-pro` / `chanlun.py` /
+> `chanlun_pine` 与 Rust `chanlun==2606.73` **均已移除**。当前参照为 **czsc**
+> （可选依赖 extra `chan`）与 **wbt**（仅可视化参考），详见 `docs/reference-audit.md`。
+> 下文相关表述已逐处标注，但里程碑的任务分解与验收标准仍按当时的写法保留，作为历史记录。
+> **当前进行中的工作以 `docs/progress-log.md` 与 `CPT-总计划-2026-09-24.md` 为准。**
 
 ## 1. 总体原则
 
@@ -16,7 +22,7 @@
 |---|---|---|
 | M0 | 基线补齐与工具链 | references 落盘可复现；审计文档落盘；CI 依赖规则生效 |
 | M1 | 单级别全链路（复用层） | 5m 数据→分型→笔→中枢→JSON 导出，人工案例通过 |
-| M2 | oracle 对照 | 与 chanlun-pro 基础结构序列 diff 可解释 |
+| M2 | oracle 对照 | ~~与 chanlun-pro 基础结构序列 diff 可解释~~ → 改为与 **czsc** 对照 |
 | M3 | 走势类型 + 递归 + 一买（自研核心） | 两级递归贯通；一买状态机人工案例通过 |
 | M4 | 数据与回放 | Binance 回填 + 缺口检测 + 回放 CLI |
 | M5 | 实时预警 | 收盘确认升级；重构事件可追溯 |
@@ -28,21 +34,21 @@
 **目标**：把"可复现"三个字落到实处，再写一行业务代码。
 
 任务：
-- `scripts/fetch_references.sh`：clone 三个参考仓库并 checkout 到固定 commit（chanlun-pro `78ffa470` / chanlun.py `2e4fa135` / chanlun_pine `0c028ef`），输出版本与 LICENSE 校验信息。
-- `docs/reference-audit.md`：落盘三仓库许可证（Apache-2.0 / MIT+NOTICE / GPL-3.0）、复用边界、加密核心风险、配置覆盖点（`query_macd_ld`/`compare_ld_beichi`/`user_custom_mmd`）。
+- `scripts/fetch_references.sh`：clone 参考仓库并 checkout 到固定 commit（**现为 czsc `701e480a` / wbt `39bb1e8a`**，原为 chanlun-pro / chanlun.py / chanlun_pine），输出版本与 LICENSE 校验信息。
+- `docs/reference-audit.md`：落盘参考仓库许可证（**现为 Apache-2.0 czsc / MIT wbt**）、复用边界与版本固定方式。
 - 冻结 `docs/rules.md` §9 七条约定（已随本次架构文档完成）。
 - 工具链：ruff + mypy + pytest + pre-commit；import-linter 配置依赖方向契约。
-- **验证 PyPI 旧 MIT 版 `chanlun` 包**（约半小时）：确认其源码覆盖范围（分型/新笔/笔中枢/走势类型）与协议（MIT），评估是否可作为比加密 pro 更干净的 oracle。结论记入 `docs/reference-audit.md`。
+- ~~验证 PyPI 旧 MIT 版 `chanlun` 包~~（已完成，结论：不存在该包；详见 `docs/reference-audit.md` §4.2）。
 
 验收：`fetch_references.sh` 在干净环境一键复现 references；`import-linter` 对空骨架生效；`pytest` 可运行。
 
 ## 4. M1：单级别全链路（复用层）
 
-**目标**：打通 `5m 数据 → 包含 → 分型 → 新笔 → 笔中枢 → JSON 导出`，先喂 chanlun-pro 的结果，让反腐层和存储先立起来。
+**目标**：打通 `5m 数据 → 包含 → 分型 → 新笔 → 笔中枢 → JSON 导出`，先接真实后端的结果，让反腐层和存储先立起来。
 
 任务：
 - `domain/types.py`（`BarLike` 协议）、`models.py`（不可变领域对象）、`config.py`（`RulesConfig`，含 `zs_wzgx=zgd`、MACD(12,26,9)、≥5元素）。
-- `adapters/reference_chanlun.py` 反腐层：CanonicalBar → chanlun-pro 输入 → 领域对象。
+- `adapters/reference_chanlun.py` 反腐层与**后端契约**：CanonicalBar → 后端输入 → 领域对象（现由 `czsc_chanlun.py` / `native_chanlun.py` 实现）。
 - `storage/`：SQLite 三层模型（状态 + 事件 + 信号）+ repository。
 - `application/export.py`：JSON 导出，**schema v1 此刻冻结并版本化**（回放/评测/未来 UI 三方契约）。
 - 人工构造案例 5–8 个（JSON fixture，含预期结构序列与事件）。
@@ -54,8 +60,8 @@
 **目标**：把"复用"转化成"免费验证器"。
 
 任务：
-- `tests/oracle/`：同一份输入，CPT 管线 vs chanlun-pro 直接输出，diff 分型/新笔/笔中枢基础序列。
-- 若 M0 验证通过，切换/新增 MIT 版 `chanlun` 包为 oracle，对比加密 pro 的可审计性收益。
+- `tests/oracle/`：同一份输入，CPT 管线 vs 后端直接输出，diff 分型/新笔/力度度量/一买谓词（**现为 czsc**）。
+- ~~切换 MIT 版 `chanlun` 包为 oracle~~（已作废：该包不存在，且 czsc 已作为唯一后端）。
 - 差异报告模板：每条 diff 必须能归因（配置口径 / 边界处理 / 真 bug）。
 
 验收：连续 3 个真实数据切片（各 ≥1000 根 5m K线）基础结构序列 diff 全部可解释并记录。
@@ -67,7 +73,7 @@
 任务：
 - `domain/trend_type.py`：盘整/趋势构成与完成分类（rules.md §8.1），状态含 `forming/consolidation/trend/extended/reclassified/closed/open_end`。
 - `domain/recursion.py`：走势类型 → `StructureElement`（实现 `BarLike`），喂回同一条管线；先贯通 5m→30m 一级。
-- `engine/rebuild.py`：尾部弹出 + 回溯重算 + 级联事件（借鉴 chanlun.py `_弹出旧笔` 系列）；级联重构按已冻结约定 2（确认即冻结、重构走新事件、`source_revision` 依赖扫描）。
+- `engine/rebuild.py`：尾部弹出 + 回溯重算 + 级联事件（原借鉴 chanlun.py —— 该参照已移除，实现保留）；级联重构按已冻结约定 2（确认即冻结、重构走新事件、`source_revision` 依赖扫描）。
 - `domain/signal.py`：一买状态机（`structure_ready/alert/candidate/confirmed/invalidated`），背驰段硬条件 + 背驰成立非硬门槛，`divergence_status` 三态。
 - 人工构造案例补充：开放终态 `open_end`、级联重构、`forming` 与信号 `candidate` 的术语边界各 ≥2 例。
 
@@ -91,7 +97,7 @@
 
 任务：
 - `engine/realtime.py`：增量输入、候选维护、收盘升级；未收盘K线只触发预警。
-- 收盘后小窗口全量重建（借鉴 chanlun_pine `needFullRebuild` 策略：每根收盘 bar O(n) 重建，限制窗口规模，历史加载期不重建避免 O(n²)）。增量优化留到性能真成问题时再做。
+- 收盘后小窗口全量重建（策略：每根收盘 bar O(n) 重建，限制窗口规模，历史加载期不重建避免 O(n²)）。增量优化留到性能真成问题时再做。
 - 实时输出与历史最终结果分层保存；预警、候选、确认、失效时间全程可追溯。
 
 验收：模拟实时流与事后批量回放的结构结果一致；未确认结构重构产生完整事件链；无未来函数（t 时刻输出只依赖 ≤t 数据）有专项测试。
@@ -114,7 +120,7 @@
 验收清单（逐项过）：
 - 人工案例逐条通过；批量历史回放结果可复现（同输入同输出哈希）。
 - 实时模式与离线回放结果一致；信号出现/确认/撤销时间可追溯。
-- 结构重构不产生隐性未来函数；与 chanlun-pro 和 Pine 的差异可解释并记录。
+- 结构重构不产生隐性未来函数；与 czsc 的差异可解释并记录。
 - 数据缺口、重复K线、未收盘K线有明确处理。
 - 交付：测试报告、差异报告、已知限制清单。
 
@@ -122,7 +128,7 @@
 
 | 风险 | 对策 |
 |---|---|
-| chanlun-pro 加密核心行为与文档不符 | M0 验证 MIT 版 `chanlun` 包作备选 oracle；差异报告强制归因 |
+| ~~chanlun-pro 加密核心行为与文档不符~~ | 已消解：参照换为 czsc（源码开放、可选依赖）；差异报告仍强制归因 |
 | 递归/走势类型规则在边界数据上发散 | 人工构造案例先行；`open_end` 显式终态；差异可解释才准合并 |
 | 范围蔓延（线段/Web/多交易所） | 架构文档 §10 非目标清单；每个里程碑只做验收清单内的事 |
 | LLM 成本失控 | budget 硬上限 + 缓存 + 可关闭开关；审计表每周 review |
@@ -131,12 +137,15 @@
 
 截至 2026-09-23：
 
-- M0：基线、参考审计、工具链和 PyPI MIT 版 `chanlun` 验证已完成。
+- M0：基线、参考审计、工具链和 PyPI `chanlun` 包验证已完成。
 - M1：包含 → 分型 → 新笔 → 笔中枢纯 domain 链路、存储、schema v1 和人工回放已完成。
-- M2：Rust `chanlun==2606.73` 三段真实快照诊断对照已完成；正式算法等价未宣称。
+- M2：三段真实快照诊断对照已完成；正式算法等价未宣称。（当时用 Rust `chanlun==2606.73`，该参照现已移除，替换为 czsc 对照。）
 - M3：走势类型、一级递归结构元素、一买状态机、重构事件与依赖扫描已完成基础实现。
 - M4：数据验证、Binance Futures 窄接口、批量/单根回放已完成。
 - M5：实时增量、未收盘预警、收盘升级和窗口重建已完成基础实现。
 - M6：质量报告与已知限制已落盘至 `docs/m6-quality-report.md`。
 
 下一步不是继续扩大范围，而是按质量报告逐项收敛限制：优先统一旧人工 fixture 的时间契约、补齐正式一买背驰计算、完善真实回放/实时对账，并在每项变更后保持全量验收。M-LLM 仍是独立可选线，不阻塞主线。
+
+**2026-09-24 更新**：上述收敛已并入 `CPT-总计划-2026-09-24.md` 的 R13–R18 轮次。
+一买背驰计算已由 `cpt/domain/first_buy.py` 补齐（R14-4），剩余项按该总计划推进。

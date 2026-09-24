@@ -9,7 +9,7 @@
 2. **虚拟/物理分层清晰**：缠论算法（虚拟）不知道交易所、数据库、绘图、LLM 的存在；物理层（交易所/存储/大模型）通过窄接口适配接入。
 3. **各 API 干好自己的活儿**：每个模块一个窄接口，输入输出明确，不做"顺手"的事。
 4. **避免代码屎山**：一套结构算法对 `BarLike` 泛化，跨级别复用；配置集中；领域对象不可变。
-5. **高复用率**：基础口径（分型/新笔/笔中枢/`level`/`zs_wzgx`）经反腐层委托给固定版 `chanlun-pro`；CPT 只自研走势类型、递归映射、一买状态机这三个参考仓库都未覆盖的核心。
+5. **高复用率**：基础口径（分型/新笔/力度度量）经反腐层委托给固定版 `czsc`；CPT 自研笔中枢、走势类型、递归映射、一买状态机这些 czsc 未覆盖的核心。
 
 ## 2. 分层总览
 
@@ -71,7 +71,7 @@ domain 不导入 pandas / httpx / ccxt / fastapi / sqlalchemy / torch / openai /
 |---|---|
 | `historical.py` | 历史模式：批量输入、事后分类、补 `closed` 事件、`open_end` 边界处理 |
 | `realtime.py` | 实时模式：增量输入、候选维护、收盘升级、收盘后小窗口全量重建 |
-| `rebuild.py` | 尾部失效结构弹出 + 回溯重算 + 级联事件（借鉴 chanlun.py，见 §8） |
+| `rebuild.py` | 尾部失效结构弹出 + 回溯重算 + 级联事件（见 §8） |
 | `events.py` | 事件追加、时间戳来源（历史用 bar 时间、实时用 wall clock）、配置快照 |
 | `store.py` | 应用事件维护"当前状态"投影，是 storage 的唯一写入方 |
 
@@ -87,7 +87,7 @@ def fetch_klines(symbol, interval, start, end) -> list[CanonicalBar]
 
 - `binance_futures.py`：Binance USDⓈ-M 永续 K 线，产出 `CanonicalBar`（字段见 rules.md §8.5）。
 - `validators.py`：去重、缺口检测、连续性检查（独立于适配器，可单测）。发现缺口不自动填充，并阻止跨缺口生成正式结构。
-- `reference_chanlun.py`：**反腐层**（见 §7）。不用 ccxt——抽象泄漏且重，httpx + 窄接口足够。
+- `reference_chanlun.py`：**后端契约**（见 §7.3）+ `native_chanlun.py`（自研后端）/ `czsc_chanlun.py`（czsc 后端）。不用 ccxt——抽象泄漏且重，httpx + 窄接口足够。
 
 ### 3.4 storage/ — 持久化（物理层）
 
@@ -141,7 +141,7 @@ class LLMClient(Protocol):
 | 用例 | 输入 | 输出 | 写回结构？ |
 |---|---|---|---|
 | 规则解释 | 结构/信号 JSON + 规则片段 | 自然语言解释 | 否 |
-| 差异摘要 | CPT 与 chanlun-pro/Pine 的对照 diff | 差异原因说明 | 否 |
+| 差异摘要 | CPT 与 czsc 的对照 diff | 差异原因说明 | 否 |
 | 标注辅助 | 结构序列片段 | 标注建议 | 建议，须校验+人工确认 |
 
 ### 4.4 不做的事
@@ -172,7 +172,7 @@ tests/
 docs/
     rules.md  architecture.md  implementation-plan.md  reference-audit.md(待补)
 references/
-    chanlun-pro @ 78ffa470   chanlun.py @ 2e4fa135   chanlun_pine @ 0c028ef
+    czsc @ 701e480a（可选 extra `chan`）   wbt @ 39bb1e8a（仅可视化参考）
 ```
 
 ## 6. 数据模型（不可变）
@@ -197,8 +197,10 @@ references/
 `signal_id level signal_type status structure_id center_ids divergence_status alert_time candidate_time confirmed_time invalidated_time price source_revision`
 `status ∈ {structure_ready, alert, candidate, confirmed, invalidated}`
 
-**RulesConfig（config.py，对标 chanlun.py 60+ 字段配置的可序列化子集）**：
-包含关系方向口径、`fx_qy_middle`、`fx_qj_ck`、`bi_type_new`、`zs_wzgx` 档位、高级别笔≥5元素、MACD(12,26,9)、级别链等，全部可序列化，写入每次计算结果的元数据。
+**RulesConfig（config.py，可序列化的规则口径子集）**：
+包含关系方向口径、`fx_qy_middle`、`fx_qj_ck`、`bi_type_new`、`zs_wzgx` 档位、底层笔最少跨度 `min_bi_len`、高级别笔≥5元素、MACD(12,26,9)、级别链等，全部可序列化，写入每次计算结果的元数据。
+
+> 注意两个「笔门槛」量纲不同、不可混用：`min_bi_len` 是**去包含后K线根数**（§9.8），`min_elements_for_higher_bi` 是**低级别结构元素数**（§9.7）。
 
 ## 7. 复用映射与反腐层
 
@@ -206,39 +208,42 @@ references/
 
 | 仓库 | 固定版本 | 许可证 | 复用方式 |
 |---|---|---|---|
-| chanlun-pro | `78ffa470` | Apache-2.0 | 依赖级复用（经反腐层），保留版权声明 |
-| chanlun.py | `2e4fa135` | MIT（NOTICE：Signal/Factor/Event 源自 czsc，Apache-2.0） | 借鉴逻辑，不整体依赖 |
-| chanlun_pine | `0c028ef` | GPL-3.0（有传染性） | 仅视觉交叉校验，一行代码都不抄 |
+| czsc | `701e480a` | Apache-2.0 | 可选依赖 extra（`chan`），经反腐层复用分型/笔/力度度量/一买谓词 |
+| wbt | `39bb1e8a` | MIT | 仅作可视化与回测参考（R16 画布 D），不整体依赖 |
+
+**已移除（2026-09-24，G1 决议）**：`chanlun-pro`、`chanlun.py`、`chanlun_pine`。前者的分型/笔实现与缠论定义冲突（笔端点中位跨度仅 2 根原始K线，66–74% 的笔跨度不足 4 根），后两者只提供借鉴价值且引入了不可核验的溯源负担。移除依据与实测数据见 `rules.md` §7.6 与 `progress-log.md`。
 
 ### 7.2 复用地图
 
 ```text
-依赖级复用（chanlun-pro，经反腐层）
-    缠论K线包含 / 三根分型(fx_qy_middle, fx_qj_ck) / 新笔(bi_type_new)
-    笔中枢三笔重叠 / 中枢 level / zs_wzgx / 背驰字段与一买标签语义
+依赖级复用（czsc，经反腐层，可选 extra `chan`）
+    缠论K线包含 / 三根分型 / 新笔判定 / 笔的力度度量(power_price, power_volume, length)
+    一买一卖结构谓词（移植为 cpt/domain/first_buy.py，与上游逐笔数交叉验证一致）
 
-借鉴逻辑（chanlun.py / chanlun_pine）
-    chanlun.py：弹出式级联重建（_弹出旧笔/_弹出线段/_从中枢序列尾部弹出）、
-                配置序列化（to_dict/to_json/保存/加载/对比）
-    chanlun_pine：信号生命周期状态机、收盘后小窗口全量重建的工程策略
+借鉴逻辑（wbt）
+    可视化报告与回测口径（R16 画布 D 参考）
 
-CPT 自研（两个参考仓库都未覆盖）
+CPT 自研（czsc 未覆盖）
+    笔中枢（严格三笔重叠 + ≥3 笔 + 延伸不收缩）
     走势类型构成与分类 / 走势类型→高级别笔的递归映射 / 一买状态机
 ```
 
-### 7.3 反腐层 `adapters/reference_chanlun.py`
+### 7.3 反腐层 `adapters/czsc_chanlun.py`
 
-chanlun-pro 的对象**绝不泄漏进 domain**。反腐层做三件事：
+czsc 的对象**绝不泄漏进 domain**。反腐层做四件事：
 
-1. 把 `CanonicalBar` 转成 chanlun-pro 的输入 DataFrame；
-2. 调用其公开接口，取回缠论K线/分型/新笔/笔中枢/`level`/`zs_wzgx`；
-3. 把结果映射回 CPT 的不可变领域对象。
+1. 把 `CanonicalBar` 转成 czsc 的 `RawBar`（注意：**传原始K线**，czsc 内部自己做包含处理，先跑 CPT 的 `merge_contained_bars` 会让包含关系被处理两次）；
+2. 由相邻 `open_time` 的**中位**间隔反推周期标签（用中位而非均值，避免停牌/断线缺口带偏）；
+3. 调用 czsc 取回分型/新笔与力度度量，并把**时间反查回原始K线下标**（反查失败即响亮报错，不静默用错时间）；
+4. 把结果映射回 CPT 的不可变领域对象。
 
-这样即便未来替换或移除 chanlun-pro，domain/engine 零改动。`user_custom_mmd` 扩展点可用于把 CPT 一买挂到 chanlun-pro 内部做对照验证。
+中枢**不走** czsc：其 `zs_list` 会产出 <3 笔的假中枢且无笔级溯源，CPT 用自己的 `build_zhongshus`（§9.9）。
 
-### 7.4 配置覆盖点（已核实）
+这样即便未来替换或移除 czsc，domain/engine 零改动。`reference_chanlun.py` 保留为**后端契约**（`ChanlunResult` / `FxRaw` / `BiRaw` / `ZsRaw` / `ReferenceChanlunConfig`）与 `InMemoryChanlunBackend`，是三个后端（native / czsc / 测试内存）共同的接口定义。
 
-`cl_interface.py` 中背驰力度 `query_macd_ld` 与背驰比较 `compare_ld_beichi` 设计为**可覆盖**，因此背驰口径可由 CPT 自定义注入，无需破解加密核心 `cl.py`。
+### 7.4 配置覆盖点
+
+背驰口径由 CPT 自定义：MACD 柱面积法，参数固定 `(12,26,9)`（`rules.md` §9.6），不依赖外部实现的可覆盖钩子。
 
 ## 8. 已冻结约定（v0）
 
@@ -250,7 +255,7 @@ chanlun-pro 的对象**绝不泄漏进 domain**。反腐层做三件事：
 4. **术语**：走势类型状态 `candidate` 改名 `forming`，避免与一买信号状态 `candidate` 冲突。事件统一 `created/updated/confirmed/reclassified/invalidated/closed`。
 5. **中枢位置关系档位**：首版固定 `zs_wzgx = zgd`（高点比 zg、低点比 zd），写入 `RulesConfig`，不单币配置。
 6. **背驰力度口径**：复用 MACD 柱面积法（对应 `query_macd_ld`），参数固定 `(12,26,9)`，`divergence_status ∈ {not_checked, not_detected, detected}`。
-7. **"≥5 结构元素"语义**：是 CPT 递归工程参数，为 chanlun-pro 新笔"至少5根K线"的**类比映射**而非数值等价，必须用人工构造案例验证。
+7. **"≥5 结构元素"语义**：是 CPT 递归工程参数，量纲为**低级别结构元素数**，与 `min_bi_len`（去包含后K线根数，§9.8）不同，必须用人工构造案例验证。
 
 ## 9. 架构原则（CI 与工程约束）
 
@@ -275,8 +280,8 @@ Web UI / 前端图表组件      LLM 参与结构判断或信号生成
 ```text
 tests/fixtures/   人工构造案例（JSON，含预期结构序列与事件）
 tests/unit/       domain 各 stage 纯函数 + engine 状态机
-tests/oracle/     chanlun-pro 对照：同输入 diff 分型/新笔/笔中枢基础序列
+tests/oracle/     czsc 对照：同输入 diff 分型/新笔/力度度量/一买谓词
 tests/e2e/        同输入必同输出的哈希校验（复现性）
 ```
 
-测试金字塔：人工构造 fixture 先行（实施计划 M0 交付物直接 fixture 化）→ 引擎回放集成测 → oracle 对照测 → 端到端复现性校验。与 chanlun-pro/Pine 的差异必须可解释并记录。
+测试金字塔：人工构造 fixture 先行（实施计划 M0 交付物直接 fixture 化）→ 引擎回放集成测 → oracle 对照测 → 端到端复现性校验。与 czsc 的差异必须可解释并记录。

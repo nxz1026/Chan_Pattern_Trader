@@ -76,7 +76,7 @@ CPT 笔端点中位跨度 = **2 根原始K线**；跨度 <4 根的笔占比 **66
 
 ### R14 — 算法换引擎
 
-状态：**进行中**（R14-1 完工）
+状态：**已完成**（R14-1 ~ R14-5）
 
 #### R14-1 czsc 接入（方案 C）✅
 
@@ -244,6 +244,47 @@ mypy（55 files）/ vulture / import-linter 全绿。
 
 **验收**：`226 passed`（R14-3 的 207 + 19）；全门禁绿。
 
-#### R14 剩余子任务
+#### R14-5 文档同步 ✅
 
-- R14-5 重写 `docs/rules.md` §7 + 修 `signal.py:14` 的 chanlun 溯源
+**范围扩大说明**：原计划只改 `docs/rules.md` §7 与两处代码溯源。实际审计发现
+`docs/architecture.md`（**活文档**）、`README.md`、`docs/reference-audit.md`、
+`docs/implementation-plan.md` 与 `cpt/adapters/reference_chanlun.py`（**含
+`_CHANLUN_PRO_FIXED_COMMIT` 常量**）都有大量失效引用。只改 rules.md 会让其余
+活文档继续误导，因此一并处理。
+
+**判定标准**：**活文档改，带日期的历史快照不改**。
+
+| 文件 | 处理 |
+|---|---|
+| `docs/rules.md` §7 | 整节重写（去失效横幅，改为 czsc 基线 + 复用边界表 + 已移除说明）；§9.6/§9.7 去 chanlun 溯源；新增 §9.8（`min_bi_len`）与 §9.9（中枢延伸口径） |
+| `docs/architecture.md` | §7 整节重写（复用映射、反腐层改为 `czsc_chanlun.py`）；另修 8 处正文引用（高复用率、rebuild、差异摘要、目录树、测试策略等） |
+| `docs/reference-audit.md` | **整体重写为 v0.2**：czsc + wbt 两个引用，去掉三个已移除仓库与 chanlun-pro 加密核心风险章节 |
+| `README.md` | 修 4 处（核心理念、架构速览、文档导航、参考仓库表） |
+| `docs/implementation-plan.md` | 加**参照变更横幅**，另修 16 处；已完成的里程碑内容保留为历史记录，失效项加删除线 |
+| `cpt/adapters/reference_chanlun.py` | 模块 docstring 重写（chanlun-pro 反腐层 → 后端契约）；`_CHANLUN_PRO_FIXED_COMMIT` → `_CZSC_FIXED_COMMIT = "701e480a..."`；`fixed_commit` 默认值同步 |
+| `cpt/adapters/czsc_chanlun.py` | docstring 去 chanlun-pro 表述 |
+| `cpt/domain/config.py` / `signal.py` | 去 chanlun 溯源（R14-3 已顺带做掉 config.py） |
+| `docs/m6-quality-report.md` 等 4 个带日期快照 | **不改**（改了等于篡改历史记录） |
+| `docs/archive/progress-log-至R12-2026-09-24.md` | **不改**（归档） |
+
+**新增规则条款**：
+
+- **§9.8 底层笔最少跨度 `min_bi_len`** —— 量纲为去包含后K线根数，与 §9.7 的
+  `min_elements_for_higher_bi`（低级别结构元素数）**不可混用**
+- **§9.9 中枢区间与延伸口径** —— 区间由建枢前三笔唯一确定、延伸不收缩；
+  笔不跨中枢复用；附交叉验证数据
+
+**验收**：`226 passed`（与 R14-4 持平，本轮纯文档）；全门禁绿。
+**残留终检**：活文档与 `cpt/` 中的 `chanlun-pro` / `78ffa470` 提及，只剩
+`reference-audit.md` §4 的移除记录表、`rules.md` §7.6、`README.md` 的移除说明
+与 `implementation-plan.md` 的删除线标注——**均为有意的历史记录**。
+
+## R14 小结
+
+| 子任务 | 产出 | 关键证据 |
+|---|---|---|
+| R14-1 | `cpt/adapters/czsc_chanlun.py` + `tests/test_czsc_backend.py` | 笔端点中位跨度 2 → 9–10 根；短跨度占比 66.9% → 6.1% |
+| R14-2 | `cpt/domain/zhongshu.py` 延伸不收缩 | 区间宽与纳入笔数与 czsc `get_zs_seq` 逐项一致；最小宽度 4.5 → 17.2 |
+| R14-3 | `RulesConfig.min_bi_len = 6` | 4–7 区间笔数不敏感，8 起急降；取上游默认不自造 |
+| R14-4 | `cpt/domain/first_buy.py` + 力度度量 | 与 czsc 信号模板逐 n 交叉验证 **6/6**，含正例 |
+| R14-5 | 5 个活文档 + 3 个代码文件同步 | 残留终检只剩有意保留的历史记录 |

@@ -1,20 +1,23 @@
-"""chanlun-pro 反腐层（anti-corruption layer）。
+"""缠论后端契约（backend contract）与反腐层数据类。
 
-本模块是 CPT 领域层与固定版 chanlun-pro 之间唯一的边界：chanlun-pro 的
-对象（``DataFrame``、内部结构、``cl.py`` 加密核心等）**绝不泄漏进
-``cpt/domain/``**。反腐层只做三件事：
+本模块是 CPT 领域层与外部缠论实现之间唯一的边界：外部实现的对象
+（``DataFrame``、Rust 对象、内部结构等）**绝不泄漏进 ``cpt/domain/``**。
+边界只做三件事：
 
-1. 把 ``CanonicalBar`` 转成 chanlun-pro 期望的输入；
-2. 调用其公开接口，取回缠论 K 线 / 分型 / 新笔 / 笔中枢 / ``level`` /
-   ``zs_wzgx``；
+1. 把 ``CanonicalBar`` 转成外部实现期望的输入；
+2. 调用其公开接口，取回分型 / 新笔 / 笔中枢 / ``level`` / 力度度量；
 3. 把结果映射回 CPT 的不可变领域对象（``Fractal`` / ``Bi`` / ``ZhongShu``）。
 
-这样即便未来替换或移除 chanlun-pro，``domain/`` 与 ``engine/`` 都零改动。
+这样即便未来替换或移除某个后端，``domain/`` 与 ``engine/`` 都零改动。
 
-**M1 状态**：本模块只声明接口与数据类，不实际 import 或调用 chanlun-pro
-（真实接入留 M3+）。``InMemoryChanlunBackend`` 是占位后端，仅作 fixture
-生成与单元测试用，基于 bar 高低点做极简顶底分型 / 笔判定，不追求真实缠论
-精度——精度由 M3+ 接入的真实后端负责。
+**当前实现**（2026-09-24 起）：
+
+- :mod:`cpt.adapters.czsc_chanlun` —— 生产后端，走可选依赖 extra ``chan``；
+- :mod:`cpt.adapters.native_chanlun` —— CPT 自研后端，回放与离线用；
+- :class:`InMemoryChanlunBackend` —— 测试占位后端，基于 bar 高低点做极简
+  顶底分型 / 笔判定，不追求真实缠论精度。
+
+本模块本身不 import 任何外部实现，只声明接口与数据类。
 """
 
 from __future__ import annotations
@@ -39,17 +42,21 @@ __all__ = [
     "InMemoryChanlunBackend",
 ]
 
-#: chanlun-pro 固定版本 commit（``docs/reference-audit.md`` 与
+#: czsc 固定版本 commit（``docs/reference-audit.md`` 与
 #: ``scripts/fetch_references.sh`` 中锁定）。
-_CHANLUN_PRO_FIXED_COMMIT = "78ffa470f1e9463809d8fe2a2802e9e84b896dfe"
+_CZSC_FIXED_COMMIT = "701e480a545004f945bb1721e510ae610ad90c4c"
 
 
 @dataclass(frozen=True, slots=True)
 class ReferenceChanlunConfig:
-    """转发给 chanlun-pro 的口径参数（与 ``RulesConfig`` v0 冻结口径对齐）。
+    """转发给后端的口径参数（与 ``RulesConfig`` v0 冻结口径对齐）。
 
-    chanlun-pro 的输入口径通过本配置显式声明，避免反腐层内部散落魔法值。
+    输入口径通过本配置显式声明，避免反腐层内部散落魔法值。
     ``fixed_commit`` 记录依赖的固定版本，便于结果元数据追溯。
+
+    注意 ``use_fx_qy_middle`` / ``use_fx_qj_ck`` / ``use_bi_type_new`` 是
+    **历史字段**：czsc 后端不接受这些开关（其分型/笔规则固定），保留它们
+    只为兼容既有 fixture 与配置序列化，传了也不生效。
     """
 
     use_fx_qy_middle: bool = True
@@ -59,12 +66,12 @@ class ReferenceChanlunConfig:
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
-    fixed_commit: str = _CHANLUN_PRO_FIXED_COMMIT
+    fixed_commit: str = _CZSC_FIXED_COMMIT
 
 
 @dataclass(frozen=True, slots=True)
 class FxRaw:
-    """chanlun-pro 产出的原始分型（未映射到 domain）。"""
+    """后端产出的原始分型（未映射到 domain）。"""
 
     bar_index: int
     kind: str  # "top" | "bottom"
@@ -94,7 +101,7 @@ class BiRaw:
 
 @dataclass(frozen=True, slots=True)
 class ZsRaw:
-    """chanlun-pro 产出的原始笔中枢（未映射到 domain）。"""
+    """后端产出的原始笔中枢（未映射到 domain）。"""
 
     start_bar: int
     end_bar: int
@@ -116,11 +123,10 @@ class ChanlunResult:
 
 @runtime_checkable
 class ChanlunBackend(Protocol):
-    """抽象后端：既能跑 chanlun-pro（生产），也能用 in-memory 模拟（测试）。
+    """抽象后端：既能跑 czsc（生产），也能跑 CPT 自研或 in-memory（测试）。
 
     ``bars`` 是 ``BarLike``（典型为 ``CanonicalBar``）序列；真实后端内部
-    会把它转成 chanlun-pro 期望的 ``DataFrame``，但该对象绝不越过本接口
-    边界。
+    会把它转成外部实现期望的输入，但该对象绝不越过本接口边界。
     """
 
     def compute_structures(

@@ -1,103 +1,124 @@
 # CPT 参考仓库审计报告
 
-版本：v0.1 · 2026-09-22
-状态：M0-02 交付物。记录缠论参考仓库的元数据、复用边界与许可证合规结论。当前以后续仍在线维护、社区影响力较高的仓库为主要参考入口；Star/Fork 仅作热度参考，不作为算法正确性证明。
-验证脚本：`scripts/fetch_references.sh`（一键 clone + 固定 commit 校验，见 §6）。
+版本：v0.2 · 2026-09-24（R13/R14 更新）
+状态：**活文档**。与 `references/` 下实际 checkout 的 commit 必须一致；`scripts/fetch_references.sh` 是唯一固化入口。
+v0.1（2026-09-22，M0-02）的 chanlun-pro / chanlun.py / chanlun_pine / chan.py 部分已按 G1 决议删除，见 §4。
 
-## 1. 参考仓库元数据
+## 1. 当前引用（2 个）
 
 | 名称 | URL | 固定 commit | LICENSE | 用途 |
 |---|---|---|---|---|
-| chanlun-pro | https://github.com/yijixiuxin/chanlun-pro | `78ffa470f1e9463809d8fe2a2802e9e84b896dfe` | Apache-2.0（`LICENSE`） | 依赖级复用基础口径（分型/新笔/笔中枢/`level`/`zs_wzgx`）+ oracle 对照 |
-| chanlun.py | https://github.com/YuYuKunKun/chanlun.py | `2e4fa135b19eaa201fca7bfcc8ca4a86cbde7815` | MIT（含 `NOTICE`） | 借鉴级联重建与配置序列化逻辑，不复制 |
-| chanlun_pine | https://github.com/Ye-Yu-Mo/chanlun_pine | `0c028ef52fa8474b212b9a234aabbf22c3f45b4e` | GPL-3.0（`LICENSE`） | 仅视觉交叉校验，不复制代码 |
-| czsc | https://github.com/waditu/czsc | 记录时以仓库默认分支/发布版本为准，需在引用前固定 commit | MIT（以仓库 LICENSE 为准） | 主要在线参考：Rust + PyO3 缠论核心、多级别、信号/事件、回测和可视化生态 |
-| chan.py | https://github.com/Vespa314/chan.py | 记录时以仓库默认分支/发布版本为准，需在引用前固定 commit | MIT（以仓库 LICENSE 为准） | 主要在线参考：Python 缠论结构、多级别、线段、买卖点、回放与策略扩展 |
+| czsc | https://github.com/waditu/czsc | `701e480a545004f945bb1721e510ae610ad90c4c` | Apache-2.0（`LICENSE`） | **可选依赖** extra `chan = ["czsc==1.0.1"]`，经反腐层复用分型/笔/力度度量/一买谓词 |
+| wbt | https://github.com/zengbin93/wbt | `39bb1e8ab7db71cce2dcea24150639e9470a4ed4` | MIT（`LICENSE`） | 仅作可视化与回测参考（R16 画布 D），不依赖、不复制 |
 
-> chanlun.py 的 `NOTICE` 声明 Signal/Factor/Event 等部分逻辑源自 czsc（Apache-2.0），因此其 LICENSE 记为「MIT（含 NOTICE）」。
+两者均已 `.gitignore`（`/references/czsc/`、`/references/wbt/`），仓库里只保留本审计与固化脚本。
 
-## 2. 复用边界
+## 2. czsc：复用边界
 
-| 仓库 | 允许 | 禁止 | 仅对照 |
-|---|---|---|---|
-| chanlun-pro | 依赖级复用基础口径：分型/新笔/笔中枢/`level`/`zs_wzgx`；经反腐层 `adapters/reference_chanlun.py` 调用公开接口，结果映射回 CPT 领域对象 | 对象不泄漏进 `domain/`；不破解 `cl.py` 加密核心 | oracle 对照：同输入 diff 基础结构序列 |
-| chanlun.py | 借鉴级联重建（尾部弹出 + 回溯重算）与配置序列化（to_dict/to_json/保存/加载/对比）的工程思路 | 不复制代码，不整体依赖 | — |
-| chanlun_pine | — | 一行代码都不抄；不与 CPT 静态/动态链接 | 仅视觉交叉校验信号生命周期与图表呈现 |
-| czsc | 允许阅读公开文档、API 和许可证范围内的源码；必要时固定 commit 做行为实验 | 不整体复制、不把 czsc 作为 CPT domain 依赖，不把其 Rust/PyO3 实现当作 CPT 正确性权威 | 结构、信号、事件、多级别和可视化行为对照 |
-| chan.py | 允许阅读公开源码和文档、固定版本做行为对照 | 不复制代码、不整体依赖、不将外部策略/交易系统引入 CPT | 分型/笔/线段/中枢/买卖点/回放工程行为对照 |
+### 2.1 复用内容
 
-## 3. 主要在线参考优先级
-
-缠论是 CPT 的核心算法领域。以后进行算法、字段和交互研究时，优先查看仍在线维护且社区影响力较高的公开仓库：
-
-1. **czsc**：https://github.com/waditu/czsc —— 当前主要在线参考，覆盖 Rust/PyO3 核心、多级别、信号/事件、回测和可视化生态。
-2. **chan.py**：https://github.com/Vespa314/chan.py —— Python 结构、线段、买卖点、多级别、回放和策略扩展参考。
-3. **chanlun-pro**：https://github.com/yijixiuxin/chanlun-pro —— 公开接口和字段口径参考，核心 `cl.py` 受许可证/加密边界约束。
-4. **chanlun.rs**：https://github.com/YuYuKunKun/chanlun.rs —— MIT Rust/PyO3 独立 oracle，作为黑盒行为对照。
-5. **chanlun_pine**：https://github.com/Ye-Yu-Mo/chanlun_pine —— GPL-3.0，仅离线视觉交叉校验。
-
-Star/Fork 只用于判断社区热度，不等于算法正确性、许可证授权或 CPT 兼容性。每次真正引用代码/字段前仍须固定 commit、核验 LICENSE 并记录差异。
-
-## 4. 许可证合规要点
-
-- **Apache-2.0（chanlun-pro）**：保留原版权声明与 LICENSE；对修改过的部分需注明修改。依赖级复用（非复制源码进仓库）不触发传染义务。
-- **MIT + NOTICE（chanlun.py）**：保留 `NOTICE` 与版权声明即可；MIT 无传染性，CPT 不因借鉴逻辑而改变自身许可证。
-- **GPL-3.0（chanlun_pine）**：强传染。CPT 必须与 chanlun_pine 保持零静态/动态链接、零代码复制，仅做**离线视觉对照**。若违反（引入其代码或链接其产物），将触发 GPL-3.0 的源码分发义务，污染 CPT 整体许可证。
-
-## 5. chanlun-pro 加密核心风险
-
-`chanlun-pro/src/chanlun/cl_interface.py` 中以下两个函数设计为**可覆盖**，是 CPT 注入自定义背驰口径的合法扩展点：
-
-- `query_macd_ld(cd, start_fx, end_fx)` — 背驰力度（MACD 柱面积）查询；
-- `compare_ld_beichi(one_ld, two_ld, line_direction)` — 背驰比较。
-
-CPT 不直接破解加密核心 `cl.py`；而是通过 `user_custom_mmd` 扩展点注入 CPT 一买对照逻辑，实现「用 CPT 口径验证 chanlun-pro 结构序列」的 oracle 对照，避免触碰加密实现。
-
-## 6. PyPI MIT 版 chanlun 旧包验证
-
-**结论：不可用（M0-04 实测）**。PyPI 上不存在「MIT 许可的旧版 Python `chanlun` 包」；当前该包名指向作者 YuYuKunKun 的 **Rust 重写版 `chanlun.rs`**（PyO3 绑定），与旧 Python 项目 `chanlun.py`（固定 `2e4fa135`）不是同一发行物。
-
-### 5.1 PyPI 发行事实（https://pypi.org/pypi/chanlun/json）
-
-| 项 | 值 |
+| 环节 | 说明 |
 |---|---|
-| 最新版本 | `2606.73`（upload 2026-06-12） |
-| 全部版本 | 仅 10 个：`2605.11`/`2605.46`/`2605.86`/`2605.94`/`2605.101`/`2605.103`/`2606.17`/`2606.44`/`2606.47`/`2606.73`，全部 2026-05-26→2026-06-12 上传 |
-| 作者 | YuYuKunKun |
-| summary | 「缠论技术分析库 — Rust 高性能实现」 |
-| `license` / `license_expression` 元数据字段 | **null（核心元数据未声明）** |
-| classifier | `License :: OSI Approved :: MIT License` |
-| sdist 内 LICENSE | 存在（`license_files: ["LICENSE"]`） |
-| 源码仓库 | https://github.com/YuYuKunKun/chanlun.rs |
+| 缠论K线包含处理 | `remove_include` |
+| 三根分型 | 直接取 `analyzer.fx_list` |
+| 新笔判定 | 直接取 `analyzer.bi_list`，门槛由 `min_bi_len` 控制 |
+| 笔的力度度量 | `BI.power_price` / `power_volume` / `length` |
+| 一买/一卖结构谓词 | `check_first_buy` / `check_first_sell`，**逐行移植**为 `cpt/domain/first_buy.py` |
 
-### 5.2 关键事实链
+### 2.2 明确不复用
 
-1. **无「旧版 Python 包」**：全部 10 个 release 均为 Rust 重写版；旧 Python 项目 `chanlun.py` 仓库（固定 commit）无 `setup.py`/`pyproject.toml`，从未作为 pip 包发布。其 README 的 PyPI badge 指向的正是同一个 `chanlun`（Rust 版）包，即该包名已被 Rust 重写版「接管」。另查 `chanlun-py`/`chanlunpy`/`chanlun_py` 三个相近包名，均 404，旧 Python 代码未在 PyPI 任何名下发过。
-2. **同作者近亲而非同源**：`chanlun.rs` 与 `chanlun.py` 同作者；Rust README 明确「API 参考 `chan.py` 设计，高度兼容」「类名/方法名/字段名与 `chan.py` 保持一致」，是 `chan.py` 的 Rust 重写（PyO3 绑定），非旧 Python 源码的再发行。
-3. **许可证更干净但字段未声明**：`chanlun.rs` 仓库根 `LICENSE` 为纯净 MIT，**无 `NOTICE`、无 czsc（Apache-2.0）痕迹、无加密核心**；但 PyPI 核心元数据 `license`/`license_expression` 为 null，仅靠 classifier + LICENSE 文件声明，元数据卫生欠佳。
+| 环节 | 原因（实测） |
+|---|---|
+| 中枢 | `zs_list` 会产出 **<3 笔的假中枢**（fixture3 有 2 个两笔中枢，其中一个还是首个），且 `ZS` 无 `bi_ids` 笔级溯源。CPT 用自己的 `build_zhongshus`（严格三笔重叠 + ≥3 笔 + 延伸不收缩，见 `rules.md` §9.9） |
+| 走势类型 / 线段 / 递归 | czsc 无这些能力 |
+| 信号模板体系 | `call_signal` 需要分析器对象 + 模板名 + 参数字典；CPT 需要的是"输入一串笔、输出布尔值"的纯谓词 |
 
-### 5.3 算法覆盖（Rust 版 `chanlun.rs`）
+> 补充实测：czsc 的 `zs_list` **不做** `is_valid()` 过滤（`crates/czsc-core/src/analyze/mod.rs`），
+> 但 `is_valid() == False` 与 `zg < zd` 在 3 个 fixture 上**均为 0**——真正的缺陷只有
+> "产出 <3 笔假中枢"这一条。`ZS::new` 用 `take(3)`：前三笔定 `zg`/`zd`，延伸不收紧。
+> 这与 CPT 修正后的中枢口径一致，已作为交叉验证依据（见 `progress-log.md` R14-2）。
 
-| 口径 | Rust 模块 | 覆盖 |
+### 2.3 接入形态：为什么是可选依赖（方案 C）
+
+用户 2026-09-24 定：**可选依赖 extra**，`dependencies = []` 必须保持为空。三个备选方案被实测否决：
+
+| 方案 | 实测结论 |
+|---|---|
+| A 无条件 `pip install czsc` | 会拉入 pandas / numpy / pyarrow / polars / scipy / statsmodels / openpyxl / requests，破坏 `dependencies = []` |
+| B vendor `_native.abi3.so` | **46.6 MB**（超 GitHub 50 MB 警告线），且**半废**——取 `FX.dt` / `BI.sdt` 直接 `ModuleNotFoundError: pandas`（`crates/czsc-core/src/objects/fx.rs` 的 `create_naive_pandas_timestamp` 是硬依赖） |
+| D 移植 273 行 Rust | 可行但自担维护；优先复用上游 |
+
+落地：`pyproject.toml` 的 `[project.optional-dependencies] chan = ["czsc==1.0.1"]`，
+适配器内**延迟导入 + 版本校验**（`CzscNotInstalledError` / `CzscVersionError`），
+未装 czsc 时核心功能与全部既有测试不受影响。
+
+### 2.4 版本固定
+
+- `cpt/adapters/czsc_chanlun.py` 的 `PINNED_CZSC_VERSION = "1.0.1"`
+- `cpt/adapters/reference_chanlun.py` 的 `_CZSC_FIXED_COMMIT`
+- 测试 `test_pinned_version_matches_pyproject_extra` 与 `test_core_dependencies_stay_empty` 钉住这两条不变式
+
+### 2.5 已知副作用
+
+安装 czsc 会**附带**引入 `wbt-0.9.1` 与 `plotly-7.1.0`（czsc 声明的依赖）。这两者正好可用于 R16 的画布 C/D。
+
+## 3. wbt：复用边界
+
+仅作**可视化与回测口径参考**（R16 画布 D）。CPT 不 import wbt、不复制其代码，只参考它如何组织报告与回测指标。
+
+## 4. 已移除的参照（2026-09-24，G1 决议）
+
+| 仓库 | 原固定 commit | LICENSE | 移除原因 |
+|---|---|---|---|
+| chanlun-pro | `78ffa470f1e9463809d8fe2a2802e9e84b896dfe` | Apache-2.0 | 分型/笔实现与缠论定义冲突（见 §4.1） |
+| chanlun.py | `2e4fa135b19eaa201fca7bfcc8ca4a86cbde7815` | MIT | 只提供借鉴价值，带来不可核验的溯源负担 |
+| chanlun_pine | `0c028ef52fa8474b212b9a234aabbf22c3f45b4e` | GPL-3.0 | 强传染性；仅视觉对照，价值不足 |
+| chan.py | 未固定 | MIT | 同上；未固定 commit，故从未实际引用 |
+
+一并删除的还有：`oracle` 可选依赖、`oracle-parity` CI 作业及其在 `.github/workflows/ci.yml` 中的对照步骤、`references/chanlun*/` 目录。
+
+### 4.1 chanlun-pro 移除的实测依据
+
+| 指标 | chanlun-pro（已移除） | czsc（现用） |
 |---|---|---|
-| 分型 fx | `structure/fractal_obj.rs` | ✅ |
-| 笔 bi | `algorithm/bi.rs` | ✅ |
-| 中枢 zs | `algorithm/hub.rs` | ✅ |
-| 线段 | `algorithm/segment.rs` | ✅ |
-| 背驰 | `algorithm/divergence.rs` | ✅ |
-| 买卖点 | `business/bsp.rs` | ✅ |
-| **走势类型 trend_type** | —（无该模块，`lib.rs` 无导出） | ❌ |
+| 笔端点跨度**中位** | **2 根**原始K线 | **9–10 根** |
+| 跨度 <4 根占比 | **66.9% / 74.4% / 73.0%** | **6.1% / 4.2% / 6.2%** |
+| 分型 / 笔 / 中枢（fixture1） | 327 / 326 / 43 | 202 / 50 / 6 |
 
-> 走势类型在旧 `chan.py` 中本就残缺：`走势.分析`/`_同级分解`/`_非同分解` 均为 `pass` 桩，仅 `走势.日内分类`（第 46 课）有实现；Rust 重写未移植该概念。
+两根 3K 分型窗口重叠，定义上不可能成笔。差距是**定义级**的，不是参数级的——因此移除而不是调参。
 
-### 5.4 评估结论
+### 4.2 PyPI `chanlun` 包的历史结论（保留备查）
 
-- **不可作为「旧版 Python MIT oracle」**：前提不成立——PyPI 上不存在 MIT 许可的旧版 Python `chanlun` 包；`chanlun` 包名自 2026-05 起即指向 Rust 重写版。
-- **作为「更干净 oracle」的附带判断**：即便退而考虑 Rust 版 `chanlun`（`pip install chanlun`，MIT、无加密核心、无 czsc 传染），它相对 chanlun-pro（Apache-2.0 + 加密 `cl.py`）确有许可证优势，但存在两点阻断：
-  1. **形态**：编译型 Rust wheel（PyO3 绑定），非 Python 源码；无法像 chanlun-pro 那样直接读源码做口径 diff，只能通过 Python API 调用做黑盒对照。
-  2. **覆盖不全**：缺 `走势类型`，且不含 chanlun-pro 的 `level`/`zs_wzgx` 等对照口径，无法覆盖现有 oracle 对照面。
-- **遗留 TODO（不阻塞 M0）**：若 M2 需 MIT oracle，Rust 版 `chanlun` `2606.73` 是候选，但需补齐走势类型对照并接受 PyO3 调用形态；本结论留待 M2 oracle 切换策略评估。
+M0 曾验证「PyPI 上是否存在 MIT 许可的旧版 Python `chanlun` 包」。**结论：不存在**。
+该包名自 2026-05 起指向同作者 YuYuKunKun 的 Rust 重写版 `chanlun.rs`（PyO3 绑定），
+与旧 Python 项目 `chanlun.py` 不是同一发行物。相近包名 `chanlun-py` / `chanlunpy` /
+`chanlun_py` 均 404，旧 Python 代码未在 PyPI 任何名下发过。
 
-## 7. 验证脚本
+该结论随 §4 一并作废（不再需要 oracle），仅作历史记录。Rust 版 `chanlun.rs` 虽许可证更干净
+（纯 MIT、无加密核心、无 czsc 传染），但形态为编译 wheel、无法直接读源码做口径 diff，
+且缺 `走势类型` 模块——即使当初保留也不足以覆盖对照面。
 
-- `scripts/fetch_references.sh`：一键 clone 三个仓库到 `references/` 并 checkout 到固定 commit；已存在则 fetch + checkout；最后打印每个仓库实际 HEAD 与期望 commit 比对，不一致则退出码非 0；并打印各仓库 LICENSE 路径供审计。
+## 5. 许可证义务
+
+- **Apache-2.0（czsc）**：保留原版权声明与 `LICENSE`；对修改过的部分须注明修改。
+  CPT 的 `cpt/domain/first_buy.py` 是从 czsc `crates/czsc-signals/src/utils/cxt.rs`
+  **逐行移植**的，已在模块 docstring 中注明来源与许可证。
+- **MIT（wbt）**：无传染性；CPT 未复制其代码。
+- **CPT 自身许可证不受影响**：可选依赖（非复制源码进仓库）不触发传染义务。
+
+## 6. 校验方式
+
+```bash
+# 固化引用（clone + checkout 到固定 commit）
+scripts/fetch_references.sh
+
+# 核对本地 commit 与本文档一致
+for d in references/*/; do git -C "$d" rev-parse HEAD; done
+```
+
+期望输出（顺序与 §1 表格一致）：
+
+```text
+701e480a545004f945bb1721e510ae610ad90c4c
+39bb1e8ab7db71cce2dcea24150639e9470a4ed4
+```
