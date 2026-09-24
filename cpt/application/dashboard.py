@@ -98,6 +98,7 @@ def _market(bars: Sequence[CanonicalBar], config: RulesConfig, symbol: str) -> d
     """
     return {
         "symbol": symbol,
+        "kind": "crypto",  # 默认加密；A 股侧由 cpt/web/a_share.py 覆盖为 "a_share"
         "interval_ms": _infer_interval_ms(bars, config),
         "last_price": bars[-1].close if bars else None,
         "first_open_time": bars[0].open_time if bars else None,
