@@ -25,6 +25,9 @@ dev = [
     "import-linter>=2.0",
     "types-requests",
 ]
+# 分型/笔的参考实现（R14，方案 C）。核心 dependencies 保持为空；
+# 只有需要 czsc 后端（生产/交叉验证）时才安装本 extra。
+chan = ["czsc==1.0.1"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

@@ -73,3 +73,60 @@ CPT 笔端点中位跨度 = **2 根原始K线**；跨度 <4 根的笔占比 **66
    - `docs/rules.md:8`：去掉 chanlun-pro/chanlun.py/Pine 三处实现参照，改为 czsc
 
 **未改**：`docs/m6-quality-report.md`、`docs/dashboard-final-acceptance.md`、`docs/low-risk-hardening.md`、`cpt-feature-review-and-deadcode-audit.md` —— 它们是带日期的历史验收/审计快照，改它们等于篡改历史记录。其中命令已失效，以本日志和总计划为准。
+
+### R14 — 算法换引擎
+
+状态：**进行中**（R14-1 完工）
+
+#### R14-1 czsc 接入（方案 C）✅
+
+用户 2026-09-24 定：**方案 C —— 可选依赖**。
+
+**否决 A/B/D 的实测依据**：
+
+| 方案 | 实测结论 |
+|---|---|
+| A `pip install czsc` 无条件依赖 | 会拉入 pandas/numpy/pyarrow/polars/scipy/statsmodels/openpyxl/requests，破坏 `dependencies = []` |
+| B vendor `_native.abi3.so` | **46.6 MB**（超 GitHub 50 MB 警告线），且**半废**：取 `FX.dt`/`BI.sdt` 直接 `ModuleNotFoundError: pandas`（`crates/czsc-core/src/objects/fx.rs` 的 `create_naive_pandas_timestamp` 是硬依赖） |
+| D 移植 273 行 Rust | 可行但自担维护；用户选择优先复用上游 |
+
+**落地**：
+
+- `pyproject.toml` 加 `chan = ["czsc==1.0.1"]`，**`dependencies = []` 保持为空**
+- 新增 `cpt/adapters/czsc_chanlun.py`：延迟导入 + 版本校验（`CzscNotInstalledError` / `CzscVersionError`）
+- 新增 `tests/test_czsc_backend.py`（18 个测试，其中 7 个不依赖 czsc 始终运行）
+
+**核心回归（决定性）**：
+
+| 指标 | CPT 自研笔 | czsc 笔（本适配器） |
+|---|---|---|
+| 笔端点跨度**中位** | **2 根**原始K线 | **9–10 根** |
+| 跨度 <4 根占比 | **66.9% / 74.4% / 73.0%** | **6.1% / 4.2% / 6.2%** |
+| 分型 / 笔 / 中枢 | 327/326/43 · 357/356/45 · 353/352/43 | 202/50/6 · 203/49/6 · 245/49/6 |
+
+> 残留的 4–6% 短跨度不是 bug：czsc `check_bi`（`analyze/utils.rs:417`）的门槛是
+> `if !ab_include && bars_a.len() >= min_bi_len` —— 当两端分型 K 线互相包含时
+> （`ab_include`）**门槛不适用**。这是 czsc 的既定规则。
+
+**关键设计决定**：
+
+- **只借分型与笔**，中枢仍用 `cpt.domain.zhongshu.build_zhongshus`。实测 czsc 的
+  `zs_list` 虽 `is_valid()` 全过、无 `zg<zd`，但**会产出 <3 笔的假中枢**
+  （fixture3 有 2 个两笔中枢，其中一个还是首个），且 `ZS` 无 `bi_ids` 溯源。
+  测试 `test_real_fixture_zhongshu_never_has_negative_width` 把这个事实钉住。
+- **必须传原始 K 线**：czsc 内部自己做包含处理（`remove_include`），
+  先跑 `merge_contained_bars` 会让包含关系被处理两次。
+- **周期自动推断**：由相邻 `open_time` 的**中位**间隔反推（用中位而非均值，
+  避免停牌/断线缺口带偏）。
+- **时间必须能反查回原始 K 线下标**：czsc 只回吐 `Timestamp`，映射失败即响亮报错，
+  不静默用错时间（这是 R1–R12 期间踩过的坑）。
+
+**验收**：`198 passed`（R13 的 180 + 18 新增）；ruff check / ruff format --check（111 files）/
+mypy（55 files）/ vulture / import-linter 全绿。
+
+#### R14 剩余子任务
+
+- R14-2 中枢延伸改为**不收紧**（对齐缠论原文；实测改后与 czsc 中枢逐项一致）
+- R14-3 `RulesConfig.min_bi_len = 6`（去包含后K线根数，与 `min_elements_for_higher_bi` 量纲不同）
+- R14-4 一买移植（`Bi` 加 `power_volume`；czsc `BI` 已直接暴露 `length`/`power_price`/`power_volume`）
+- R14-5 重写 `docs/rules.md` §7 + 修 `config.py:6`/`signal.py:14` 的 chanlun 溯源
