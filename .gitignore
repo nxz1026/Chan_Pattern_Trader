@@ -1,7 +1,6 @@
 # Local reference checkouts are kept on disk but not tracked by CPT.
-/references/chanlun-pro/
-/references/chanlun.py/
-/references/chanlun_pine/
+/references/czsc/
+/references/wbt/
 
 # Python caches and local environments.
 __pycache__/

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 一键拉取并固定三个缠论参考仓库到 references/ 子目录。
+# 一键拉取并固定 CPT 的两个参考仓库到 references/ 子目录。
 #
 # 用法: scripts/fetch_references.sh
 #
@@ -17,9 +17,8 @@ set -euo pipefail
 
 # 仓库定义: 名称|仓库 URL|期望 commit|许可证(SPDX)
 REPOS=(
-  "chanlun-pro|https://github.com/yijixiuxin/chanlun-pro.git|78ffa470f1e9463809d8fe2a2802e9e84b896dfe|Apache-2.0"
-  "chanlun.py|https://github.com/YuYuKunKun/chanlun.py.git|2e4fa135b19eaa201fca7bfcc8ca4a86cbde7815|MIT"
-  "chanlun_pine|https://github.com/Ye-Yu-Mo/chanlun_pine.git|0c028ef52fa8474b212b9a234aabbf22c3f45b4e|GPL-3.0"
+  "czsc|https://github.com/waditu/czsc.git|701e480a545004f945bb1721e510ae610ad90c4c|Apache-2.0"
+  "wbt|https://github.com/zengbin93/wbt.git|39bb1e8ab7db71cce2dcea24150639e9470a4ed4|MIT"
 )
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"

@@ -18,25 +18,11 @@ jobs:
         run: pytest tests -rsq
       - name: Static quality gates
         run: |
-          ruff check cpt tests scripts/compare_oracle.py
-          ruff format --check cpt tests scripts/compare_oracle.py
+          ruff check cpt tests
+          ruff format --check cpt tests
           mypy cpt
       - name: Dead-code audit (vulture)
         run: |
           python -m pip install 'vulture==2.14'
-          vulture cpt scripts/compare_oracle.py --min-confidence 80 \
+          vulture cpt --min-confidence 80 \
             --exclude 'cpt/web/app.py'
-
-  oracle-parity:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
-        with:
-          python-version: '3.12'
-      - name: Install locked development dependencies and pinned oracle
-        run: |
-          python -m pip install -r requirements-dev.txt
-          python -m pip install 'chanlun==2606.73'
-      - name: Run pinned Rust oracle parity tests
-        run: pytest tests/test_compare_oracle.py -rsq
