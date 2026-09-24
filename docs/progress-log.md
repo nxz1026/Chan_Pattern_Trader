@@ -393,3 +393,103 @@ R15 当前交付了 **完整的"读数据 + 计算结构"的 cpt/ 侧能力**；
 
 **验收**：`258 passed`（R15-2 的 245 + 13）；ruff check / ruff format --check
 (119 files) / mypy(59 files) / vulture / import-linter(4 kept, 0 broken) 全绿。
+
+---
+
+## R16 — 四画布 + flag 切换（进行中）
+
+**目标**：看板能看到 A 股日线缠论结构，四个画布并存、flag 切换，最后选一个。
+
+### R16-1 A 股 web 后端（最小交付）✅ `3225d05`
+
+`cpt/web/a_share.py`：A 股日线独立 HTTP 服务，复用 `cpt.web.app.make_handler`
+路由 + dashboard snapshot v2 schema（与加密侧 100% 兼容）。
+
+数据流：`AShareLocalClient.fetch_validated_klines` → 后复权 `CanonicalBar`
+→ 缠论结构 → `build_dashboard_snapshot_v2`。
+
+关键设计：client 参数化注入（不把 psycopg 拉进 cpt 核心）；DB 出错返回
+degraded snapshot（不静默 OK）；无后台线程（日线收盘后不变，60s TTL 够用）。
+
+**验收**：264 passed。
+
+### R16-2 前端「市场」标签 + `market.kind` ✅ `1828109`
+
+- `cpt/application/dashboard.py`：`_market()` 增加 `"kind": "crypto"` 默认值
+- `dashboard/index.html`：topbar 新增「市场」项（`data-field="market.kind"`）
+
+**实测发现**：`market.kind` 在 `dashboard.js` 里**没有任何分支**（R16-2 未触碰
+dashboard.js），走 `dashboard.js:410-412` 的通用 `data-field` 循环 —— 前端确实
+一套管线通吃 crypto / a_share。
+
+**验收**：264 passed。
+
+### R16-3 A 股快照链路打通（在途工作收尾）✅ `baa8405`
+
+上一轮会话留下了未提交的在途改动，本子轮收尾并修掉三个**致命** bug：
+
+1. **overlays 恒为空**（最严重）。`cpt/web/a_share.py` 原来写
+   `run_replay(...)` + `payload.get("fractals")`，但 `run_replay` 返回的是
+   `export_dataset` 的 **schema v1 payload** —— 结构元素在 `payload["data"]` 下，
+   顶层没有该键 ⇒ 静默拿到 `None` ⇒ K 线上一条笔都不画，而 snapshot 仍是合法
+   v2 schema、不报错。改取 `payload["data"]["fractals"]` 后又炸
+   `TypeError: asdict() should be called on dataclass instances`（拿到的是 dict，
+   而 `build_dashboard_snapshot_v2` 要 dataclass）。
+   → 新增 `cpt/application/replay.compute_domain_structures()` 返回 **dataclass**
+   三元组；`cpt/web/__main__._compute_domain_structures` 改为它的薄包装，删掉
+   重复实现与已无引用的 `_reference_config`。
+   回归测试 `test_overlays_are_populated_from_replay_payload`。
+2. **缺 psycopg ⇒ A 股永远 degraded**。新增可选 extra
+   `db = ["psycopg[binary]>=3.1"]`（核心 `dependencies` 仍为空，同 `chan` extra
+   的方案 C）；`a_share_local.py` 自带 `~/.dbconfig` 解析，不再 import `asel`。
+3. **日历缺口被当成数据缺口**。新增 `validate_ashare_bars()`：逐根契约/去重/
+   递增与 `validate_canonical_bars` 一致，**只跳过连续性那一步** —— 周末/节假日
+   （C5）与停牌（C3）是合法缺口，不是数据缺失，不能被 `DataGapError` 拦下，
+   更不能填 0。
+4. `_empty_snapshot` 与真实路径形状不一致（`overlays: []` vs dict、
+   `signal: {}` vs `None`）⇒ 前端 degraded 分支会崩；已对齐 + 回归测试。
+5. `scripts/factor_backfill.py`：取数窗口 30 天 → **800 天**（腾讯上限 801 根）；
+   写入改 `executemany` 批量；删掉改造后遗留的死码 `_upsert_factor_rows_legacy`。
+
+**真实链路验收（本机真库，非 mock）**：
+
+- `build_ashare_snapshot('300059')` → 64 根 K 线 / 24 分型 / 23 笔（修复前全 0）
+- `asel.ref_adjust_factor` 实测 49,790 行 / 94 只 / 2023-05-29→2026-09-24
+- 已知缺口：`public.daily_bar` 5,225 只里只有 94 只有复权因子（98.2% 缺），
+  且 `asel.ref_trading_calendar` / `ref_limit_rule` / `ref_security_status`
+  **均为 0 行** —— 留 R17 处理。
+
+### R16-4 后端 flag：决策 A1 在生产里生效 ✅ `baa8405`
+
+**发现的缺口**：R14 交付了 `CzscChanlunBackend`，但 `cpt/web/__main__.py` 与
+`cpt/web/a_share.py` 都**硬编码** `NativeChanlunBackend()`；`RulesConfig.min_bi_len`
+也只有 czsc 后端消费。⇒ 看板上画的仍是 R14 实测判定的"烂笔"（端点中位跨度 2 根
+原始 K 线、短跨度占比 66.9%），**决策 A1 在生产里等于没落地**。
+
+- 新增 `cpt/adapters/backend_factory.py`：`resolve_backend(name, *, min_bi_len=)`
+  - `native` → 自研后端；`czsc` → czsc 后端，缺依赖**响亮报错**（不静默回落）；
+  - `auto` → 装了 czsc 就用 czsc，否则回落 native（**默认档**）
+  - 工厂内做**显式探针** `_import_czsc()`：`CzscChanlunBackend.__init__` 不做导入
+    （导入在 `compute_structures` 里），"构造成功"≠"czsc 可用"；探针让缺依赖在
+    服务启动时就暴露，而不是等第一张快照静默降级。
+- 两个 web 入口新增 `--backend auto|czsc|native`
+- `cpt/application/multi_level.py` 后端类型从 `NativeChanlunBackend` 放宽为协议
+  `ChanlunBackend`（否则 czsc 后端传不进去）
+- `tests/test_backend_factory.py`（12 个测试）**刻意不断言 auto 选中哪个后端**：
+  CI 只装 `requirements-dev.txt`（**不含 czsc**），断言具体类型会让 CI 与本地
+  分叉；改用 monkeypatch 伪造"装了/没装"两种环境。
+
+**真实 A 股数据上的对照（同一份 64 根日线，本机真库）**
+
+| 后端 | 代码 | 分型 | 笔 | 中枢 | 笔端点中位跨度 | 短跨度(<4根)占比 |
+|---|---|---|---|---|---|---|
+| native | 300059 | 26 | 25 | 3 | **2** 根 | **76.0%** |
+| czsc | 300059 | 21 | 5 | 1 | **12** 根 | **20.0%** |
+| native | 002636 | 23 | 22 | 5 | **2** 根 | **72.7%** |
+| czsc | 002636 | 6 | 6 | 1 | **8** 根 | **16.7%** |
+
+与 R14 在 oracle fixture 上的结论同向：**换 czsc 笔后中位跨度从 2 根升到 8–12 根，
+短跨度占比从 ~75% 降到 ~17–20%**，中枢也不再退化。
+
+**验收**：`278 passed`（R16-2 的 264 + 14）；ruff check / ruff format --check
+(124 files) / mypy(61 files) / vulture / import-linter(4 kept, 0 broken) 全绿。
