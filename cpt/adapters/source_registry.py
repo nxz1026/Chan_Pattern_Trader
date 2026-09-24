@@ -24,6 +24,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
+from datetime import timedelta
 from typing import Any, Final
 
 __all__ = [
@@ -117,7 +118,11 @@ SOURCES: Final[tuple[SourceCapability, ...]] = (
         role="local",
         provides=("kline",),
         requires=("psycopg",),
-        note="后复权口径的事实标准；98.2% 的代码缺因子（R17 待 backfill）",
+        note=(
+            "价格序列与腾讯 qfq **逐日完全相等**（600519 实测 ratio=1.000000，5/5 天），"
+            "即本地库是前复权口径而非后复权；`ref_adjust_factor` 只有 94/5225 只，"
+            "对该 94 只以外的代码 a_share_local 取不到因子"
+        ),
     ),
 )
 
@@ -225,7 +230,48 @@ def _probe_a_share_local() -> Mapping[str, Any]:
         total = int(cur.fetchone()[0])
         cur.execute("SELECT count(*) FROM asel.ref_adjust_factor")
         factors = int(cur.fetchone()[0])
-    return {"status": "ok", "daily_bar_rows": total, "adjust_factor_rows": factors}
+        # 覆盖率 + **缺整天检测**：只报总行数会让"少了一整个交易日"完全隐形。
+        # 实测 public.daily_bar 缺 2026-09-22（周二）全天 —— 腾讯与 Wind 两个
+        # 独立通道都确认当天有成交（成交量 24573 手 / 2457294 股，吻合到 0.006%）。
+        cur.execute(
+            """
+            SELECT date, count(*) FROM public.daily_bar
+            WHERE date >= current_date - interval '45 days'
+            GROUP BY date ORDER BY date
+            """
+        )
+        per_day = [(row[0], int(row[1])) for row in cur.fetchall()]
+    gaps: list[str] = []
+    if per_day:
+        counts = sorted(count for _, count in per_day)
+        median = counts[len(counts) // 2]
+        have = {day for day, _ in per_day}
+        first, last = per_day[0][0], per_day[-1][0]
+        cursor_day = first
+        while cursor_day <= last:
+            # 工作日缺整天 = 可疑；节假日不在此列（本地没有交易日历，所以只报
+            # "工作日无数据"，由人判断是否为节假日）。
+            if cursor_day.weekday() < 5 and cursor_day not in have:
+                gaps.append(cursor_day.isoformat())
+            cursor_day += timedelta(days=1)
+        low_coverage = [
+            {"date": day.isoformat(), "bars": count}
+            for day, count in per_day
+            if count < median * 0.9
+        ]
+    else:
+        median = 0
+        low_coverage = []
+    return {
+        "status": "degraded" if gaps else "ok",
+        "daily_bar_rows": total,
+        "adjust_factor_rows": factors,
+        "latest_date": per_day[-1][0].isoformat() if per_day else None,
+        "median_bars_per_day": median,
+        "missing_weekdays": gaps,
+        "low_coverage_days": low_coverage,
+        "detail": f"缺 {len(gaps)} 个工作日整天：{', '.join(gaps)}" if gaps else "",
+    }
 
 
 _PROBES: Final[Mapping[str, Callable[[bool], Mapping[str, Any]]]] = {

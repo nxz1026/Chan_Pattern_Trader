@@ -38,6 +38,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -69,6 +70,10 @@ DAILY_INTERVAL_MS: Final[int] = 86_400_000
 #: 后复权（与 CPT 本地库口径一致）。0=前复权 1=后复权 2=不复权。
 AFTYPE_HFQ: Final[str] = "1"
 AFTYPE_RAW: Final[str] = "2"
+
+#: Wind 日 K 的 ``TIME`` 前导日期：``2010-01-04T00:00:00.000+02:00`` / ``20260924`` /
+#: ``2026/09/24``。只取日期，不带时间与时区偏移（见 :func:`_wind_time_to_ms`）。
+_DATE_PREFIX_RE: Final[re.Pattern[str]] = re.compile(r"^(\d{4})[-/]?(\d{2})[-/]?(\d{2})")
 
 #: 额度类错误标记（CLI 的 code + message 里可能出现的中文提示）。
 _QUOTA_CODES: Final[frozenset[str]] = frozenset({"RATE_LIMIT_ERROR"})
@@ -232,9 +237,13 @@ class WindSourceClient:
 
         stdout = completed.stdout or ""
         payload = self._parse_stdout(stdout, server_type=server_type, tool_name=tool_name)
-        ok = payload.get("ok", True) is not False
+        # 两种失败信封都实测存在：工具层的 ``{"ok": false, "code": ...}`` 与
+        # MCP 外壳的 ``isError: true``（此时错误文本在 content[0].text 里）。
+        ok = payload.get("ok", True) is not False and payload.get("isError") is not True
         code = str(payload.get("code") or ("OK" if ok else "UNKNOWN"))
         message = str(payload.get("message") or "")
+        if not ok and not message:
+            message = self._extract_error_text(payload)
         if record:
             self._record(server_type, tool_name, params, ok=ok, code=code, started=started)
 
@@ -272,6 +281,16 @@ class WindSourceClient:
         if not isinstance(payload, Mapping):
             raise WindSourceError("Wind 输出 JSON 顶层不是对象")
         return payload
+
+    @staticmethod
+    def _extract_error_text(payload: Mapping[str, Any]) -> str:
+        """从 ``isError: true`` 外壳的 ``content[0].text`` 里取错误文本。"""
+        content = payload.get("content")
+        if isinstance(content, Sequence) and content and isinstance(content[0], Mapping):
+            text = content[0].get("text")
+            if isinstance(text, str):
+                return text.strip()[:500]
+        return ""
 
     @staticmethod
     def _extract_data(payload: Mapping[str, Any]) -> Mapping[str, Any]:
@@ -439,9 +458,22 @@ def parse_wind_kline(data: Mapping[str, Any], *, windcode: str) -> tuple[Canonic
     先找列表，再按别名取列，找不到就报错而不是静默补 0。
     """
     rows: Any = data
+    # 真实形状（实测回执）：``{"data": {"columns": [{"name": "TIME", ...}, ...],
+    # "rows": [[...], ...], "unit": {...}}}`` —— 列语义只在 ``columns[].name`` 里，
+    # ``rows`` 是**按位置**的数组，所以必须按列名建索引。
+    #
+    # 表格检测必须在**解包循环内部**做：真形状的内层同时有 ``rows`` 键，若先按
+    # 通用键名解包，``columns`` 会被丢掉，于是位置数组被当成
+    # ``[TIME, OPEN, MATCH, HIGH, LOW, ...]`` 硬读 —— 实测列序第 6 列是
+    # ``TURNOVER``（成交额）而不是 ``VOLUME``（成交量），会**静默**把成交额写成成交量。
     for key in ("data", "rows", "items", "klines", "result"):
+        if isinstance(rows, Mapping) and "columns" in rows and "rows" in rows:
+            rows = _table_rows_to_dicts(rows, windcode=windcode)
+            break
         if isinstance(rows, Mapping) and key in rows:
             rows = rows[key]
+    if isinstance(rows, Mapping) and "columns" in rows and "rows" in rows:
+        rows = _table_rows_to_dicts(rows, windcode=windcode)
     if isinstance(rows, Mapping):
         # 形如 {"TIME": [...], "OPEN": [...]} 的列式结构
         times = _first(rows, ("TIME", "time", "date"))
@@ -515,16 +547,46 @@ def parse_wind_kline(data: Mapping[str, Any], *, windcode: str) -> tuple[Canonic
     return tuple(bars)
 
 
+def _table_rows_to_dicts(table: Mapping[str, Any], *, windcode: str) -> list[dict[str, Any]]:
+    """把 Wind 的 ``{columns:[{name}], rows:[[...]]}`` 表格转成按列名的字典行。
+
+    列名缺失或重复就直接报错 —— 按位置硬编码列顺序是这类接口最经典的静默错
+    （腾讯 ``fqkline`` 就是字段序不是 OHLC，见 ``a_share_public.py``）。
+    """
+    raw_columns = table.get("columns")
+    raw_rows = table.get("rows")
+    if not isinstance(raw_columns, Sequence) or not isinstance(raw_rows, Sequence):
+        raise WindSourceError(f"Wind 表格结构不符（{windcode}）：columns/rows 不是数组")
+    names: list[str] = []
+    for column in raw_columns:
+        if isinstance(column, Mapping):
+            name = column.get("name")
+        else:
+            name = column
+        if not isinstance(name, str) or not name:
+            raise WindSourceError(f"Wind 表格列缺少 name（{windcode}）：{column!r}")
+        names.append(name)
+    if len(set(names)) != len(names):
+        raise WindSourceError(f"Wind 表格列名重复（{windcode}）：{names}")
+    return [
+        dict(zip(names, row, strict=False))
+        for row in raw_rows
+        if isinstance(row, Sequence) and not isinstance(row, str)
+    ]
+
+
 def _wind_time_to_ms(value: str) -> int:
-    """Wind 的日 K ``TIME`` 可能是 ``2026-09-24`` 或 ``20260924``。"""
+    """Wind 的日 K ``TIME`` 实测形如 ``2010-01-04T00:00:00.000+02:00``。
+
+    **只取日期部分，绝不按瞬时时刻换算**：``2010-01-04T00:00:00+02:00`` 换算成
+    UTC 是 ``2010-01-03T22:00Z``，日期会退一天。日线的 ``open_time`` 口径是
+    "交易日 00:00 UTC"（与 ``a_share_local`` 一致），所以先截出前导日期。
+
+    兼容 ``2026-09-24`` / ``20260924`` / ``2026/09/24`` / 带时间与偏移的 ISO。
+    """
     text = value.strip()
-    parsed: date | None = None
-    for fmt in ("%Y-%m-%d", "%Y%m%d", "%Y/%m/%d"):
-        try:
-            parsed = datetime.strptime(text, fmt).date()
-            break
-        except ValueError:
-            continue
-    if parsed is None:
+    match = _DATE_PREFIX_RE.match(text)
+    if match is None:
         raise ValueError(f"无法解析 Wind 日期：{value!r}")
-    return int(datetime(parsed.year, parsed.month, parsed.day, tzinfo=UTC).timestamp() * 1000)
+    year, month, day = (int(part) for part in match.groups())
+    return int(datetime(year, month, day, tzinfo=UTC).timestamp() * 1000)

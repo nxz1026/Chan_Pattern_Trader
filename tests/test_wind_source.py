@@ -273,3 +273,132 @@ def test_no_real_network_in_this_module() -> None:
     forbidden = ("url" + "open", "requests." + "get", "socket." + "create_connection")
     for token in forbidden:
         assert token not in source, f"测试模块里出现了真实网络调用：{token}"
+
+
+# ---------------------------------------------------------------------------
+# 真实回执形状（2026-09-24 用真实额度实探 + 历史 fixture 核对）
+#
+# 这一组是**最重要**的：上面那些用例用的是 list-of-dicts 形状，而 Wind 实际返回的
+# 是 ``{"columns": [{"name": ...}], "rows": [[位置数组]]}``。只按自造形状写测试会
+# 给出虚假的安全感 —— 实测第一次拿真回执跑就是直接解析失败。
+# ---------------------------------------------------------------------------
+
+#: 真实回执（600519.SH 2010-01-04..08，逐字段照抄，列名与列序均为实测）。
+REAL_WIND_KLINE = {
+    "data": {
+        "columns": [
+            {"name": "TIME", "type": "string"},
+            {"name": "OPEN", "type": "string"},
+            {"name": "MATCH", "type": "string"},
+            {"name": "HIGH", "type": "string"},
+            {"name": "LOW", "type": "string"},
+            {"name": "TURNOVER", "type": "string"},
+            {"name": "VOLUME", "type": "string"},
+            {"name": "CHANGEHANDRATE", "type": "string"},
+            {"name": "AVPRICE", "type": "string"},
+        ],
+        "rows": [
+            [
+                "2010-01-04T00:00:00.000+02:00",
+                "91.55",
+                "90.45",
+                "91.55",
+                "90.12",
+                "753405635",
+                "4430488",
+                "0.47",
+                "90.51",
+            ],
+            [
+                "2010-01-08T00:00:00.000+02:00",
+                "87.29",
+                "86.22",
+                "87.29",
+                "85.21",
+                "593162176",
+                "3670208",
+                "0.39",
+                "86.02",
+            ],
+        ],
+        "unit": {},
+    },
+    "error": None,
+}
+
+
+def test_parse_wind_kline_real_table_shape() -> None:
+    bars = parse_wind_kline(REAL_WIND_KLINE, windcode="600519.SH")
+    assert len(bars) == 2
+    first = bars[0]
+    assert first.open == pytest.approx(91.55)
+    assert first.close == pytest.approx(90.45)
+    assert first.high == pytest.approx(91.55)
+    assert first.low == pytest.approx(90.12)
+    assert first.is_closed is True
+
+
+def test_parse_wind_kline_maps_columns_by_name_not_position() -> None:
+    """第 6 列是 ``TURNOVER``（成交额）、第 7 列才是 ``VOLUME``（成交量）。
+
+    按位置硬读会静默把成交额写成成交量（753405635 vs 4430488，差 170 倍），
+    没有任何异常会冒出来 —— 这是必须用真实列序钉死的断言。
+    """
+    bars = parse_wind_kline(REAL_WIND_KLINE, windcode="600519.SH")
+    assert bars[0].volume == pytest.approx(4430488.0)
+    assert bars[0].volume != pytest.approx(753405635.0)
+
+
+def test_wind_time_keeps_calendar_date_and_ignores_timezone_offset() -> None:
+    """``2010-01-04T00:00:00+02:00`` 的**交易日是 01-04**，不是换算后的 01-03。
+
+    按瞬时时刻换算成 UTC 会得到 ``2010-01-03T22:00Z``，日线日期整整退一天。
+    """
+    bars = parse_wind_kline(REAL_WIND_KLINE, windcode="600519.SH")
+    assert bars[0].open_time == int(datetime(2010, 1, 4, tzinfo=UTC).timestamp() * 1000)
+    assert bars[0].close_time == bars[0].open_time + DAILY_INTERVAL_MS - 1
+
+
+def test_parse_wind_kline_rejects_missing_or_duplicate_column_names() -> None:
+    bad_missing = {"data": {"columns": [{"type": "string"}], "rows": [["x"]]}}
+    with pytest.raises(WindSourceError, match="缺少 name"):
+        parse_wind_kline(bad_missing, windcode="600519.SH")
+    bad_dup = {
+        "data": {
+            "columns": [{"name": "TIME"}, {"name": "TIME"}],
+            "rows": [["2026-09-24", "2026-09-24"]],
+        }
+    }
+    with pytest.raises(WindSourceError, match="列名重复"):
+        parse_wind_kline(bad_dup, windcode="600519.SH")
+
+
+def test_call_raises_on_iserror_envelope(tmp_path: Path) -> None:
+    """MCP 外壳的 ``isError: true``（错误文本在 content[0].text 里）也必须报错。"""
+    envelope = json.dumps(
+        {"content": [{"type": "text", "text": "windcode 无效"}], "isError": True},
+        ensure_ascii=False,
+    )
+    client, _, ledger = _client(tmp_path, [envelope])
+    with pytest.raises(WindSourceError, match="windcode 无效"):
+        client.call("stock_data", "get_stock_kline", {"windcode": "bad"})
+    entry = json.loads(ledger.read_text(encoding="utf-8").strip())
+    assert entry["ok"] is False
+
+
+def test_fetch_daily_bars_end_to_end_with_real_envelope(tmp_path: Path) -> None:
+    """完整链路：CLI stdout → ``content[0].text`` → 表格 → CanonicalBar。"""
+    envelope = json.dumps(
+        {
+            "content": [{"type": "text", "text": json.dumps(REAL_WIND_KLINE, ensure_ascii=False)}],
+            "isError": False,
+            "cli_meta": {"server_type": "stock_data", "tool_name": "get_stock_kline"},
+        },
+        ensure_ascii=False,
+    )
+    client, runner, _ = _client(tmp_path, [envelope])
+    bars = client.fetch_daily_bars("600519.SH", begin_date="2010-01-01", end_date="2010-01-08")
+    assert len(bars) == 2
+    assert bars[0].volume == pytest.approx(4430488.0)
+    assert bars[0].open_time == int(datetime(2010, 1, 4, tzinfo=UTC).timestamp() * 1000)
+    assert json.loads(runner.argv[0][5])["aftype"] == "1"

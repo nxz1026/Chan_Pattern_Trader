@@ -213,3 +213,119 @@ def test_sources_route_defaults_to_no_quota(monkeypatch: pytest.MonkeyPatch) -> 
     assert default["include_quota"] is False
     assert with_quota["include_quota"] is True
     assert seen == [False, True]
+
+
+# ------------------------------------------------- 本地库缺整天检测（真实缺陷）
+
+
+class _FakeCursor:
+    """按 SQL 关键词返回预设行的假游标。"""
+
+    def __init__(self, counts: dict[str, int], per_day: list[tuple[Any, int]]) -> None:
+        self._counts = counts
+        self._per_day = per_day
+        self._result: list[tuple[Any, int]] = []
+
+    def execute(self, sql: str, *args: Any) -> None:
+        flat = " ".join(sql.split())
+        if "group by date" in flat.lower():
+            self._result = list(self._per_day)
+        elif "from asel.ref_adjust_factor" in flat.lower():
+            self._result = [(self._counts["factors"],)]
+        else:
+            self._result = [(self._counts["bars"],)]
+
+    def fetchone(self) -> tuple[Any, ...]:
+        return self._result[0] if self._result else (0,)
+
+    def fetchall(self) -> list[tuple[Any, int]]:
+        return list(self._result)
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeConn:
+    def __init__(self, cursor: _FakeCursor) -> None:
+        self._cursor = cursor
+
+    def cursor(self) -> _FakeCursor:
+        return self._cursor
+
+
+def _install_fake_local(monkeypatch: pytest.MonkeyPatch, per_day: list[tuple[Any, int]]) -> None:
+    from datetime import date
+
+    cursor = _FakeCursor({"bars": sum(n for _, n in per_day), "factors": 49790}, per_day)
+
+    class _FakeClient:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            pass
+
+        def _get_conn(self) -> _FakeConn:
+            return _FakeConn(cursor)
+
+    monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", _FakeClient)
+    # 覆盖 autouse 的通用假探针，把**真实**的本地库探针接回来（DB 已被假游标替换）。
+    monkeypatch.setitem(
+        source_registry._PROBES,  # noqa: SLF001
+        "a_share_local",
+        lambda _q: source_registry._probe_a_share_local(),  # noqa: SLF001
+    )
+    assert date(2026, 9, 22).weekday() == 1  # 周二，确认它不是周末
+
+
+def test_local_probe_detects_missing_whole_trading_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    """只报总行数会让"少了一整个交易日"完全隐形 —— 必须报出来并降级。"""
+    from datetime import date
+
+    per_day = [
+        (date(2026, 9, 18), 5210),
+        (date(2026, 9, 21), 5210),
+        # 2026-09-22（周二）整天缺失
+        (date(2026, 9, 23), 5221),
+        (date(2026, 9, 24), 5221),
+    ]
+    _install_fake_local(monkeypatch, per_day)
+    result = probe_source("a_share_local", use_cache=False)
+    assert result.status == "degraded"
+    assert result.evidence["missing_weekdays"] == ["2026-09-22"]
+    assert result.evidence["latest_date"] == "2026-09-24"
+    # 上中位数（sorted[len//2]）：[5210, 5210, 5221, 5221] → 5221
+    assert result.evidence["median_bars_per_day"] == 5221
+    assert "2026-09-22" in result.detail
+
+
+def test_local_probe_ignores_weekend_gap_and_is_ok(monkeypatch: pytest.MonkeyPatch) -> None:
+    """周五 → 周一是正常间隔，不许误报成缺失。"""
+    from datetime import date
+
+    per_day = [
+        (date(2026, 9, 17), 5210),
+        (date(2026, 9, 18), 5210),
+        (date(2026, 9, 21), 5210),
+        (date(2026, 9, 22), 5210),
+    ]
+    _install_fake_local(monkeypatch, per_day)
+    result = probe_source("a_share_local", use_cache=False)
+    assert result.status == "ok"
+    assert result.evidence["missing_weekdays"] == []
+    assert result.detail == ""
+
+
+def test_local_probe_flags_low_coverage_day(monkeypatch: pytest.MonkeyPatch) -> None:
+    from datetime import date
+
+    per_day = [
+        (date(2026, 9, 21), 5210),
+        (date(2026, 9, 22), 5210),
+        (date(2026, 9, 23), 4000),  # 只有 77% 覆盖，但不缺整天
+        (date(2026, 9, 24), 5210),
+    ]
+    _install_fake_local(monkeypatch, per_day)
+    result = probe_source("a_share_local", use_cache=False)
+    assert result.status == "ok"
+    assert result.evidence["low_coverage_days"] == [{"date": "2026-09-23", "bars": 4000}]
