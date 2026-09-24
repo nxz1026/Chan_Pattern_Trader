@@ -103,6 +103,11 @@ def build_ashare_snapshot(
     else:
         assert client is not None  # type assertion only — mypy 收窄
         active_client = client
+    # 证券名称（如 600519 → 贵州茅台）。**纯展示信息**，取不到就不显示，
+    # 绝不允许它把快照搞挂 —— 所以单独 try 住，且失败只记 debug。
+    security = _resolve_security_name(active_client, code)
+    security_name = security.name if security is not None else ""
+    security_board = security.board if security is not None else None
     # 注意：``ensure_factors`` 为 ``None`` 时**不做**按需补因子（安全默认）。
     # 生产入口显式传入，见 factor_ensurer_from_env 的注释。
     ensurer = ensure_factors
@@ -125,7 +130,7 @@ def build_ashare_snapshot(
             reason = "no_factor" if _skipped_no_factor(result) else "no_data"
             if outcome is not None and outcome.reason:
                 reason = _reason_for_failure(outcome)
-            snapshot = empty_ashare_snapshot(code, reason)
+            snapshot = empty_ashare_snapshot(code, reason, name=security_name, board=security_board)
             _attach_factor_fetch(snapshot, outcome)
             return snapshot
     except AShareNoFactorError as exc:
@@ -139,20 +144,26 @@ def build_ashare_snapshot(
                 canonical = list(result.bars)
             except Exception as retry_exc:  # noqa: BLE001
                 _LOG.warning("按需补因子后重读仍失败 %s: %s", code, retry_exc)
-                snapshot = empty_ashare_snapshot(code, "no_factor")
+                snapshot = empty_ashare_snapshot(
+                    code, "no_factor", name=security_name, board=security_board
+                )
                 _attach_factor_fetch(snapshot, outcome)
                 return snapshot
         else:
-            snapshot = empty_ashare_snapshot(code, _reason_for_failure(outcome))
+            snapshot = empty_ashare_snapshot(
+                code, _reason_for_failure(outcome), name=security_name, board=security_board
+            )
             _attach_factor_fetch(snapshot, outcome)
             return snapshot
     except AShareNoDataError as exc:
         _LOG.info("A 股无行情 %s: %s", code, exc)
-        return empty_ashare_snapshot(code, "no_data")
+        return empty_ashare_snapshot(code, "no_data", name=security_name, board=security_board)
     except Exception as exc:  # noqa: BLE001
         # DB 不可达 → 返回 degraded snapshot，**不静默成 OK**
         _LOG.warning("A 股 DB 拉取失败 %s: %s", code, exc)
-        return empty_ashare_snapshot(code, f"db_error:{type(exc).__name__}")
+        return empty_ashare_snapshot(
+            code, f"db_error:{type(exc).__name__}", name=security_name, board=security_board
+        )
     finally:
         if owns_client:
             active_client.close()
@@ -164,7 +175,9 @@ def build_ashare_snapshot(
         validated = validate_ashare_bars(canonical, interval_ms=INTERVAL_MS)
     except Exception as exc:  # noqa: BLE001
         _LOG.warning("A 股序列校验失败 %s: %s", code, exc)
-        return empty_ashare_snapshot(code, f"invalid_bars:{type(exc).__name__}")
+        return empty_ashare_snapshot(
+            code, f"invalid_bars:{type(exc).__name__}", name=security_name, board=security_board
+        )
 
     # 用 ``compute_domain_structures`` 拿 **dataclass** 结构对象（分型/笔/中枢）。
     # 不能改用 ``run_replay``：它返回 ``export_dataset`` 的 schema v1 payload，
@@ -201,8 +214,26 @@ def build_ashare_snapshot(
     snapshot["market"]["symbol"] = code
     snapshot["market"]["kind"] = "a_share"
     snapshot["market"]["interval"] = "1d"
+    snapshot["market"]["name"] = security_name
+    snapshot["market"]["board"] = security_board
     _attach_factor_fetch(snapshot, outcome)
     return snapshot
+
+
+def _resolve_security_name(client: Any, code: str) -> Any:
+    """尽力取证券名称；**任何失败都返回 None**（名字是装饰，不该影响出图）。
+
+    用 ``getattr`` 探测而不是写进 ``AShareLocalClient`` 的协议里：测试注入的假
+    客户端没有这个方法，于是名字自然缺席 —— 这正是我们要的（测试不该连真库）。
+    """
+    getter = getattr(client, "fetch_security_name", None)
+    if not callable(getter):
+        return None
+    try:
+        return getter(code)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.debug("证券名称查询失败 %s: %s", code, exc)
+        return None
 
 
 # --------------------------------------------------------------- 按需补因子（R17-3）
@@ -353,17 +384,28 @@ def _attach_factor_fetch(snapshot: dict[str, Any], outcome: FactorEnsureResult |
         runtime["factor_fetch"] = quality.get("factor_fetch") if isinstance(quality, dict) else None
 
 
-def empty_ashare_snapshot(code: str, reason: str) -> dict[str, Any]:
+def empty_ashare_snapshot(
+    code: str,
+    reason: str,
+    *,
+    name: str = "",
+    board: str | None = None,
+) -> dict[str, Any]:
     """DB 真空 / 缺因子时的占位 snapshot（前端可识别为"无数据"）。
 
     ``reason`` 是给用户看的，必须具体：``no_factor``（缺复权因子）、``no_data``、
     ``db_error:*``、``invalid_bars:*``。
+
+    ``name``/``board`` 由调用方**已经查好**传进来（本函数不碰 DB）：降级时反而更
+    需要知道"这是哪只票"，否则用户对着空图只有一个六位数字。
     """
     return {
         "schema_version": "dashboard.v2",
         "market": {
             "symbol": code,
             "kind": "a_share",
+            "name": name,
+            "board": board,
             "interval_ms": INTERVAL_MS,
             "bar_count": 0,
         },

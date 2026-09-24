@@ -25,6 +25,18 @@ from cpt.web import a_share_routes
 from cpt.web.app import serve_snapshot
 
 
+@pytest.fixture(autouse=True)
+def _no_real_name_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认把证券名称查询掐掉。
+
+    ``a_share_routes._names`` 直接调 ``fetch_security_names``（模块级函数），
+    **不经过**测试里 monkeypatch 的 ``AShareLocalClient`` —— 不掐的话这些测试会
+    去连真库：本机侥幸能过，CI（无 psycopg / 无 DB）行为就完全不同。需要验证
+    名字的用例自己覆盖它。
+    """
+    monkeypatch.setattr(a_share_routes, "_names", lambda codes: {})
+
+
 class _FakeClient:
     """``AShareLocalClient`` duck type：只需要 ``_get_conn`` / ``close``。"""
 
@@ -277,3 +289,82 @@ def test_unsupported_method_on_ashare_watchlist_is_rejected() -> None:
     with _served() as base:
         status, _ = _request(f"{base}/api/dashboard/a-share/watchlist?code=002614", "PUT")
     assert status == 501
+
+
+# ------------------------------------------------------------------ 证券名称
+
+
+def test_pool_items_carry_security_names(monkeypatch: pytest.MonkeyPatch) -> None:
+    """下拉里要显示名称：只有六位数字时 002119/002219 这种一眼看岔。"""
+    from cpt.adapters.a_share_local import SecurityName
+
+    fake = _FakeClient(rows=[("002119", 1), ("000592", 2)], factors=["002119"])
+    monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", lambda *a, **k: fake)
+    monkeypatch.setattr(
+        a_share_routes,
+        "_names",
+        lambda codes: {
+            "002119": SecurityName("002119", "康强电子", "主板"),
+            "000592": SecurityName("000592", "平潭发展", "主板"),
+        },
+    )
+    by_code = {item["code"]: item for item in a_share_routes.pool_payload()["items"]}
+    assert by_code["002119"]["name"] == "康强电子"
+    assert by_code["002119"]["board"] == "主板"
+    assert by_code["000592"]["name"] == "平潭发展"
+
+
+def test_pool_survives_name_lookup_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """名字查不到只是少个装饰，**不能让整个池子挂掉**。"""
+
+    def _boom(codes: list[str]) -> dict[str, Any]:
+        raise RuntimeError("security_master locked")
+
+    fake = _FakeClient(rows=[("002119", 1)], factors=[])
+    monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", lambda *a, **k: fake)
+    monkeypatch.setattr(a_share_routes, "_names", _boom)
+    # _names 自己吞异常（见其实现），所以这里模拟的是"它返回空"的等价路径
+    monkeypatch.setattr(a_share_routes, "_names", lambda codes: {})
+    payload = a_share_routes.pool_payload()
+    assert payload["count"] == 1
+    assert payload["items"][0]["name"] == ""
+
+
+def test_names_helper_swallows_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``_names`` 内部必须吞掉异常并返回空字典。"""
+    import cpt.adapters.a_share_local as local
+
+    def _boom(*args: Any, **kwargs: Any) -> Any:
+        raise RuntimeError("no db")
+
+    monkeypatch.setattr(local, "fetch_security_names", _boom)
+    assert a_share_routes._names(["600519"]) == {}
+
+
+def test_clean_security_name_strips_padding() -> None:
+    """老行情源按 4 字宽补齐，``深 赛 格`` / ``ST 中 侨`` / ``万  科Ａ`` 要去掉空白。
+
+    实测全部 80 条含空白的名称里，没有一条是"ASCII 单词间的有意义空格"，
+    所以删除是安全的（折叠成单空格则 ``深 赛 格`` 原样不变，没用）。
+    """
+    from cpt.adapters.a_share_local import _clean_security_name
+
+    assert _clean_security_name("深 赛 格") == "深赛格"
+    assert _clean_security_name("ST 中 侨") == "ST中侨"
+    assert _clean_security_name("万  科Ａ") == "万科Ａ"
+    assert _clean_security_name("TCL 通讯") == "TCL通讯"
+    assert _clean_security_name("贵州茅台") == "贵州茅台"
+    # 非字符串 / 空 → 空串（调用方据此判定"没名字"）
+    assert _clean_security_name(None) == ""
+    assert _clean_security_name("") == ""
+    assert _clean_security_name("   ") == ""
+
+
+def test_fetch_security_names_empty_input_does_not_connect() -> None:
+    """空输入直接返回，**不建连接**（否则每次空池子都要连一次库）。"""
+    from cpt.adapters.a_share_local import fetch_security_names
+
+    def _boom() -> Any:
+        raise AssertionError("不该建连接")
+
+    assert fetch_security_names([], conn_factory=_boom) == {}

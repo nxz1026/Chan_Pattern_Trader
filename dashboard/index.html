@@ -61,9 +61,12 @@
           <dd data-testid="topbar-market-kind" data-field="market.kind">—</dd>
         </div>
         <div class="meta-item">
-          <dt>交易对</dt>
-          <dd><select data-testid="symbol-select" aria-label="切换交易对"><option value="BTCUSDT" selected>BTCUSDT</option><option value="ETHUSDT">ETHUSDT</option><option value="SOLUSDT">SOLUSDT</option></select></dd>
-          <span data-testid="topbar-symbol" data-field="market.symbol" hidden>BTCUSDT</span>
+          <dt>标的</dt>
+          <dd>
+            <select data-testid="symbol-select" aria-label="切换交易对"><option value="BTCUSDT" selected>BTCUSDT</option><option value="ETHUSDT">ETHUSDT</option><option value="SOLUSDT">SOLUSDT</option></select>
+            <span data-testid="topbar-symbol" data-field="market.symbol" hidden>BTCUSDT</span>
+            <span data-testid="topbar-security-name" class="security-name" hidden></span>
+          </dd>
         </div>
         <div class="meta-item">
           <dt>级别</dt>

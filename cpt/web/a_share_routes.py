@@ -13,9 +13,12 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
+
+_LOG = logging.getLogger(__name__)
 
 __all__ = [
     "DEFAULT_WIDTH_K",
@@ -93,6 +96,17 @@ def _factor_codes() -> set[str]:
         client.close()
 
 
+def _names(codes: list[str]) -> dict[str, Any]:
+    """批量查证券名称；**失败返回空字典**（名字是装饰，不该让池子/自选报错）。"""
+    from cpt.adapters.a_share_local import fetch_security_names  # noqa: PLC0415
+
+    try:
+        return fetch_security_names(codes)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.debug("证券名称批量查询失败: %s", exc)
+        return {}
+
+
 def pool_payload() -> dict[str, Any]:
     """热门池 + 每只是否有复权因子。
 
@@ -116,9 +130,13 @@ def pool_payload() -> dict[str, Any]:
         factors = set()
         factor_error = f"{type(exc).__name__}: {exc}"
 
+    names = _names([entry.code for entry in entries])
     items = [
         {
             "code": entry.code,
+            # 名字（如 002119 → 康强电子）。下拉里只给六位数字太容易看岔。
+            "name": names[entry.code].name if entry.code in names else "",
+            "board": names[entry.code].board if entry.code in names else None,
             "source": entry.source,
             "rank": entry.rank,
             "cont_days": entry.cont_days,
@@ -139,12 +157,18 @@ def pool_payload() -> dict[str, Any]:
 
 def _entries_payload() -> dict[str, Any]:
     entries = _store().list()
+    names = _names([entry.code for entry in entries])
     return {
         "schema_version": "a_share_watchlist.v1",
         "market": _MARKET,
         "count": len(entries),
         "items": [
-            {"code": entry.code, "market": entry.market, "added_at": entry.added_at}
+            {
+                "code": entry.code,
+                "name": names[entry.code].name if entry.code in names else "",
+                "market": entry.market,
+                "added_at": entry.added_at,
+            }
             for entry in entries
         ],
     }

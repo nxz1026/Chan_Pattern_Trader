@@ -348,6 +348,19 @@ button {
   letter-spacing: 0.04em;
 }
 
+/* A 股证券名（如 600519 贵州茅台）：中文不用等宽字体，且要一眼可辨。
+   它是"确认自己看的是哪只票"的关键，所以比代码更重。 */
+.topbar-meta .security-name {
+  margin-left: var(--space-2);
+  font-family: var(--font-sans);
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.topbar-meta .security-name[hidden] {
+  display: none;
+}
+
 .topbar-meta dd {
   margin: 0;
   color: var(--color-text);

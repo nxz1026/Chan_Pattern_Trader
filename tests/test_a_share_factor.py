@@ -236,14 +236,13 @@ def test_ensurer_env_can_enable_explicitly(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_bare_build_call_does_not_use_ondemand(monkeypatch: pytest.MonkeyPatch) -> None:
     """不给 ``ensure_factors`` 时，缺因子路径**不得**触发任何补取。"""
-    from cpt.adapters.a_share_local import AShareNoFactorError
 
     touched: list[str] = []
     monkeypatch.setattr(snap, "_ensure_factors_and_persist", lambda code: touched.append(code))
 
     class _NoFactorClient:
         def fetch_validated_klines(self, *args: Any, **kwargs: Any) -> Any:
-            raise AShareNoFactorError("全缺因子")
+            raise snap.AShareNoFactorError("全缺因子")
 
         def close(self) -> None: ...
 
@@ -363,3 +362,91 @@ def test_retryable_failure_still_uses_cooldown() -> None:
     assert fetcher.ensure("600519").reason == "network"
     assert fetcher.ensure("600519").reason == "cooldown"
     assert calls == ["600519"]
+
+
+# ------------------------------------------------------------------ 证券名称（R17-3c）
+
+
+def test_snapshot_carries_security_name() -> None:
+    """成功路径把名字/板块挂到 ``market``（前端顶栏与下拉都读它）。"""
+    from cpt.adapters.a_share_local import SecurityName
+
+    bars = [_Bar(i, 10.0 + i) for i in range(5)]
+
+    class _Client:
+        def fetch_validated_klines(self, *args: Any, **kwargs: Any) -> Any:
+            return type("R", (), {"bars": tuple(bars), "skipped_no_factor": ()})()
+
+        def fetch_security_name(self, code: str) -> Any:
+            return SecurityName(code, "贵州茅台", "主板")
+
+        def close(self) -> None: ...
+
+    snapshot = snap.build_ashare_snapshot("600519", client=_Client())
+    assert snapshot["market"]["name"] == "贵州茅台"
+    assert snapshot["market"]["board"] == "主板"
+
+
+def test_degraded_snapshot_still_carries_name() -> None:
+    """降级时**更**需要名字：否则用户对着空图只有一个六位数字。"""
+    from cpt.adapters.a_share_local import SecurityName
+
+    class _Client:
+        def fetch_validated_klines(self, *args: Any, **kwargs: Any) -> Any:
+            raise snap.AShareNoFactorError("缺因子")
+
+        def fetch_security_name(self, code: str) -> Any:
+            return SecurityName(code, "贵州茅台", "主板")
+
+        def close(self) -> None: ...
+
+    snapshot = snap.build_ashare_snapshot("600519", client=_Client())
+    assert snapshot["runtime"]["degraded_reason"] == "no_factor"
+    assert snapshot["market"]["name"] == "贵州茅台"
+
+
+def test_name_lookup_failure_does_not_break_snapshot() -> None:
+    """名字是装饰：查名字炸了**绝不能**影响出图（否则一个装饰能挂掉整个看板）。"""
+    bars = [_Bar(i, 10.0 + i) for i in range(5)]
+
+    class _Client:
+        def fetch_validated_klines(self, *args: Any, **kwargs: Any) -> Any:
+            return type("R", (), {"bars": tuple(bars), "skipped_no_factor": ()})()
+
+        def fetch_security_name(self, code: str) -> Any:
+            raise RuntimeError("security_master locked")
+
+        def close(self) -> None: ...
+
+    snapshot = snap.build_ashare_snapshot("600519", client=_Client())
+    assert len(snapshot["candles"]) == 5
+    assert snapshot["market"]["name"] == ""
+    assert snapshot["market"]["board"] is None
+
+
+def test_client_without_name_method_is_fine() -> None:
+    """假客户端没有 ``fetch_security_name`` → 名字缺席，但快照照常。
+
+    这正是我们要的：测试注入的假客户端**不会**偷偷连真库去查名字。
+    """
+    bars = [_Bar(i, 10.0 + i) for i in range(5)]
+
+    class _Client:
+        def fetch_validated_klines(self, *args: Any, **kwargs: Any) -> Any:
+            return type("R", (), {"bars": tuple(bars), "skipped_no_factor": ()})()
+
+        def close(self) -> None: ...
+
+    snapshot = snap.build_ashare_snapshot("600519", client=_Client())
+    assert len(snapshot["candles"]) == 5
+    assert snapshot["market"]["name"] == ""
+
+
+def test_empty_snapshot_takes_name_as_argument() -> None:
+    """``empty_ashare_snapshot`` 收**已查好的**名字 —— 它自己不碰 DB。"""
+    snapshot = snap.empty_ashare_snapshot("600519", "no_data", name="贵州茅台", board="主板")
+    assert snapshot["market"]["name"] == "贵州茅台"
+    assert snapshot["market"]["board"] == "主板"
+    # 默认（不传）就是空，不留 None 给前端
+    plain = snap.empty_ashare_snapshot("600519", "no_data")
+    assert plain["market"]["name"] == ""

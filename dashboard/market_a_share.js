@@ -11,8 +11,9 @@
  * 与加密侧的三点差异（都必须在 UI 上体现，不能装作一样）：
  *   1. **不轮询**：A 股日线收盘后不再变，轮询纯属浪费；切到 A 股会停掉定时器；
  *   2. **周期固定 1d**：interval 选择器锁死并禁用；
- *   3. **只有 94/5225 只画得出来**：缺复权因子的代码后端返回 degraded +
- *      `reason=no_factor`，前端必须明说，不能画空图让人猜。
+ *   3. **本地因子不全**：缺复权因子的代码后端返回 degraded + `reason=no_factor`，
+ *      前端必须明说，不能画空图让人猜。R17-3b 起缺因子会自动按需拉取，所以
+ *      这里不再写死"94/5225"这种会过期的数字。
  *
  * URL 约定（与 `?canvas=` 同套路，可分享、可审计）：
  *   `?market=a_share&code=002614`
@@ -26,7 +27,7 @@
 
   /** 后端降级原因 → 面向用户的中文说明（A 股专属，加密侧的在 dashboard.js）。 */
   const A_SHARE_REASONS = {
-    no_factor: "该代码缺复权因子，画不出后复权序列（全库 5225 只里只有 94 只有因子）",
+    no_factor: "该代码缺复权因子，画不出后复权序列（本地因子表未覆盖该标的，且按需拉取没成功）",
     no_data: "本地库 public.daily_bar 里没有该代码的行情（日线入库是另一条链路，不在按需拉取范围）",
     invalid_code: "代码格式不正确",
     // 下面三条来自「按需补因子」。区分它们是有意义的：重试对 unsupported 没用，
@@ -98,6 +99,25 @@
       });
       const picker = q("[data-testid=a-share-picker]");
       if (picker) picker.hidden = state.market !== MARKET_A_SHARE;
+
+      // 顶栏「标的」栏在两市场显示不同东西：
+      //   · 加密：BTCUSDT/ETHUSDT 下拉（可切）；
+      //   · A股：纯文本代码（代码由 A 股 picker 选，不再放一个加密下拉）。
+      //
+      // 这里原来有个真实的坑：A 股模式下加密下拉**没有隐藏**，于是顶栏一直写着
+      // "BTCUSDT" 而画布画的是 A 股 —— 用户没法确认自己在看什么，正是"看岔"的来源。
+      const symbolSelect = q("[data-testid=symbol-select]");
+      if (symbolSelect) symbolSelect.hidden = state.market === MARKET_A_SHARE;
+      const symbolText = q("[data-testid=topbar-symbol]");
+      if (symbolText) {
+        symbolText.hidden = state.market !== MARKET_A_SHARE;
+        if (state.market === MARKET_A_SHARE && state.code) symbolText.textContent = state.code;
+      }
+      if (state.market !== MARKET_A_SHARE) {
+        const nameNode = q("[data-testid=topbar-security-name]");
+        if (nameNode) nameNode.hidden = true;
+      }
+
       const interval = q("[data-testid=interval-select]");
       if (interval) {
         interval.disabled = state.market === MARKET_A_SHARE;
@@ -125,13 +145,16 @@
       //
       // R17-3 起**不再禁用**它们：本地没因子不等于画不出来 —— 点一下会触发按需
       // 拉取（腾讯有该标的后复权就能救回来）。禁用会把这条路堵死。
+      // 下拉里必须带**名称**：只有六位数字时 002119/002219/002110 这种一眼看岔，
+      // 而这里正是"选错票"最容易发生的地方。
       items.forEach((item) => {
         const option = document.createElement("option");
         option.value = item.code;
         const rank = item.rank === null || item.rank === undefined ? "—" : item.rank;
+        const name = typeof item.name === "string" && item.name ? ` ${item.name}` : "";
         option.textContent = item.drawable
-          ? `${item.code}（#${rank}）`
-          : `${item.code}（#${rank}·本地无因子，可尝试拉取）`;
+          ? `${item.code}${name}（#${rank}）`
+          : `${item.code}${name}（#${rank}·本地无因子，可尝试拉取）`;
         if (item.code === state.code) option.selected = true;
         select.appendChild(option);
       });

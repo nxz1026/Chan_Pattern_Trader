@@ -164,3 +164,72 @@ def test_css_defines_market_widgets() -> None:
         ".a-share-picker",
     ):
         assert selector in source, f"dashboard.css 缺少 {selector}"
+
+
+# --------------------------------------------------- 证券名称（R17-3c）
+
+
+def test_topbar_shows_security_name(index_source: str) -> None:
+    """顶栏「标的」栏要有名称节点。
+
+    A 股只有六位数字，600519/600815 这种一眼看岔；"看的是不是我想的那只票"是
+    看盘第一件要确认的事，所以名称必须出现在**常驻可见**的位置。
+    """
+    assert 'data-testid="topbar-security-name"' in index_source
+    # 名称节点必须在 <dd> 里（与代码同一格），否则会掉到下一行
+    assert index_source.index('data-testid="topbar-symbol"') < index_source.index(
+        'data-testid="topbar-security-name"'
+    )
+    # 标签不能再叫"交易对"——A 股不是交易对
+    assert "<dt>标的</dt>" in index_source
+    assert "<dt>交易对</dt>" not in index_source
+
+
+def test_security_name_span_is_hidden_by_default(index_source: str) -> None:
+    """加密模式没有名字，节点必须默认隐藏（否则顶栏留一个空位）。"""
+    block = index_source[index_source.index('data-testid="topbar-security-name"') - 200 :]
+    assert "hidden" in block[:260]
+
+
+def test_name_is_not_a_data_field_binding(index_source: str, a_share_source: str) -> None:
+    """名称**不能**用 ``data-field`` 绑定。
+
+    那套把 undefined 格式化成 "—"，加密模式下顶栏会留一个孤零零的破折号。
+    它必须由 ``renderChrome`` 显式判空后隐藏。
+    """
+    assert 'data-field="market.name"' not in index_source
+    source = DASHBOARD_JS.read_text(encoding="utf-8")
+    assert 'setText("[data-testid=topbar-security-name]", securityName)' in source
+    assert "nameNode.hidden = securityName" in source
+
+
+def test_ashare_mode_hides_crypto_symbol_dropdown(a_share_source: str) -> None:
+    """**回归**：A 股模式下必须隐藏加密的交易对下拉。
+
+    踩过：A 股模式顶栏一直显示着 "BTCUSDT" 下拉框，而画布画的是 A 股 ——
+    用户没法确认自己在看什么，这正是"看岔"的来源。
+    """
+    assert 'q("[data-testid=symbol-select]")' in a_share_source
+    assert "symbolSelect.hidden = state.market === MARKET_A_SHARE" in a_share_source
+    # A 股模式下用纯文本显示代码（代码由 A 股 picker 选，不再放加密下拉）
+    assert "symbolText.hidden = state.market !== MARKET_A_SHARE" in a_share_source
+
+
+def test_picker_options_include_security_name(a_share_source: str) -> None:
+    """下拉选项要带名称 —— 这里正是"选错票"最容易发生的地方。"""
+    assert "item.name" in a_share_source
+    assert "`${item.code}${name}（#${rank}）`" in a_share_source
+
+
+def test_document_title_includes_symbol_and_name() -> None:
+    """多标签页时"看岔"发生在标签栏：标题要带标的，且名称在前（先被看到）。"""
+    source = DASHBOARD_JS.read_text(encoding="utf-8")
+    assert "document.title" in source
+    assert "`${securityName} ${titleSymbol} · CPT`" in source
+
+
+def test_security_name_has_css(index_source: str) -> None:
+    source = CSS.read_text(encoding="utf-8")
+    assert ".topbar-meta .security-name" in source
+    # 中文名不该用等宽字体
+    assert "font-family: var(--font-sans)" in source

@@ -425,6 +425,26 @@
       node.textContent = formatFieldValue(node.dataset.field, resolvePath(snapshot, node.dataset.field));
     });
 
+    // 证券名称（A 股有，加密没有）。**不放进 data-field 绑定**：那套把 undefined
+    // 格式化成 "—"，加密模式下会在顶栏留一个孤零零的破折号。这里空则直接隐藏。
+    //
+    // 之所以要在顶栏显示名称：A 股只有六位数字，600519/600815 这种一眼看岔，
+    // 而"看的是不是我想的那只票"是看盘第一件要确认的事。
+    const securityName = typeof market.name === "string" ? market.name.trim() : "";
+    const nameNode = setText("[data-testid=topbar-security-name]", securityName);
+    if (nameNode) {
+      nameNode.hidden = securityName === "";
+      const board = typeof market.board === "string" ? market.board.trim() : "";
+      nameNode.setAttribute("title", board ? `${securityName} · ${board}` : securityName);
+    }
+
+    // 页面标题也带上标的：同时开几个标签页时，"看岔"就发生在标签栏这一层。
+    // 名称放最前面——标签被截断时先看到的是它。
+    const titleSymbol = typeof market.symbol === "string" ? market.symbol.trim() : "";
+    if (titleSymbol) {
+      document.title = securityName ? `${securityName} ${titleSymbol} · CPT` : `${titleSymbol} · CPT`;
+    }
+
     const firstOpen = num(market.first_open_time);
     const lastOpen = num(market.last_open_time);
     // 更新时间读 snapshot 的生成时刻（runtime.generated_at），不是 K 线窗口起点；

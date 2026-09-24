@@ -22,7 +22,8 @@ OHLC，转为 :class:`~cpt.domain.models.CanonicalBar`。
 from __future__ import annotations
 
 import pathlib
-from collections.abc import Callable
+import re
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
@@ -36,6 +37,8 @@ __all__ = [
     "AShareLocalError",
     "AShareNoDataError",
     "AShareNoFactorError",
+    "SecurityName",
+    "fetch_security_names",
 ]
 
 #: ``public.daily_bar`` 实际列名（与 DB schema 对齐）
@@ -47,6 +50,84 @@ _AMT_COL: Final[str] = "amount"
 
 #: ``~/.dbconfig`` 位置（与 ``scripts/factor_backfill.py`` / ``a_share_pool.py`` 同源）
 _DB_CONFIG_FILE: Final[pathlib.Path] = pathlib.Path.home() / ".dbconfig"
+
+#: ``asel.security_master`` 里的证券名称表（5,930 行，覆盖全部 5,225 个有日线的代码）
+_SECURITY_MASTER: Final[str] = "asel.security_master"
+
+#: 名称里的**填充空白**：老行情源把 3 字名按 4 字宽补齐，于是 ``深 赛 格``、
+#: ``ST 中 侨``、``万  科Ａ`` 这样存进来，直接显示很难看。
+#:
+#: 归一化策略是**删掉全部空白**（不是折叠成单个空格——那样 ``深 赛 格`` 原样不变）。
+#: 已对全部 80 条含空白的名称核对过：没有任何一条是"ASCII 单词之间的有意义空格"
+#: （``[A-Za-z] +[A-Za-z]`` 匹配数为 0），所以删除是安全的。删除后
+#: ``ST 中 侨`` → ``ST中侨``、``TCL 通讯`` → ``TCL通讯``，都是正确写法。
+_WHITESPACE_RE: Final[re.Pattern[str]] = re.compile(r"\s+")
+
+
+@dataclass(frozen=True)
+class SecurityName:
+    """证券名称（+ 板块，用于在 UI 上区分主板/创业板/科创板/北交所）。"""
+
+    code: str
+    name: str
+    board: str | None = None
+
+
+def _clean_security_name(raw: Any) -> str:
+    """去掉填充空白；非字符串/空 → 空串（调用方据此判定"没名字"）。"""
+    if not isinstance(raw, str):
+        return ""
+    return _WHITESPACE_RE.sub("", raw).strip()
+
+
+def fetch_security_names(
+    codes: Sequence[str],
+    *,
+    conn: Any | None = None,
+    conn_factory: Callable[[], Any] | None = None,
+) -> dict[str, SecurityName]:
+    """批量查证券名称：``{6位裸码: SecurityName}``。
+
+    查不到的代码**不出现在返回字典里**（不是返回空名），调用方自行决定兜底文案。
+    传入空序列直接返回 ``{}``，**不连 DB**。
+
+    :param conn: 复用已有连接（调用方负责生命周期）。
+    :param conn_factory: 没有 ``conn`` 时用它建一个，用完即关。
+    """
+    bare = [str(code).split(".", 1)[0].strip() for code in codes]
+    wanted = sorted({code for code in bare if code})
+    if not wanted:
+        return {}
+
+    owned = False
+    if conn is None:
+        if conn_factory is None:
+            import psycopg  # noqa: PLC0415
+
+            conn = psycopg.connect(**connection_kwargs())
+        else:
+            conn = conn_factory()
+        owned = True
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT code, name, board FROM {_SECURITY_MASTER} WHERE code = ANY(%s)",
+                (wanted,),
+            )
+            rows = cur.fetchall()
+    finally:
+        if owned:
+            conn.close()
+
+    found: dict[str, SecurityName] = {}
+    for row in rows:
+        code = str(row[0]).split(".", 1)[0].strip()
+        name = _clean_security_name(row[1])
+        if not code or not name:
+            continue
+        board = row[2] if len(row) > 2 and isinstance(row[2], str) else None
+        found[code] = SecurityName(code=code, name=name, board=board)
+    return found
 
 
 def _read_dbconfig() -> dict[str, str]:
@@ -135,6 +216,18 @@ class AShareLocalClient:
             else:
                 self._conn = self._conn_factory()
         return self._conn
+
+    def fetch_security_name(self, code: str) -> SecurityName | None:
+        """查单只证券名称（查不到返回 ``None``）。
+
+        放在客户端里而不是让上层自己连库：**名字和 K 线必须来自同一条链路**，
+        这样测试注入假客户端时名字自然缺席（不会偷偷连真库），生产用真客户端时
+        名字自动就有。
+        """
+        bare = str(code).split(".", 1)[0].strip()
+        if not bare:
+            return None
+        return fetch_security_names([bare], conn=self._get_conn()).get(bare)
 
     @staticmethod
     def _to_wind_code(code: str) -> str:
