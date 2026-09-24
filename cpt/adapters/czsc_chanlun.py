@@ -228,6 +228,11 @@ class CzscChanlunBackend:
                 high=float(bi.high),
                 low=float(bi.low),
                 level=0,
+                # 力度度量直接取 czsc 的值（口径见 crates/czsc-core/src/objects/bi.rs
+                # 的 get_power_price / get_power_volume / get_length）
+                power_price=float(bi.power_price),
+                power_volume=float(bi.power_volume),
+                length=int(bi.length),
             )
             for bi in analyzer.bi_list
         )
@@ -252,6 +257,9 @@ class CzscChanlunBackend:
                 high=raw.high,
                 low=raw.low,
                 source_ids=(f"bi:{i}",),
+                power_price=raw.power_price,
+                power_volume=raw.power_volume,
+                length=raw.length,
             )
             for i, raw in enumerate(bi_raw)
         ]

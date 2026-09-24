@@ -11,6 +11,7 @@ from cpt.adapters.reference_chanlun import (
 )
 from cpt.domain.bi import build_bis
 from cpt.domain.contain import merge_contained_bars
+from cpt.domain.first_buy import round_to_2_digit
 from cpt.domain.fractal import detect_fractals
 from cpt.domain.types import BarLike
 from cpt.domain.zhongshu import build_zhongshus
@@ -69,17 +70,32 @@ class NativeChanlunBackend:
             bi.start_time: resolve(fractal_start_raw, bi.start_time, "笔起点") for bi in bis
         }
         bi_end_raw = {bi.end_time: resolve(fractal_end_raw, bi.end_time, "笔终点") for bi in bis}
-        bi_raw = tuple(
-            BiRaw(
-                direction=bi.direction,
-                start_bar=bi_start_raw[bi.start_time],
-                end_bar=bi_end_raw[bi.end_time],
-                high=bi.high,
-                low=bi.low,
-                level=bi.level,
+
+        # 力度度量（一买/一卖背驰比较用，见 cpt.domain.first_buy）。口径与 czsc
+        # 对齐：``length`` 是笔的**去包含后** K 线根数、``power_volume`` 是中间
+        # K 线的成交量之和（不含两端）、``power_price`` 是两端价差保留 2 位。
+        # 分型的 ``bar_index`` 是**原始**下标，必须先反查回包含处理后的下标，
+        # 否则 length/volume 会按原始 K 线算，与 czsc 不同量纲。
+        merged_index = {bar.source_indices[0]: index for index, bar in enumerate(merged)}
+
+        bi_raw_list: list[BiRaw] = []
+        for bi in bis:
+            start = merged_index[bi_start_raw[bi.start_time]]
+            end = merged_index[bi_end_raw[bi.end_time]]
+            bi_raw_list.append(
+                BiRaw(
+                    direction=bi.direction,
+                    start_bar=bi_start_raw[bi.start_time],
+                    end_bar=bi_end_raw[bi.end_time],
+                    high=bi.high,
+                    low=bi.low,
+                    level=bi.level,
+                    power_price=round_to_2_digit(bi.high - bi.low),
+                    power_volume=sum(merged[i].volume for i in range(start + 1, end)),
+                    length=end - start + 1,
+                )
             )
-            for bi in bis
-        )
+        bi_raw = tuple(bi_raw_list)
         zs_raw = tuple(
             ZsRaw(
                 start_bar=bi_start_raw[zhongshu.start_time],

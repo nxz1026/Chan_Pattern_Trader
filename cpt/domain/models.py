@@ -122,7 +122,18 @@ class Fractal:
 
 @dataclass(frozen=True, slots=True)
 class Bi:
-    """笔（新笔）。"""
+    """笔（新笔）。
+
+    后三个字段是**力度度量**（一买/一卖背驰比较用，见 :mod:`cpt.domain.first_buy`），
+    默认 ``0`` 表示"未填充"：
+
+    - ``power_price``：两端分型价格之差的绝对值，保留 2 位小数；
+    - ``power_volume``：笔内**中间** K 线的成交量之和（不含两端）；
+    - ``length``：笔的**去包含后** K 线根数。
+
+    口径与 czsc ``BI.get_power_price`` / ``get_power_volume`` / ``get_length``
+    对齐（``crates/czsc-core/src/objects/bi.rs``）。
+    """
 
     level: int
     direction: int  # +1 | -1
@@ -131,6 +142,9 @@ class Bi:
     high: float
     low: float
     source_ids: tuple[str, ...]
+    power_price: float = 0.0
+    power_volume: float = 0.0
+    length: int = 0
 
 
 @dataclass(frozen=True, slots=True)

@@ -187,7 +187,63 @@ mypy（55 files）/ vulture / import-linter 全绿。
 
 **验收**：`207 passed`（R14-2 的 203 + 4）；全门禁绿。
 
+#### R14-4 一买/一卖结构谓词移植 ✅
+
+**发现的缺口**：`cpt/domain/signal.py` 是**状态机**——它把 `has_two_centers` /
+`has_divergence_leg` / `has_reversal_bi` 当**入参**，**没有任何模块负责算出**
+"这一段向下走势是否构成一买"。czsc 的 `check_first_buy` 恰好就是这个自足谓词。
+
+**移植来源**：czsc `crates/czsc-signals/src/utils/cxt.rs` 的 `check_first_buy` /
+`check_first_sell`（Apache-2.0），逐行移植为 `cpt/domain/first_buy.py`。
+
+> **为什么移植而不是调用**：czsc 的 Python 绑定把这两个函数包在 `call_signal`
+> 信号模板体系里（需要 `CZSC` 对象 + 模板名 + 参数字典），而 CPT 需要的是
+> "输入一串 `Bi`、输出 `bool`"的纯谓词。算法本身是纯函数，移植更可控可测。
+
+**配套改动**：
+
+- `cpt/domain/models.py`：`Bi` 新增 `power_price` / `power_volume` / `length`
+  （默认 `0` = 未填充），并写明三者口径
+- `cpt/adapters/reference_chanlun.py`：`BiRaw` 同步加三个字段，`map_bi` 透传
+- `cpt/adapters/czsc_chanlun.py`：直接取 czsc 的 `bi.power_price` / `power_volume`
+  / `length`（**精确值，无需重算**）
+- `cpt/adapters/native_chanlun.py`：自研后端自行补算——`power_price =
+  round2(high - low)`（已实测等于 czsc 的 `|fx_b.fx - fx_a.fx|`）、`length` 与
+  `power_volume` 按**去包含后**K线算（分型 `bar_index` 是**原始**下标，必须先反查）
+
+**关键设计：未填充必须报错，不能静默返回 `False`**。默认 `length == 0` 是
+"未填充"标记；`_require_power_metrics` 会 `raise ValueError`。否则背驰比较会拿
+`0` 参与运算并得出"不背驰"的错误结论——这是最难发现的静默失败。
+
+**最强证据：与 czsc 逐 n 交叉验证**。czsc 的 `cxt_first_buy_V221126` 信号模板内部
+就是调 Rust 的 `check_first_buy`，按 n 降序 `[21,19,17,15,13,11,9,7,5]` 逐段尝试并
+返回首个命中的 n。测试复现同一循环，要求命中 n **完全一致**：
+
+| fixture | buy | sell |
+|---|---|---|
+| 2024-02-01 | `None` = `None` ✓ | `None` = `None` ✓ |
+| 2024-09-01 | `None` = `None` ✓ | `None` = `None` ✓ |
+| 2025-04-01 | `None` = `None` ✓ | **`21` = `21`** ✓ |
+
+**6/6 一致，且含一个正例**（fixture3 的一卖）。`test_cross_validation_covers_a_positive_hit`
+专门钉住"正例确实被覆盖"，防止两边空对空。
+
+**踩到的坑（记录以免重犯）**：验证脚本里用 `str(b.direction) == "Up"` 判方向，
+但 czsc 的 `Direction` repr 是 **`'向上'` / `'向下'`**，导致所有笔被判成 `-1`，
+一度以为 fixture3 的 sell 不一致。适配器里的 `_bi_direction` 已同时接受
+`Up`/`向上`，验证脚本应复用它。
+
+**`round_to_2_digit` 的一个反直觉结论**：必须**跟随 f64 实际值**，而不是十进制直觉。
+`1.005` 在 f64 里略小，乘 100 得 `100.49999999999999` → Rust 也给 `1.0`；
+`2.675` 反过来略大，得 `2.68`。若把测试写成"期望 `1.01`"，就是自造了一个与 czsc
+不一致的口径。半数场景用二进制精确值 `0.125` / `0.625` 验证（Python 的银行家舍入
+会给出 `0.12` / `0.62`，本实现给出 `0.13` / `0.63`）。
+
+**新增测试**：`tests/test_first_buy.py`，20 个用例（人工构造正反例 + 各门槛 +
+工具函数边界 + 6 个交叉验证 + 1 个正例覆盖）。
+
+**验收**：`226 passed`（R14-3 的 207 + 19）；全门禁绿。
+
 #### R14 剩余子任务
 
-- R14-4 一买移植（`Bi` 加 `power_volume`；czsc `BI` 已直接暴露 `length`/`power_price`/`power_volume`）
 - R14-5 重写 `docs/rules.md` §7 + 修 `signal.py:14` 的 chanlun 溯源

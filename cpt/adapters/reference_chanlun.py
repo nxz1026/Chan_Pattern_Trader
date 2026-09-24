@@ -75,7 +75,11 @@ class FxRaw:
 
 @dataclass(frozen=True, slots=True)
 class BiRaw:
-    """chanlun-pro 产出的原始笔（未映射到 domain）。"""
+    """后端产出的原始笔（未映射到 domain）。
+
+    ``power_price`` / ``power_volume`` / ``length`` 是**力度度量**（一买/一卖
+    背驰比较用，见 :mod:`cpt.domain.first_buy`）；默认 ``0`` 表示后端未填充。
+    """
 
     direction: int  # +1 | -1
     start_bar: int
@@ -83,6 +87,9 @@ class BiRaw:
     high: float
     low: float
     level: int
+    power_price: float = 0.0
+    power_volume: float = 0.0
+    length: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -177,6 +184,9 @@ def map_bi(
         high=raw.high,
         low=raw.low,
         source_ids=source_ids,
+        power_price=raw.power_price,
+        power_volume=raw.power_volume,
+        length=raw.length,
     )
 
 
