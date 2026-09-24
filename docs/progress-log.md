@@ -493,3 +493,101 @@ dashboard.js），走 `dashboard.js:410-412` 的通用 `data-field` 循环 —�
 
 **验收**：`278 passed`（R16-2 的 264 + 14）；ruff check / ruff format --check
 (124 files) / mypy(61 files) / vulture / import-linter(4 kept, 0 broken) 全绿。
+
+## R16-5 — 四画布落地 + flag 切换
+
+**目标（总计划 §6）**：同一份快照，四个画布渲染一致（结构元素数量一致），
+`?canvas=A|B|C|D` 切换，**断网可用（0 个 CDN 请求）**。
+
+### 架构决定：数据归一化留在 dashboard.js，画布只负责"画"
+
+四个画布若各自归一化快照，"渲染一致"就无从证明（口径可能不同）。所以
+`dashboard.js` 新增 `buildCanvasView()`（由原 `drawChart()` 前 50 行原样抽出），
+统一产出 K 线、叠加层、价格域、`xForIndex`/`yForPrice`，画布模块只消费它。
+
+- `dashboard/canvas_registry.js`：`window.CPT_CANVASES`（`register/get/has/ids/list`）。
+  必须**先于**画布模块加载（`defer` 按文档顺序执行），`dashboard.js` 最后 ——
+  `boot()` 时要读到完整注册表。
+- `drawChart()` 从"唯一实现"变成"唯一分发点"：原实现改名 `drawChartA(view)`，
+  新增 3 行分发读 `state.canvas`。缩放/滚轮/双击/级别筛选/`render`/`ResizeObserver`
+  **6 个调用点 + 1 个观察者一行未改**（这是选择"改分发而不是改调用点"的理由）。
+- 每个画布的 `draw(view)` 必须返回**自己真正画出来的**元素个数（不是"快照里有几个"）。
+  画布 A 直接数 DOM 节点（K 线按 `data-bar-index` 去重：一根 K 线画影线+实体 2 个节点，
+  直接数会得到 2 倍 —— 首轮审计实测 360 vs 180）。
+
+### 四个画布
+
+| 画布 | 实现 | 中枢表达 | 离线资产 |
+|---|---|---|---|
+| A | 原手写 SVG（行为未改，仅新增窗口过滤） | SVG rect | 无依赖 |
+| B | lightweight-charts 4.2.0 | 两条虚线边界（LWC 无矩形图元） | 163 KB，Apache-2.0 |
+| C | plotly 2.35.2 finance 构建 | `layout.shapes` 真矩形 | 1.17 MB，MIT |
+| D | 服务端 wbt `HtmlReportBuilder` 报告外壳 | plotly rect | 复用 C 的 plotly + bootstrap |
+
+`dashboard/vendor/` 内联 6 个资产（≈1.87 MB，含 sha256 清单与许可证，
+`tests/test_dashboard_canvas_contract.py` 逐字节校验哈希）。用 `plotly-finance-dist-min`
+而不是完整 plotly：完整包 4.6 MB，只为画 K 线浪费 4 倍体积。
+
+### 画布 D 的一处**计划偏差**（依据实测，不是妥协）
+
+总计划 §6 把 D 定为 "wbt report"。实测 `references/wbt/python/wbt`：
+
+1. **wbt 画不了 K 线**：全仓没有 `go.Candlestick` / `go.Ohlc`，5 个 tab 全是
+   净值/回撤/分布/绩效表，零价格图；
+2. **wbt 报告外壳带 6 个 CDN 外链**（Google Fonts ×3、bootstrap CSS/JS、
+   bootstrap-icons），离线打开会丢样式、tab 失效。
+
+⇒ D 的落地方式：**真实复用 wbt 的 `HtmlReportBuilder`**（`add_header`/`add_metrics`/
+`add_chart_tab`/`add_table`/`add_footer`/`render`）产出报告外壳，CPT 侧丢弃 `<head>`
+外链、只取 `<body>`，K 线用 plotly 补上（`include_plotlyjs=False`，页面已 vendor
+plotly）。渲染在**同源 iframe** 里 —— wbt + bootstrap 的样式会重排全局
+（`.container`/`.table`/`.nav-tabs`），直接注入主页面会打乱现有看板
+（R12 刚验过 375px 移动端触摸目标与水平溢出）；同源 iframe 下父页面仍能读
+`contentDocument`，审计照做。
+
+服务端 `/api/canvas/wbt?start_ms=&end_ms=`（`cpt/application/canvas_wbt.py`）：
+客户端**必须传可视窗口**，否则只画窗口的 A/B/C 与画全量的 D 计数必然不等。
+`innerHTML` 不执行 `<script>` ⇒ 片段里的 plotly `newPlot` 与 wbt 主题脚本被抽出来
+由父页面重建元素执行；**外链脚本一律剥离**（wbt 模板的 bootstrap CDN script 就在
+body 里，`_CDN_RE` 会对残留外链响亮失败而不是静默降级）。
+
+### 两处 R16-5 顺带修掉的真 bug（都是审计先发现的）
+
+1. **`?snapshot=` 完全失效**：`root.dataset.snapshotUrl || params.get("snapshot")`
+   —— 属性在 index.html 里恒非空，参数永远走不到，文档里写的"file:// 内联 JSON
+   离线"是死代码，离屏审计也无法把页面指到固定快照。改为参数优先。
+2. **窗口外的笔/分型被"钳到图边缘"**：`timeIndexOf` 会把任意时间戳夹到 0 或
+   length-1，于是窗口外的笔被画成贴着左右边框的假线段。改为在 `buildCanvasView()`
+   里统一按 `overlapsWindow` 过滤四种结构（中枢本来就有这个过滤），既消灭假线段，
+   也让"四个画布消费同一批元素"有了定义。
+3. 分发前不检查 `view.ready`：未就绪时 `view` 里没有 `geom`/`windowStart`，画布
+   B/C/D 会拿 `undefined` 拼请求参数（审计实测画布 D 发了 `start_ms=undefined` 的
+   400 请求）。现在未就绪统一走 `renderCanvasPlaceholder`，不交给画布模块。
+
+### 验收证据（Playwright，`audit_R16.js`，真机 `https://127.0.0.1/cpt/`）
+
+四画布计数（真实 Binance 1h 快照，可视窗口 180 根）：
+
+| 画布 | candles | fractals | bis | zhongshus | trendTypes | 绘制物证 |
+|---|---|---|---|---|---|---|
+| A | 180 | 67 | 10 | 2 | 2 | 447 个 SVG 图元 |
+| B | 180 | 67 | 10 | 2 | 2 | 7 个 `<canvas>` 位图（672×1298 等） |
+| C | 180 | 67 | 10 | 2 | 2 | plotly 503 个图元 |
+| D | 180 | 67 | 10 | 2 | 2 | iframe 内 wbt 6 指标卡 + 2 数据表 + 1 tab 导航 + plotly 315 图元 |
+
+- **`comparison` 五项全 true**（两两相等）
+- **`externalRequests = 0`**（离线可用：全部资源同源）
+- `consoleErrors = 0`、`pageErrors = 0`、P0/P1/P2 = 0/0/0
+- 顶栏 4 个按钮 A/B/C/D，点 B 后 `data-canvas=B`、`aria-pressed=true`、
+  URL 写回 `?canvas=B`
+- 产物：`screenshot-R16-canvas-{A,B,C,D}.png`（各 ~155 KB）、`audit_R16.json`
+
+**踩坑记录**（全部由审计/测试先发现）：K 线节点 2 倍计数、画布 C 因"查表找 K 线"
+丢掉起点在窗口前的笔（9 vs 10）、`Object.assign(counts, ...)` 把 `pending`/`library`
+污染进计数、`wbt.__version__` 不存在（版本必须走 `importlib.metadata`，否则误报
+"版本不符"把画布 D 打成不可用）。
+
+**验收**：`305 passed`（R16-4 的 278 + 27）；ruff check / ruff format --check
+(128 files) / mypy(62 files) / vulture / import-linter(4 kept, 0 broken) 全绿。
+CI 无 wbt ⇒ 画布 D 的渲染断言 `importorskip`（已用 meta_path 屏蔽 wbt 模拟 CI：
+13 passed, 2 skipped）。

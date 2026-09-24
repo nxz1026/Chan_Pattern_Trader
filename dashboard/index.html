@@ -33,6 +33,7 @@
           <button type="button" data-mode="watch" data-mode-action="watch">盯盘</button>
           <button type="button" data-mode="research" data-mode-action="research">研究</button>
         </div>
+        <div data-testid="canvas-switch" class="canvas-switch" role="group" aria-label="画布切换"></div>
       </nav>
 
       <dl data-testid="topbar-meta" class="topbar-meta">
@@ -369,6 +370,15 @@
       </p>
     </noscript>
 
+    <!-- R16-5 四画布：注册表必须最先加载（defer 按文档顺序执行），
+         画布模块次之，dashboard.js 最后 —— 它 boot() 时要读到完整注册表。
+         vendor 资产全部本地内联，无任何 CDN 请求（总计划决策 E2）。 -->
+    <script src="./canvas_registry.js" defer></script>
+    <script src="./vendor/lightweight-charts.standalone.production.js" defer></script>
+    <script src="./vendor/plotly-finance.min.js" defer></script>
+    <script src="./canvas_b.js" defer></script>
+    <script src="./canvas_c.js" defer></script>
+    <script src="./canvas_d.js" defer></script>
     <script src="./dashboard.js" defer></script>
   </body>
 </html>

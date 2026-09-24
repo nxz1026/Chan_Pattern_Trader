@@ -149,6 +149,10 @@
     zoomLevel: 0,
     visibleWindow: null,
     pinnedRange: null,
+    // R16-5 画布分发：当前画布 id、最近一次绘制的元素计数、绘制异常（回落 A 时记录）
+    canvas: "A",
+    canvasStats: null,
+    canvasError: null,
   };
 
   /* ------------------------------------------------------------ DOM 基础 */
@@ -1999,123 +2003,6 @@
     axisNode.appendChild(svg);
   }
 
-  function drawChart() {
-    const canvas = q("[data-testid=chart-canvas-region]");
-    const volumeNode = q("[data-testid=chart-volume-region]");
-    const macdNode = q("[data-testid=chart-macd-region]");
-    const axisNode = q("[data-testid=chart-time-axis]");
-    if (!canvas || !volumeNode || !axisNode) return;
-
-    const snapshot = state.snapshot;
-    const rawCandles = normalizeCandles(snapshot && snapshot.candles);
-    const candles = applyZoomWindow(rawCandles);
-    const overlays = normalizeOverlays(snapshot && snapshot.overlays);
-    const domain = priceDomain(candles, overlays);
-    const rect = canvas.getBoundingClientRect();
-    const width = Math.round(rect.width);
-    const height = Math.round(rect.height);
-
-    if (!candles.length || !domain || width < 40 || height < 40) {
-      clearRegion(canvas);
-      clearRegion(volumeNode);
-      if (macdNode) clearRegion(macdNode);
-      clearRegion(axisNode);
-      appendNote(
-        canvas,
-        !candles.length
-          ? "暂无 K 线：等待 dashboard.v2 snapshot（empty）"
-          : "图形区尚未完成布局，等待下一次重绘",
-      );
-      appendNote(volumeNode, "暂无成交量数据");
-      if (macdNode) appendNote(macdNode, "暂无 MACD 数据");
-      appendNote(axisNode, "时间轴：无数据（Unix 毫秒）");
-      canvas.setAttribute("role", "img");
-      canvas.setAttribute("aria-label", "K 线绘制区占位：分型、笔、中枢、走势类型由 dashboard.js 叠加渲染");
-      updateZoomLabel();
-      return;
-    }
-
-    const geom = layoutPlot(width, height, candles.length);
-    const view = {
-      candles,
-      overlays,
-      geom,
-      domain,
-      lastOpenTime: candles[candles.length - 1].openTime,
-      windowStart: candles[0].openTime,
-      windowEnd: candles[candles.length - 1].openTime,
-      indexForTime: timeIndexOf(candles),
-      xForIndex: (index) => geom.left + (index + 0.5) * geom.slot,
-      yForPrice: (price) =>
-        geom.top + ((domain.max - price) / (domain.max - domain.min)) * geom.plotHeight,
-    };
-
-    clearRegion(canvas);
-    clearRegion(volumeNode);
-    if (macdNode) clearRegion(macdNode);
-    clearRegion(axisNode);
-    canvas.dataset.rendered = "true";
-    canvas.setAttribute("role", "group");
-    canvas.setAttribute("aria-label", "K 线与缠论结构叠加图：分型、笔、中枢、走势类型可点击查看结构详情");
-
-    const svg = createSvg("svg", {
-      class: "cpt-chart-svg",
-      viewBox: `0 0 ${width} ${height}`,
-      preserveAspectRatio: "none",
-      role: "presentation",
-    });
-    canvas.appendChild(svg);
-
-    const gridGroup = createSvg("g", { class: "cpt-chart-grid" });
-    const trendGroup = createSvg("g", { class: "cpt-chart-trends" });
-    const zhongshuGroup = createSvg("g", { class: "cpt-chart-zhongshus" });
-    const candleGroup = createSvg("g", { class: "cpt-chart-candles" });
-    const biGroup = createSvg("g", { class: "cpt-chart-bis" });
-    const fractalGroup = createSvg("g", { class: "cpt-chart-fractals" });
-    const signalGroup = createSvg("g", { class: "cpt-chart-signals" });
-    const overlayGroup = createSvg("g", { class: "cpt-chart-overlays" });
-    [
-      gridGroup,
-      trendGroup,
-      zhongshuGroup,
-      candleGroup,
-      biGroup,
-      fractalGroup,
-      signalGroup,
-      overlayGroup,
-    ].forEach((group) => svg.appendChild(group));
-
-    drawPriceGrid(gridGroup, view);
-    drawTrendBackgrounds(trendGroup, view);
-    drawZhongshus(zhongshuGroup, view);
-    drawCandles(candleGroup, view);
-    drawBis(biGroup, view);
-    drawFractals(fractalGroup, view);
-    drawSignal(signalGroup, view);
-    drawLastPrice(overlayGroup, view);
-
-    const volumeRect = volumeNode.getBoundingClientRect();
-    const axisRect = axisNode.getBoundingClientRect();
-    drawVolume(volumeNode, view, Math.max(48, Math.round(volumeRect.height) || 72));
-    if (macdNode) drawMacd(macdNode, view, Math.max(60, Math.round(macdNode.getBoundingClientRect().height) || 96));
-    drawAxis(axisNode, view, Math.max(20, Math.round(axisRect.height) || 28));
-    updateZoomLabel();
-
-    // 重绘会替换全部节点，按 kind + source_ids 找回当前选中元素并重新标记。
-    state.selectedNode = null;
-    if (state.selection) {
-      const selection = state.selection;
-      const selector = selection.kind === "candle"
-        ? `[data-structure-kind=candle][data-bar-index="${selection.barIndex}"]`
-        : `[data-structure-kind=${selection.kind}][data-source-ids="${selection.sourceIds.join(" ")}"]`;
-      const node = canvas.querySelector(selector);
-      if (node) {
-        node.setAttribute("data-selected", "true");
-        state.selectedNode = node;
-      }
-    }
-  }
-
   function scheduleDraw() {
     if (state.drawPending) return;
     state.drawPending = true;
@@ -2859,8 +2746,329 @@
     return null;
   }
 
+  /* --------------------------------------------------- 画布分发（R16-5）
+   *
+   * 四个画布（A 手写 SVG / B lightweight-charts / C plotly / D wbt 报告）
+   * 并存，`?canvas=A|B|C|D` 或顶栏按钮切换，最后选一个。
+   *
+   * 关键不变式：**四个画布必须消费同一份归一化数据**。所以归一化（K 线、
+   * 叠加层、价格域、像素坐标函数）留在 dashboard.js 里，由 buildCanvasView()
+   * 统一产出，画布只负责"画"。
+   *
+   * 每个画布的 draw(view) 必须返回**自己真正画出来的**元素个数（不是"快照里
+   * 有几个"），审计脚本据此断言四个画布计数两两相等。
+   */
+  const CANVAS_FALLBACK = "A";
+
+  function canvasRegistry() {
+    return window.CPT_CANVASES || null;
+  }
+
+  function canvasList() {
+    const registry = canvasRegistry();
+    return registry ? registry.list() : [{ id: "A", label: "A 手写 SVG", note: "" }];
+  }
+
+  // 归一化视图：四个画布共用的唯一数据入口（原 drawChart 前 50 行原样抽出）。
+  function buildCanvasView() {
+    const canvas = q("[data-testid=chart-canvas-region]");
+    const volumeNode = q("[data-testid=chart-volume-region]");
+    const macdNode = q("[data-testid=chart-macd-region]");
+    const axisNode = q("[data-testid=chart-time-axis]");
+    if (!canvas || !volumeNode || !axisNode) return null;
+
+    const snapshot = state.snapshot;
+    const rawCandles = normalizeCandles(snapshot && snapshot.candles);
+    const candles = applyZoomWindow(rawCandles);
+    const rawOverlays = normalizeOverlays(snapshot && snapshot.overlays);
+    // 可视窗口过滤（R16-5 新增）：只保留与窗口相交的结构。
+    // 改这个是因为旧行为把窗口外的笔/分型**钳到图边缘**（timeIndexOf 会把任意
+    // 时间戳夹到 0 或 length-1），既画出假线段，又让"四个画布画同一批元素"
+    // 无从定义。中枢本来就有这个过滤（overlapsWindow），现在笔/分型/走势类型
+    // 与它统一口径，四个画布拿到的就是同一份窗口内结构。
+    const windowStart = candles.length ? candles[0].openTime : 0;
+    const windowEnd = candles.length ? candles[candles.length - 1].openTime : 0;
+    const inWindow = (item) => {
+      const start = num(item.start_time);
+      const end = num(item.end_time);
+      return start !== null && end !== null && end >= windowStart && start <= windowEnd;
+    };
+    const overlays = {
+      fractals: rawOverlays.fractals.filter(inWindow),
+      bis: rawOverlays.bis.filter(inWindow),
+      zhongshus: rawOverlays.zhongshus.filter(inWindow),
+      trend_types: rawOverlays.trend_types.filter(inWindow),
+    };
+    const domain = priceDomain(candles, overlays);
+    const rect = canvas.getBoundingClientRect();
+    const width = Math.round(rect.width);
+    const height = Math.round(rect.height);
+    const base = {
+      canvas,
+      volumeNode,
+      macdNode,
+      axisNode,
+      snapshot,
+      candles,
+      overlays,
+      domain,
+      width,
+      height,
+      ready: Boolean(candles.length && domain && width >= 40 && height >= 40),
+    };
+    if (!base.ready) return base;
+
+    const geom = layoutPlot(width, height, candles.length);
+    return Object.assign(base, {
+      geom,
+      lastOpenTime: candles[candles.length - 1].openTime,
+      windowStart: candles[0].openTime,
+      windowEnd: candles[candles.length - 1].openTime,
+      indexForTime: timeIndexOf(candles),
+      xForIndex: (index) => geom.left + (index + 0.5) * geom.slot,
+      yForPrice: (price) =>
+        geom.top + ((domain.max - price) / (domain.max - domain.min)) * geom.plotHeight,
+    });
+  }
+
+  // 空数据/未布局时的统一占位（四个画布共用，保证降级行为一致）。
+  function renderCanvasPlaceholder(view) {
+    const { canvas, volumeNode, macdNode, axisNode } = view;
+    clearRegion(canvas);
+    clearRegion(volumeNode);
+    if (macdNode) clearRegion(macdNode);
+    clearRegion(axisNode);
+    appendNote(
+      canvas,
+      !view.candles.length
+        ? "暂无 K 线：等待 dashboard.v2 snapshot（empty）"
+        : "图形区尚未完成布局，等待下一次重绘",
+    );
+    appendNote(volumeNode, "暂无成交量数据");
+    if (macdNode) appendNote(macdNode, "暂无 MACD 数据");
+    appendNote(axisNode, "时间轴：无数据（Unix 毫秒）");
+    canvas.setAttribute("role", "img");
+    canvas.setAttribute("aria-label", "K 线绘制区占位：分型、笔、中枢、走势类型由画布渲染");
+    updateZoomLabel();
+  }
+
+  // 画布 A 的计数：直接数**画出来的 DOM 节点**（不是数输入数组），
+  // 这样"计数相等"才真的证明四个画布画了同样多的结构元素。
+  // K 线按 `data-bar-index` 去重：一根 K 线画 2 个节点（影线 line + 实体 rect），
+  // 直接数节点会得到 2 倍（首轮审计实测 360 vs 180）。
+  function canvasACounts(view) {
+    const count = (kind) =>
+      view.canvas.querySelectorAll(`[data-structure-kind=${kind}]`).length;
+    const bars = new Set();
+    view.canvas.querySelectorAll("[data-structure-kind=candle]").forEach((node) => {
+      bars.add(node.getAttribute("data-bar-index"));
+    });
+    return {
+      canvas: "A",
+      candles: bars.size,
+      fractals: count("fractal"),
+      bis: count("bi"),
+      zhongshus: count("zhongshu"),
+      trendTypes: view.overlays.trend_types.length,
+    };
+  }
+
+  function drawChartA(view) {
+    if (!view) return null;
+    const { canvas, volumeNode, macdNode, axisNode } = view;
+    if (!view.ready) {
+      renderCanvasPlaceholder(view);
+      return { canvas: "A", candles: 0, fractals: 0, bis: 0, zhongshus: 0, trendTypes: 0 };
+    }
+
+    clearRegion(canvas);
+    clearRegion(volumeNode);
+    if (macdNode) clearRegion(macdNode);
+    clearRegion(axisNode);
+    canvas.dataset.rendered = "true";
+    canvas.setAttribute("role", "group");
+    canvas.setAttribute("aria-label", "K 线与缠论结构叠加图：分型、笔、中枢、走势类型可点击查看结构详情");
+
+    const svg = createSvg("svg", {
+      class: "cpt-chart-svg",
+      viewBox: `0 0 ${view.width} ${view.height}`,
+      preserveAspectRatio: "none",
+      role: "presentation",
+    });
+    canvas.appendChild(svg);
+
+    const gridGroup = createSvg("g", { class: "cpt-chart-grid" });
+    const trendGroup = createSvg("g", { class: "cpt-chart-trends" });
+    const zhongshuGroup = createSvg("g", { class: "cpt-chart-zhongshus" });
+    const candleGroup = createSvg("g", { class: "cpt-chart-candles" });
+    const biGroup = createSvg("g", { class: "cpt-chart-bis" });
+    const fractalGroup = createSvg("g", { class: "cpt-chart-fractals" });
+    const signalGroup = createSvg("g", { class: "cpt-chart-signals" });
+    const overlayGroup = createSvg("g", { class: "cpt-chart-overlays" });
+    [
+      gridGroup,
+      trendGroup,
+      zhongshuGroup,
+      candleGroup,
+      biGroup,
+      fractalGroup,
+      signalGroup,
+      overlayGroup,
+    ].forEach((group) => svg.appendChild(group));
+
+    drawPriceGrid(gridGroup, view);
+    drawTrendBackgrounds(trendGroup, view);
+    drawZhongshus(zhongshuGroup, view);
+    drawCandles(candleGroup, view);
+    drawBis(biGroup, view);
+    drawFractals(fractalGroup, view);
+    drawSignal(signalGroup, view);
+    drawLastPrice(overlayGroup, view);
+
+    const volumeRect = volumeNode.getBoundingClientRect();
+    const axisRect = axisNode.getBoundingClientRect();
+    drawVolume(volumeNode, view, Math.max(48, Math.round(volumeRect.height) || 72));
+    if (macdNode) drawMacd(macdNode, view, Math.max(60, Math.round(macdNode.getBoundingClientRect().height) || 96));
+    drawAxis(axisNode, view, Math.max(20, Math.round(axisRect.height) || 28));
+    updateZoomLabel();
+
+    // 重绘会替换全部节点，按 kind + source_ids 找回当前选中元素并重新标记。
+    state.selectedNode = null;
+    if (state.selection) {
+      const selection = state.selection;
+      const selector = selection.kind === "candle"
+        ? `[data-structure-kind=candle][data-bar-index="${selection.barIndex}"]`
+        : `[data-structure-kind=${selection.kind}][data-source-ids="${selection.sourceIds.join(" ")}"]`;
+      const node = canvas.querySelector(selector);
+      if (node) {
+        node.setAttribute("data-selected", "true");
+        state.selectedNode = node;
+      }
+    }
+    return canvasACounts(view);
+  }
+
+  function registerBuiltinCanvasA() {
+    const registry = canvasRegistry();
+    if (!registry) return;
+    registry.register("A", {
+      label: "A 手写 SVG",
+      note: "零依赖手写 SVG（原有画布，行为未改）",
+      draw: drawChartA,
+    });
+  }
+
+  // 唯一分发点：所有重绘路径（缩放/滚轮/双击/级别筛选/render/ResizeObserver）
+  // 都汇到这里，所以画布切换不需要改任何调用点。
+  function drawChart() {
+    const registry = canvasRegistry();
+    const view = buildCanvasView();
+    if (!view) return null;
+    // 未就绪（无 K 线 / 容器还没布局）时**不交给画布模块**：此时 view 里没有
+    // geom / windowStart / xForIndex，画布 B/C/D 拿去会算出 undefined 的请求参数
+    // （首轮审计实测：画布 D 对 /api/canvas/wbt 发了 start_ms=undefined 的 400 请求）。
+    if (!view.ready) {
+      renderCanvasPlaceholder(view);
+      const empty = {
+        canvas: state.canvas,
+        candles: 0,
+        fractals: 0,
+        bis: 0,
+        zhongshus: 0,
+        trendTypes: 0,
+      };
+      state.canvasStats = empty;
+      view.canvas.dataset.canvas = state.canvas;
+      view.canvas.dataset.canvasCounts = JSON.stringify(empty);
+      root.dataset.canvas = state.canvas;
+      return empty;
+    }
+    const module = (registry && registry.get(state.canvas)) || (registry && registry.get(CANVAS_FALLBACK));
+    let stats = null;
+    if (module) {
+      try {
+        stats = module.draw(view);
+      } catch (error) {
+        // 单个画布炸掉不能拖垮整页：记一条 warning，回落 A 画布。
+        state.canvasError = `${state.canvas}: ${error && error.message ? error.message : error}`;
+        stats = registry.get(CANVAS_FALLBACK) ? registry.get(CANVAS_FALLBACK).draw(view) : null;
+      }
+    }
+    state.canvasStats = stats;
+    const node = view.canvas;
+    if (node) {
+      node.dataset.canvas = state.canvas;
+      if (stats) node.dataset.canvasCounts = JSON.stringify(stats);
+      else delete node.dataset.canvasCounts;
+    }
+    root.dataset.canvas = state.canvas;
+    if (state.canvasError) root.dataset.canvasError = state.canvasError;
+    else delete root.dataset.canvasError;
+    return stats;
+  }
+
+  function setCanvas(id) {
+    const registry = canvasRegistry();
+    const wanted = String(id || "").toUpperCase();
+    if (!registry || !registry.has(wanted)) return false;
+    if (wanted === state.canvas) return true;
+    state.canvas = wanted;
+    state.canvasError = null;
+    // URL 写回（照抄模式切换的 history.replaceState 范式）
+    try {
+      const url = new URL(window.location.href);
+      url.searchParams.set("canvas", wanted);
+      window.history.replaceState(null, "", url.toString());
+    } catch (error) {
+      void error;
+    }
+    renderCanvasSwitch();
+    drawChart();
+    root.dispatchEvent(new CustomEvent("cpt:canvas-changed", { detail: { canvas: wanted } }));
+    return true;
+  }
+
+  function renderCanvasSwitch() {
+    const container = q("[data-testid=canvas-switch]");
+    if (!container) return;
+    const registry = canvasRegistry();
+    const options = registry ? registry.ids() : ["A"];
+    if (container.dataset.builtFor !== options.join(",")) {
+      container.replaceChildren();
+      options.forEach((id) => {
+        const module = registry.get(id);
+        const button = createHtml("button", {
+          type: "button",
+          "data-canvas-option": id,
+          "data-testid": `canvas-option-${id.toLowerCase()}`,
+        });
+        button.textContent = `${id} · ${(module && module.label) || id}`;
+        button.addEventListener("click", () => setCanvas(id));
+        container.appendChild(button);
+      });
+      container.dataset.builtFor = options.join(",");
+    }
+    Array.from(container.querySelectorAll("[data-canvas-option]")).forEach((button) => {
+      const active = button.dataset.canvasOption === state.canvas;
+      button.setAttribute("aria-pressed", active ? "true" : "false");
+      button.dataset.state = active ? "active" : "idle";
+    });
+  }
+
+  function installCanvasSwitch() {
+    const params = new URLSearchParams(window.location.search);
+    const requested = (params.get("canvas") || CANVAS_FALLBACK).toUpperCase();
+    const registry = canvasRegistry();
+    state.canvas = registry && registry.has(requested) ? requested : CANVAS_FALLBACK;
+    state.canvasError = null;
+    renderCanvasSwitch();
+    root.dataset.canvas = state.canvas;
+  }
+
   function boot() {
     installRuntimeStyle();
+    registerBuiltinCanvasA();
+    installCanvasSwitch();
     installModeSwitch();
     installIntervalSwitch();
     installTimeRange();
@@ -2882,7 +3090,12 @@
     window.addEventListener("resize", scheduleDraw);
 
     const params = new URLSearchParams(window.location.search);
-    const snapshotUrl = root.dataset.snapshotUrl || params.get("snapshot");
+    // ``?snapshot=`` 优先于 ``data-snapshot-url``（R16-5 改）。
+    // 原顺序（属性优先）让 ``?snapshot=`` 完全失效 —— 属性在 index.html 里恒非空，
+    // 于是文档里写的"file:// + 内联 JSON 默认离线"根本走不到，离屏审计也无法把
+    // 页面指到一份固定快照上。改为参数优先后：不传参数 = 原行为（走属性），
+    // 传了就覆盖。``?demo=off`` 的语义不变。
+    const snapshotUrl = params.get("snapshot") || root.dataset.snapshotUrl;
     if (snapshotUrl) {
       state.snapshotUrl = snapshotUrl;
       loadSnapshot(snapshotUrl);
@@ -2903,6 +3116,17 @@
     getSelection: () => state.selection,
     startPolling,
     stopPolling,
+    // ---- 画布层（R16-5）：画布模块与审计脚本的公开入口 ----
+    // buildView: 四个画布共用的归一化视图（同一份快照 + 同一套像素坐标）
+    buildView: buildCanvasView,
+    // clearRegion / appendNote: 画布模块重置区域与写占位文案的唯一契约
+    clearRegion,
+    appendNote,
+    getCanvas: () => state.canvas,
+    getCanvasStats: () => state.canvasStats,
+    canvasList,
+    setCanvas,
+    redraw: drawChart,
   };
 
   boot();

@@ -225,6 +225,21 @@ def make_handler(
                 except Exception:  # noqa: BLE001
                     self.send_error(HTTPStatus.INTERNAL_SERVER_ERROR, "inspect failed")
                     return
+            elif path.path == "/api/canvas/wbt":
+                # 画布 D（R16-5）：服务端用 wbt 的 HtmlReportBuilder 渲染报告片段。
+                # 客户端必须传可视窗口（start_ms/end_ms），否则只画窗口的 A/B/C
+                # 与画全量的 D 计数不相等，"四画布一致"的验收无从谈起。
+                window: tuple[int, int] | None = None
+                if query.get("start_ms") and query.get("end_ms"):
+                    try:
+                        window = (int(query["start_ms"][0]), int(query["end_ms"][0]))
+                    except ValueError:
+                        self.send_error(HTTPStatus.BAD_REQUEST, "start_ms/end_ms must be integers")
+                        return
+                # 延迟导入：wbt/pandas/plotly 是可选依赖，demo/加密路径不该被迫加载。
+                from cpt.application.canvas_wbt import build_canvas_d_payload  # noqa: PLC0415
+
+                payload = build_canvas_d_payload(snapshot, window=window)
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return

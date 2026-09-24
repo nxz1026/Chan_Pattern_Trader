@@ -1378,3 +1378,43 @@ noscript p {
   border-color: var(--color-accent);
   color: var(--color-accent);
 }
+
+/* ------------------------------------------------- R16-5 四画布切换与宿主 */
+
+.canvas-switch {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-left: var(--space-3, 8px);
+}
+
+.canvas-switch button {
+  border: 1px solid var(--color-border);
+  background: var(--color-panel);
+  color: var(--color-text-muted);
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.canvas-switch button[aria-pressed="true"] {
+  color: var(--color-text);
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+
+/* 画布宿主：三种库（lightweight-charts / plotly / iframe）都要求父容器有确定尺寸 */
+.cpt-canvas-host {
+  position: absolute;
+  inset: 0;
+}
+
+.cpt-canvas-d-frame {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: var(--color-bg);
+}
