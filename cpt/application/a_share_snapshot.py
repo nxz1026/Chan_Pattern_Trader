@@ -19,14 +19,24 @@ import，也会让 application 依赖 web（import-linter 的 Engine 契约不�
 from __future__ import annotations
 
 import logging
+import os
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
+from cpt.adapters.a_share_factor import (
+    DEFAULT_FACTOR_DAYS,
+    FactorEnsureResult,
+    OnDemandFactorFetcher,
+    fetch_factor_rows,
+    upsert_factor_rows,
+)
 from cpt.adapters.a_share_local import (
     AShareLocalClient,
     AShareNoDataError,
     AShareNoFactorError,
 )
+from cpt.adapters.a_share_public import TENCENT_KLINE_URL
 from cpt.adapters.backend_factory import DEFAULT_BACKEND, resolve_backend
 from cpt.adapters.reference_chanlun import ChanlunBackend
 from cpt.adapters.validators import validate_ashare_bars
@@ -36,9 +46,19 @@ from cpt.domain.config import RulesConfig
 
 __all__ = [
     "DEFAULT_WIDTH_K",
+    "ENV_ONDEMAND_FACTOR",
+    "FactorEnsurer",
     "build_ashare_snapshot",
+    "factor_ensurer_from_env",
     "empty_ashare_snapshot",
+    "reset_factor_fetcher",
 ]
+
+#: 按需补因子的开关（``0``/``false``/``off`` 关闭）。
+ENV_ONDEMAND_FACTOR: str = "CPT_ASHARE_ONDEMAND_FACTOR"
+
+#: 按需补因子的钩子：给一个代码，返回拉取结果。``False`` 语义的关闭用 ``None`` 表达。
+FactorEnsurer = Callable[[str], FactorEnsureResult]
 
 _LOG = logging.getLogger("cpt.application.a_share_snapshot")
 
@@ -59,6 +79,7 @@ def build_ashare_snapshot(
     width_k: int = DEFAULT_WIDTH_K,
     client: AShareLocalClient | None = None,
     backend: ChanlunBackend | None = None,
+    ensure_factors: FactorEnsurer | None = None,
 ) -> dict[str, Any]:
     """为 ``code`` 构造 dashboard snapshot（v2 schema，与加密侧同）。
 
@@ -68,6 +89,9 @@ def build_ashare_snapshot(
         client: 可选注入的 :class:`AShareLocalClient`；不传则 lazy 默认连接
             （需要运行 venv 装 psycopg，``pip install -e ".[db]"``）。
         backend: 缠论后端；``None`` 时走 ``auto`` 档（装了 czsc 就用 czsc）。
+        ensure_factors: 按需补因子的钩子。``None``（默认）表示**不补** ——
+            直接调用本函数永远不会联网或写库。生产入口传
+            ``factor_ensurer_from_env(default=True)``。
 
     Returns:
         v2 snapshot；任何失败都返回 **degraded 占位快照**而不是抛异常 —— 但
@@ -79,22 +103,49 @@ def build_ashare_snapshot(
     else:
         assert client is not None  # type assertion only — mypy 收窄
         active_client = client
+    # 注意：``ensure_factors`` 为 ``None`` 时**不做**按需补因子（安全默认）。
+    # 生产入口显式传入，见 factor_ensurer_from_env 的注释。
+    ensurer = ensure_factors
+    outcome: FactorEnsureResult | None = None
     try:
         end_ms = int(datetime.now(UTC).timestamp() * 1000)
         # 多预留 60 根以保证缠论结构稳定
         start_ms = end_ms - (width_k + 60) * INTERVAL_MS
         result = active_client.fetch_validated_klines(code, start_ms, end_ms)
         canonical = list(result.bars)
+        if not canonical or _skipped_no_factor(result):
+            # 本地因子不全（全库 5225 只只有 94 只有因子）→ 按需补一次再重读。
+            # 触发条件同时覆盖"整段缺"和"部分缺"：部分缺会让 K 线序列出现空洞，
+            # 画出来的笔/中枢是错的，比整段缺更隐蔽。
+            outcome = _try_on_demand_factors(code, active_client, start_ms, end_ms, ensurer)
+            if outcome is not None:
+                result = active_client.fetch_validated_klines(code, start_ms, end_ms)
+                canonical = list(result.bars)
         if not canonical:
-            # 缺复权因子是最常见的原因（全库 5225 只只有 94 只有因子），
-            # 必须把"为什么没有"带到前端，而不是画一张空图。
-            reason = "no_factor" if getattr(result, "skipped_no_factor", ()) else "no_data"
-            return empty_ashare_snapshot(code, reason)
+            reason = "no_factor" if _skipped_no_factor(result) else "no_data"
+            if outcome is not None and outcome.reason:
+                reason = _reason_for_failure(outcome)
+            snapshot = empty_ashare_snapshot(code, reason)
+            _attach_factor_fetch(snapshot, outcome)
+            return snapshot
     except AShareNoFactorError as exc:
         # 最常见的一种失败（全库 5225 只只有 94 只有因子）。必须与"没数据"和
         # "DB 挂了"分开报 —— 报成 db_error 会把排查方向带偏（实测踩过）。
         _LOG.info("A 股缺因子 %s: %s", code, exc)
-        return empty_ashare_snapshot(code, "no_factor")
+        outcome = _try_on_demand_factors(code, active_client, start_ms, end_ms, ensurer)
+        if outcome is not None and outcome.fetched:
+            try:
+                result = active_client.fetch_validated_klines(code, start_ms, end_ms)
+                canonical = list(result.bars)
+            except Exception as retry_exc:  # noqa: BLE001
+                _LOG.warning("按需补因子后重读仍失败 %s: %s", code, retry_exc)
+                snapshot = empty_ashare_snapshot(code, "no_factor")
+                _attach_factor_fetch(snapshot, outcome)
+                return snapshot
+        else:
+            snapshot = empty_ashare_snapshot(code, _reason_for_failure(outcome))
+            _attach_factor_fetch(snapshot, outcome)
+            return snapshot
     except AShareNoDataError as exc:
         _LOG.info("A 股无行情 %s: %s", code, exc)
         return empty_ashare_snapshot(code, "no_data")
@@ -150,7 +201,156 @@ def build_ashare_snapshot(
     snapshot["market"]["symbol"] = code
     snapshot["market"]["kind"] = "a_share"
     snapshot["market"]["interval"] = "1d"
+    _attach_factor_fetch(snapshot, outcome)
     return snapshot
+
+
+# --------------------------------------------------------------- 按需补因子（R17-3）
+
+
+def _skipped_no_factor(result: Any) -> tuple[str, ...]:
+    """取 ``AShareFetchResult.skipped_no_factor``（对 duck-typed 假客户端也安全）。
+
+    不用 ``getattr(result, ..., ())``：``result`` 已被标注成 ``AShareFetchResult``，
+    mypy 会拿属性类型 ``tuple[str, ...]`` 去校验默认值 ``tuple[()]`` 并报错。
+    """
+    skipped = getattr(result, "skipped_no_factor", None)
+    return tuple(skipped) if skipped else ()
+
+
+def factor_ensurer_from_env(*, default: bool = False) -> FactorEnsurer | None:
+    """按 ``CPT_ASHARE_ONDEMAND_FACTOR`` 决定是否启用按需补因子。
+
+    Args:
+        default: 环境变量**未设置**时的取值。
+
+    ``default=False``（本函数的默认）意味着：**直接调用
+    ``build_ashare_snapshot`` 不会联网、不会写库**。只有显式开启才生效 —— 这一点
+    是踩出来的：早期版本把默认写成"开"，结果跑一次 ``pytest`` 就让
+    ``test_snapshot_reason_no_factor_is_not_db_error`` 真的去腾讯拉了 600519 的
+    800 行因子并写进了生产库（因子表 94 → 95 只）。
+
+    生产入口（``cpt.web.a_share_routes``）用 ``default=True`` 显式打开。
+    """
+    raw = os.getenv(ENV_ONDEMAND_FACTOR)
+    if raw is None:
+        return _ensure_factors_and_persist if default else None
+    if raw.strip().lower() in {"", "0", "false", "no", "off"}:
+        return None
+    return _ensure_factors_and_persist
+
+
+def _ensure_factors_and_persist(code: str) -> FactorEnsureResult:
+    """拉一次因子并**落库**（幂等），返回结果。
+
+    落库而不是只放内存：这样它同时是一个**自愈缓存** —— 拉过一次以后都快，
+    而且每日的 ``scripts/factor_backfill.py --mode incremental`` 会顺带刷新。
+    代价是 GET 快照会写 DB，所以整条路径由 ``CPT_ASHARE_ONDEMAND_FACTOR`` 兜底开关。
+    """
+    fetcher = _fetcher()
+    outcome = fetcher.ensure(code)
+    if not outcome.fetched:
+        return outcome
+    try:
+        rows = fetch_factor_rows(code, days=DEFAULT_FACTOR_DAYS)
+    except Exception as exc:  # noqa: BLE001 — 落库失败不该让看板 500
+        _LOG.warning("按需因子落库前重取失败 %s: %s", code, exc)
+        return FactorEnsureResult(
+            code=code, fetched=False, rows=0, reason="error", detail=f"{type(exc).__name__}: {exc}"
+        )
+    client = AShareLocalClient()
+    try:
+        written = upsert_factor_rows(client._get_conn(), rows, source_url=TENCENT_KLINE_URL)  # noqa: SLF001
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("按需因子落库失败 %s: %s", code, exc)
+        return FactorEnsureResult(
+            code=code,
+            fetched=False,
+            rows=0,
+            reason="persist_failed",
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+    finally:
+        client.close()
+    _LOG.info("按需因子落库成功 %s: %d 行", code, written)
+    return FactorEnsureResult(code=code, fetched=True, rows=written)
+
+
+_FETCHER: OnDemandFactorFetcher | None = None
+
+
+def _fetcher() -> OnDemandFactorFetcher:
+    """进程内单例：冷却状态必须跨请求保留，否则冷却形同虚设。"""
+    global _FETCHER  # noqa: PLW0603
+    if _FETCHER is None:
+        _FETCHER = OnDemandFactorFetcher()
+    return _FETCHER
+
+
+def reset_factor_fetcher() -> None:
+    """清掉冷却状态（测试用）。"""
+    global _FETCHER  # noqa: PLW0603
+    _FETCHER = None
+
+
+def _try_on_demand_factors(
+    code: str,
+    client: AShareLocalClient,
+    start_ms: int,
+    end_ms: int,
+    ensurer: FactorEnsurer | None,
+) -> FactorEnsureResult | None:
+    """本地因子不全时补一次；返回结果（``None`` = 没启用/不该补）。"""
+    if ensurer is None:
+        return None
+    # 行情本身都没有的代码不必去拉因子（省一次腾讯往返）
+    try:
+        result = client.fetch_validated_klines(code, start_ms, end_ms)
+    except AShareNoDataError:
+        return None
+    except AShareNoFactorError:
+        pass  # 正是要补的情形
+    except Exception:  # noqa: BLE001 — DB 类问题不该在这里吞掉，交给外层
+        return None
+    else:
+        if not _skipped_no_factor(result):
+            return None
+    return ensurer(code)
+
+
+def _reason_for_failure(outcome: FactorEnsureResult | None) -> str:
+    """把按需补因子的失败原因翻成前端能懂且**能据此行动**的 reason。
+
+    ``unsupported`` 与 ``network`` 必须分开：前者是"这只票腾讯就没有"，重试无意义；
+    后者是"这次没连上"，重试有意义。混成一个会让用户白点。
+    """
+    if outcome is None:
+        return "no_factor"
+    if outcome.reason == "unsupported":
+        return "no_factor_unsupported"
+    if outcome.reason == "cooldown":
+        return "no_factor_cooldown"
+    if outcome.reason in {"network", "error", "persist_failed"}:
+        return f"no_factor_fetch_failed:{outcome.reason}"
+    return "no_factor"
+
+
+def _attach_factor_fetch(snapshot: dict[str, Any], outcome: FactorEnsureResult | None) -> None:
+    """把按需拉取的结果挂到快照上（审计用：这次到底拉没拉、拉了多少）。"""
+    if outcome is None:
+        return
+    quality = snapshot.setdefault("data_quality", {})
+    if isinstance(quality, dict):
+        quality["factor_fetch"] = {
+            "attempted": True,
+            "fetched": outcome.fetched,
+            "rows": outcome.rows,
+            "reason": outcome.reason,
+            "detail": outcome.detail,
+        }
+    runtime = snapshot.setdefault("runtime", {})
+    if isinstance(runtime, dict):
+        runtime["factor_fetch"] = quality.get("factor_fetch") if isinstance(quality, dict) else None
 
 
 def empty_ashare_snapshot(code: str, reason: str) -> dict[str, Any]:

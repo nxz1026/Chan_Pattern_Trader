@@ -47,6 +47,7 @@ from urllib.parse import quote
 from cpt.domain.models import CanonicalBar
 
 __all__ = [
+    "AShareAdjustUnsupportedError",
     "ASharePublicError",
     "DAILY_INTERVAL_MS",
     "SINA_QUOTE_URL",
@@ -76,6 +77,17 @@ _CODE_RE: Final[re.Pattern[str]] = re.compile(r"^(?P<market>sh|sz|bj)?(?P<digits
 
 class ASharePublicError(RuntimeError):
     """公开源不可用 / 响应格式不符（不静默降级，由调用方决定兜底）。"""
+
+
+class AShareAdjustUnsupportedError(ASharePublicError):
+    """腾讯对该**标的**不提供请求的复权序列（HTTP 200 但无 ``hfqday`` 键）。
+
+    单独成类是因为这是**逐标的**属性、不是板块属性，且**无法预测**：实测
+    688111/688036 有 hfq 而 688981（中芯国际，800 根 raw）没有；多数 301 有 hfq
+    而近期新股没有。唯一可靠的做法是问一次、然后如实报告 —— 见
+    ``docs/progress-log.md`` R15-1 节：这里先后错过两次（先记成"501"，再记成
+    "按板块不支持"），任何前缀规则都会重犯。
+    """
 
 
 def normalize_code(code: str) -> str:
@@ -212,7 +224,8 @@ def parse_tencent_kline(
     rows = node.get(key)
     if rows is None and key != "day":
         # 部分标的没有复权数据，腾讯只给 day —— 明确报错而不是拿不复权价冒充后复权。
-        raise ASharePublicError(f"{symbol} 无 {key} 数据（腾讯只返回了 {sorted(node)}）")
+        # 用专用异常类型：调用方要据此区分"该标的没有"与"网络/解析失败"。
+        raise AShareAdjustUnsupportedError(f"{symbol} 无 {key} 数据（腾讯只返回了 {sorted(node)}）")
     if not isinstance(rows, Sequence) or not rows:
         raise ASharePublicError(f"{symbol} 的 {key} 为空")
 

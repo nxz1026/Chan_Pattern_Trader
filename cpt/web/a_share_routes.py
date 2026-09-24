@@ -62,10 +62,22 @@ def _normalize(code: str) -> str:
 
 
 def snapshot_payload(code: str, *, width_k: int = DEFAULT_WIDTH_K) -> dict[str, Any]:
-    """构造 A 股 v2 snapshot。失败时返回 degraded 占位快照（不抛）。"""
-    from cpt.application.a_share_snapshot import build_ashare_snapshot  # noqa: PLC0415
+    """构造 A 股 v2 snapshot。失败时返回 degraded 占位快照（不抛）。
 
-    return build_ashare_snapshot(_normalize(code), width_k=width_k)
+    **按需补因子在这里显式开启**（``default=True``）：用户输入代码 → 本地没有因子
+    就去腾讯拉一次并落库 → 重新生成快照。application 层的默认是关闭的，所以直接
+    调用 ``build_ashare_snapshot`` 的代码（含测试）不会联网、不会写库。
+    """
+    from cpt.application.a_share_snapshot import (  # noqa: PLC0415
+        build_ashare_snapshot,
+        factor_ensurer_from_env,
+    )
+
+    return build_ashare_snapshot(
+        _normalize(code),
+        width_k=width_k,
+        ensure_factors=factor_ensurer_from_env(default=True),
+    )
 
 
 def _factor_codes() -> set[str]:

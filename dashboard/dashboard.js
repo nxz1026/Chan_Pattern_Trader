@@ -391,6 +391,11 @@
     // 否则"缺复权因子"会被显示成"无法连接行情上游（Binance）"，把排查方向带偏。
     no_factor: "该代码缺复权因子，画不出后复权序列（全库 5225 只里只有 94 只有因子）",
     no_data: "本地库 public.daily_bar 里没有该代码的行情",
+    // 「按需补因子」的三种结果（见 market_a_share.js）：必须分开，否则用户不知道
+    // 该不该重试 —— unsupported 重试无意义，fetch_failed 有意义。
+    no_factor_unsupported: "腾讯不提供该标的的后复权数据，补不了因子（逐标的属性，无法用板块预测）",
+    no_factor_cooldown: "刚为该代码拉取过因子，请稍候再试（冷却中）",
+    no_factor_fetch_failed: "拉取因子失败（网络或落库），可以再试一次",
     invalid_code: "A 股代码格式不正确（期望 600519 / 600519.SH / sh600519）",
   };
 

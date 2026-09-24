@@ -132,6 +132,10 @@ def test_degraded_reasons_cover_ashare_failures() -> None:
     assert "no_data:" in source
     assert "invalid_code:" in source
     assert "缺复权因子" in source
+    # 按需补因子的三种结果也必须各有文案：用户要能据此判断该不该重试
+    assert "no_factor_unsupported:" in source
+    assert "no_factor_cooldown:" in source
+    assert "no_factor_fetch_failed:" in source
 
 
 def test_market_url_params_are_linkable(a_share_source: str) -> None:
@@ -142,13 +146,14 @@ def test_market_url_params_are_linkable(a_share_source: str) -> None:
     assert 'url.searchParams.set("code"' in a_share_source
 
 
-def test_picker_lists_undrawable_codes_but_disables_them(a_share_source: str) -> None:
-    """热门池 100 只里只有 94 只有因子：**列出但禁用**，不能直接过滤掉。
+def test_picker_lists_undrawable_codes_without_disabling_them(a_share_source: str) -> None:
+    """热门池里本地无因子的票：**列出、标注，但不禁用**。
 
-    直接过滤会让人以为池子少了票；不标注则让人对着空画布猜。
+    不能直接过滤（会让人以为池子少了票），也**不能禁用** —— R17-3 起点击会触发
+    按需拉取，腾讯有该标的后复权就能救回来；禁用等于把这条路堵死。
     """
-    assert "缺因子" in a_share_source
-    assert "option.disabled = item.drawable !== true" in a_share_source
+    assert "本地无因子" in a_share_source
+    assert "option.disabled" not in a_share_source
 
 
 def test_css_defines_market_widgets() -> None:

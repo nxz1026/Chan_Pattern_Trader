@@ -27,8 +27,13 @@
   /** 后端降级原因 → 面向用户的中文说明（A 股专属，加密侧的在 dashboard.js）。 */
   const A_SHARE_REASONS = {
     no_factor: "该代码缺复权因子，画不出后复权序列（全库 5225 只里只有 94 只有因子）",
-    no_data: "本地库 public.daily_bar 里没有该代码的行情",
+    no_data: "本地库 public.daily_bar 里没有该代码的行情（日线入库是另一条链路，不在按需拉取范围）",
     invalid_code: "代码格式不正确",
+    // 下面三条来自「按需补因子」。区分它们是有意义的：重试对 unsupported 没用，
+    // 对 fetch_failed 有用；混成一条会让用户白点。
+    no_factor_unsupported: "腾讯不提供该标的的后复权数据，补不了因子（是否提供是逐标的的，无法用板块预测）",
+    no_factor_cooldown: "刚为该代码拉取过因子，请稍候再试（冷却中）",
+    no_factor_fetch_failed: "拉取因子失败（网络或落库），可以再试一次",
   };
 
   function q(selector, scope) {
@@ -117,14 +122,16 @@
       }
       // 画不出来的票**仍然列出但标注**：热门池 100 只里只有 94 只有因子，
       // 直接过滤掉会让人以为池子少了票。
+      //
+      // R17-3 起**不再禁用**它们：本地没因子不等于画不出来 —— 点一下会触发按需
+      // 拉取（腾讯有该标的后复权就能救回来）。禁用会把这条路堵死。
       items.forEach((item) => {
         const option = document.createElement("option");
         option.value = item.code;
         const rank = item.rank === null || item.rank === undefined ? "—" : item.rank;
         option.textContent = item.drawable
           ? `${item.code}（#${rank}）`
-          : `${item.code}（#${rank}·缺因子）`;
-        option.disabled = item.drawable !== true;
+          : `${item.code}（#${rank}·本地无因子，可尝试拉取）`;
         if (item.code === state.code) option.selected = true;
         select.appendChild(option);
       });
@@ -142,7 +149,8 @@
       if (runtime.degraded !== true) return null;
       const reason = String(runtime.degraded_reason || "");
       const key = reason.split(":")[0];
-      return A_SHARE_REASONS[key] || `A 股数据不可用（${reason || "unknown"}）`;
+      const detail = reason.includes(":") ? `（${reason}）` : "";
+      return (A_SHARE_REASONS[key] || `A 股数据不可用（${reason || "unknown"}）`) + detail;
     }
 
     function applyMarket() {
