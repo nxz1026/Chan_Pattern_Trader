@@ -769,3 +769,9 @@ where date between '2026-09-14' and '2026-09-25' group by date order by date;
 `379 passed`（R17 的 370 + 9）；ruff check / ruff format --check(136 files) /
 mypy(66 files) / vulture / import-linter(4 kept, 0 broken) 全绿；CI 无可选依赖
 模拟：86 passed, 3 skipped。
+
+`audit_R17.js` 复跑：**P1 = 1**（`a_share_local 降级：缺 1 个工作日整天：2026-09-22`，
+evidence 里带 `missing_weekdays` / `median_bars_per_day` / `low_coverage_days`），
+P0 = 0、P2 = 0、外部请求 0、页面异常 0、四画布计数仍全等。审计脚本原本只校验
+status 合法（`degraded` 合法所以被放过），已改成**把 degraded 顶成 P1** ——
+合法状态不等于健康状态。
