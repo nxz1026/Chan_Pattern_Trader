@@ -5,10 +5,12 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import Any
 
-from cpt.web.a_share import (
+from cpt.application.a_share_snapshot import (
     DEFAULT_WIDTH_K,
-    _empty_snapshot,
     build_ashare_snapshot,
+)
+from cpt.application.a_share_snapshot import (
+    empty_ashare_snapshot as _empty_snapshot,
 )
 
 
@@ -113,7 +115,9 @@ def test_provider_caches_snapshot_within_ttl():
 
 
 def test_provider_default_width_k_matches_plan():
-    assert DEFAULT_WIDTH_K == 30
+    # R17-3 起默认 120 根（≈半年）：30 根实测只出 2 笔，看不出笔/中枢形态；
+    # 而带因子的 61 只全部有 ≥250 根历史，调大零覆盖损失。
+    assert DEFAULT_WIDTH_K == 120
 
 
 def test_empty_and_real_paths_have_same_schema_shape():

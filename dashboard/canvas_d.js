@@ -23,6 +23,15 @@
     return String(raw).replace(/\/dashboard\/snapshot.*$/, "/canvas/wbt");
   }
 
+  // A 股模式必须把 code 透给服务端：本路由是服务端取数的，不带 code 就会拿
+  // 加密快照 —— 结果是 A/B/C 画 A 股、D 画 BTCUSDT（R17-3 审计实测 579 vs 123）。
+  function marketQuery() {
+    const data = (document.body && document.body.dataset) || {};
+    if (data.market !== "a_share") return "";
+    const code = data.aShareCode || "";
+    return code ? `&code=${encodeURIComponent(code)}` : "";
+  }
+
   function vendorBase() {
     const link = document.querySelector('link[rel="stylesheet"][href*="dashboard.css"]');
     const href = link ? link.getAttribute("href") : "./dashboard.css";
@@ -121,7 +130,7 @@
     note.textContent = "正在请求服务端 wbt 报告…";
     frame.contentDocument.body.appendChild(note);
 
-    const url = `${endpoint()}?start_ms=${view.windowStart}&end_ms=${view.windowEnd}`;
+    const url = `${endpoint()}?start_ms=${view.windowStart}&end_ms=${view.windowEnd}${marketQuery()}`;
     window
       .fetch(url)
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))

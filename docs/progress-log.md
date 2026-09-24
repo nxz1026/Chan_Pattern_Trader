@@ -798,3 +798,92 @@ status 合法（`degraded` 合法所以被放过），已改成**把 degraded �
 
 结论：**台账是共享追加文件，存在无法归属的写入方**。已给每条记录加 `pid` 字段，
 后续任何一笔额度消耗都能定位到进程，不再靠推断。
+
+---
+
+## R17-3 A 股主看板 UI（市场切换 + 四画布复用）
+
+### 目标
+
+R17 把 A 股的**后端**链路打通了（Wind 因子 backfill / 日线接入 / 热门池 / 自选），
+但看板上**没有任何 A 股入口** —— 只能靠 `python -m cpt.web.a_share --code XXX
+--port 8011` 另起一个进程、自己在浏览器里开第二个页面看。R17-3 把 A 股接进主看板。
+
+### 落地方案：换 snapshot URL，不碰画布
+
+A 股快照走的是与加密侧**完全同构**的 `dashboard.v2` schema，所以接入点只有一个：
+**换掉 `loadSnapshot()` 的 URL**。四个画布（A/B/C/D）零改动 —— 这条性质由测试钉住
+（`tests/test_dashboard_ashare_contract.py::test_render_canvas_modules_are_market_agnostic`：
+canvas_b.js / canvas_c.js 里不允许出现 `a_share` 或 `market` 字样）。
+
+改动清单：
+
+| 文件 | 作用 |
+| --- | --- |
+| `cpt/application/a_share_snapshot.py` | **新**：`build_ashare_snapshot` 从 web 层迁到 application 层（两个调用方：独立 A 股服务 + 主看板路由）；`DEFAULT_WIDTH_K` 30 → **120** |
+| `cpt/web/a_share_routes.py` | **新**：三条路由的载荷构造（snapshot / pool / watchlist） |
+| `cpt/web/app.py` | 新增 `/api/dashboard/a-share/{snapshot,pool,watchlist}`，**在 `provider()` 之前分发**；`do_POST` / `do_DELETE` |
+| `cpt/adapters/a_share_local.py` | 新增 `AShareNoDataError` / `AShareNoFactorError`（原来两者都抛同一个 `AShareLocalError`） |
+| `dashboard/market_a_share.js` | **新**：市场切换 + 代码下拉 + `?market=&code=` |
+| `dashboard/index.html` / `.css` / `dashboard.js` | 顶栏市场切换、A 股选择器、降级文案、A 股模式停轮询 |
+| `dashboard/canvas_d.js` | 透传 `code`（见下文"跨市场错配"） |
+
+### 为什么默认宽度从 30 改成 120
+
+30 根（≈1.5 个月）实测只能出 **2 笔**（`000002`），笔/中枢的形态根本看不出来；
+120 根（≈半年）才是缠论结构的可读尺度。带因子的 61 只**全部**有 ≥250 根历史，
+所以调大默认值**零覆盖损失**。
+
+### 三个实测踩到的坑
+
+**1. 画布 D 跨市场错配（最严重）**
+
+D 与 A/B/C 的取数方式**根本不同**：A/B/C 画客户端那份快照，而 D 是
+`/api/canvas/wbt` **服务端**取数的。不带 `code` 时服务端拿的是 provider 的
+**加密**快照，于是出现 A/B/C 画 123 根 A 股 K 线、D 画 **579 根 BTCUSDT** K 线，
+**一屏两个市场**。这个错配在"四画布计数全等"的旧断言下是**看不出来**的 ——
+旧审计逐个画布独立断言，只要每个画布内部自洽就放过。已改为跨画布比对，
+并加了后端回归测试（`test_canvas_wbt_route_with_code_uses_ashare_snapshot`）。
+
+**2. 中文错误消息会**断开**HTTP 连接**
+
+`BaseHTTPRequestHandler.send_error()` 把 message 写进 HTTP **状态行**，而状态行
+只能 latin-1 编码 —— 任何中文提示都会抛 `UnicodeEncodeError` 并直接断连接，
+浏览器侧只看到 `RemoteDisconnected`（网络错误），看不到原因。所有 A 股 400 改成
+JSON 错误体（`_write_json_error`）。
+
+**3. `select.value` 写标签而不是值 → 控件显示空白**
+
+`interval-select` 的 option `value` 是**毫秒**（`86400000` = 1d），写
+`interval.value = "1d"` 匹配不到任何 option，select 会显示成空白。
+
+### 失败语义（A 股特有）
+
+全库 5225 只里只有 **94 只有复权因子**，"点进去是空图"是常态而非异常，所以
+失败必须分类说清楚：
+
+| reason | 含义 | 前端文案 |
+| --- | --- | --- |
+| `no_factor` | 有行情但整段缺因子 | 该代码缺复权因子，画不出后复权序列（94/5225） |
+| `no_data` | `public.daily_bar` 里没有该代码 | 本地库里没有该代码的行情 |
+| `db_error:*` | DB 不可达 | 保留原始异常类型名 |
+| `invalid_code` | 代码格式非法 | HTTP 400 + JSON 体 |
+
+热门池列表里缺因子的票**仍然列出但禁用并标注"缺因子"** —— 直接过滤会让人以为
+池子少了票（100 只里 6 只缺因子）。
+
+### 验收
+
+`409 passed`（R17 的 379 + 30）；ruff check / ruff format --check(140 files) /
+mypy(68 files) / vulture / import-linter(4 kept, 0 broken) 全绿；
+CI 无可选依赖模拟：338 passed, 28 skipped。
+
+`audit_R17-3.js`（真机 Chromium + 公网 URL）：**P0 = 0、P1 = 0、P2 = 0**，
+外部请求 0、控制台错误 0、页面异常 0。四画布计数**全等**
+（`002614`：123 根 K 线 / 52 分型 / 10 笔 / 2 中枢）；缺因子代码显示明确文案；
+interval 锁 `1d` 且禁用；点击市场按钮 URL 写 `?market=a_share&code=002614`。
+
+审计脚本自身也修了两个**假绿/假红**来源：`canvasCounts` 在**首次**渲染（空快照）
+就会出现，只等它存在会在数据到达前返回 0 计数（上一版因此误报"一笔都没有"）；
+`state-degraded-message` 的文案是 `index.html` 里的静态 placeholder，恒非空，
+等"文本非空"会立刻拿到占位文案。

@@ -387,6 +387,11 @@
     data_guard_rejected: "上游返回的 K 线未通过数据守卫（去重/递增/缺口/OHLC 校验）",
     poll_failed: "实时轮询线程异常退出本轮采集",
     no_poll_yet: "尚未完成首次行情采集",
+    // A 股（R17-3）：这两条是最常见的失败，必须与加密侧的措辞分开 ——
+    // 否则"缺复权因子"会被显示成"无法连接行情上游（Binance）"，把排查方向带偏。
+    no_factor: "该代码缺复权因子，画不出后复权序列（全库 5225 只里只有 94 只有因子）",
+    no_data: "本地库 public.daily_bar 里没有该代码的行情",
+    invalid_code: "A 股代码格式不正确（期望 600519 / 600519.SH / sh600519）",
   };
 
   function degradedMessage(reason) {
@@ -2572,6 +2577,12 @@
   }
 
   function startPolling(url, intervalMs = 5000) {
+    // A 股日线收盘后不再变，轮询纯属浪费（还会让"数据没变"看起来像卡住）。
+    // 用 root.dataset.market 而不是另存一份 state，避免与 market_a_share.js 双头状态。
+    if (root.dataset.market === "a_share") {
+      state.snapshotUrl = url;
+      return null;
+    }
     stopPolling();
     state.snapshotUrl = url;
     state.pollTimer = window.setInterval(() => {
@@ -3090,17 +3101,33 @@
     window.addEventListener("resize", scheduleDraw);
 
     const params = new URLSearchParams(window.location.search);
+    // A 股市场模式（R17-3）。模块只负责"换 snapshot URL + 换顶栏控件"，
+    // 渲染仍走 drawChart() 分发到四个画布 —— 所以这里不碰任何画布代码。
+    const aShare =
+      window.CPTAShare && typeof window.CPTAShare.install === "function"
+        ? window.CPTAShare.install({ loadSnapshot })
+        : null;
+    state.aShare = aShare;
     // ``?snapshot=`` 优先于 ``data-snapshot-url``（R16-5 改）。
     // 原顺序（属性优先）让 ``?snapshot=`` 完全失效 —— 属性在 index.html 里恒非空，
     // 于是文档里写的"file:// + 内联 JSON 默认离线"根本走不到，离屏审计也无法把
     // 页面指到一份固定快照上。改为参数优先后：不传参数 = 原行为（走属性），
     // 传了就覆盖。``?demo=off`` 的语义不变。
-    const snapshotUrl = params.get("snapshot") || root.dataset.snapshotUrl;
-    if (snapshotUrl) {
-      state.snapshotUrl = snapshotUrl;
-      loadSnapshot(snapshotUrl);
-    } else if (params.get("demo") !== "off") loadDemo();
-    else render(null);
+    const explicitSnapshot = params.get("snapshot");
+    const snapshotUrl = explicitSnapshot || root.dataset.snapshotUrl;
+    const aShareMode =
+      Boolean(aShare) && aShare.getMarket() === "a_share" && !explicitSnapshot;
+    if (aShareMode) {
+      // 交给市场模块去拉 A 股快照（它还要先取热门池填下拉），这里不重复发请求。
+      aShare.init();
+    } else {
+      if (aShare) aShare.init();
+      if (snapshotUrl) {
+        state.snapshotUrl = snapshotUrl;
+        loadSnapshot(snapshotUrl);
+      } else if (params.get("demo") !== "off") loadDemo();
+      else render(null);
+    }
 
     root.dispatchEvent(new CustomEvent("cpt:dashboard-ready"));
   }
@@ -3109,6 +3136,7 @@
     schemaVersion: SCHEMA_VERSION,
     render,
     loadSnapshot,
+    getAShare: () => state.aShare,
     demoSnapshot,
     loadDemo,
     clear,

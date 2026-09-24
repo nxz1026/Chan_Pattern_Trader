@@ -141,7 +141,13 @@ def test_snapshot_query_param_overrides_attribute() -> None:
     无法把页面指到一份固定快照上。
     """
     source = (DASHBOARD / "dashboard.js").read_text(encoding="utf-8")
-    assert 'params.get("snapshot") || root.dataset.snapshotUrl' in source
+    # R17-3 起显式分了两步：先取参数（A 股模式判断也要用它），再让参数优先。
+    # 断言语义不变，同时钉住"参数必须先于属性被求值"。
+    explicit = 'const explicitSnapshot = params.get("snapshot");'
+    resolved = "const snapshotUrl = explicitSnapshot || root.dataset.snapshotUrl;"
+    assert explicit in source
+    assert resolved in source
+    assert source.index(explicit) < source.index(resolved)
 
 
 def test_window_filtering_is_applied_to_all_structure_kinds() -> None:

@@ -34,6 +34,21 @@
           <button type="button" data-mode="research" data-mode-action="research">研究</button>
         </div>
         <div data-testid="canvas-switch" class="canvas-switch" role="group" aria-label="画布切换"></div>
+        <div data-testid="market-switch" class="market-switch" role="group" aria-label="市场切换">
+          <button type="button" data-market-action="crypto" aria-pressed="true">加密</button>
+          <button type="button" data-market-action="a_share" aria-pressed="false">A股</button>
+        </div>
+        <div data-testid="a-share-picker" class="a-share-picker" hidden>
+          <select data-testid="a-share-code-select" aria-label="选择 A 股代码"></select>
+          <input
+            type="text"
+            data-testid="a-share-code-input"
+            aria-label="手输 A 股代码"
+            placeholder="600519"
+            size="8"
+          />
+          <button type="button" data-testid="a-share-code-apply">查看</button>
+        </div>
       </nav>
 
       <dl data-testid="topbar-meta" class="topbar-meta">
@@ -379,6 +394,7 @@
     <script src="./canvas_b.js" defer></script>
     <script src="./canvas_c.js" defer></script>
     <script src="./canvas_d.js" defer></script>
+    <script src="./market_a_share.js" defer></script>
     <script src="./dashboard.js" defer></script>
   </body>
 </html>

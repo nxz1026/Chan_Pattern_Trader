@@ -31,9 +31,11 @@ from cpt.domain.models import CanonicalBar
 from cpt.domain.types import BarLike
 
 __all__ = [
+    "AShareFetchResult",
     "AShareLocalClient",
     "AShareLocalError",
-    "AShareFetchResult",
+    "AShareNoDataError",
+    "AShareNoFactorError",
 ]
 
 #: ``public.daily_bar`` 实际列名（与 DB schema 对齐）
@@ -85,6 +87,18 @@ def connection_kwargs() -> dict[str, Any]:
 
 class AShareLocalError(RuntimeError):
     """A股本地适配器错误（DB 不可达、因子缺失、代码无数据等）。"""
+
+
+class AShareNoDataError(AShareLocalError):
+    """区间内在 ``public.daily_bar`` 完全没有该代码的行情。"""
+
+
+class AShareNoFactorError(AShareLocalError):
+    """有行情但区间内**每一天都缺复权因子** —— 画不出后复权序列。
+
+    这是最常见的一种失败：全库 5225 只里只有 94 只有因子。单独成类是为了让上层
+    能把"这只票没数据"和"这只票缺因子"分开告诉用户（实测前者会误导排查方向）。
+    """
 
 
 @dataclass(frozen=True)
@@ -180,7 +194,7 @@ class AShareLocalClient:
             ) from e
 
         if not rows:
-            raise AShareLocalError(
+            raise AShareNoDataError(
                 f"{bare_code} {start_date}~{end_date} 在 public.daily_bar 无数据"
             )
 
@@ -213,7 +227,7 @@ class AShareLocalClient:
             )
 
         if not bars:
-            raise AShareLocalError(
+            raise AShareNoFactorError(
                 f"{bare_code} {start_date}~{end_date} 区间内所有日期都缺因子（{len(skipped)} 日）"
             )
 

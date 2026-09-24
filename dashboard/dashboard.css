@@ -1418,3 +1418,50 @@ noscript p {
   border: 0;
   background: var(--color-bg);
 }
+
+/* ---- 市场切换 + A 股代码选择器（R17-3） ---- */
+.market-switch {
+  display: inline-flex;
+  gap: 2px;
+  margin-left: 8px;
+  padding: 2px;
+  border: 1px solid var(--cpt-border, #2a3242);
+  border-radius: 6px;
+}
+.market-switch button {
+  padding: 2px 10px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
+.market-switch button[aria-pressed="true"] {
+  background: var(--cpt-accent, #3b82f6);
+  color: #fff;
+}
+.a-share-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 8px;
+}
+.a-share-picker input,
+.a-share-picker select {
+  padding: 2px 6px;
+  border: 1px solid var(--cpt-border, #2a3242);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+}
+.a-share-picker button {
+  padding: 2px 10px;
+  border: 1px solid var(--cpt-border, #2a3242);
+  border-radius: 4px;
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+}
