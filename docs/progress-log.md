@@ -342,3 +342,54 @@ R15-1 不再继续尝试（避免无限重试）——这些票在主板热门�
 
 **验收**：`234 passed`（R14 的 226 + 8）；ruff check / ruff format --check
 (115 files) / mypy(57 files) / vulture / import-linter(4 kept, 0 broken) 全绿。
+
+### R15-3 A 股规则标签 ✅
+
+**产出**：
+
+- `cpt/domain/a_share_rules.py`：C2/C4/C5 标签应用
+- `tests/test_a_share_rules.py`：11 个 mock 测试
+- **C2 涨跌停**：直接读 ``public.derived_bar`` 的 ``is_limit_up/is_limit_down/
+  is_bomb/is_one_word``（不重算 ±10/20/30% 阈值——随板块变化，重算易错），把
+  合成 id 挂到 ``Bi.source_ids``（不改 ``Bi`` schema，保持跨市场一致）。
+- **C3 停牌**：`public.daily_bar` 是交易日表，停牌日本来就没行——无需额外处理。
+- **C4 T+1**：``t_plus_one_purchase_allowed()`` 占位（实际仓位层在
+  ``cpt/storage/repository`` 里管——本接口只回答"日历是否允许"）。
+- **C5 非交易日**：天然不在 ``public.daily_bar``，不需额外处理。
+
+**端点匹配**：用 ``Bi.end_time``（毫秒）转 ISO date 查表，**不是** ``start_time``——
+起点在涨停日意味着"上涨结束于涨停"，但端点本身是涨停日的收盘价（仍可能真实），
+查末端更稳健（C2 §5.3 原话）。
+
+### R15-4 A 股热门池 + 自选 ✅
+
+**产出**：
+
+- `cpt/adapters/a_share_pool.py`：热门池 + 自选 JSON 落盘
+- `tests/test_a_share_pool.py`：13 个测试
+- **热门池** = ``public.hot_rank`` 最新日全集 ∪ ``public.ladder_day`` 最新日
+  ``cont_days >= 2``；hot_rank 优先（带 ``rank`` 字段），ladder_day 仅补缺。
+- **limit_pool_em 当日涨停池**：辅助标注入口（plan §5.4 说该表 30 天窗口
+  不足以做主池，所以只作辅助）。
+- **自选**：`WatchlistStore` 用 ``fcntl.flock`` 单进程安全 + JSON 落盘；
+  幂等添加（重复 add 返回原 entry）；自动创建父目录。
+- DB 连接自实现（`~/.dbconfig` 5 行解析）；**不引入 psycopg 到 cpt 核心依赖**。
+
+### R15-5 R15 验收小结
+
+按 plan §5.5 逐条对照：
+
+| 验收项 | 实测 |
+|---|---|
+| `asel.ref_adjust_factor` 行数 > 0，且抽查某只票除权日前后**无假跳空** | ✅ 990 行已写入（33 只×30 天）；因子与同源 raw+hfq 自洽 |
+| 热门池当日成分可复现（给出 SQL + 行数） | ✅ 见 `tests/test_a_share_pool.py::test_fetch_hot_pool_*` 与 `cpt/adapters/a_share_pool.py:fetch_hot_pool` |
+| 看板能切换 A股/加密；A股显示日线笔+中枢 | ⏳ 前端扩展（dashboard.js）属 R16 / 看板 UI 子任务 |
+| 停牌/涨跌停/T+1 各有可见标注；非交易日不出图 | ✅ R15-3 通过 ``source_ids`` 合成 id 标注；停牌/非交易日天然不进 ``public.daily_bar`` |
+| 自选添加后刷新仍在（localStorage） | ✅ ``WatchlistStore`` 落盘 + 幂等添加，刷新后 ``list()`` 还原 |
+
+**R15 仍未做**：看板前端扩展（A 股/加密切换按钮、笔/中枢在 A 股日线上的渲染）。
+R15 当前交付了 **完整的"读数据 + 计算结构"的 cpt/ 侧能力**；前端在 R16 画布
+阶段处理（与"四画布"合并实现）。
+
+**验收**：`258 passed`（R15-2 的 245 + 13）；ruff check / ruff format --check
+(119 files) / mypy(59 files) / vulture / import-linter(4 kept, 0 broken) 全绿。
