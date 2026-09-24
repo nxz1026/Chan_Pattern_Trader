@@ -163,8 +163,31 @@ mypy（55 files）/ vulture / import-linter 全绿。
 
 **验收**：`203 passed`（R14-1 的 198 + 5）；全门禁绿。
 
+#### R14-3 `RulesConfig.min_bi_len = 6` ✅
+
+**改动**：
+
+- `cpt/domain/config.py` 新增字段 `min_bi_len: int = 6`，量纲＝**去包含后的 K 线根数**
+- **不动** `min_elements_for_higher_bi = 5`（量纲＝低级别结构元素数，递归层用）
+- `__post_init__` 加 `min_bi_len >= 1` 校验；类 docstring 显式写明两个门槛量纲不同、不可混用
+- `config.py` 模块 docstring 去掉 chanlun.py 溯源（R14-5 的一部分提前做掉）
+- `docs/rules.md` 新增 **§9.8**；§9.6/§9.7 去掉 chanlun-pro 溯源并加量纲说明
+
+**取值依据**：与 czsc `check_bi` 的门槛对齐（`analyze/utils.rs`：
+`!ab_include && bars_a.len() >= min_bi_len`）。实测 `min_bi_len` 在 **4–7 区间笔数
+几乎不敏感**（3 个 fixture 恒 ~50 笔），8 起急降（44/49/40），9–10 更差
+（32/40/30、30/36/30），故直接采用 czsc 上游默认 6，**不自造数值**。
+
+**新增测试**（4 个，`tests/test_czsc_backend.py`）：
+
+- `test_rules_config_min_bi_len_matches_adapter_default` —— 配置与适配器默认值防漂移
+- `test_min_bi_len_is_distinct_from_higher_bi_gate` —— 两个门槛共存、独立可调、值域校验
+- `test_min_bi_len_survives_config_roundtrip` —— 序列化往返
+- `test_adapter_honours_rules_config_min_bi_len` —— 配置能真正驱动适配器
+
+**验收**：`207 passed`（R14-2 的 203 + 4）；全门禁绿。
+
 #### R14 剩余子任务
 
-- R14-3 `RulesConfig.min_bi_len = 6`（去包含后K线根数，与 `min_elements_for_higher_bi` 量纲不同）
 - R14-4 一买移植（`Bi` 加 `power_volume`；czsc `BI` 已直接暴露 `length`/`power_price`/`power_volume`）
-- R14-5 重写 `docs/rules.md` §7 + 修 `config.py:6`/`signal.py:14` 的 chanlun 溯源
+- R14-5 重写 `docs/rules.md` §7 + 修 `signal.py:14` 的 chanlun 溯源

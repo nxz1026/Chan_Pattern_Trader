@@ -112,6 +112,43 @@ def test_core_dependencies_stay_empty() -> None:
     assert data["project"]["dependencies"] == []
 
 
+def test_rules_config_min_bi_len_matches_adapter_default() -> None:
+    """``RulesConfig.min_bi_len`` 与适配器默认值不得漂移。"""
+    from cpt.domain.config import RulesConfig
+
+    assert RulesConfig().min_bi_len == DEFAULT_MIN_BI_LEN
+
+
+def test_min_bi_len_is_distinct_from_higher_bi_gate() -> None:
+    """两个「笔门槛」量纲不同，必须共存且互不覆盖。
+
+    ``min_bi_len`` 量纲＝去包含后 K 线根数；``min_elements_for_higher_bi``
+    量纲＝低级别结构元素数。
+    """
+    from cpt.domain.config import RulesConfig
+
+    config = RulesConfig()
+    assert config.min_bi_len == 6
+    assert config.min_elements_for_higher_bi == 5
+
+    # 两者独立可调
+    assert RulesConfig(min_bi_len=8).min_elements_for_higher_bi == 5
+    assert RulesConfig(min_elements_for_higher_bi=9).min_bi_len == 6
+
+    with pytest.raises(ValueError, match="min_bi_len"):
+        RulesConfig(min_bi_len=0)
+
+
+def test_min_bi_len_survives_config_roundtrip() -> None:
+    """``min_bi_len`` 必须能序列化/反序列化（写入导出元数据）。"""
+    from cpt.domain.config import RulesConfig
+
+    original = RulesConfig(min_bi_len=8)
+    restored = RulesConfig.from_dict(original.to_dict())
+    assert restored.min_bi_len == 8
+    assert restored == original
+
+
 def test_missing_czsc_raises_actionable_error(monkeypatch: pytest.MonkeyPatch) -> None:
     """未安装 czsc 时给出可操作的安装提示，而不是裸 ModuleNotFoundError。"""
     import builtins
@@ -402,6 +439,18 @@ def test_min_bi_len_gate_actually_bites(czsc_module: object) -> None:
     loose = CzscChanlunBackend(min_bi_len=6).compute_structures(bars, CONFIG)
     strict = CzscChanlunBackend(min_bi_len=10).compute_structures(bars, CONFIG)
     assert len(strict.bi_list) < len(loose.bi_list)
+
+
+def test_adapter_honours_rules_config_min_bi_len(czsc_module: object) -> None:
+    """``RulesConfig.min_bi_len`` 能真正驱动适配器（而不是只存着不用）。"""
+    from cpt.domain.config import RulesConfig
+
+    bars = _load_fixture(FIXTURE_DIR / "btcusdt_5m_2024-02-01.csv")
+    tuned = CzscChanlunBackend(min_bi_len=RulesConfig(min_bi_len=10).min_bi_len)
+    default = CzscChanlunBackend()
+    assert len(tuned.compute_structures(bars, CONFIG).bi_list) < len(
+        default.compute_structures(bars, CONFIG).bi_list
+    )
 
 
 def test_explicit_freq_label_bypasses_inference(czsc_module: object) -> None:

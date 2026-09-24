@@ -430,10 +430,20 @@ source_revision
 
 ### 9.6 背驰力度口径
 
-- 复用 MACD 柱面积法（对应 chanlun-pro `query_macd_ld`），参数固定 `(12,26,9)`。
+- 复用 MACD 柱面积法，参数固定 `(12,26,9)`。
 - `divergence_status ∈ {not_checked, not_detected, detected}`。
 
 ### 9.7 "至少5个结构元素"的语义
 
-- "高级别新笔至少包含 5 个低级别走势类型结构元素"是 CPT 递归工程参数，为 chanlun-pro 新笔"至少 5 根 K 线"的类比映射，而非数值等价。
+- "高级别新笔至少包含 5 个低级别走势类型结构元素"是 CPT 递归工程参数，量纲为**低级别结构元素数**，与 §9.8 的 `min_bi_len` 不同，**不可混用**。
 - 必须用人工构造案例验证该参数下高级别笔的行为。
+
+### 9.8 底层笔最少跨度 `min_bi_len`（2026-09-24 新增，R14）
+
+- 字段：`RulesConfig.min_bi_len`，默认 **6**，量纲为**去包含后的 K 线根数**。
+- 与 §9.7 的 `min_elements_for_higher_bi` 量纲不同，两者独立存在，不可互相替代。
+- 取值依据：与 czsc `check_bi` 的门槛对齐（`crates/czsc-core/src/analyze/utils.rs`，条件为
+  `!ab_include && bars_a.len() >= min_bi_len`）。实测在 4–7 区间笔数几乎不敏感
+  （3 个 oracle fixture 恒 ~50 笔），8 起急降，故直接采用 czsc 上游默认 6，不自造数值。
+- 注意 `ab_include` 分支：当两端分型 K 线互相包含时该门槛**不适用**，因此会存在少量
+  跨度小于 `min_bi_len` 的笔（实测占比 4–6%），这是既定规则而非缺陷。

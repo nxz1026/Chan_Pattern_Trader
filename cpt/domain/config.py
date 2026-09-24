@@ -3,7 +3,7 @@
 本模块定义缠论计算的口径参数。``v0`` 配置与 ``docs/rules.md`` §9 冻结，
 任何修改都必须走 ``v0.x`` 升级流程，并同步 ``docs/rules.md`` 与本文档。
 
-设计参考 chanlun.py：配置对象本身不可变（``frozen=True``），序列化走
+设计约束：配置对象本身不可变（``frozen=True``），序列化走
 ``to_dict()`` / ``from_dict()``，便于持久化、配置对比与结果元数据落盘。
 """
 
@@ -27,7 +27,11 @@ class RulesConfig:
     """可序列化的规则口径配置。
 
     ``v0`` 配置冻结。字段语义详见 ``docs/rules.md`` §9；工程参数
-    （如 ``min_elements_for_higher_bi``）同样冻结，修改需走升级流程。
+    （``min_elements_for_higher_bi``、``min_bi_len``）同样冻结，修改需走升级流程。
+
+    注意两个「笔门槛」量纲不同，**不可混用**：``min_bi_len`` 是底层笔的
+    **去包含后 K 线根数**；``min_elements_for_higher_bi`` 是高级别笔包含的
+    **低级别结构元素数**。
 
     Attributes:
         contain_direction: 包含关系方向，``"forward"``=向前（新高新低后处理），
@@ -38,6 +42,11 @@ class RulesConfig:
         zs_wzgx: 中枢位置关系，``"zgd"``=高点比 zg、低点比 zd（§9.5 冻结）。
         zs_level_count: 中枢级别数。
         min_elements_for_higher_bi: 高级别笔最少结构元素（§9.7 冻结，工程参数）。
+            **量纲＝低级别结构元素数**，与 ``min_bi_len`` 不同，不可混用。
+        min_bi_len: 底层笔最少跨度，**量纲＝去包含后的 K 线根数**（§9.8）。
+            由 czsc ``check_bi`` 的门槛对齐而来（R14 换引擎时引入）；实测在
+            4–7 区间笔数几乎不敏感（3 个 oracle fixture 恒 ~50 笔），故取
+            czsc 上游默认 6。
         macd_fast: MACD 快线周期。
         macd_slow: MACD 慢线周期。
         macd_signal: MACD 信号线周期。
@@ -53,6 +62,7 @@ class RulesConfig:
     zs_wzgx: str = "zgd"
     zs_level_count: int = 1
     min_elements_for_higher_bi: int = 5
+    min_bi_len: int = 6
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
@@ -105,6 +115,8 @@ class RulesConfig:
             raise ValueError(
                 f"min_elements_for_higher_bi 必须 >= 1, 实测 {self.min_elements_for_higher_bi}"
             )
+        if self.min_bi_len < 1:
+            raise ValueError(f"min_bi_len 必须 >= 1, 实测 {self.min_bi_len}")
         if self.zs_wzgx not in {"zgd", "zdg", "ggd", "ddd"}:
             # 实际可用档位由 rules.md §9.5 决定,此处仅做白名单最小校验
             raise ValueError(f"zs_wzgx 必须是已知档位之一, 实测 {self.zs_wzgx!r}")
