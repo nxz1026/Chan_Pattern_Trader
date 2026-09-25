@@ -1222,8 +1222,22 @@ HTML/CSS 看起来完全正常，所以很容易误判成"前端代码写错了"
   | ④ `DELETE /watchlist?code=600519` | count=8，`removed=true` |
 
 - 真实数据：热门池 100 → **5**；策略 9 行 → 滤后 3 只；去重与来源标注均生效
-- **门禁**：`446 passed`（上一轮 424 + 22 例新增）；ruff/format(135)/mypy(65)/
-  vulture/import-linter 全绿
+- **真实浏览器实测**（chromium headless 对线上站点 `--dump-dom`，读的是浏览器**实际
+  渲染**结果而非源码断言）：
+
+  ```
+  【手输（已保存）】002614 奥佳华（手输）                      ← 选中
+  【热门池 Top5】   002119 康强电子（热门#1）…301689 电科思仪（热门#5·本地无因子）
+  【策略综合 Top5】 000498 山东路桥（策略88分/置信92%·BUY）…000678 襄阳轴承
+  来源标注节点 = 手输；移除按钮可见（当前票确实是手输项）；无 JS 报错
+  ```
+
+- **门禁**：`446 passed, 0 failed`（上一轮 424 + 22 例新增）；ruff/format(135)/
+  mypy(65)/vulture/import-linter 全绿
+
+  > 本轮前半段有 2 例 chromium 测试失败，当时判定是本会话 `workspace-write` 沙箱
+  > 不让 chromium 写 `/dev/shm` 与 `~/.config`。后来沙箱放宽为 `danger-full-access`，
+  > 这 2 例**立刻通过** —— 判断得到证实，失败确与代码无关。
 
 ### 边界
 
@@ -1231,6 +1245,3 @@ HTML/CSS 看起来完全正常，所以很容易误判成"前端代码写错了"
 - 策略候选可能**不足 5 只**（口径 D 会滤掉 `PASS`）。当前数据下只有 3 只 ——
   这是口径的预期结果，不是取数缺失。
 - 热门池 `limit=None` 的全量能力保留但**暂无 UI 入口**（"展开全部"未做）。
-- 前端 chromium smoke 测试在本会话沙箱下**跑不了**（chromium 需要写 `/dev/shm`
-  与 `~/.config`，被 `workspace-write` 拒绝），故前端改动靠
-  `test_dashboard_ashare_contract.py` 的源码契约断言 + 人工核对，未做浏览器实测。
