@@ -327,8 +327,7 @@ class BinanceFuturesClient:
     """Binance USDT-M 永续 K 线客户端（窄接口：两个读方法）。
 
     该类只做「请求 → 解析 → 领域对象」的一次转换，不持有状态、不做重试、
-    不做缓存、不落盘：重试/分页/持久化属于上层（``cpt.application`` /
-    ``cpt.storage``）的职责。
+    不做缓存、不落盘：重试/分页/持久化属于上层（``cpt.application``）的职责。
 
     Args:
         base_url: REST 根地址，默认 :data:`BINANCE_FAPI_BASE_URL`；测试可指向

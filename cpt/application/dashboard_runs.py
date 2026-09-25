@@ -1,4 +1,10 @@
-"""Research dashboard run index helpers."""
+"""Research dashboard run index helpers.
+
+**状态：待接线（pending-wiring，2026-09-25 审核 P0-2）**——生产代码零导入，尚无
+调用方；``/api/dashboard/runs`` 路由已在服务，但 ``dashboard_snapshot_v2.py:62``
+硬编码 ``v2["runs"] = []``。保留原因与接线计划见 ``docs/pending-wiring.md``，
+改动前请先读该文档。
+"""
 
 from __future__ import annotations
 

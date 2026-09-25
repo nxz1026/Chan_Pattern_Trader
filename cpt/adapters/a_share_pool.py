@@ -10,9 +10,8 @@
   ``data/watchlist.json``）。
 
 ## 取舍
-- 本模块**只读 DB**，写库另由 ``cpt.storage.repository`` 系列模块负责。本
-  模块只暴露**纯查询接口 + 自选 JSON 读写**——后者是文件 IO，不走 DB 避免
-  schema 膨胀。
+- 本模块**只读 DB**，不做任何写库。本模块只暴露**纯查询接口 + 自选 JSON
+  读写**——后者是文件 IO，不走 DB 避免 schema 膨胀。
 - 自选 JSON 用 ``pathlib.Path`` + ``fcntl`` 文件锁，避免并发写损坏。
 """
 
@@ -20,7 +19,6 @@ from __future__ import annotations
 
 import fcntl
 import json
-import logging
 import pathlib
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -35,8 +33,6 @@ __all__ = [
     "fetch_limit_pool_marks",
     "WatchlistError",
 ]
-
-logger = logging.getLogger("a_share_pool")
 
 
 # --------------------------------------------------------------------------- #
@@ -166,8 +162,7 @@ class WatchlistEntry:
 class WatchlistStore:
     """自选 JSON 落盘存储（fcntl 进程内锁，**单进程安全**）。
 
-    多进程 / 多机需要替换为 ``cpt.storage.repository`` 走 DB——本接口设计为
-    **可注入**，方便后续替换。
+    多进程 / 多机需要换成走 DB 的实现——本接口设计为**可注入**，方便后续替换。
     """
 
     def __init__(self, path: pathlib.Path | str) -> None:

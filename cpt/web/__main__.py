@@ -239,10 +239,6 @@ class _FixtureProvider:
             self._bars = bars
             self._snapshot = self._build_snapshot()
 
-    def current_symbol(self) -> tuple[str, str]:
-        with self._lock:
-            return self._symbol, self._interval
-
     def snapshot_payload(self) -> dict[str, Any]:
         with self._lock:
             return dict(self._snapshot)
@@ -517,11 +513,6 @@ class _RealtimeProvider:
             self._last_signal_status = "none"
             self._last_alert_at = 0.0
         self._switch_event.set()
-
-    def current_symbol(self) -> tuple[str, str]:
-        """Return ``(symbol, interval)`` as currently configured."""
-        with self._lock:
-            return self._symbol, self._interval
 
     def force_refresh(self) -> None:
         """Run a single poll cycle synchronously and publish the result.
@@ -884,11 +875,6 @@ class _DemoProvider:
     def select_symbol(self, symbol: str, interval: str) -> None:
         with self._lock:
             self._snapshot = demo_snapshot(symbol, interval)
-
-    def current_symbol(self) -> tuple[str, str]:
-        with self._lock:
-            snap = self._snapshot
-        return snap["runtime"]["symbol"], snap["runtime"]["interval"]
 
     def snapshot_payload(self) -> dict[str, Any]:
         with self._lock:

@@ -1,5 +1,8 @@
 """一买状态机（``docs/rules.md`` §8.2 / §8.6，纯 domain 计算）。
 
+**状态：待接线（pending-wiring，2026-09-25 审核 P0-2）**——生产代码零导入，尚无
+调用方；保留原因与接线计划见 ``docs/pending-wiring.md``，改动前请先读该文档。
+
 位于 ``docs/architecture.md`` §3.1 的「结构序列 → ``Signal[]``」环节，是 CPT 自研
 三个核心模块之一（另两个：:mod:`cpt.domain.trend_type`、:mod:`cpt.domain.recursion`）。
 
@@ -30,9 +33,8 @@
    ``structure_ready`` 没有对应时间字段，且「首次准备不自动 alert/candidate」，
    故其四个时间戳均为 ``None``。
 7. **信号标识**：``signal_id`` 固定为 ``first_buy:{level}:{structure_id}``，同级别
-   同结构恒等、重复调用可复现；它同时是仓储 upsert 的主键
-   （``cpt.storage.repository.SQLiteRepository.upsert_signal``），使一条信号随状态
-   演进原地更新，而不是每步产生新行。
+   同结构恒等、重复调用可复现；它被设计为**稳定的 upsert 主键**，便于将来接入
+   仓储时让一条信号随状态演进原地更新，而不是每步产生新行。
 
 本模块是纯函数状态机：**不**检测背驰（只记录三态）、**不**自行判断结构准备以外的
 结构有效性（``has_two_centers`` / ``has_divergence_leg`` / ``structure_valid`` 由

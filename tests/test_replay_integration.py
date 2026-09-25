@@ -1,10 +1,12 @@
-"""M1 集成测试：replay + fixture + 同输入哈希稳定 + storage round-trip。
+"""M1 集成测试：replay + fixture + 同输入哈希稳定。
 
 这些测试覆盖 implementation-plan.md §4 的 M1 验收条件：
 - 人工案例全过（每个 fixture 满足预期 bi count/direction）
 - 同输入导出哈希一致（hash stability）
 - 端到端 export → 重读 → schema v1
-- storage (SQLiteRepository) round-trip 不丢失字段
+
+原文件另有两例 storage（``SQLiteRepository``）round-trip 测试，随 ``cpt/storage/``
+整层一起移除（2026-09-25 审核 P0-2，见 ``docs/audit/cpt-code-audit-20260925.md`` §3.4）。
 """
 
 from __future__ import annotations
@@ -15,11 +17,6 @@ from pathlib import Path
 import pytest
 from cpt.application.export import dataset_hash
 from cpt.application.replay import load_fixture, run_replay
-from cpt.domain.models import (
-    Signal,
-    StructureEvent,
-)
-from cpt.storage.repository import SQLiteRepository
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -115,93 +112,6 @@ def test_replay_export_to_file_round_trip(tmp_path: Path) -> None:
 
     on_disk = json.loads(out.read_text(encoding="utf-8"))
     assert dataset_hash(on_disk) == dataset_hash(payload)
-
-
-def test_storage_raw_bars_round_trip() -> None:
-    """case4 的 K 线写入 SQLiteRepository 再读出,逐字段比对。"""
-    cfg, bars, meta = load_fixture(FIXTURES_DIR / "case4_volatile.json")
-    repo = SQLiteRepository(path=":memory:")
-    repo.init_schema()
-    n = repo.upsert_raw_bars(
-        bars, symbol="BTCUSDT", interval_minutes=5, fetched_at=1_700_000_000_000
-    )
-    assert n == len(bars)
-
-    loaded = repo.load_raw_bars(symbol="BTCUSDT", interval_minutes=5)
-    assert len(loaded) == len(bars)
-    for orig, ld in zip(bars, loaded, strict=True):
-        assert orig == ld
-
-
-def test_storage_events_signals_round_trip() -> None:
-    """events/signals 经 SQLiteRepository round-trip 保持完整。"""
-    from cpt.domain.models import StructureState
-
-    repo = SQLiteRepository(path=":memory:")
-    repo.init_schema()
-    state = StructureState(
-        id="p1",
-        level=5,
-        kind="bi",
-        direction=1,
-        start_time=1000000,
-        end_time=2000000,
-        status="forming",
-        revision=1,
-        first_seen_at=1_700_000_000_000,
-        confirmed_at=None,
-        invalidated_at=None,
-        source_ids=("f1", "f2"),
-    )
-    repo.upsert_structure_state(state)
-
-    event = StructureEvent(
-        event_type="created",
-        structure_id="p1",
-        revision=1,
-        payload={"kind": "bi", "high": 110.0},
-        occurred_at=1_700_000_000_000,
-    )
-    repo.append_structure_event(event)
-    repo.append_structure_event(
-        StructureEvent(
-            event_type="confirmed",
-            structure_id="p1",
-            revision=2,
-            payload={"confirmed_at": 1_700_000_500_000},
-            occurred_at=1_700_000_500_000,
-        )
-    )
-
-    sig = Signal(
-        signal_id="s1",
-        level=5,
-        signal_type="first_buy",
-        status="alert",
-        structure_id="p1",
-        center_ids=("zs1", "zs2"),
-        divergence_status="not_checked",
-        alert_time=1_700_000_000_000,
-        candidate_time=None,
-        confirmed_time=None,
-        invalidated_time=None,
-        price=105.5,
-        source_revision=1,
-    )
-    repo.upsert_signal(sig)
-
-    # read back
-    events = repo.list_structure_events("p1")
-    assert len(events) == 2
-    assert events[0].event_type == "created"
-    assert events[0].payload == {"kind": "bi", "high": 110.0}
-    assert events[1].event_type == "confirmed"
-
-    loaded_sig = repo.load_signal("s1")
-    assert loaded_sig is not None
-    assert loaded_sig.signal_id == "s1"
-    assert loaded_sig.center_ids == ("zs1", "zs2")
-    assert loaded_sig.price == 105.5
 
 
 def test_fixture_metadata_hints_match() -> None:

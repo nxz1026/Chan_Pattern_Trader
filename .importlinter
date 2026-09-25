@@ -22,23 +22,8 @@ source_modules =
     cpt.domain
 forbidden_modules =
     cpt.adapters
-    cpt.engine
-    cpt.storage
 
-[importlinter:contract:storage-isolated-from-application]
-name = Storage isolated from application
-type = forbidden
-source_modules =
-    cpt.storage
-forbidden_modules =
-    cpt.application
-    cpt.engine
-
-[importlinter:contract:engine-orchestrates-domain-and-storage-only]
-name = Engine orchestrates domain and storage only
-type = forbidden
-source_modules =
-    cpt.engine
-forbidden_modules =
-    cpt.application
-    cpt.adapters
+# 2026-09-25 审核 P0-2：`cpt/engine/` 与 `cpt/storage/` 两层已整层移除，故原
+# `storage-isolated-from-application` 与 `engine-orchestrates-domain-and-storage-only`
+# 两条契约随之删除（它们唯一的作用域就是这两个已不存在的包）。见
+# docs/architecture.md §2 的层说明与 docs/audit/cpt-code-audit-20260925.md §3.4。

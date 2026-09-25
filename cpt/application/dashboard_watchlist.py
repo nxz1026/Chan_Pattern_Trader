@@ -1,4 +1,9 @@
-"""Read-only multi-symbol watchlist and alert projections."""
+"""Read-only multi-symbol watchlist and alert projections.
+
+**状态：待接线（pending-wiring，2026-09-25 审核 P0-2）**——生产代码零导入，尚无
+调用方；对应 `docs/dashboard-product-roadmap.md` Phase 4 P1「多交易对」，故保留。
+改动前请先读 `docs/pending-wiring.md`。
+"""
 
 from __future__ import annotations
 

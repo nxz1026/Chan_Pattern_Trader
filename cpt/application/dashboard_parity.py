@@ -1,4 +1,10 @@
-"""Research dashboard parity view-model helpers."""
+"""Research dashboard parity view-model helpers.
+
+**状态：待接线（pending-wiring，2026-09-25 审核 P0-2）**——生产代码零导入，尚无
+调用方；``/api/dashboard/parity`` 路由已在服务，但 ``dashboard_snapshot_v2.py:61``
+恒填占位 ``{"available": false, ...}``。保留原因与接线计划见
+``docs/pending-wiring.md``，改动前请先读该文档。
+"""
 
 from __future__ import annotations
 

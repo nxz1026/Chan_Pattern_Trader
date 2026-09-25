@@ -1,8 +1,10 @@
 """Smoke test: ensure all CPT sub-packages import cleanly.
 
-This is the only test in M0. It exists to verify that the package skeleton
-defined in docs/architecture.md (application/engine/domain/adapters/storage/llm)
-is structurally sound before any business logic lands in M1+.
+This is the only test in M0. It exists to verify that the package skeleton is
+structurally sound before any business logic lands in M1+.
+
+2026-09-25 审核 P0-2：`cpt/engine/` 与 `cpt/storage/` 两层已整层移除，此处的
+层清单同步收缩为实际存在的四个（见 `docs/architecture.md` §2 的层说明）。
 """
 
 from __future__ import annotations
@@ -18,10 +20,9 @@ def test_all_subpackages_import() -> None:
     """Each architectural layer must be importable as a sub-package."""
     for layer in (
         "cpt.application",
-        "cpt.engine",
         "cpt.domain",
         "cpt.adapters",
-        "cpt.storage",
+        "cpt.web",
     ):
         module = __import__(layer, fromlist=["__name__"])
         assert module.__name__ == layer

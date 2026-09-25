@@ -33,6 +33,19 @@
 > 编排、`llm/` 只放无业务规则的独立服务层，且遵守下方依赖方向（llm 不导入
 > engine / adapters / storage）。
 
+> **engine/ 与 storage/ 层说明（死代码审计 P0-2 处置，2026-09-25）**：上图的
+> `engine/` 与 `storage/` 两层同为**预留蓝图**，实际只落地过
+> `engine/realtime.py`、`engine/rebuild.py`、`storage/models.py`、
+> `storage/repository.py` 四个文件，且**生产代码零导入**——生产实时路径由
+> `web/__main__.py` 的 `_RealtimeProvider` 自包含承担（poll-driven），历史回放走
+> `application/replay.py`，全程**无本地持久化**。按
+> `docs/audit/cpt-code-audit-20260925.md` §3.4 处置：两层已**整层删除**，
+> `.importlinter` 中 `storage-isolated-from-application` 与
+> `engine-orchestrates-domain-and-storage-only` 两条契约随之移除（现行 2 条契约见
+> 仓库根 `.importlinter`）。若未来确实需要持久化（如信号落库），按
+> `domain/signal.py` 中 `signal_id` 作为**稳定 upsert 主键**的设计重新实现，
+> 不要照搬旧的 SQLite 三层模型。
+
 依赖方向（import-linter 强制）：
 
 ```text
@@ -65,7 +78,7 @@ domain 不导入 pandas / httpx / ccxt / fastapi / sqlalchemy / torch / openai /
 
 **核心设计：一套算法，两层输入。** 分型/笔/中枢算法全部写成对 `BarLike` 序列的纯变换。K 线层和高级别结构元素层共用同一条管线，递归只负责适配输入——这是避免"为每个级别复制一套算法"的关键。
 
-### 3.2 engine/ — 有状态编排
+### 3.2 engine/ — 有状态编排（**已整层删除，2026-09-25，见 §2 层说明**）
 
 | 模块 | 职责 |
 |---|---|
@@ -89,7 +102,7 @@ def fetch_klines(symbol, interval, start, end) -> list[CanonicalBar]
 - `validators.py`：去重、缺口检测、连续性检查（独立于适配器，可单测）。发现缺口不自动填充，并阻止跨缺口生成正式结构。
 - `reference_chanlun.py`：**后端契约**（见 §7.3）+ `native_chanlun.py`（自研后端）/ `czsc_chanlun.py`（czsc 后端）。不用 ccxt——抽象泄漏且重，httpx + 窄接口足够。
 
-### 3.4 storage/ — 持久化（物理层）
+### 3.4 storage/ — 持久化（物理层）（**已整层删除，2026-09-25，见 §2 层说明**）
 
 - `models.py`：SQLite 表结构（原始K线 / 标准化K线 / 结构当前状态 / 结构事件 / 信号 / LLM 调用记录）。
 - `repository.py`：读写接口，不导入 engine。首版 SQLite + JSON 导出，不引入 ORM。
@@ -97,7 +110,7 @@ def fetch_klines(symbol, interval, start, end) -> list[CanonicalBar]
 
 ### 3.5 application/ — 用例编排
 
-只做参数解析、调用 engine/adapters/llm、输出。不含业务规则。
+只做参数解析、调用 domain / adapters、输出。不含业务规则。
 
 - `replay.py`：历史回放（批量/单根推进）
 - `inspect.py`：查询结构与信号（CLI）
