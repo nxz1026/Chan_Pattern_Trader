@@ -85,6 +85,49 @@ def test_script_has_no_local_market_inference(script: Any) -> None:
     assert "_code_to_tx" not in defined
 
 
+def test_script_reuses_shared_symbols_instead_of_copying(script: Any) -> None:
+    """脚本必须**导入**共享符号，不许再自带副本（判 AST，不判字符串）。
+
+    2026-09-25 之前本脚本自带 ``FactorRow`` / ``upsert_factor_rows`` / ``SOURCE_TX``
+    / ``TX_ENDPOINT`` 四份副本，与 ``cpt/adapters/a_share_factor.py`` 分叉
+    （8 列 vs 9 列、``tencent_fqkline`` vs ``tx:fqkline``）。这条测试把"副本不许再
+    长出来"钉死。
+
+    **必须判 AST 不能搜字符串**：脚本注释里故意留着这段历史说明（"合并前本脚本自带
+    一份逐行重复实现"），字符串匹配会假红。
+    """
+    import ast
+
+    tree = ast.parse(SCRIPT_PATH.read_text(encoding="utf-8"))
+    defined = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+    assigned = {
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    forbidden = {"FactorRow", "upsert_factor_rows", "SOURCE_TX", "TX_ENDPOINT", "_code_to_tx"}
+    copies = forbidden & (defined | assigned)
+    assert not copies, f"脚本又长出了共享符号的本地副本：{sorted(copies)}"
+
+    # 反面也要钉：这些符号必须**确实**从 cpt 导入（否则上面的断言靠"什么都没有"也能过）
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    required = {
+        "FactorRow",
+        "upsert_factor_rows",
+        "factor_source_ref",
+        "TENCENT_KLINE_URL",
+        "normalize_code",
+    }
+    assert required <= imported, f"脚本没有从 cpt 导入：{sorted(required - imported)}"
+
+
 # ------------------------------------------------------------------ 因子计算
 
 
