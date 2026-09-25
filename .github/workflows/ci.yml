@@ -24,5 +24,10 @@ jobs:
       - name: Dead-code audit (vulture)
         run: |
           python -m pip install 'vulture==2.14'
-          vulture cpt --min-confidence 80 \
-            --exclude 'cpt/web/app.py'
+          # 阈值 60（不是 80）：vulture 给「未使用的函数/类」打的置信度正是 60%，
+          # 阈值 80 会把它们全部滤掉，使本步骤永远 exit 0 —— 2026-09-25 审核 P0-3。
+          # 选项必须写在位置参数之前，否则 argparse 报 unrecognized arguments。
+          # 不再 --exclude 'cpt/web/app.py'：那会连带隐藏 app.py 里对别处符号的真实
+          # 使用（曾把 binance_futures.resolve_interval_label 误报为死代码）；
+          # 改由 whitelist.py 逐条登记框架回调。
+          vulture --min-confidence 60 cpt whitelist.py
