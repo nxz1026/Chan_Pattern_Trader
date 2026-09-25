@@ -1125,3 +1125,112 @@ HTML/CSS 看起来完全正常，所以很容易误判成"前端代码写错了"
 - `N`/`ST`/`*ST` 前缀是**源里的当前名称**（如 `920201` 当时叫 `N百瑞吉`），
   会随源更新变化，CPT 不做额外标注或推断。
 - 不做名称搜索（按名字找代码）—— 本次只解决"看清自己在看哪只票"。
+
+## A 股候选池三源合并（热门池 Top5 + 手输持久化 + 策略源）· 2026-09-25
+
+### 需求（用户原话要点）
+
+在 A 股股票池里：热门池**只留 Top5**；**加上手输入的**（要保存起来 ——
+"目前第二次登录手输入的丢失"）；**加上** `/stock-legacy/strategy` 的
+**置信+评分综合 top5**；**并注明来源**。
+
+### 根因：手输为什么丢
+
+手输的代码此前**只写进 URL 查询串**（`market_a_share.js` 的 `syncUrl()`），
+全仓**零持久化**。后端其实早就有一套完整实现 —— `WatchlistStore`
+（`~/.cache/cpt/watchlist.json`，带文件锁 + add/remove/list）与三条已挂载路由
+（`cpt/web/app.py:324-345`）—— 但**前端从未调用过**：
+`grep -rn watchlist dashboard/*.js dashboard/index.html` 零命中。
+所以是"能力齐备、缺接线"，不是"没做"。
+
+### 三个来源
+
+| 来源 | 取数 | 口径 |
+|---|---|---|
+| 热门池 Top5 | `public.hot_rank` 最新日 ∪ `public.ladder_day` cont_days≥2，按 rank 排 | `fetch_hot_pool(conn, limit=5)` |
+| 手输（自选） | `~/.cache/cpt/watchlist.json` | 加入时间倒序 |
+| 策略综合 Top5 | `public.strategy_signal` 最新日 | **先滤 `action∈{BUY,WATCH}`，再按 `评分×0.5+置信×100×0.5` 排序** |
+
+### 为什么直接读表而不是调 HTTP
+
+`/stock-legacy/strategy` 由 `/home/ubuntu/DSH/longkonglong/dashboard/strategyview.py`
+提供，读 `reports/strategy_*.json`；但它的 runner **同时写库**
+（`lkl/strategy/runner.py:105` → `public.strategy_signal`），而 CPT 与它**同库**。
+取表就与 `hot_rank`/`ladder_day` 走同一条取数路径，无新增运行时依赖，CI 可用假游标
+覆盖；调 HTTP 会让 CPT 依赖那个服务在线，读 JSON 则要把另一个仓库的文件路径写进 CPT。
+
+### 关键决策：口径 D（有实测数据支撑，不是拍脑袋）
+
+实查 2026-09-24 的策略表发现 **`score` 与 `confidence` 是负相关的** ——
+"低分高置信"的票几乎都是 `PASS`（`000607` 评分 20/置信 0.90，`000823` 评分 35/置信 0.80）。
+所以「综合」口径会**实质改变选谁**：
+
+| 口径 | Top5 的第 5 位 |
+|---|---|
+| 简单平均 `(score+置信×100)/2` | `000823`（评分仅 35 的 PASS） |
+| 评分权重 0.7/0.3 | `000678` |
+| **先滤 BUY/WATCH 再综合（采用）** | 只有 3 只符合：`000498` / `000753` / `000678` |
+
+把四个口径的**真实 Top5 都算出来**给用户看，用户选了"先滤动作再综合"。这也解释了
+为什么 `fetch_strategy_top` 的过滤与排序放在 **Python 而不是 SQL**：`eligible` 是可调
+业务口径，放进 SQL 字符串就只能靠真库才能验证。
+
+### 合并去重（必须，不是优化）
+
+`000592` 可以**同时**是热门池 #2 和策略 42 分。不去重的话下拉里会出现两个 `value`
+相同的 option，选中哪个结果一样，而 `selected` 归属还会变得随机 —— 正是"选错票"最容易
+发生的地方。合并后每条带 `sources: [...]`（全部来源，按优先级排序）与 `group`
+（决定 optgroup 归属）。
+
+**分组优先级 `manual > hot > strategy`**：手输排第一，否则用户会以为手输又丢了 ——
+而"手输丢失"正是这次要修的问题。策略排最后，它是外部观察信号，不是本系统的判断。
+
+### 落地方案
+
+- 新增 `cpt/adapters/strategy_signal.py`：`fetch_strategy_top` + `combined_score`
+- `cpt/adapters/a_share_pool.py`：`fetch_hot_pool(conn, *, limit=None)`（默认全量，
+  由调用方收敛，保留"展开全部"的能力）
+- `cpt/web/a_share_routes.py`：`pool_payload()` 改三源合并，`schema_version` 升
+  **`a_share_pool.v2`**；三个来源的失败**互不影响**（`factor_error` /
+  `strategy_error` / `watchlist_error` 分别记录）
+- 前端：`renderPicker()` 用 `optgroup` 按来源分组 + 每条标注全部来源；
+  手输提交改走 `submitManual()`（**先 `POST /watchlist` 落盘再切图**）；
+  新增「移除手输」按钮（`DELETE /watchlist`）；顶栏新增当前票的来源标注
+
+### 三个踩到的坑
+
+1. **`strategy_signal.name` 是策略名称，不是股票名**。实值是「默认多头趋势」，
+   股票名要另查 `stock_basic`。字段名一样但语义不同，直接拿来显示会把策略名当股票名
+   写进下拉。已在 `StrategyPick.strategy_name` 与 docstring 里显式钉住。
+2. **`confidence` 是 `numeric(4,3)` → psycopg 回 `Decimal`**。不转 float 会在排序时抛
+   `TypeError`，且 `json.dumps` 无法序列化 `Decimal` → 路由直接 500。测试里特意用
+   `Decimal` 造数据，用 float 会把这个坑测没。
+3. **`pool_payload()` 一读自选，池子测试就会去读真实的自选文件**。第一次跑出现
+   3 例失败（count 多 1），根因是 `~/.cache/cpt/watchlist.json` 里恰好有一条手输 ——
+   **本机假红、CI（无该文件）假绿**。加了 autouse 夹具 `_isolated_watchlist` 把落盘
+   路径指到 `tmp_path`。这与该文件已有的 `_no_real_name_lookup` 是同一类防护。
+
+### 验收
+
+- **端到端实跑**（真服务 + 真库，非 mock）：
+
+  | 步骤 | 结果 |
+  |---|---|
+  | ① 首次登录（空自选） | count=8，`groups={hot:5, manual:0, strategy:3}` |
+  | ② `POST /watchlist?code=600519` | count=9，`600519 贵州茅台` 出现在**手输组首位** |
+  | ③ **关掉服务 = 模拟第二次登录** | count=9，**600519 仍在** ← 用户报的 bug 已修 |
+  | ④ `DELETE /watchlist?code=600519` | count=8，`removed=true` |
+
+- 真实数据：热门池 100 → **5**；策略 9 行 → 滤后 3 只；去重与来源标注均生效
+- **门禁**：`446 passed`（上一轮 424 + 22 例新增）；ruff/format(135)/mypy(65)/
+  vulture/import-linter 全绿
+
+### 边界
+
+- 自选**没有用户概念**：单用户看板，全库一份。多用户要换成带 user 键的实现。
+- 策略候选可能**不足 5 只**（口径 D 会滤掉 `PASS`）。当前数据下只有 3 只 ——
+  这是口径的预期结果，不是取数缺失。
+- 热门池 `limit=None` 的全量能力保留但**暂无 UI 入口**（"展开全部"未做）。
+- 前端 chromium smoke 测试在本会话沙箱下**跑不了**（chromium 需要写 `/dev/shm`
+  与 `~/.config`，被 `workspace-write` 拒绝），故前端改动靠
+  `test_dashboard_ashare_contract.py` 的源码契约断言 + 人工核对，未做浏览器实测。

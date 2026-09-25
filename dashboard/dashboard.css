@@ -1478,3 +1478,14 @@ noscript p {
   cursor: pointer;
   font: inherit;
 }
+/* 当前票的来源标注（热门池#2｜策略42分/置信65%·PASS 之类）。等宽数字 + 不换行：
+   它紧跟在几个控件后面，换行会把顶栏撑高。 */
+.a-share-source {
+  margin-left: 4px;
+  color: var(--cpt-text-dim, #8b95a7);
+  font-size: 0.85em;
+  white-space: nowrap;
+}
+.a-share-source[hidden] {
+  display: none;
+}

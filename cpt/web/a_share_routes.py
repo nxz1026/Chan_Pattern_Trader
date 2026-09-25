@@ -6,9 +6,12 @@
 
 三条路由：
 - ``snapshot``：v2 snapshot（与加密侧同构 ⇒ 四个画布直接复用）；
-- ``pool``：热门池（``hot_rank`` 最新日 ∪ ``ladder_day`` 连板），并标注每只是否
-  **有复权因子** —— 这是 A 股能不能画出来的前提；
-- ``watchlist``：自选读写（``WatchlistStore`` JSON 落盘，单进程锁）。
+- ``pool``：**三源合并**的候选池（2026-09-25 起）= 热门池 Top5（``hot_rank`` 最新日
+  ∪ ``ladder_day`` 连板）∪ 手输自选 ∪ 策略观察综合 Top5（``public.strategy_signal``）；
+  每只标注**全部来源**（``sources``）与是否**有复权因子**（``drawable``，A 股能不能
+  画出来的前提）；
+- ``watchlist``：自选读写（``WatchlistStore`` JSON 落盘，单进程锁）。手输的代码走
+  这里持久化 —— 此前它只写进 URL 查询串，第二次登录就丢。
 """
 
 from __future__ import annotations
@@ -21,6 +24,8 @@ from typing import Any
 _LOG = logging.getLogger(__name__)
 
 __all__ = [
+    "DEFAULT_HOT_TOP",
+    "DEFAULT_STRATEGY_TOP",
     "DEFAULT_WIDTH_K",
     "DEFAULT_WATCHLIST_PATH",
     "InvalidCodeError",
@@ -33,6 +38,25 @@ __all__ = [
 
 #: 默认展示根数（与 ``cpt.application.a_share_snapshot.DEFAULT_WIDTH_K`` 同值）。
 DEFAULT_WIDTH_K: int = 120
+
+#: 热门池在下拉里只留 Top5（2026-09-25 需求：热门池收敛，别把 100 只全倒进下拉）。
+DEFAULT_HOT_TOP: int | None = 5
+
+#: 策略观察候选同样只留 Top5。
+DEFAULT_STRATEGY_TOP: int | None = 5
+
+#: 合并去重后的分组顺序。**手输排第一**：用户自己的选择绝不能被算法分组盖掉 ——
+#: 否则他会以为手输又丢了，而"手输丢失"正是这次要修的问题。策略排最后，它是外部
+#: 观察信号，不是本系统的判断。
+_GROUP_ORDER: tuple[str, ...] = ("manual", "hot", "strategy")
+
+#: 具体来源标签 → 分组（``hot_rank`` 与 ``ladder_day`` 同属"热门池"）。
+_GROUP_OF: dict[str, str] = {
+    "manual": "manual",
+    "hot_rank": "hot",
+    "ladder_day": "hot",
+    "strategy": "strategy",
+}
 
 #: 自选落盘位置。**不进仓库**：这是运行时状态，不是代码资产。
 DEFAULT_WATCHLIST_PATH: Path = Path(
@@ -107,19 +131,119 @@ def _names(codes: list[str]) -> dict[str, Any]:
         return {}
 
 
-def pool_payload() -> dict[str, Any]:
-    """热门池 + 每只是否有复权因子。
+def _manual_entries() -> tuple[list[Any], str | None]:
+    """A 股手输（自选）条目 + 读失败原因。
 
-    ``drawable`` 字段是**刻意**加的：热门池 100 只里只有 94 只有因子，剩下 6 只
-    点进去必然是空图。把这件事在列表阶段就说清楚，比让用户对着空画布猜要好。
+    读不到**不让整个池子挂**：热门池和策略仍然可用，前端只需少一组。这与
+    ``_factor_codes`` / ``_names`` 的处理哲学一致 —— 装饰性来源失败不该拖垮主视图。
+
+    注意与 ``_entries_payload``（自选路由本身）**刻意不同**：那条路由读失败就该报错，
+    因为用户点的是"看我的自选"，静默返回空列表会让他以为自选被清空了。
+    """
+    try:
+        return [e for e in _store().list() if e.market == _MARKET], None
+    except Exception as exc:  # noqa: BLE001
+        return [], f"{type(exc).__name__}: {exc}"
+
+
+def _merge_sources(
+    hot_entries: list[Any], strategy_picks: list[Any], manual_entries: list[Any]
+) -> list[dict[str, Any]]:
+    """三源合并去重：同一代码只出一条，``sources`` 列出它的**全部**来源。
+
+    去重是必须的，不是优化：``000592`` 可以同时是热门池 #2 和策略 42 分。不去重的
+    话下拉里会出现两个 ``value`` 相同的 option，选中哪个结果一样，而 ``selected``
+    归属还会变得随机 —— 正是"选错票"最容易发生的地方。
+
+    合并后每条的 ``group`` 取 ``sources`` 的第一个（即 ``_GROUP_ORDER`` 里优先级
+    最高的那个），前端据此分组渲染。
+    """
+    slots: dict[str, dict[str, Any]] = {}
+
+    def slot(code: str) -> dict[str, Any]:
+        return slots.setdefault(code, {"hot": None, "strategy": None, "manual": None})
+
+    for entry in hot_entries:
+        slot(entry.code)["hot"] = {
+            "source": entry.source,
+            "rank": entry.rank,
+            "cont_days": entry.cont_days,
+            "as_of": entry.as_of,
+        }
+    for pick in strategy_picks:
+        slot(pick.code)["strategy"] = {
+            "action": pick.action,
+            "score": pick.score,
+            "confidence": pick.confidence,
+            "combined": pick.combined,
+            "strategy": pick.strategy,
+            # ⚠️ 策略名称，**不是股票名**（见 cpt.adapters.strategy_signal 的 docstring）
+            "strategy_name": pick.strategy_name,
+            "trade_date": pick.trade_date,
+            "reason": pick.reason,
+            "model": pick.model,
+        }
+    for entry in manual_entries:
+        slot(entry.code)["manual"] = {"added_at": entry.added_at}
+
+    merged: list[dict[str, Any]] = []
+    for code, parts in slots.items():
+        sources: list[str] = []
+        if parts["manual"] is not None:
+            sources.append("manual")
+        if parts["hot"] is not None:
+            sources.append(parts["hot"]["source"])  # hot_rank | ladder_day
+        if parts["strategy"] is not None:
+            sources.append("strategy")
+        merged.append({"code": code, "sources": sources, "group": _GROUP_OF[sources[0]], **parts})
+    merged.sort(key=_pool_sort_key)
+    return merged
+
+
+def _pool_sort_key(item: dict[str, Any]) -> tuple[Any, ...]:
+    """组内排序键：手输按加入时间、热门池按名次、策略按综合分。"""
+    group = _GROUP_ORDER.index(item["group"])
+    if item["group"] == "manual":
+        return (group, item["manual"]["added_at"] or "", item["code"])
+    if item["group"] == "hot":
+        hot = item["hot"]
+        rank = hot["rank"] if hot["rank"] is not None else 9999
+        return (group, rank, -(hot["cont_days"] or 0), item["code"])
+    strategy = item["strategy"]
+    return (group, -strategy["combined"], -strategy["score"], item["code"])
+
+
+def pool_payload(
+    *,
+    hot_limit: int | None = DEFAULT_HOT_TOP,
+    strategy_limit: int | None = DEFAULT_STRATEGY_TOP,
+) -> dict[str, Any]:
+    """A 股下拉的候选池 = **热门池 Top5 ∪ 手输（自选）∪ 策略综合 Top5**。
+
+    ``drawable`` 字段是**刻意**加的：池子里没有复权因子的票点进去必然是空图（本地
+    因子表未覆盖，按需拉取也可能失败）。在列表阶段就说清楚，比让用户对着空画布猜好。
+
+    三个来源各自的失败**互不影响**（``factor_error`` / ``strategy_error`` /
+    ``watchlist_error`` 分别记录）：A 股入口是主视图，任何一个上游抖动都不该让它整体
+    不可用。前端只在对应字段非空时提示。
+
+    自选读的是 ``_store()``（服务端 JSON，见 ``DEFAULT_WATCHLIST_PATH``）——
+    **不是** localStorage。手输的代码必须跨登录保留，这是本次改动的起因。
     """
     from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
     from cpt.adapters.a_share_pool import fetch_hot_pool  # noqa: PLC0415
+    from cpt.adapters.strategy_signal import fetch_strategy_top  # noqa: PLC0415
 
     client = AShareLocalClient()
     try:
         conn = client._get_conn()  # noqa: SLF001
-        entries = fetch_hot_pool(conn)
+        entries = fetch_hot_pool(conn, limit=hot_limit)
+        try:
+            picks = fetch_strategy_top(conn, limit=strategy_limit)
+            strategy_error: str | None = None
+        except Exception as exc:  # noqa: BLE001 — 策略表读不到也要能出池子
+            picks = []
+            strategy_error = f"{type(exc).__name__}: {exc}"
     finally:
         client.close()
 
@@ -130,28 +254,30 @@ def pool_payload() -> dict[str, Any]:
         factors = set()
         factor_error = f"{type(exc).__name__}: {exc}"
 
-    names = _names([entry.code for entry in entries])
-    items = [
-        {
-            "code": entry.code,
-            # 名字（如 002119 → 康强电子）。下拉里只给六位数字太容易看岔。
-            "name": names[entry.code].name if entry.code in names else "",
-            "board": names[entry.code].board if entry.code in names else None,
-            "source": entry.source,
-            "rank": entry.rank,
-            "cont_days": entry.cont_days,
-            "as_of": entry.as_of,
-            "drawable": entry.code in factors,
-        }
-        for entry in entries
-    ]
+    manual, watchlist_error = _manual_entries()
+    merged = _merge_sources(entries, picks, manual)
+
+    names = _names([item["code"] for item in merged])
+    for item in merged:
+        code = item["code"]
+        # 名字（如 002119 → 康强电子）。下拉里只给六位数字太容易看岔。
+        item["name"] = names[code].name if code in names else ""
+        item["board"] = names[code].board if code in names else None
+        item["drawable"] = code in factors
+
+    as_of = entries[0].as_of if entries else (picks[0].trade_date if picks else None)
     return {
-        "schema_version": "a_share_pool.v1",
-        "as_of": items[0]["as_of"] if items else None,
-        "count": len(items),
-        "drawable_count": sum(1 for item in items if item["drawable"]),
+        "schema_version": "a_share_pool.v2",
+        "as_of": as_of,
+        "count": len(merged),
+        "drawable_count": sum(1 for item in merged if item["drawable"]),
+        "groups": {
+            group: sum(1 for item in merged if item["group"] == group) for group in _GROUP_ORDER
+        },
         "factor_error": factor_error,
-        "items": items,
+        "strategy_error": strategy_error,
+        "watchlist_error": watchlist_error,
+        "items": merged,
     }
 
 

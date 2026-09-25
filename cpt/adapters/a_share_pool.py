@@ -5,14 +5,17 @@
 - **热门池合成** = ``public.hot_rank`` 最新日全集（top100）∪ ``public.ladder_day``
   最新日 ``cont_days >= 2``。``public.limit_pool_em`` 仅 30 天窗口，**不足以做主
   池**，这里只是辅助查询入口（保留 ``list_limit_pool_marks`` 给上层做"今日涨停
-  辅助标注"用）。
-- **自选** = 即时生效（前端 localStorage）+ 可选落盘（服务端 JSON 文件
-  ``data/watchlist.json``）。
+  辅助标注"用）。合成结果默认**全量**，由调用方用 ``limit`` 收敛（A 股下拉只要
+  Top5）。
+- **自选** = 落盘在服务端 JSON（默认 ``~/.cache/cpt/watchlist.json``，可用环境变量
+  ``CPT_WATCHLIST`` 覆盖）。**不是 localStorage** —— 2026-09-25 修掉的正是这个：
+  手输的代码此前只写进 URL 查询串，第二次登录就没了。
 
 ## 取舍
 - 本模块**只读 DB**，不做任何写库。本模块只暴露**纯查询接口 + 自选 JSON
   读写**——后者是文件 IO，不走 DB 避免 schema 膨胀。
 - 自选 JSON 用 ``pathlib.Path`` + ``fcntl`` 文件锁，避免并发写损坏。
+- 自选**没有用户概念**：单用户看板，全库一份。多用户要换成带 user 键的实现。
 """
 
 from __future__ import annotations
@@ -62,8 +65,13 @@ class LimitPoolMark:
     trade_date: str
 
 
-def fetch_hot_pool(conn: Any) -> list[HotPoolEntry]:
-    """热门池 = ``hot_rank`` 最新日 ∪ ``ladder_day`` 最新日 cont_days≥2。"""
+def fetch_hot_pool(conn: Any, *, limit: int | None = None) -> list[HotPoolEntry]:
+    """热门池 = ``hot_rank`` 最新日 ∪ ``ladder_day`` 最新日 cont_days≥2。
+
+    :param limit: 只取排序后的前 N 条（``None`` = 全部）。A 股下拉默认只要 Top5
+        （2026-09-25 需求：热门池收敛到 Top5），但 ``None`` 保留全量能力 ——
+        ``limit_pool_em`` 那类辅助查询和将来的"展开全部"都要用到。
+    """
     with conn.cursor() as cur:
         cur.execute("SELECT max(date) FROM public.hot_rank")
         hot_date = cur.fetchone()[0]
@@ -108,7 +116,7 @@ def fetch_hot_pool(conn: Any) -> list[HotPoolEntry]:
             -e.cont_days if e.cont_days is not None else 0,  # 连板天数高的在前
             e.code,
         ),
-    )
+    )[:limit]
 
 
 def fetch_limit_pool_marks(conn: Any, trade_date: str | None = None) -> list[LimitPoolMark]:

@@ -218,7 +218,49 @@ def test_ashare_mode_hides_crypto_symbol_dropdown(a_share_source: str) -> None:
 def test_picker_options_include_security_name(a_share_source: str) -> None:
     """下拉选项要带名称 —— 这里正是"选错票"最容易发生的地方。"""
     assert "item.name" in a_share_source
-    assert "`${item.code}${name}（#${rank}）`" in a_share_source
+    assert "`${item.code}${name}（${sourceLabel(item)}${suffix}）`" in a_share_source
+
+
+def test_picker_options_annotate_source(a_share_source: str) -> None:
+    """**2026-09-25 需求**：候选必须注明来源（热门池 / 手输 / 策略）。
+
+    一条候选可以同时来自多个源（如既在热门池 #2 又是策略 42 分），所以标注是
+    拼接出来的，不是单选。
+    """
+    assert "function sourceLabel(item)" in a_share_source
+    assert 'if (item.manual) parts.push("手输")' in a_share_source
+    assert "热门#" in a_share_source
+    assert "策略${item.strategy.score}分/置信${pct}%" in a_share_source
+    # 当前票的来源也要在顶栏标出来
+    assert 'data-testid="a-share-source"' in INDEX_HTML.read_text(encoding="utf-8")
+
+
+def test_picker_groups_by_source_with_optgroup(a_share_source: str) -> None:
+    """按来源分组渲染：原生下拉里 ``optgroup`` 是唯一的视觉分组手段。"""
+    assert 'document.createElement("optgroup")' in a_share_source
+    assert "GROUP_LABELS" in a_share_source
+    assert "manual:" in a_share_source and "hot:" in a_share_source
+
+
+def test_manual_input_persists_to_server(a_share_source: str) -> None:
+    """**回归**：手输的代码必须落盘到服务端，不能只写进 URL。
+
+    踩过：手输只进 ``syncUrl()`` 的查询串，第二次登录（不带 ``?code=``）就回到默认票。
+    现在走 ``POST /watchlist`` → ``~/.cache/cpt/watchlist.json``。
+    """
+    assert "async function writeWatchlist(code, method)" in a_share_source
+    assert "/watchlist?code=" in a_share_source
+    # 提交必须走 submitManual（先落盘再切图），不再是裸的 selectCode
+    assert "const submit = () => submitManual(input.value)" in a_share_source
+    # 落盘失败要留下可见痕迹，且不能只写状态栏（会被快照请求覆盖）
+    assert "state.saveError" in a_share_source
+
+
+def test_manual_entry_can_be_removed(a_share_source: str) -> None:
+    """手输要能移除，否则打错的代码会永久留在池子里（只能手工改 JSON）。"""
+    assert 'data-testid="a-share-manual-remove"' in INDEX_HTML.read_text(encoding="utf-8")
+    assert "async function removeManual()" in a_share_source
+    assert 'writeWatchlist(state.code, "DELETE")' in a_share_source
 
 
 def test_document_title_includes_symbol_and_name() -> None:

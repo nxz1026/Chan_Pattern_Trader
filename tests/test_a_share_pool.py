@@ -146,6 +146,23 @@ def test_fetch_hot_pool_empty_when_no_data():
     assert entries == []
 
 
+def test_fetch_hot_pool_limit_keeps_top_ranks():
+    """``limit`` 取排序后的前 N 条（A 股下拉只要 Top5，见 a_share_routes）。"""
+    rows = [
+        ("hot_rank_date", date(2026, 9, 21)),
+        ("hot_rank", date(2026, 9, 21), "000002", 50),
+        ("hot_rank", date(2026, 9, 21), "600519", 5),
+        ("hot_rank", date(2026, 9, 21), "000504", 12),
+        ("ladder_date", date(2026, 9, 21)),
+        ("ladder", date(2026, 9, 21), "999999", 5),
+    ]
+    conn = FakeConn(rows=rows)
+    assert [e.code for e in fetch_hot_pool(conn, limit=2)] == ["600519", "000504"]
+    # limit=None 保留全量能力（将来"展开全部"要用）
+    assert len(fetch_hot_pool(conn, limit=None)) == 4
+    assert len(fetch_hot_pool(conn)) == 4
+
+
 # --------------------------------------------------------------------------- #
 # fetch_limit_pool_marks
 # --------------------------------------------------------------------------- #

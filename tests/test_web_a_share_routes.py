@@ -17,6 +17,7 @@ import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -37,33 +38,58 @@ def _no_real_name_lookup(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(a_share_routes, "_names", lambda codes: {})
 
 
+@pytest.fixture(autouse=True)
+def _isolated_watchlist(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """把自选落盘指到临时文件。
+
+    ``pool_payload()`` 从 v2 起会读自选 —— 不隔离的话每个池子测试都会去读**真实的**
+    ``~/.cache/cpt/watchlist.json``：本机因为恰好有一条手输而失败、CI（无该文件）却
+    通过，是最典型的"本机假红 / 假绿"。需要验证自选的用例自己覆盖这个路径。
+    """
+    monkeypatch.setattr(a_share_routes, "DEFAULT_WATCHLIST_PATH", tmp_path / "watchlist.json")
+
+
 class _FakeClient:
     """``AShareLocalClient`` duck type：只需要 ``_get_conn`` / ``close``。"""
 
-    def __init__(self, rows: list[Any] | None = None, factors: list[Any] | None = None) -> None:
+    def __init__(
+        self,
+        rows: list[Any] | None = None,
+        factors: list[Any] | None = None,
+        strategy_rows: list[Any] | None = None,
+    ) -> None:
         self._rows = rows if rows is not None else []
         self._factors = factors if factors is not None else []
+        #: 策略表行，形状 (code, strategy, name, action, score, confidence, reason, model)
+        self._strategy_rows = strategy_rows if strategy_rows is not None else []
         self.closed = False
 
     def _get_conn(self) -> _FakeClient:
         return self
 
     def cursor(self) -> _FakeCursor:
-        return _FakeCursor(self._rows, self._factors)
+        return _FakeCursor(self._rows, self._factors, self._strategy_rows)
 
     def close(self) -> None:
         self.closed = True
 
 
 class _FakeCursor:
-    def __init__(self, rows: list[Any], factors: list[Any]) -> None:
+    def __init__(self, rows: list[Any], factors: list[Any], strategy_rows: list[Any]) -> None:
         self._rows = rows
         self._factors = factors
+        self._strategy_rows = strategy_rows
         self._result: list[Any] = []
 
     def execute(self, sql: str, *args: Any) -> None:
         flat = " ".join(sql.split()).lower()
-        if "ref_adjust_factor" in flat and "distinct" in flat:
+        if "max(trade_date)" in flat:
+            # 策略表的最新交易日。**必须先于下面那条判**：两条 SQL 都含
+            # "public.strategy_signal"，顺序反了会把 max 查询当成取数查询。
+            self._result = [(date(2026, 9, 24),)]
+        elif "from public.strategy_signal" in flat:
+            self._result = list(self._strategy_rows)
+        elif "ref_adjust_factor" in flat and "distinct" in flat:
             self._result = [(code,) for code in self._factors]
         elif "max(date)" in flat:
             # hot_rank / ladder_day 的 max(date) 都要给 **date 对象**：适配器会对它
@@ -197,7 +223,7 @@ def test_ashare_routes_survive_broken_crypto_provider() -> None:
     with _served(_boom) as base:
         status, body = _request(f"{base}/api/dashboard/a-share/pool")
     assert status == 200
-    assert body["schema_version"] == "a_share_pool.v1"
+    assert body["schema_version"] == "a_share_pool.v2"
 
 
 # ----------------------------------------------------------------------- 池
@@ -213,7 +239,10 @@ def test_pool_marks_drawable_and_uses_union(monkeypatch: pytest.MonkeyPatch) -> 
     # 缺因子的票**仍然列出但标 drawable=false**：直接过滤会让人以为池子少了票
     assert by_code["002119"]["drawable"] is True
     assert by_code["000592"]["drawable"] is False
-    assert by_code["000592"]["rank"] == 2
+    # v2 起来源明细收进 `hot` 子对象（一条候选可以同时来自多个源，见 _merge_sources）
+    assert by_code["000592"]["hot"]["rank"] == 2
+    assert by_code["000592"]["sources"] == ["hot_rank"]
+    assert by_code["000592"]["group"] == "hot"
 
 
 def test_pool_survives_factor_table_failure(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -229,6 +258,141 @@ def test_pool_survives_factor_table_failure(monkeypatch: pytest.MonkeyPatch) -> 
     assert payload["count"] == 1
     assert payload["drawable_count"] == 0
     assert "factor table locked" in payload["factor_error"]
+
+
+# --------------------------------------------------------------- 三源合并（v2）
+
+
+def _strategy_row(
+    code: str,
+    action: str,
+    score: int,
+    confidence: float,
+    *,
+    strategy: str = "bull_trend",
+    name: str = "默认多头趋势",
+) -> tuple:
+    """真实行形状：``(code, strategy, name, action, score, confidence, reason, model)``。
+
+    ⚠️ ``name`` 是**策略名称**，不是股票名。``confidence`` 用 ``Decimal``
+    —— 真库是 ``numeric(4,3)``，用 float 造数据会把这个坑测没。
+    """
+    return (code, strategy, name, action, score, Decimal(str(confidence)), "理由", "m")
+
+
+def test_pool_merges_hot_manual_and_strategy(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """三源合并 + 每只标注全部来源（2026-09-25 需求）。"""
+    monkeypatch.setattr(a_share_routes, "DEFAULT_WATCHLIST_PATH", tmp_path / "wl.json")
+    a_share_routes.watchlist_add("600519")
+
+    fake = _FakeClient(
+        rows=[("002119", 1), ("000592", 2)],
+        factors=["002119", "600519"],
+        strategy_rows=[_strategy_row("000498", "BUY", 88, 0.92)],
+    )
+    monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", lambda *a, **k: fake)
+    payload = a_share_routes.pool_payload()
+
+    assert payload["schema_version"] == "a_share_pool.v2"
+    by_code = {item["code"]: item for item in payload["items"]}
+    assert set(by_code) == {"002119", "000592", "600519", "000498"}
+    # 手输排第一：用户自己的选择不能被算法分组盖掉
+    assert [item["code"] for item in payload["items"]][0] == "600519"
+    assert by_code["600519"]["sources"] == ["manual"]
+    assert by_code["002119"]["sources"] == ["hot_rank"]
+    assert by_code["000498"]["sources"] == ["strategy"]
+    assert by_code["000498"]["strategy"]["combined"] == 90.0
+    assert by_code["000498"]["strategy"]["action"] == "BUY"
+    assert payload["groups"] == {"manual": 1, "hot": 2, "strategy": 1}
+    assert payload["strategy_error"] is None
+    assert payload["watchlist_error"] is None
+
+
+def test_pool_dedups_code_present_in_multiple_sources(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """同一代码出现在两个源里只出一条，但 ``sources`` 要列出两处。
+
+    不去重的话下拉会出现两个 value 相同的 option，选中哪个都一样，
+    而 ``selected`` 归属还会变得随机 —— 正是"选错票"最容易发生的地方。
+    """
+    monkeypatch.setattr(a_share_routes, "DEFAULT_WATCHLIST_PATH", tmp_path / "wl.json")
+    fake = _FakeClient(
+        rows=[("000592", 2)],
+        factors=[],
+        strategy_rows=[_strategy_row("000592", "WATCH", 55, 0.60)],
+    )
+    monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", lambda *a, **k: fake)
+    payload = a_share_routes.pool_payload()
+    assert payload["count"] == 1
+    item = payload["items"][0]
+    assert item["sources"] == ["hot_rank", "strategy"]
+    assert item["group"] == "hot"  # 热门池优先级高于策略
+    assert item["hot"]["rank"] == 2
+    assert item["strategy"]["score"] == 55
+
+
+def test_pool_manual_beats_hot_in_grouping(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """手输的票同时也在热门池时归到「手输」组 —— 否则用户会以为手输又丢了。"""
+    monkeypatch.setattr(a_share_routes, "DEFAULT_WATCHLIST_PATH", tmp_path / "wl.json")
+    a_share_routes.watchlist_add("002119")
+    fake = _FakeClient(rows=[("002119", 1)], factors=[])
+    monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", lambda *a, **k: fake)
+    item = a_share_routes.pool_payload()["items"][0]
+    assert item["sources"] == ["manual", "hot_rank"]
+    assert item["group"] == "manual"
+
+
+def test_pool_caps_hot_pool_at_top5(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """热门池 100 只收敛到 Top5（2026-09-25 需求）。"""
+    monkeypatch.setattr(a_share_routes, "DEFAULT_WATCHLIST_PATH", tmp_path / "wl.json")
+    fake = _FakeClient(rows=[(f"00000{i}", i) for i in range(1, 11)], factors=[])
+    monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", lambda *a, **k: fake)
+    payload = a_share_routes.pool_payload()
+    assert payload["count"] == 5
+    assert [item["hot"]["rank"] for item in payload["items"]] == [1, 2, 3, 4, 5]
+
+
+def test_pool_survives_strategy_table_failure(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """策略表读不到也要能出池子（策略只是三个来源之一）。"""
+    monkeypatch.setattr(a_share_routes, "DEFAULT_WATCHLIST_PATH", tmp_path / "wl.json")
+
+    class _BrokenCursor(_FakeCursor):
+        def execute(self, sql: str, *args: Any) -> None:
+            if "strategy_signal" in " ".join(sql.split()).lower():
+                raise RuntimeError("strategy_signal missing")
+            super().execute(sql, *args)
+
+    class _BrokenClient(_FakeClient):
+        def cursor(self) -> Any:
+            return _BrokenCursor(self._rows, self._factors, self._strategy_rows)
+
+    fake = _BrokenClient(rows=[("002119", 1)], factors=[])
+    monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", lambda *a, **k: fake)
+    payload = a_share_routes.pool_payload()
+    assert payload["count"] == 1
+    assert "strategy_signal missing" in payload["strategy_error"]
+    assert payload["groups"]["strategy"] == 0
+
+
+def test_pool_survives_corrupt_watchlist(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """自选文件损坏不能让整个池子挂 —— 但必须在 ``watchlist_error`` 里说清。
+
+    与自选路由本身**刻意不同**：那条路由读失败就该报错（用户点的是"看我的自选"，
+    静默返回空列表会让他以为自选被清空了）。
+    """
+    bad = tmp_path / "wl.json"
+    bad.write_text("not json {", encoding="utf-8")
+    monkeypatch.setattr(a_share_routes, "DEFAULT_WATCHLIST_PATH", bad)
+    fake = _FakeClient(rows=[("002119", 1)], factors=[])
+    monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", lambda *a, **k: fake)
+    payload = a_share_routes.pool_payload()
+    assert payload["count"] == 1
+    assert "自选文件读取失败" in payload["watchlist_error"]
 
 
 # --------------------------------------------------------------------- 自选
