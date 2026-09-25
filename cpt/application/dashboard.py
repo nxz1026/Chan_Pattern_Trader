@@ -12,8 +12,8 @@ application service，不引入任何 HTTP/第三方依赖。
 * 时间统一 Unix 毫秒，价格/量沿用 ``CanonicalBar`` 原始单位，不做换单位；
 * 结构对象保留 ``level`` / ``source_ids``（``asdict`` 原样透出），
   走势类型额外保留 ``kind`` / ``direction``；
-* 未收盘状态不得伪装成 ``confirmed``：``status`` 由调用方按
-  :class:`~cpt.engine.realtime.RealtimeEngine` 的 ``alert`` / ``confirmed`` 传入；
+* 未收盘状态不得伪装成 ``confirmed``：``status`` 由调用方按未收盘 ``"alert"`` /
+  已收盘 ``"confirmed"`` 传入（本模块只透传，不推断）；
 * 缺口、stale 必须显式返回，不用空数组掩盖；
 * 空输入（无 K 线）返回结构完整、可 JSON 序列化的载荷，不做异常分支。
 
