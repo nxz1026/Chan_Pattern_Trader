@@ -213,32 +213,43 @@ F5 的结论（两个 canvas 测试不重复）也一并记进去。
 
 ---
 
-## 4. 需要人工/用户的两件事（我做不到）
+## 4. 需要人工/用户的两件事 —— **两件均已于 2026-09-25 复核会话执行完毕**
 
-**这两件都已进全局收件箱（`inbox_list`）。**
+**这两件都已进全局收件箱（`inbox_list`），现已完成、收件箱条目标记 done。**
 
-1. ~~**部署前端文案修复到 `/var/www/cpt-dashboard/`** —— 本会话 approval 已关闭且
-   `sudo` 完全不可用（`The "no new privileges" flag is set`）。~~ **【2026-09-25
-   后续会话复核更正：这个前提不成立，见下方】** 实测
-   `diff dashboard/dashboard.js /var/www/cpt-dashboard/dashboard.js` **不一致**，
-   部署副本第 392 行仍是旧文案。按 `deploy/README.md` 操作；
-   **`chmod` 必须用 `u=rwX,go=rX`（大写 `X`）**，否则 `vendor/` 丢执行位 → 403。
+1. ✅ **已部署**（2026-09-25 复核会话执行）。原判定"`sudo` 不可用"**前提不成立**：
+   `grep -i NoNewPrivs /proc/self/status` → **`NoNewPrivs: 0`**；
+   `sudo -n id` → **`uid=0(root)`，exit 0**；且 `/var/www/cpt-dashboard/` 属主是
+   **`ubuntu:ubuntu`**，**根本不需要 sudo**（写探针实测可直接写）。
+   实际做法：只 `cp dashboard/dashboard.js`（唯一有差异的文件，diff 仅第 392 行），
+   **未跑 chown/chmod**（因此不碰 `vendor/` 执行位）。
+   验收：8 个资产 + `vendor/` 全部 `diff -q` 一致；线上
+   `curl -sk -H "Host:140.83.62.161" https://127.0.0.1/cpt/dashboard.js` 与仓库
+   **逐字节相同**、旧文案 0 次、新文案 1 次；`vendor/` 4 个资产全 **200**（无 403）。
+   备份：`/tmp/deployed-dashboard.js.bak`（md5 `4155278c…`）。
 
-   > **更正（2026-09-25 复核会话实跑）**：
-   > - `grep -i NoNewPrivs /proc/self/status` → **`NoNewPrivs: 0`**（**没有**设该标志）；
-   > - `sudo -n id` → **`uid=0(root)`，exit 0** —— `sudo` **完全可用**。
-   > - 且 `/var/www/cpt-dashboard/` 属主是 **`ubuntu:ubuntu`**（`drwxr-xr-x`），
-   >   目录对属主可写，**根本不需要 sudo**：`cp` 直接就能写。
-   >
-   > 结论：这条"人工待办"的**阻塞条件不存在**，是一个可立即执行的一行改动。
-   > 之前判定不可用，很可能是把某次 `sudo` 失败（或沙箱提示）当成了永久状态。
-   > **下一个会话请直接按 `deploy/README.md` 部署，不要再交用户。**
-2. **确认是否执行 `asel.ref_adjust_factor.source` 的 7,200 行迁移** —— 库里
-   `'tx:fqkline'` 49,730 行 vs `'tencent_fqkline'` 7,200 行（`source_url` 逐字相同，
-   同一个腾讯接口）。代码侧已统一到 `tx:fqkline`，但历史行未迁移，任何
-   `WHERE source='tx:fqkline'` 都会漏掉那 7,200 行。该表由
-   `/home/ubuntu/DSH/longkonglong/migrations/0002_p0_reference.sql` 建，是**共享表**，
-   故需确认后再 `UPDATE`。
+2. ✅ **已迁移**（2026-09-25 复核会话执行，用户批准）。
+   `UPDATE asel.ref_adjust_factor SET source='tx:fqkline' WHERE source='tencent_fqkline'`
+   → **rowcount = 7,200**，总行数 56,930 不变，`distinct code` 101 不变，库里现在
+   只有 `tx:fqkline` 一个值。
+
+   复核时纠正了原描述的三处：
+
+   - **主键是 `(code, trade_date)`，而两个 source 组零重叠**（92 只 + 9 只 = 101，
+     `INTERSECT` 实测 = 0）→ UPDATE **不可能**撞主键。那 7,200 行属于 9 只票：
+     `000002 万科A / 002119 康强电子 / 002724 海洋王 / 600000 浦发银行 /
+     600004 白云机场 / 600006 东风股份 / 600036 招商银行 / 600519 贵州茅台 /
+     601398 工商银行`，它们**完全没有** `tx:fqkline` 行。
+   - **"任何 `WHERE source='tx:fqkline'` 都会漏掉它们"是假设性风险**：全仓
+     **没有任何查询按 `source` 过滤** —— 读路径是
+     `WHERE code = %s AND trade_date BETWEEN %s AND %s`（`a_share_local.py:256`），
+     所以当时**没有东西被漏**。这次迁移是消除潜在陷阱，不是修 bug。
+   - **建表文件不在 `longkonglong`**，实际在
+     `/home/ubuntu/DSH/a_share_emotion_leader/migrations/0002_p0_reference.sql`
+     （原路径不存在）。该项目只在迁移与一个表名清单测试里提到该表，
+     **同样没有按 `source` 过滤的查询**。
+   - 回滚脚本（按 9 只 code 精确回滚，因两组 code 互斥故可逆）：
+     `/tmp/rollback_source_migration.sql`。
 
 > 另：`~/.cache/cpt/watchlist.json` 里有真实手输条目 `002614`（奥佳华）。**这不是测试
 > 污染** —— 已核实旧测试文件在 `6df7b75` 就 monkeypatch 了 `DEFAULT_WATCHLIST_PATH`，

@@ -462,7 +462,8 @@ def test_empty_snapshot_takes_name_as_argument() -> None:
 # **9 列 + dry_run** 的副本，本模块这份只有 8 列且不支持 dry_run。两份已漂移：
 # 脚本写的行带 ``source_ref``、按需路径写的行不带；``source`` 值还各写一个，
 # 同一个腾讯接口在库里分裂成 49,730 行 ``tx:fqkline`` 与 7,200 行
-# ``tencent_fqkline``。现在适配器是唯一实现，下面钉住它的**列集合**与 dry_run 语义。
+# ``tencent_fqkline``（后者已于同日迁移，库里现只有 ``tx:fqkline``）。
+# 现在适配器是唯一实现，下面钉住它的**列集合**与 dry_run 语义。
 
 
 class _FakeCursor:

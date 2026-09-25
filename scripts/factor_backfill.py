@@ -69,7 +69,8 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: 端点与 ``source`` 取值都取自 cpt 的**唯一**定义，脚本不再各留一份。
 #: 2026-09-25 之前脚本自带 ``TX_ENDPOINT``（与 ``TENCENT_KLINE_URL`` 逐字相同）与
 #: ``SOURCE_TX = "tx:fqkline"``（适配器写 ``tencent_fqkline``）—— 同一个腾讯接口
-#: 在库里分裂成两个 ``source``，实测 49,730 行 vs 7,200 行。
+#: 在库里分裂成两个 ``source``，实测 49,730 行 vs 7,200 行。存量行已于 2026-09-25
+#: 迁移完毕（库里现只有 ``tx:fqkline``）。
 UA = "Mozilla/5.0"
 DEFAULT_KLINE_DAYS = 800  # 腾讯单次上限 801 根（实测 count=800 → 801 根，覆盖 2023-06 至今）
 

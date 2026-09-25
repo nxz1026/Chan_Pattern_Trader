@@ -1354,3 +1354,86 @@ HTML/CSS 看起来完全正常，所以很容易误判成"前端代码写错了"
 - `dup_names` 的 23 组「同名不同义」**全部保留**：判定口径是"看起来一样不等于应该
   合并"，合并的代价是把两个独立演进的东西焊死。
 
+---
+
+## 两件人工待办收口（前端部署 + source 迁移）· 2026-09-25
+
+上一轮交到全局收件箱的两件事（`imuh6z12x-rzkhxh` / `imuh6z136-yjd1fg`），本轮经用户
+批准后**全部执行完毕**。两件都在复核阶段被证伪或纠正了原始描述。
+
+### 一、前端文案修复部署 ✅
+
+**原描述**：「需 sudo，本会话 approval 关闭且 sudo 完全不可用（no-new-privileges）」。
+
+**实测证伪**：
+
+| 检查 | 结果 |
+|---|---|
+| `grep -i NoNewPrivs /proc/self/status` | **`NoNewPrivs: 0`**（根本没设该标志） |
+| `sudo -n id` | **`uid=0(root)`，exit 0** —— sudo 完全可用 |
+| `/var/www/cpt-dashboard/` 属主 | **`ubuntu:ubuntu`** + `drwxr-xr-x` → 属主可写 |
+| 写探针（无 sudo 往该目录写文件） | **成功** |
+
+即**连 sudo 都不需要**。原判定很可能把某次 sudo 失败当成了永久状态。
+
+**实际做法**（最小改动）：`diff` 确认 8 个资产里**只有 `dashboard.js` 有差异、且只差
+第 392 行一处旧文案**，故只 `cp dashboard/dashboard.js`，**未跑 chown/chmod**
+（不碰 `vendor/` 执行位，从构造上避免 README 里那个 403 坑）。备份
+`/tmp/deployed-dashboard.js.bak`（md5 `4155278c…`）。
+
+**验收（实跑，非推断）**：
+
+- 8 个资产 + `vendor/` 递归 `diff -q` → **全 SAME**；
+- 线上 `curl -sk -H "Host:140.83.62.161" https://127.0.0.1/cpt/dashboard.js`
+  → **200**，与仓库版本 `diff -q` **逐字节相同**；旧文案出现 **0** 次、新文案 **1** 次；
+- `vendor/` 4 个资产（lightweight-charts / plotly-finance / bootstrap.min.css /
+  bootstrap-icons.woff2）全 **200**，**无 403**；
+- `/cpt/`、`index.html`、`dashboard.css`、`canvas_d.js`、`market_a_share.js` 全 **200**。
+
+### 二、`asel.ref_adjust_factor.source` 7,200 行迁移 ✅
+
+**原描述**：「任何 `WHERE source='tx:fqkline'` 都会漏掉那 7,200 行；该表由
+`/home/ubuntu/DSH/longkonglong/migrations/0002_p0_reference.sql` 建，是共享表」。
+
+**复核纠正三处**：
+
+1. **主键是 `(code, trade_date)`，而两组零重叠** —— `tx:fqkline` 92 只 /
+   `tencent_fqkline` 9 只，`INTERSECT` 实测 **0** 对。所以 UPDATE **不可能**撞主键。
+   那 9 只是：`000002 万科A`、`002119 康强电子`、`002724 海洋王`、`600000 浦发银行`、
+   `600004 白云机场`、`600006 东风股份`、`600036 招商银行`、`600519 贵州茅台`、
+   `601398 工商银行` —— 它们**完全没有** `tx:fqkline` 行。
+2. **"任何 `WHERE source=...` 都会漏"是假设性风险，不是现状**：全仓**没有任何查询
+   按 `source` 过滤**。唯一取因子值的读路径是
+   `SELECT trade_date, hfq_factor FROM asel.ref_adjust_factor WHERE code = %s
+   AND trade_date BETWEEN %s AND %s`（`cpt/adapters/a_share_local.py:256`），
+   另一处是 `SELECT count(*)`（`source_registry.py:233`）。**所以当时没有东西被漏**
+   —— 这次是消除潜在陷阱（将来谁加个 source 过滤就会静默漏 9 只），不是修 bug。
+3. **建表文件不在 `longkonglong`**，实际在
+   `/home/ubuntu/DSH/a_share_emotion_leader/migrations/0002_p0_reference.sql`
+   （原路径**不存在**）。该项目只在迁移与一个表名清单测试里提到该表，
+   **同样没有按 `source` 过滤的查询**。
+
+**执行**：事务内先跑守卫（断言 9 只与 92 只零重叠）→
+`UPDATE ... SET source='tx:fqkline' WHERE source='tencent_fqkline'`
+→ **rowcount = 7,200** → 事务内校验（总行数 56,930 不变、只剩一个 source）
+→ COMMIT。回滚脚本落盘 `/tmp/rollback_source_migration.sql`
+（因两组 code 互斥，按 9 只 code 回滚是**精确可逆**的）。
+
+**验收（独立连接复核）**：
+
+- `source` 分布：**只剩 `('tx:fqkline', 56930)`**；
+- 总行数 **56,930**、`distinct code` **101**（迁移前后一致）；
+- 9 只各自仍是 **800 行**，日期范围 `2023-06-12 → 2026-09-24` 未变，因子区间合理；
+- 抽查 600519 最近 3 个交易日：因子 `7.0855804365 / 7.0689899620 / 7.0660472165`，
+  走生产读路径（`a_share_local` 原句）可正常取回；
+- 全量测试 **462 passed**（无任何测试硬断言旧分布，已 grep 确认）。
+
+> 附注：迁移只改 `source` 一列，`source_ref` 现状不变 —— 全表 49,790/56,930 有值，
+> 那 7,140 个 NULL 是旧适配器版本不写该列留下的**既有**情况，与本次迁移无关。
+
+### 踩坑
+
+- **不要凭一次失败就断言能力不可用**：上一轮据"某次 sudo 失败"写下"sudo 完全不可用"，
+  本轮 `sudo -n id` 一条命令就证伪。凡"我做不到"的结论，都要留下**当场可复现的命令
+  与原始输出**，否则下一个会话会把假前提当事实继续传下去。
+

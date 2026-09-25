@@ -58,7 +58,13 @@ _LOG = logging.getLogger("cpt.adapters.a_share_factor")
 #: **必须与 ``scripts/factor_backfill.py`` 一致。** 2026-09-25 之前两处各写一个值
 #: （本模块 ``tencent_fqkline``、脚本 ``tx:fqkline``），于是同一个腾讯接口在库里
 #: 分裂成两个 ``source``（实测 7,200 行 vs 49,730 行）—— 任何 ``WHERE source=...``
-#: 的查询都会漏掉八成数据。现统一取脚本那个（占多数）。改这个值必须同时处置存量行。
+#: 的查询都会漏掉八成数据。现统一取脚本那个（占多数）。
+#:
+#: **存量行已于 2026-09-25 迁移完毕**：``UPDATE ... WHERE source='tencent_fqkline'``
+#: 命中 7,200 行，库里现在只有 ``tx:fqkline`` 一个值（56,930 行 / 101 只）。
+#: 那 7,200 行属于 9 只票（000002/002119/002724/600000/600004/600006/600036/
+#: 600519/601398），与原 92 只**零重叠**，故 UPDATE 不可能撞 ``(code, trade_date)``
+#: 主键。改这个值时必须同时处置存量行。
 SOURCE_TX: Final[str] = "tx:fqkline"
 #: 腾讯单次上限 801 根，取 800 留边界（与 scripts/factor_backfill.py 一致）。
 DEFAULT_FACTOR_DAYS: Final[int] = 800
