@@ -51,7 +51,6 @@ import argparse
 import json
 import logging
 import os
-import pathlib
 import sys
 import time
 import urllib.error
@@ -60,8 +59,9 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 
+from cpt.adapters._dbconfig import connection_kwargs as _shared_connection_kwargs
+
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-DB_CONFIG_FILE = pathlib.Path.home() / ".dbconfig"
 SOURCE_TX = "tx:fqkline"
 TX_ENDPOINT = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 UA = "Mozilla/5.0"
@@ -71,34 +71,18 @@ logger = logging.getLogger("factor_backfill")
 
 
 # --------------------------------------------------------------------------- #
-# DB 工具（与 asel.storage.dbconfig.connection_kwargs 同步自实现）
+# DB 工具（解析与校验走 cpt.adapters._dbconfig 的唯一权威实现）
 # --------------------------------------------------------------------------- #
 
 
-def _read_dbconfig() -> dict[str, str]:
-    if not DB_CONFIG_FILE.exists():
-        return {}
-    out: dict[str, str] = {}
-    for line in DB_CONFIG_FILE.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line.startswith("$") and "=" in line:
-            key, _, value = line.partition("=")
-            out[key.strip()] = value.strip()
-    return out
-
-
 def connection_kwargs() -> dict[str, object]:
-    cfg = _read_dbconfig()
-    if not cfg.get("$RDSHOST") or not cfg.get("$DB_PW"):
-        raise SystemExit(f"~/.dbconfig 缺失 $RDSHOST 或 $DB_PW。位置: {DB_CONFIG_FILE}")
-    return {
-        "host": cfg["$RDSHOST"],
-        "port": int(cfg.get("$DBPORT", "5432")),
-        "dbname": cfg.get("$DBNAME", "longkonglong"),
-        "user": cfg.get("$USER", "postgres"),
-        "password": cfg["$DB_PW"],
-        "connect_timeout": 15,
-    }
+    """构造 psycopg3 连接参数（缺失 ``~/.dbconfig`` 时 ``SystemExit``）。
+
+    解析与校验在 :mod:`cpt.adapters._dbconfig`（2026-09-25 审核 §5.1 收口，合并前
+    本脚本自带一份逐行重复实现）。本脚本是运维入口，缺配置时**直接退出并打印一行
+    原因**比抛栈友好，故把异常类型注入为 ``SystemExit``——与合并前行为一致。
+    """
+    return _shared_connection_kwargs(exc_type=SystemExit)
 
 
 # --------------------------------------------------------------------------- #

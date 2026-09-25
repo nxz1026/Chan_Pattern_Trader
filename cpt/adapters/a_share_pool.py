@@ -40,38 +40,6 @@ logger = logging.getLogger("a_share_pool")
 
 
 # --------------------------------------------------------------------------- #
-# DB 工具（与 scripts/factor_backfill.py 同步）
-# --------------------------------------------------------------------------- #
-
-
-def _read_dbconfig() -> dict[str, str]:
-    p = pathlib.Path.home() / ".dbconfig"
-    if not p.exists():
-        return {}
-    out: dict[str, str] = {}
-    for line in p.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line.startswith("$") and "=" in line:
-            k, _, v = line.partition("=")
-            out[k.strip()] = v.strip()
-    return out
-
-
-def connection_kwargs() -> dict[str, Any]:
-    cfg = _read_dbconfig()
-    if not cfg.get("$RDSHOST") or not cfg.get("$DB_PW"):
-        raise WatchlistError("~/.dbconfig 缺失 $RDSHOST 或 $DB_PW")
-    return {
-        "host": cfg["$RDSHOST"],
-        "port": int(cfg.get("$DBPORT", "5432")),
-        "dbname": cfg.get("$DBNAME", "longkonglong"),
-        "user": cfg.get("$USER", "postgres"),
-        "password": cfg["$DB_PW"],
-        "connect_timeout": 15,
-    }
-
-
-# --------------------------------------------------------------------------- #
 # 热门池
 # --------------------------------------------------------------------------- #
 

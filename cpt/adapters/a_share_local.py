@@ -28,6 +28,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Final
 
+from cpt.adapters._dbconfig import connection_kwargs as _shared_connection_kwargs
 from cpt.domain.models import CanonicalBar
 from cpt.domain.types import BarLike
 
@@ -47,9 +48,6 @@ _CODE_COL: Final[str] = "code"
 _OHLC_COLS: Final[tuple[str, ...]] = ("open", "high", "low", "close")
 _VOL_COL: Final[str] = "volume"
 _AMT_COL: Final[str] = "amount"
-
-#: ``~/.dbconfig`` 位置（与 ``scripts/factor_backfill.py`` / ``a_share_pool.py`` 同源）
-_DB_CONFIG_FILE: Final[pathlib.Path] = pathlib.Path.home() / ".dbconfig"
 
 #: ``asel.security_master`` 里的证券名称表（5,930 行，覆盖全部 5,225 个有日线的代码）
 _SECURITY_MASTER: Final[str] = "asel.security_master"
@@ -130,40 +128,19 @@ def fetch_security_names(
     return found
 
 
-def _read_dbconfig() -> dict[str, str]:
-    """解析 ``~/.dbconfig`` 的 ``$KEY=value`` 行。
-
-    与 ``asel.storage.dbconfig.read_dbconfig`` 同口径，但**本模块自带实现**——
-    不 import ``asel``（该包只存在于 ``a_share_emotion_leader/`` 项目里，CPT 与
-    长龙 venv 都没有）。这是刻意的：``cpt/`` 只依赖 ``psycopg``（可选）+
-    ``~/.dbconfig`` 这一个文件约定，跨项目边界最小。
-    """
-    if not _DB_CONFIG_FILE.exists():
-        return {}
-    out: dict[str, str] = {}
-    for line in _DB_CONFIG_FILE.read_text(encoding="utf-8").splitlines():
-        line = line.strip()
-        if line.startswith("$") and "=" in line:
-            key, _, value = line.partition("=")
-            out[key.strip()] = value.strip()
-    return out
-
-
 def connection_kwargs() -> dict[str, Any]:
-    """构造 psycopg3 连接参数（与 ``asel.storage.dbconfig.connection_kwargs`` 同口径）。"""
-    cfg = _read_dbconfig()
-    if not cfg.get("$RDSHOST") or not cfg.get("$DB_PW"):
-        raise AShareLocalError(f"~/.dbconfig 缺失 $RDSHOST 或 $DB_PW。位置: {_DB_CONFIG_FILE}")
+    """构造 psycopg3 连接参数（缺失 ``~/.dbconfig`` 时抛 :class:`AShareLocalError`）。
+
+    解析与校验走 :mod:`cpt.adapters._dbconfig` 的**唯一权威实现**（2026-09-25 审核
+    §5.1 收口）；本函数只保留 A 股本地库特有的两件事：①异常类型注入为
+    ``AShareLocalError``；②在返回值上追加 RDS CA 证书 ``~/global-bundle.pem``
+    （文件存在才带——``a_share_pool`` / ``factor_backfill`` 不需要，所以不放进共享层）。
+    """
+    kwargs = _shared_connection_kwargs(exc_type=AShareLocalError)
     ssl_cert = pathlib.Path.home() / "global-bundle.pem"
-    return {
-        "host": cfg["$RDSHOST"],
-        "port": int(cfg.get("$DBPORT", "5432")),
-        "dbname": cfg.get("$DBNAME", "longkonglong"),
-        "user": cfg.get("$USER", "postgres"),
-        "password": cfg["$DB_PW"],
-        "connect_timeout": 15,
-        **({"sslrootcert": str(ssl_cert)} if ssl_cert.exists() else {}),
-    }
+    if ssl_cert.exists():
+        kwargs["sslrootcert"] = str(ssl_cert)
+    return kwargs
 
 
 class AShareLocalError(RuntimeError):
