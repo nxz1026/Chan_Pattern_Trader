@@ -119,7 +119,7 @@ def build_ashare_snapshot(
         result = active_client.fetch_validated_klines(code, start_ms, end_ms)
         canonical = list(result.bars)
         if not canonical or _skipped_no_factor(result):
-            # 本地因子不全（全库 5225 只只有 94 只有因子）→ 按需补一次再重读。
+            # 本地因子不全（因子表只覆盖热门池并集，缺是常态）→ 按需补一次再重读。
             # 触发条件同时覆盖"整段缺"和"部分缺"：部分缺会让 K 线序列出现空洞，
             # 画出来的笔/中枢是错的，比整段缺更隐蔽。
             outcome = _try_on_demand_factors(code, active_client, start_ms, end_ms, ensurer)
@@ -134,7 +134,7 @@ def build_ashare_snapshot(
             _attach_factor_fetch(snapshot, outcome)
             return snapshot
     except AShareNoFactorError as exc:
-        # 最常见的一种失败（全库 5225 只只有 94 只有因子）。必须与"没数据"和
+        # 最常见的一种失败（因子表只覆盖热门池并集）。必须与"没数据"和
         # "DB 挂了"分开报 —— 报成 db_error 会把排查方向带偏（实测踩过）。
         _LOG.info("A 股缺因子 %s: %s", code, exc)
         outcome = _try_on_demand_factors(code, active_client, start_ms, end_ms, ensurer)

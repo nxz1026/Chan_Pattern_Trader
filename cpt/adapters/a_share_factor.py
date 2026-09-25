@@ -2,9 +2,9 @@
 
 ## 为什么需要这个
 
-`asel.ref_adjust_factor` 只有 94 只（全库 5,225 只），原因是**全市场 backfill
-从未执行** —— 只跑过增量模式（热门池 ∪ 连板 ∪ 新股 ∪ 已有覆盖）。全市场批量被
-否决（5,225 只太多），改为**用户输入哪个代码就按需补哪个**。
+`asel.ref_adjust_factor` 覆盖面很小（只覆盖热门池并集，全库 5,225 只里绝大多数没有），
+原因是**全市场 backfill 从未执行** —— 只跑过增量模式（热门池 ∪ 连板 ∪ 新股 ∪
+已有覆盖）。全市场批量被否决（5,225 只太多），改为**用户输入哪个代码就按需补哪个**。
 
 ## 原理
 
@@ -44,13 +44,22 @@ __all__ = [
     "FactorRow",
     "FactorUnavailableError",
     "OnDemandFactorFetcher",
+    "SOURCE_TX",
     "build_factor_rows",
+    "factor_source_ref",
     "fetch_factor_rows",
+    "upsert_factor_rows",
 ]
 
 _LOG = logging.getLogger("cpt.adapters.a_share_factor")
 
-SOURCE_TX: Final[str] = "tencent_fqkline"
+#: ``asel.ref_adjust_factor.source`` 的取值。
+#:
+#: **必须与 ``scripts/factor_backfill.py`` 一致。** 2026-09-25 之前两处各写一个值
+#: （本模块 ``tencent_fqkline``、脚本 ``tx:fqkline``），于是同一个腾讯接口在库里
+#: 分裂成两个 ``source``（实测 7,200 行 vs 49,730 行）—— 任何 ``WHERE source=...``
+#: 的查询都会漏掉八成数据。现统一取脚本那个（占多数）。改这个值必须同时处置存量行。
+SOURCE_TX: Final[str] = "tx:fqkline"
 #: 腾讯单次上限 801 根，取 800 留边界（与 scripts/factor_backfill.py 一致）。
 DEFAULT_FACTOR_DAYS: Final[int] = 800
 #: 同一代码的重复拉取冷却（秒）：避免用户连点/轮询反复打腾讯。
@@ -61,13 +70,28 @@ class FactorUnavailableError(RuntimeError):
     """按需拉因子失败（腾讯无该标的后复权 / 网络失败 / 无重叠交易日）。"""
 
 
+def factor_source_ref(trade_date: str) -> str:
+    """``source_ref`` 的**唯一**构造处。
+
+    按需路径与 backfill 脚本都必须用它 —— 否则同一行数据会带两种溯源串，按
+    ``source_ref`` 反查就查不全（这正是 ``source`` 字段刚踩过的坑）。
+    """
+    return f"web.ifzq.gtimg.cn fqkline day/hfq {trade_date}"
+
+
 @dataclass(frozen=True)
 class FactorRow:
-    """一行因子（``asel.ref_adjust_factor`` 的一行）。"""
+    """一行因子（``asel.ref_adjust_factor`` 的一行）。
+
+    ``source`` / ``source_ref`` 给默认值，是为了让只关心 code/date/factor 的调用方
+    与测试能继续三参数构造；写库时两者都会落盘。
+    """
 
     code: str
     trade_date: str  # ISO 'YYYY-MM-DD'
     hfq_factor: float
+    source: str = SOURCE_TX
+    source_ref: str | None = None
 
 
 @dataclass(frozen=True)
@@ -110,6 +134,7 @@ def build_factor_rows(
                 code=code,
                 trade_date=trade_date,
                 hfq_factor=hfq[trade_date] / raw_close,
+                source_ref=factor_source_ref(trade_date),
             )
         )
     return tuple(rows)
@@ -242,28 +267,46 @@ def upsert_factor_rows(
     rows: Sequence[FactorRow],
     *,
     source_url: str | None = None,
+    dry_run: bool = False,
 ) -> int:
     """幂等写入 ``asel.ref_adjust_factor``（主键 ``(code, trade_date)``）。
 
     用 ``executemany``：单只票 800 行，逐行 ``execute`` 会慢到不可用（实测）。
+
+    ``dry_run=True`` 只算行数、不碰 DB —— ``scripts/factor_backfill.py --dry-run``
+    依赖这个能力。2026-09-25 之前脚本自带一份 9 列实现（多写 ``source_ref``、支持
+    dry-run），而本函数只有 8 列且无 dry-run，两份实现已经漂移；现在这里是唯一实现。
     """
     if not rows:
         return 0
     now = datetime.now(UTC)
     payload = [
-        (row.code, row.trade_date, row.hfq_factor, SOURCE_TX, source_url, now, now, now)
+        (
+            row.code,
+            row.trade_date,
+            row.hfq_factor,
+            row.source,
+            source_url,
+            row.source_ref,
+            now,  # as_of
+            now,  # available_at
+            now,  # fetched_at
+        )
         for row in rows
     ]
+    if dry_run:
+        return len(payload)
     with conn.cursor() as cur:
         cur.executemany(
             """INSERT INTO asel.ref_adjust_factor
-                 (code, trade_date, hfq_factor, source, source_url,
+                 (code, trade_date, hfq_factor, source, source_url, source_ref,
                   as_of, available_at, fetched_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
                ON CONFLICT (code, trade_date) DO UPDATE SET
                  hfq_factor=EXCLUDED.hfq_factor,
                  source=EXCLUDED.source,
                  source_url=EXCLUDED.source_url,
+                 source_ref=EXCLUDED.source_ref,
                  fetched_at=EXCLUDED.fetched_at""",
             payload,
         )

@@ -11,11 +11,8 @@
 from __future__ import annotations
 
 import json
-import threading
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
-from contextlib import contextmanager
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -23,7 +20,8 @@ from typing import Any
 
 import pytest
 from cpt.web import a_share_routes
-from cpt.web.app import serve_snapshot
+
+from tests.conftest import served
 
 
 @pytest.fixture(autouse=True)
@@ -116,21 +114,6 @@ class _FakeCursor:
         return None
 
 
-@contextmanager
-def _served(provider: Any = None) -> Iterator[str]:
-    if provider is None:
-        provider = lambda: {"schema_version": "dashboard.v2", "candles": []}  # noqa: E731
-    server = serve_snapshot(provider)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
-
-
 def _request(url: str, method: str = "GET") -> tuple[int, Any]:
     request = urllib.request.Request(url, method=method)
     try:
@@ -147,14 +130,14 @@ def _request(url: str, method: str = "GET") -> tuple[int, Any]:
 
 
 def test_snapshot_requires_code() -> None:
-    with _served() as base:
+    with served() as base:
         status, body = _request(f"{base}/api/dashboard/a-share/snapshot")
     assert status == 400
     assert body["error"]["code"] == "code_required"
 
 
 def test_snapshot_rejects_bad_width_k() -> None:
-    with _served() as base:
+    with served() as base:
         for value in ("abc", "3", "5000"):
             status, body = _request(
                 f"{base}/api/dashboard/a-share/snapshot?code=002614&width_k={value}"
@@ -169,7 +152,7 @@ def test_invalid_code_returns_json_400_not_a_dropped_connection() -> None:
     ``send_error`` 把 message 写进 HTTP 状态行（只能 latin-1），所以任何中文提示
     都会把 400 变成 RemoteDisconnected —— 浏览器侧只看到"网络错误"，看不到原因。
     """
-    with _served() as base:
+    with served() as base:
         status, body = _request(f"{base}/api/dashboard/a-share/snapshot?code=abc")
     assert status == 400
     assert body["error"]["code"] == "invalid_code"
@@ -220,7 +203,7 @@ def test_ashare_routes_survive_broken_crypto_provider() -> None:
     def _boom() -> dict[str, Any]:
         raise RuntimeError("crypto upstream down")
 
-    with _served(_boom) as base:
+    with served(_boom) as base:
         status, body = _request(f"{base}/api/dashboard/a-share/pool")
     assert status == 200
     assert body["schema_version"] == "a_share_pool.v2"
@@ -415,7 +398,7 @@ def test_watchlist_round_trip(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
 def test_watchlist_route_writes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(a_share_routes, "DEFAULT_WATCHLIST_PATH", tmp_path / "wl.json")
-    with _served() as base:
+    with served() as base:
         status, body = _request(f"{base}/api/dashboard/a-share/watchlist?code=002614", "POST")
         assert status == 200
         assert [item["code"] for item in body["items"]] == ["002614"]
@@ -431,14 +414,14 @@ def test_watchlist_route_rejects_bad_code_with_json(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(a_share_routes, "DEFAULT_WATCHLIST_PATH", tmp_path / "wl.json")
-    with _served() as base:
+    with served() as base:
         status, body = _request(f"{base}/api/dashboard/a-share/watchlist?code=zzz", "POST")
     assert status == 400
     assert body["error"]["code"] == "invalid_code"
 
 
 def test_unknown_ashare_subpath_is_404() -> None:
-    with _served() as base:
+    with served() as base:
         status, _ = _request(f"{base}/api/dashboard/a-share/nope")
     assert status == 404
 
@@ -450,7 +433,7 @@ def test_unsupported_method_on_ashare_watchlist_is_rejected() -> None:
     不是 405 —— 405 只在我显式实现了该方法但路由不匹配时出现。两种都算"被拒"，
     但这里钉住实际值，避免以后有人误以为 PUT 是"已实现但未授权"。
     """
-    with _served() as base:
+    with served() as base:
         status, _ = _request(f"{base}/api/dashboard/a-share/watchlist?code=002614", "PUT")
     assert status == 501
 

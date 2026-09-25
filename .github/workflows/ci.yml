@@ -18,9 +18,13 @@ jobs:
         run: pytest tests -rsq
       - name: Static quality gates
         run: |
-          ruff check cpt tests
-          ruff format --check cpt tests
-          mypy cpt
+          # `scripts/` 也纳入：它是 364 行的运维入口（cron 跑 backfill），
+          # 2026-09-25 之前完全不在门禁内 —— 于是它自带的 FactorRow /
+          # upsert_factor_rows 两份重复实现、以及有顺序 bug 的 _code_to_tx
+          # 都没人发现。只覆盖 cpt/tests 等于给运维脚本开了后门。
+          ruff check cpt tests scripts
+          ruff format --check cpt tests scripts
+          mypy cpt scripts
       - name: Dead-code audit (vulture)
         run: |
           python -m pip install 'vulture==2.14'

@@ -90,7 +90,7 @@ def fetch_strategy_top(
             """SELECT code, strategy, name, action, score, confidence, reason, model
                FROM public.strategy_signal
                WHERE trade_date = %s
-               ORDER BY code""",
+               ORDER BY code, score DESC, confidence DESC""",
             (trade_date,),
         )
         rows = cur.fetchall()

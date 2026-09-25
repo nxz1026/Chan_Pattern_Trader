@@ -15,47 +15,46 @@
 
 ```text
 ┌─────────────────────────────────────────────────────────────┐
-│ application/      用例编排：replay / inspect / export / llm 用例 │
+│ web/              HTTP 入口：handler / 路由 / CLI（--mode）    │
 ├─────────────────────────────────────────────────────────────┤
-│ engine/           有状态编排：历史模式 / 实时模式 / 重构 / 事件  │
+│ application/      用例编排：replay / inspect / export /       │
+│                   dashboard / a_share_snapshot               │
+├─────────────────────────────────────────────────────────────┤
+│ adapters/         外部接入：Binance / ccxt / Wind / 腾讯 /     │
+│                   本地 A 股库 / 三种缠论实现                    │
 ├─────────────────────────────────────────────────────────────┤
 │ domain/           纯算法与领域模型（零第三方依赖，全部纯函数）    │
-├──────────────────┬──────────────────┬───────────────────────┤
-│ adapters/        │ storage/         │ llm/                  │
-│ 外部数据接入      │ 状态+事件持久化    │ 独立 LLM 服务层        │
-└──────────────────┴──────────────────┴───────────────────────┘
+└─────────────────────────────────────────────────────────────┘
 ```
 
-> **LLM 层说明（死代码审计 A1 处置，2026-09）**：上图的 `llm/` 层是**预留蓝图**，
-> 当前**没有对应代码**——空的 `cpt/llm/` 占位包已按审计建议删除（见
-> `cpt-feature-review-and-deadcode-audit.md` A1）。若未来落地 LLM 用例
-> （规则解释 / 差异摘要 / 标注辅助），按本图第 3.1 节规划在 `application/llm_cases.py`
-> 编排、`llm/` 只放无业务规则的独立服务层，且遵守下方依赖方向（llm 不导入
-> engine / adapters / storage）。
+> **这张图在 2026-09-25 重画过。** 原图多画了 `engine/`、`storage/`、`llm/` 三层：
+> 前两层实际只落地过 `engine/realtime.py`、`engine/rebuild.py`、`storage/models.py`、
+> `storage/repository.py` 四个文件且**生产代码零导入**（生产实时路径由
+> `web/__main__.py` 的 `_RealtimeProvider` 自包含承担，历史回放走
+> `application/replay.py`，全程无本地持久化），已按审核 P0-2 整层删除；`llm/`
+> 则从未有过代码（空的 `cpt/llm/` 占位包更早按审计 A1 删除）。
+> 当时的处置是**只在图下加"这是预留蓝图"的说明、没有重画图** —— 于是文档继续画着
+> 不存在的层，读者（和后来的审核）会以为它们还在。历史记录见 §3.2 / §3.4。
+>
+> 若未来确实需要持久化（如信号落库），按 `domain/signal.py` 中 `signal_id` 作为
+> **稳定 upsert 主键**的设计重新实现，不要照搬旧的 SQLite 三层模型。若未来落地
+> LLM 用例（规则解释 / 差异摘要 / 标注辅助），在 `application/` 里编排，LLM 服务层
+> 只放无业务规则的独立实现，且不得被 `domain` / `adapters` 导入。
 
-> **engine/ 与 storage/ 层说明（死代码审计 P0-2 处置，2026-09-25）**：上图的
-> `engine/` 与 `storage/` 两层同为**预留蓝图**，实际只落地过
-> `engine/realtime.py`、`engine/rebuild.py`、`storage/models.py`、
-> `storage/repository.py` 四个文件，且**生产代码零导入**——生产实时路径由
-> `web/__main__.py` 的 `_RealtimeProvider` 自包含承担（poll-driven），历史回放走
-> `application/replay.py`，全程**无本地持久化**。按
-> `docs/audit/cpt-code-audit-20260925.md` §3.4 处置：两层已**整层删除**，
-> `.importlinter` 中 `storage-isolated-from-application` 与
-> `engine-orchestrates-domain-and-storage-only` 两条契约随之移除（现行 2 条契约见
-> 仓库根 `.importlinter`）。若未来确实需要持久化（如信号落库），按
-> `domain/signal.py` 中 `signal_id` 作为**稳定 upsert 主键**的设计重新实现，
-> 不要照搬旧的 SQLite 三层模型。
-
-依赖方向（import-linter 强制）：
+依赖方向（`.importlinter` 的 `layers` 契约强制）：
 
 ```text
-application → engine → domain
-application → adapters / storage / llm
-adapters → domain          # 产出领域模型
-llm 不导入 engine / adapters / storage
-storage 不导入 engine / llm
+web         → application / adapters / domain
+application → adapters / domain
+adapters    → domain
+domain      → （不导入任何上层）
 domain 不导入 pandas / httpx / ccxt / fastapi / sqlalchemy / torch / openai / 绘图库
 ```
+
+> 契约是**自上而下**写的（`layers` 第一条是**最高**层），高层可以导入**任意**低层
+> （`web` 直接用 `domain` 是允许的），反向不行。实测依赖图：
+> `domain → []`、`adapters → [domain]`、`application → [adapters, domain]`、
+> `web → [adapters, application, domain]`。
 
 ## 3. 各层职责
 
@@ -78,17 +77,15 @@ domain 不导入 pandas / httpx / ccxt / fastapi / sqlalchemy / torch / openai /
 
 **核心设计：一套算法，两层输入。** 分型/笔/中枢算法全部写成对 `BarLike` 序列的纯变换。K 线层和高级别结构元素层共用同一条管线，递归只负责适配输入——这是避免"为每个级别复制一套算法"的关键。
 
-### 3.2 engine/ — 有状态编排（**已整层删除，2026-09-25，见 §2 层说明**）
+### 3.2 engine/ — 有状态编排（**已整层删除，2026-09-25**）
 
-| 模块 | 职责 |
-|---|---|
-| `historical.py` | 历史模式：批量输入、事后分类、补 `closed` 事件、`open_end` 边界处理 |
-| `realtime.py` | 实时模式：增量输入、候选维护、收盘升级、收盘后小窗口全量重建 |
-| `rebuild.py` | 尾部失效结构弹出 + 回溯重算 + 级联事件（见 §8） |
-| `events.py` | 事件追加、时间戳来源（历史用 bar 时间、实时用 wall clock）、配置快照 |
-| `store.py` | 应用事件维护"当前状态"投影，是 storage 的唯一写入方 |
+原规划 5 个模块（`historical.py` / `realtime.py` / `rebuild.py` / `events.py` /
+`store.py`），**实际只落地过 `realtime.py` 与 `rebuild.py` 两个文件，且生产代码零导入**
+—— 生产实时路径由 `web/__main__.py` 的 `_RealtimeProvider` 自包含承担（poll-driven），
+历史回放走 `application/replay.py`。已按审核 P0-2 整层删除。
 
-历史与实时**共享同一套 domain 算法**，区别只在输入边界（批量 vs 逐根）与事件策略（事后回填 vs 实时追加）。
+原模块表**不再保留**：它描述的是从未存在的模块，留着只会让人以为"曾经有过又删了"，
+而不是"从没做过"。处置依据见 §2 与 `docs/audit/cpt-code-audit-20260925.md` §3.4。
 
 ### 3.3 adapters/ — 外部数据接入（物理层）
 
@@ -102,11 +99,14 @@ def fetch_klines(symbol, interval, start, end) -> list[CanonicalBar]
 - `validators.py`：去重、缺口检测、连续性检查（独立于适配器，可单测）。发现缺口不自动填充，并阻止跨缺口生成正式结构。
 - `reference_chanlun.py`：**后端契约**（见 §7.3）+ `native_chanlun.py`（自研后端）/ `czsc_chanlun.py`（czsc 后端）。不用 ccxt——抽象泄漏且重，httpx + 窄接口足够。
 
-### 3.4 storage/ — 持久化（物理层）（**已整层删除，2026-09-25，见 §2 层说明**）
+### 3.4 storage/ — 持久化（**已整层删除，2026-09-25**）
 
-- `models.py`：SQLite 表结构（原始K线 / 标准化K线 / 结构当前状态 / 结构事件 / 信号 / LLM 调用记录）。
-- `repository.py`：读写接口，不导入 engine。首版 SQLite + JSON 导出，不引入 ORM。
-- 三层模型：**当前状态 + 不可变事件 + 信号**。事件只追加；状态更新递增 `revision`。
+原规划 SQLite 三层模型（**当前状态 + 不可变事件 + 信号**），实际只落地过 `models.py`
+与 `repository.py` 两个文件，生产代码零导入，已按审核 P0-2 整层删除。原内容不再保留
+（同上：描述的是没做完的蓝图，不是历史实现）。
+
+未来若确实需要持久化（如信号落库），按 `domain/signal.py` 里 `signal_id` 作为**稳定
+upsert 主键**的设计重新实现，不要照搬旧的 SQLite 三层模型。
 
 ### 3.5 application/ — 用例编排
 
@@ -118,6 +118,10 @@ def fetch_klines(symbol, interval, start, end) -> list[CanonicalBar]
 - `llm_cases.py`：LLM 用例（规则解释、差异摘要、标注辅助）——编排 llm 层，不含提示词
 
 ## 4. 独立 LLM 服务层
+
+> ⚠️ **本节是未实现的蓝图，不是现状。** `cpt/llm/` **从未有过代码**（空的占位包更早
+> 按审计 A1 删除），下面写的模块与接口都还不存在。保留本节只是为了记录设计意图；
+> 读到时请按"计划"而不是"已有"理解。当前 `cpt/` 里**没有任何** LLM 调用代码。
 
 `llm/` 是一个**独立、可插拔**的服务层：项目里任何需要大模型的地方，都只通过它访问；关闭它不影响任何核心功能。
 
@@ -163,30 +167,40 @@ class LLMClient(Protocol):
 
 ## 5. 目录结构
 
+**按 2026-09-25 的仓库实况重写**（原树写的是 `src/cpt/`，而实际根目录直接是 `cpt/`；
+且列着 `engine/`、`storage/`、`llm/` 三个不存在的包与 `tests/unit|oracle|e2e` 四个
+不存在的子目录 —— 那是 v0.1 的规划树，不是实况）：
+
 ```text
-src/cpt/
-├── domain/
-│   ├── types.py  models.py  config.py
-│   ├── chan_bar.py  fractal.py  bi.py  zhongshu.py
-│   ├── trend_type.py  recursion.py  signal.py
-├── engine/
-│   ├── historical.py  realtime.py  rebuild.py  events.py  store.py
-├── adapters/
-│   ├── binance_futures.py  validators.py  reference_chanlun.py
-├── storage/
-│   ├── models.py  repository.py
-├── llm/
-│   ├── config.py  base.py  registry.py  prompts.py  cache.py  budget.py
-│   └── providers/openai_compatible.py
-└── application/
-    ├── replay.py  inspect.py  export.py  llm_cases.py
-tests/
-    fixtures/   unit/  oracle/  e2e/
-docs/
-    rules.md  architecture.md  implementation-plan.md  reference-audit.md(待补)
-references/
-    czsc @ 701e480a（可选 extra `chan`）   wbt @ 39bb1e8a（仅可视化参考）
+cpt/
+├── domain/         纯算法与领域模型（14 个模块，零第三方依赖）
+│   types.py  models.py  config.py  chan_bar.py  contain.py
+│   fractal.py  bi.py  zhongshu.py  trend_type.py  recursion.py
+│   signal.py  ...
+├── adapters/       外部接入（16 个模块）
+│   binance_futures.py  ccxt_source.py  wind_source.py  a_share_public.py
+│   a_share_local.py  a_share_pool.py  a_share_factor.py  strategy_signal.py
+│   validators.py  reference_chanlun.py  native_chanlun.py  czsc_chanlun.py
+│   _dbconfig.py  ...
+├── application/    用例编排（29 个模块）
+│   replay.py  inspect.py  export.py  dashboard.py  multi_level.py
+│   a_share_snapshot.py  a_share_rules.py  canvas_*.py  ...
+└── web/            HTTP 入口（5 个模块）
+    __main__.py  app.py  a_share.py  a_share_routes.py  __init__.py
+
+scripts/            运维入口（不在包内，但已在 CI 门禁覆盖范围内）
+    factor_backfill.py
+dashboard/          前端静态产物（Nginx 从 /var/www/cpt-dashboard 提供，非包内）
+tests/              扁平布局：test_*.py 直接放 tests/ 下（71 个）
+    fixtures/oracle/
+docs/               rules.md  architecture.md  implementation-plan.md  progress-log.md
+                    pending-wiring.md  duplication-triage.md  export-schema-v1.md  audit/
+deploy/             nginx/  systemd/  env/  README.md
+references/         czsc @ 701e480a（可选 extra `chan`）  wbt @ 39bb1e8a（仅可视化参考）
 ```
+
+> 三个已删除的层（`engine/` / `storage/` / `llm/`）与它们各自的规划树**不再列出** ——
+> 见 §2 的层说明与 §3.2 / §3.4。
 
 ## 6. 数据模型（不可变）
 

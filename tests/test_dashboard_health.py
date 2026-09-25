@@ -10,12 +10,12 @@
 from __future__ import annotations
 
 import json
-import threading
 import urllib.request
 
 import pytest
 from cpt.web.__main__ import _RealtimeProvider
-from cpt.web.app import serve_snapshot
+
+from tests.conftest import served
 
 _STATIC_SNAPSHOT = {
     "schema_version": "dashboard.v2",
@@ -24,8 +24,8 @@ _STATIC_SNAPSHOT = {
 }
 
 
-def _get(port: int, path: str) -> tuple[int, dict[str, object]]:
-    with urllib.request.urlopen(f"http://127.0.0.1:{port}{path}") as response:
+def _get(base: str, path: str) -> tuple[int, dict[str, object]]:
+    with urllib.request.urlopen(f"{base}{path}") as response:
         return response.status, json.load(response)
 
 
@@ -44,13 +44,6 @@ class _HealthProvider:
         return dict(self._health)
 
 
-def _serve(provider: object) -> tuple[object, threading.Thread]:
-    server = serve_snapshot(provider)  # type: ignore[arg-type]
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    return server, thread
-
-
 def test_health_returns_real_provider_state() -> None:
     provider = _HealthProvider(
         {
@@ -61,46 +54,31 @@ def test_health_returns_real_provider_state() -> None:
             "last_error": "upstream_fetch_failed:URLError",
         }
     )
-    server, thread = _serve(provider)
-    try:
-        status, payload = _get(server.server_port, "/api/dashboard/health")
+    with served(provider) as base:
+        status, payload = _get(base, "/api/dashboard/health")
         assert status == 200
         assert payload["ok"] is False
         assert payload["degraded"] is True
         assert payload["consecutive_failures"] == 3
         assert payload["last_error"] == "upstream_fetch_failed:URLError"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
 
 
 def test_health_falls_back_without_provider_health() -> None:
     # 无 health 能力的 provider（如 dict / fixture）：退回静态只读声明
-    server, thread = _serve(lambda: dict(_STATIC_SNAPSHOT))
-    try:
-        status, payload = _get(server.server_port, "/api/dashboard/health")
+    with served(lambda: dict(_STATIC_SNAPSHOT)) as base:
+        status, payload = _get(base, "/api/dashboard/health")
         assert status == 200
         assert payload == {"ok": True, "read_only": True, "degraded": False}
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
 
 
 def test_health_survives_probe_failure() -> None:
     provider = _HealthProvider(RuntimeError("probe blew up"))
-    server, thread = _serve(provider)
-    try:
-        status, payload = _get(server.server_port, "/api/dashboard/health")
+    with served(provider) as base:
+        status, payload = _get(base, "/api/dashboard/health")
         assert status == 200
         assert payload["ok"] is False
         assert payload["degraded"] is True
         assert payload["last_error"] == "health_probe_failed:RuntimeError"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
 
 
 class _FailingClient:

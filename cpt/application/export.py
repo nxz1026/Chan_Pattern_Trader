@@ -14,6 +14,7 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
+from cpt.application._bar_dict import bar_to_dict
 from cpt.domain.config import RulesConfig
 from cpt.domain.models import (
     Bi,
@@ -46,17 +47,6 @@ EXPORT_SCHEMA_URL: str = (
 #: 任何结构对象的 ``start_time`` / ``end_time`` 等于此值时, ``export_dataset``
 #: 拒绝导出,防止占位语义污染已冻结的 schema v1。
 _EXPORT_PLACEHOLDER_TIME: int = PLACEHOLDER_TIME
-
-
-def _bar_to_dict(bar: CanonicalBar) -> dict[str, Any]:
-    """``CanonicalBar`` → schema v1 bar 对象。
-
-    ``direction`` 是 ``CanonicalBar`` 的派生属性，不参与 ``asdict``，
-    这里显式补上，排在末尾。
-    """
-    data: dict[str, Any] = asdict(bar)
-    data["direction"] = bar.direction
-    return data
 
 
 def _reject_placeholders(
@@ -99,7 +89,7 @@ def export_dataset(
         "config": config.to_dict(),
         "metadata": dict(metadata) if metadata is not None else {},
         "data": {
-            "bars": [_bar_to_dict(b) for b in bars],
+            "bars": [bar_to_dict(b) for b in bars],
             "fractals": [asdict(f) for f in fractals],
             "bis": [asdict(b) for b in bis],
             "zhongshus": [asdict(z) for z in zhongshus],

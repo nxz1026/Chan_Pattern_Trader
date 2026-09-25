@@ -379,8 +379,10 @@ R15-1 不再继续尝试（避免无限重试）。如需补，留作离线 batc
   is_bomb/is_one_word``（不重算 ±10/20/30% 阈值——随板块变化，重算易错），把
   合成 id 挂到 ``Bi.source_ids``（不改 ``Bi`` schema，保持跨市场一致）。
 - **C3 停牌**：`public.daily_bar` 是交易日表，停牌日本来就没行——无需额外处理。
-- **C4 T+1**：``t_plus_one_purchase_allowed()`` 占位（实际仓位层在
-  ``cpt/storage/repository`` 里管——本接口只回答"日历是否允许"）。
+- **C4 T+1**：``t_plus_one_purchase_allowed()`` 占位（本接口只回答"日历是否允许"；
+  仓位层**当前不存在** —— 原写的 ``cpt/storage/repository`` 已于 2026-09-25 审核
+  P0-2 整层删除，且实查 ``git show 79170b6:cpt/storage/repository.py`` 里**从来没有**
+  过 position/OPEN 相关逻辑，故那句话当时就是错的）。
 - **C5 非交易日**：天然不在 ``public.daily_bar``，不需额外处理。
 
 **端点匹配**：用 ``Bi.end_time``（毫秒）转 ISO date 查表，**不是** ``start_time``——
@@ -1245,3 +1247,110 @@ HTML/CSS 看起来完全正常，所以很容易误判成"前端代码写错了"
 - 策略候选可能**不足 5 只**（口径 D 会滤掉 `PASS`）。当前数据下只有 3 只 ——
   这是口径的预期结果，不是取数缺失。
 - 热门池 `limit=None` 的全量能力保留但**暂无 UI 入口**（"展开全部"未做）。
+
+---
+
+## 遗留问题修复收口（F3-②③④ + 去重归档）· 2026-09-25
+
+### 背景
+
+上一轮审核+验证留下三件待办（见 `docs/handoff-20260925-leftover-fixes.md` §3），
+用户指令是「遗留问题都要修」。本轮把 F3-②③④ 三件全部落地，并顺手把
+「去重判定」的结论固化成文档。
+
+### F3-② 合并 `_bar_to_dict`
+
+两处函数体逐字相同（`asdict(bar)` + 补派生 `direction`），分别在
+`cpt/application/export.py` 与 `cpt/application/dashboard.py`。
+
+**风险**：导出那份是**已冻结的 schema v1**（`data` 子树参与 `dataset_hash`），
+看板那份是 UI 载荷 —— 今天同形是巧合，直接合并会让"看板顺手加个字段"
+**静默改掉导出格式**。
+
+**做法**：抽到 `cpt/application/_bar_dict.py::bar_to_dict`（同层，不违反层契约），
+模块顶部写**显式 warning**（改键集合 = 改导出格式，必须升 `EXPORT_SCHEMA_VERSION`
++ 同步 `docs/export-schema-v1.md`）；两处改为 import。
+
+**配套守卫**：新增
+`tests/test_dataset_hashes.py::test_export_bar_keys_are_frozen_schema_v1`，
+把 bar 键集合钉成 **13 个键的冻结字面量**（12 个 `CanonicalBar` 字段 + 派生 `direction`）。
+
+**做了反向验证**（不验证就等于加了个摆设）：往 `bar_to_dict` 里插一个
+`__drift_probe__` 字段 → 该测试**立刻 RED**；还原后 **GREEN**。
+
+### F3-③ 新增 `docs/duplication-triage.md`
+
+归档 `docs/audit/audit-20260925.json` 三个去重字段的逐组判定。
+
+**没有照抄交接文档的数字，而是逐组重新取证**：对 27 组 `dup_names` 用
+`ast.parse` 取出**当前仍存在**文件里的同名定义，剥掉 docstring 后对函数体做
+**结构哈希**再分组。结果：
+
+| 字段 | audit 规模 | 复核结论 |
+|---|---|---|
+| `dup_names` | 27 组 | **4 组已消解 / 23 组同名不同义 / 0 组真重复** |
+| `dup_bodies` | 1 组 | 两个测试文件各自的 `date` helper，纯样板，**不动** |
+| `dup_blocks` | 21 组 | 全为结构性误报；5 组随文件删除消失，1 组（HTTP 样板）由 F3-④ 收口 |
+
+**纠正了交接文档的两处不实**（这是本轮取证的主要收获）：
+
+1. 交接文档称 `connection_kwargs` 出现 **3 处**（含 `cpt/adapters/a_share_pool.py`）——
+   **错**。`a_share_pool.py` 里 `grep -n connection_kwargs` **零命中**，它只接收调用方
+   传入的 `conn`（`conn.cursor()`），**从来没有**同名函数。实际是 **2 处**
+   （`a_share_local.py:131` 与 `scripts/factor_backfill.py:84`），都是转调
+   `_shared_connection_kwargs(exc_type=...)` 的薄包装。
+2. 交接文档称 HTTP server 样板有 **7 处** —— 那是按**文件数**算的；
+   按**出现次数**实测是 **8 处**（`test_review_m7_fixes.py` 一个文件里就有 2 处）。
+
+另核实 `dup_names` 里有一组**边界情况**刻意不合并：`direction` 在
+`domain/contain.py:121` 与 `domain/models.py:101` 的函数体**逐字同构**，但它们是
+两个**不同 dataclass** 各自实现 `BarLike` 协议属性 —— 合并会让两个平级模块互相依赖，
+而真正的契约收口点已经在 `domain/types.py` 的 `BarLike` 协议里。
+
+### F3-④ 抽 `tests/conftest.py::served()`
+
+`threading.Thread(target=server.serve_forever, daemon=True)` 这段样板实测
+**8 处 / 7 文件**，每份都要自己写 `shutdown` / `server_close` /
+`thread.join(timeout=2)` 三连，漏一处就泄漏线程与端口。
+
+统一收进 `served(provider)` 上下文管理器：进入 yield base URL，退出保证三连回收。
+
+**刻意不改各测试的既有假设**：仍绑 `127.0.0.1`、仍 `port=0`（内核分配）、
+`join` 超时仍是 **2s**。另：`cpt` 在函数体内**延迟导入**，维持 conftest
+「不在 collection 阶段拖入被测包」的既有约束（该文件第一段注释专门解释过原因）。
+
+收口后 `grep -rn "target=.*serve_forever" tests/` 只剩 `conftest.py` 一处定义。
+
+### 验收
+
+- **全量门禁实跑**（§5 与 CI 一致）：
+
+  | 门禁 | 结果 |
+  |---|---|
+  | `ruff check cpt tests scripts` | All checks passed |
+  | `ruff format --check cpt tests scripts` | **138 files** already formatted |
+  | `mypy cpt scripts` | Success, **67** source files, 0 error（+1 = 新增 `_bar_dict.py`） |
+  | `lint-imports` | **3 kept, 0 broken** |
+  | `pytest tests -q -o addopts=""` | **461 passed**（上一轮 460，+1 = 键集合冻结守卫） |
+  | `vulture --min-confidence 60 cpt whitelist.py` | 零输出、exit 0 |
+
+- **反向验证**：F3-② 的守卫做了"插字段 → RED → 还原 → GREEN"双向确认。
+
+### 踩到的坑
+
+1. **`edit` 报 `file changed since it was read`**（§6 坑 1 复现）：用脚本批量改完
+   测试文件后再用 `edit` 补 import，直接被挡。**必须重新 `read` 再 `edit`**。
+2. **脚本替换 import 块会把新 import 插错位置**：我先用字符串替换把
+   `from tests.conftest import served` 插到了 `import pytest` **之前**，
+   切断了第三方 import 块（ruff 的 `I` 规则会红）。改 import 块要整块替换，
+   不能插单行。
+3. **`ruff format` 会二次改写**：手写的 conftest 与测试文件过了 `check` 但没过
+   `format --check`（各一处空行），`ruff format` 直接改掉 —— 与坑 1 是同一类问题。
+
+### 边界（未做）
+
+- `dup_bodies` 那组测试 `date` helper **不合并**：4 行样板，为零生产影响引入跨测试
+  文件 import 不划算（文档里写明了将来第三个使用方出现再提 `conftest.py`）。
+- `dup_names` 的 23 组「同名不同义」**全部保留**：判定口径是"看起来一样不等于应该
+  合并"，合并的代价是把两个独立演进的东西焊死。
+

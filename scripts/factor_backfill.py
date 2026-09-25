@@ -55,15 +55,21 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from collections.abc import Iterable
-from dataclasses import dataclass
-from datetime import UTC, datetime
+from typing import Any
 
 from cpt.adapters._dbconfig import connection_kwargs as _shared_connection_kwargs
+from cpt.adapters.a_share_factor import FactorRow, factor_source_ref, upsert_factor_rows
+from cpt.adapters.a_share_public import (
+    TENCENT_KLINE_URL,
+    ASharePublicError,
+    normalize_code,
+)
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-SOURCE_TX = "tx:fqkline"
-TX_ENDPOINT = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
+#: 端点与 ``source`` 取值都取自 cpt 的**唯一**定义，脚本不再各留一份。
+#: 2026-09-25 之前脚本自带 ``TX_ENDPOINT``（与 ``TENCENT_KLINE_URL`` 逐字相同）与
+#: ``SOURCE_TX = "tx:fqkline"``（适配器写 ``tencent_fqkline``）—— 同一个腾讯接口
+#: 在库里分裂成两个 ``source``，实测 49,730 行 vs 7,200 行。
 UA = "Mozilla/5.0"
 DEFAULT_KLINE_DAYS = 800  # 腾讯单次上限 801 根（实测 count=800 → 801 根，覆盖 2023-06 至今）
 
@@ -75,12 +81,15 @@ logger = logging.getLogger("factor_backfill")
 # --------------------------------------------------------------------------- #
 
 
-def connection_kwargs() -> dict[str, object]:
+def connection_kwargs() -> dict[str, Any]:
     """构造 psycopg3 连接参数（缺失 ``~/.dbconfig`` 时 ``SystemExit``）。
 
     解析与校验在 :mod:`cpt.adapters._dbconfig`（2026-09-25 审核 §5.1 收口，合并前
     本脚本自带一份逐行重复实现）。本脚本是运维入口，缺配置时**直接退出并打印一行
     原因**比抛栈友好，故把异常类型注入为 ``SystemExit``——与合并前行为一致。
+
+    返回 ``dict[str, Any]``（不是 ``dict[str, object]``）以便直接 ``**`` 展开给
+    ``psycopg.connect``：后者有重载签名，``object`` 会让 mypy strict 报一堆 arg-type。
     """
     return _shared_connection_kwargs(exc_type=SystemExit)
 
@@ -90,37 +99,11 @@ def connection_kwargs() -> dict[str, object]:
 # --------------------------------------------------------------------------- #
 
 
-@dataclass(frozen=True)
-class FactorRow:
-    code: str
-    trade_date: str  # ISO date 'YYYY-MM-DD'
-    hfq_factor: float
-    source: str = SOURCE_TX
-    source_ref: str | None = None
-
-
-def _code_to_tx(code_wind: str) -> tuple[str, str]:
-    """``600519.SH`` → ``('sh600519', '600519')``；纯裸码则按首位推断市场。
-
-    失败抛 ``ValueError``（永久错误，不重试）。
-    """
-    if "." in code_wind:
-        base, ex = code_wind.split(".", 1)
-        return f"{ex.lower()}{base}", base
-    if code_wind.startswith(("6", "9", "5")):
-        return f"sh{code_wind}", code_wind
-    if code_wind.startswith(("0", "2", "3")):
-        return f"sz{code_wind}", code_wind
-    if code_wind.startswith(("4", "92")):
-        return f"bj{code_wind}", code_wind
-    raise ValueError(f"无法推断市场前缀: {code_wind}")
-
-
 def _fetch_tx_pair(tx_sym: str, days: int) -> tuple[list[list[str]], list[list[str]]]:
     """返回 (raw, hfq)，二者同源同对。"""
 
     def one(adj: str) -> list[list[str]]:
-        url = f"{TX_ENDPOINT}?param={tx_sym},day,,,{days},{adj}"
+        url = f"{TENCENT_KLINE_URL}?param={tx_sym},day,,,{days},{adj}"
         req = urllib.request.Request(url, headers={"User-Agent": UA})
         with urllib.request.urlopen(req, timeout=15) as r:
             text = r.read().decode("gbk", errors="replace")
@@ -129,15 +112,25 @@ def _fetch_tx_pair(tx_sym: str, days: int) -> tuple[list[list[str]], list[list[s
         d = json.loads(text)
         block = d["data"][tx_sym]
         key = f"{adj}day" if adj else "day"
-        return block[key]
+        # 显式标注：``json.loads`` 回 Any，直接 return 会被 mypy 判 no-any-return。
+        rows: list[list[str]] = block[key]
+        return rows
 
     return one(""), one("hfq")
 
 
 def fetch_tx_factor_rows(code_wind: str, *, days: int = DEFAULT_KLINE_DAYS) -> list[FactorRow]:
-    """拉一只票最近 N 天 raw+hfq，算每日 ``hfq_factor = hfq/raw``。"""
+    """拉一只票最近 N 天 raw+hfq，算每日 ``hfq_factor = hfq/raw``。
 
-    tx_sym, _ = _code_to_tx(code_wind)
+    市场前缀交给 :func:`cpt.adapters.a_share_public.normalize_code`（唯一权威实现）。
+    本脚本原先自带一份 ``_code_to_tx``，**有先后顺序 bug**：``9``（沪 B）写在
+    ``92``（北交所新代码段）之前，于是 ``920201`` 被推成 ``sh920201``；而且它不认
+    ``43/83/87/88``，``830799`` 直接抛错。``normalize_code`` 在 R17 就修掉了这个顺序
+    问题（注释里点名过 ``a_share_local._to_wind_code`` 同样的 bug），本脚本这第三份
+    一直没跟上。删掉本地实现后，这类 bug 由构造消除。
+    """
+
+    tx_sym = normalize_code(code_wind)
     raw, hfq = _fetch_tx_pair(tx_sym, days)
     raw_map = {r[0]: float(r[2]) for r in raw}  # date -> raw close
     hfq_map = {r[0]: float(r[2]) for r in hfq}
@@ -151,7 +144,7 @@ def fetch_tx_factor_rows(code_wind: str, *, days: int = DEFAULT_KLINE_DAYS) -> l
                 code=code_wind,
                 trade_date=date_str,
                 hfq_factor=h / r,
-                source_ref=f"web.ifzq.gtimg.cn fqkline day/hfq {date_str}",
+                source_ref=factor_source_ref(date_str),
             )
         )
     return rows
@@ -181,12 +174,14 @@ def list_incremental_codes() -> list[str]:
     with psycopg.connect(**connection_kwargs()) as conn:
         with conn.cursor() as cur:
             cur.execute("SELECT max(date) FROM public.hot_rank")
-            hot_date = cur.fetchone()[0]
+            row = cur.fetchone()
+            hot_date = row[0] if row else None
             cur.execute("SELECT code FROM public.hot_rank WHERE date = %s", (hot_date,))
             hot = {r[0] for r in cur.fetchall()}
 
             cur.execute("SELECT max(date) FROM public.ladder_day")
-            lad_date = cur.fetchone()[0]
+            row = cur.fetchone()
+            lad_date = row[0] if row else None
             cur.execute(
                 "SELECT code FROM public.ladder_day WHERE date=%s AND cont_days>=2",
                 (lad_date,),
@@ -206,55 +201,15 @@ def list_incremental_codes() -> list[str]:
     return sorted(hot | lad | fresh | covered)
 
 
-def latest_factor_date(conn, code: str) -> str | None:
+def latest_factor_date(conn: Any, code: str) -> str | None:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT max(trade_date) FROM asel.ref_adjust_factor WHERE code=%s",
             (code,),
         )
-        d = cur.fetchone()[0]
+        row = cur.fetchone()
+        d = row[0] if row else None
     return d.isoformat() if d else None
-
-
-def upsert_factor_rows(conn, rows: Iterable[FactorRow], dry_run: bool) -> int:
-    """幂等 upsert 整批因子行（主键 ``(code, trade_date)``）。
-
-    用 ``executemany`` 批量写入——**不要**逐行 ``execute``：每只票 800 行、
-    94 只就是 7.5 万条语句，逐行会慢到不可用（实测）。
-    """
-    now = datetime.now(UTC)
-    payload = [
-        (
-            row.code,
-            row.trade_date,
-            row.hfq_factor,
-            row.source,
-            TX_ENDPOINT,
-            row.source_ref,
-            now,  # as_of
-            now,  # available_at
-            now,  # fetched_at
-        )
-        for row in rows
-    ]
-    if dry_run:
-        return len(payload)
-    with conn.cursor() as cur:
-        cur.executemany(
-            """INSERT INTO asel.ref_adjust_factor
-                 (code, trade_date, hfq_factor, source, source_url, source_ref,
-                  as_of, available_at, fetched_at)
-               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s)
-               ON CONFLICT (code, trade_date) DO UPDATE SET
-                 hfq_factor=EXCLUDED.hfq_factor,
-                 source=EXCLUDED.source,
-                 source_url=EXCLUDED.source_url,
-                 source_ref=EXCLUDED.source_ref,
-                 fetched_at=EXCLUDED.fetched_at""",
-            payload,
-        )
-    conn.commit()
-    return len(payload)
 
 
 # --------------------------------------------------------------------------- #
@@ -305,7 +260,11 @@ def main(argv: list[str] | None = None) -> int:
         for idx, code in enumerate(codes, 1):
             try:
                 rows = fetch_tx_factor_rows(code)
-            except ValueError as e:
+            except (ValueError, ASharePublicError) as e:
+                # 永久错误：代码本身不认识/无法推断市场 —— 重试没有意义，直接跳过。
+                # ``normalize_code`` 抛的是 ``ASharePublicError``（基类是 ``RuntimeError``
+                # 而不是 ``ValueError``），必须显式列出；这条要在下面那条
+                # ``RuntimeError`` 之前，否则会被归类成"可重试的网络失败"。
                 logger.info("跳过 %s: %s", code, str(e)[:100])
                 fail_count += 1
                 time.sleep(args.sleep_ms / 1000)
@@ -329,7 +288,7 @@ def main(argv: list[str] | None = None) -> int:
                 if not rows:
                     time.sleep(args.sleep_ms / 1000)
                     continue
-            n = upsert_factor_rows(conn, rows, args.dry_run)
+            n = upsert_factor_rows(conn, rows, source_url=TENCENT_KLINE_URL, dry_run=args.dry_run)
             total += n
             logger.info(
                 "[%d/%d] %s 新增 %d 行 (%s ~ %s)",

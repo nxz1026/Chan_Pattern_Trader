@@ -12,7 +12,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 from decimal import Decimal
 from typing import Any
@@ -68,9 +68,16 @@ class _FakeCursor:
 class FakeConn:
     rows: list[tuple]
     max_row: tuple | None = (date(2026, 9, 24),)
+    cursor_obj: _FakeCursor = field(init=False)
+
+    def __post_init__(self) -> None:
+        # 复用**同一个**游标实例：``fetch_strategy_top`` 内部是 ``with conn.cursor()``，
+        # 外部拿不到那个对象，而测试要断言"到底发出去过哪些 SQL"。每次新建游标
+        # 会让 ``executed`` 永远为空。
+        self.cursor_obj = _FakeCursor(source=self.rows, max_row=self.max_row)
 
     def cursor(self) -> _FakeCursor:
-        return _FakeCursor(source=self.rows, max_row=self.max_row)
+        return self.cursor_obj
 
 
 # --------------------------------------------------------------------------- #
@@ -168,3 +175,17 @@ def test_fetch_strategy_top_handles_null_name_and_model() -> None:
 def test_fetch_strategy_top_sets_trade_date_from_max() -> None:
     picks = fetch_strategy_top(FakeConn(rows=[R_000498], max_row=(date(2026, 9, 24),)))
     assert picks[0].trade_date == "2026-09-24"
+
+
+def test_fetch_strategy_top_sql_has_deterministic_tie_break() -> None:
+    """SQL 的 ``ORDER BY`` 必须有 tie-break，否则"同 code 多行且综合分相等"时
+    保留哪一行取决于数据库返回顺序 —— 同一份数据两次跑可能给出不同的候选。
+
+    当前库里只有 1 个 strategy、且无同 code 多行，**触发不了**；但唯一键含
+    ``strategy`` / ``prompt_hash``，加策略或加 prompt 版本后立刻就会遇到。
+    """
+    conn = FakeConn(rows=[R_000498])
+    fetch_strategy_top(conn)
+    # 第 0 条是 ``SELECT max(trade_date)``，取数那条是最后一条
+    sql = " ".join(conn.cursor().executed[-1][0].split())
+    assert "ORDER BY code, score DESC, confidence DESC" in sql

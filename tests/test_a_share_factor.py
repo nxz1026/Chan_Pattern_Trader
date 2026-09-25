@@ -10,15 +10,19 @@
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import pytest
 from cpt.adapters.a_share_factor import (
+    SOURCE_TX,
     FactorRow,
     FactorUnavailableError,
     OnDemandFactorFetcher,
     build_factor_rows,
+    factor_source_ref,
     fetch_factor_rows,
+    upsert_factor_rows,
 )
 from cpt.application import a_share_snapshot as snap
 from cpt.domain.models import CanonicalBar
@@ -450,3 +454,138 @@ def test_empty_snapshot_takes_name_as_argument() -> None:
     # 默认（不传）就是空，不留 None 给前端
     plain = snap.empty_ashare_snapshot("600519", "no_data")
     assert plain["market"]["name"] == ""
+
+
+# ---------------------------------------------------------------- 写库（D 收口）
+#
+# 2026-09-25：``upsert_factor_rows`` 原先在 scripts/factor_backfill.py 有一份
+# **9 列 + dry_run** 的副本，本模块这份只有 8 列且不支持 dry_run。两份已漂移：
+# 脚本写的行带 ``source_ref``、按需路径写的行不带；``source`` 值还各写一个，
+# 同一个腾讯接口在库里分裂成 49,730 行 ``tx:fqkline`` 与 7,200 行
+# ``tencent_fqkline``。现在适配器是唯一实现，下面钉住它的**列集合**与 dry_run 语义。
+
+
+class _FakeCursor:
+    def __init__(self, log: list[tuple[str, Any]]) -> None:
+        self._log = log
+        self.rowcount = 0
+
+    def executemany(self, sql: str, payload: Any) -> None:
+        self._log.append(("executemany", (sql, list(payload))))
+
+    def __enter__(self) -> _FakeCursor:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+
+class _FakeConn:
+    """只记录 SQL 与参数，不连库。``commits`` 用来证明 dry_run 不写。"""
+
+    def __init__(self) -> None:
+        self.log: list[tuple[str, Any]] = []
+        self.commits = 0
+
+    def cursor(self) -> _FakeCursor:
+        return _FakeCursor(self.log)
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
+def test_upsert_writes_nine_columns_including_source_ref() -> None:
+    """列集合必须是 9 列（含 ``source_ref``）。
+
+    少一列就是当年那份 8 列实现的回归：按需拉来的行没有溯源串，
+    ``WHERE source_ref LIKE '%2024-01-01'`` 之类的反查会漏掉它们。
+    """
+    conn = _FakeConn()
+    rows = (FactorRow("600519", "2024-01-01", 1.5, source_ref="ref-x"),)
+    assert upsert_factor_rows(conn, rows, source_url="http://u") == 1
+
+    sql, payload = conn.log[0][1]
+    for col in ("code", "trade_date", "hfq_factor", "source", "source_url", "source_ref"):
+        assert col in sql, f"{col} 没进 INSERT 列清单"
+    assert "as_of" in sql and "available_at" in sql and "fetched_at" in sql
+    assert len(payload[0]) == 9
+    # 行自带的 source / source_ref 必须落盘（不是硬编码常量）
+    assert payload[0][3] == SOURCE_TX
+    assert payload[0][5] == "ref-x"
+    assert payload[0][4] == "http://u"
+    assert conn.commits == 1
+
+
+def test_upsert_dry_run_does_not_touch_db() -> None:
+    """``dry_run`` 只算行数：不 execute、不 commit。"""
+    conn = _FakeConn()
+    rows = (FactorRow("600519", "2024-01-01", 1.5), FactorRow("600519", "2024-01-02", 1.6))
+    assert upsert_factor_rows(conn, rows, dry_run=True) == 2
+    assert conn.log == []
+    assert conn.commits == 0
+
+
+def test_upsert_empty_rows_returns_zero_without_commit() -> None:
+    conn = _FakeConn()
+    assert upsert_factor_rows(conn, ()) == 0
+    assert conn.log == []
+    assert conn.commits == 0
+
+
+def test_source_tx_value_is_the_unified_one() -> None:
+    """``SOURCE_TX`` 必须是统一后的那个值。
+
+    两处各写一个值就是这个字段踩过的坑：同一个腾讯接口在库里有两个 ``source``，
+    任何 ``WHERE source = ...`` 的查询都会漏掉大部分数据。
+    """
+    assert SOURCE_TX == "tx:fqkline"
+
+
+def test_script_no_longer_redefines_factor_writers() -> None:
+    """backfill 脚本不该再有 ``FactorRow`` / ``upsert_factor_rows`` / 常量副本。
+
+    **用 AST 判而不是字符串判**：脚本注释里*故意*留着
+    ``SOURCE_TX = "tx:fqkline"`` 这句话来解释这段历史，字符串匹配会误报。
+    判的是"顶层没有这个定义/赋值"，这才是收口的意思。
+    """
+    import ast
+
+    source = (Path(__file__).parents[1] / "scripts" / "factor_backfill.py").read_text(
+        encoding="utf-8"
+    )
+    tree = ast.parse(source)
+
+    defined = {n.name for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef))}
+    assert "FactorRow" not in defined, "脚本还在自带 FactorRow"
+    assert "upsert_factor_rows" not in defined, "脚本还在自带 upsert 实现"
+
+    assigned = {
+        target.id
+        for node in tree.body
+        if isinstance(node, ast.Assign)
+        for target in node.targets
+        if isinstance(target, ast.Name)
+    }
+    assert "SOURCE_TX" not in assigned, "脚本还在自带 source 常量"
+    assert "TX_ENDPOINT" not in assigned, "脚本还在自带端点常量"
+
+    # 而唯一实现确实是从适配器导入的（判导入名，不判字面量 —— 多行 import 会变格式）
+    imported = {
+        alias.name
+        for node in ast.walk(tree)
+        if isinstance(node, ast.ImportFrom)
+        for alias in node.names
+    }
+    assert "upsert_factor_rows" in imported
+    assert "TENCENT_KLINE_URL" in imported
+    assert "normalize_code" in imported
+
+
+def test_build_factor_rows_carries_source_ref() -> None:
+    """按需路径也要带溯源串 —— 与脚本写出来的行保持同形。"""
+    raw = [_Bar(0, 10.0), _Bar(1, 11.0)]
+    hfq = [_Bar(0, 12.0), _Bar(1, 13.2)]
+    rows = build_factor_rows("600519", raw, hfq)
+    assert all(r.source_ref == factor_source_ref(r.trade_date) for r in rows)
+    assert rows[0].source_ref == "web.ifzq.gtimg.cn fqkline day/hfq 2024-01-01"
+    assert all(r.source == SOURCE_TX for r in rows)

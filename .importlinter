@@ -27,3 +27,33 @@ forbidden_modules =
 # `storage-isolated-from-application` 与 `engine-orchestrates-domain-and-storage-only`
 # 两条契约随之删除（它们唯一的作用域就是这两个已不存在的包）。见
 # docs/architecture.md §2 的层说明与 docs/audit/cpt-code-audit-20260925.md §3.4。
+
+[importlinter:contract:layers]
+name = Layered architecture
+type = layers
+# ⚠️ import-linter 的 ``layers`` 是**自上而下**写的：第一条是**最高**层，高层可以导入
+# 低层，反之不行。这里 web 最高、domain 最低。
+layers =
+    cpt.web
+    cpt.application
+    cpt.adapters
+    cpt.domain
+
+# 关于上面这条契约的三点说明（都是 2026-09-25 补的）：
+#
+# 1. **它是补的，不是恢复。** 审核报告 §2.1 声称存在一条
+#    `domain → engine → application → adapters → storage → web` 的层级契约，
+#    实际从来没有过 —— 之前只有上面那两条 `forbidden`。
+#
+# 2. **审核报告给的方向是整条反的。** 按 import-linter「第一条最高」的写法，它那份
+#    清单等于说 `domain` 最高（可导入任何层）、`web` 最低（谁都不能导），与真实依赖
+#    方向正好相反。实测（grimp 遍历 cpt 子包的互相导入）真实方向是：
+#        cpt.domain      -> []
+#        cpt.adapters    -> [domain]
+#        cpt.application -> [adapters, domain]
+#        cpt.web         -> [adapters, application, domain]
+#    即 web > application > adapters > domain —— 所以正确写法就是上面这个顺序。
+#
+# 3. **照审核报告原样落地会立刻失败**，然后极容易被"顺手放宽"成没用的摆设 ——
+#    补这条契约时我第一版就写反了，lint-imports 直接报
+#    `cpt.application.replay -> cpt.adapters.*` 违规，正是这个原因。

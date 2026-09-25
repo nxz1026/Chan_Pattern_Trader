@@ -1,28 +1,22 @@
 from __future__ import annotations
 
 import json
-import threading
 import urllib.error
 import urllib.request
 
-from cpt.web.app import serve_snapshot
+from tests.conftest import served
 
 
 def test_dashboard_http_adapter_is_read_only() -> None:
-    server = serve_snapshot(
-        lambda: {
-            "schema_version": "dashboard.v2",
-            "reproducibility": {"hashes": {}},
-            "parity": {"items": []},
-            "runs": [],
-            "market_24h": {"available": False},
-            "engine_state": {"revision": 0},
-        }
-    )
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        base = f"http://127.0.0.1:{server.server_port}"
+    provider = lambda: {  # noqa: E731
+        "schema_version": "dashboard.v2",
+        "reproducibility": {"hashes": {}},
+        "parity": {"items": []},
+        "runs": [],
+        "market_24h": {"available": False},
+        "engine_state": {"revision": 0},
+    }
+    with served(provider) as base:
         with urllib.request.urlopen(f"{base}/api/dashboard/snapshot") as response:
             assert json.load(response)["schema_version"] == "dashboard.v2"
         with urllib.request.urlopen(f"{base}/api/dashboard/health") as response:
@@ -43,7 +37,3 @@ def test_dashboard_http_adapter_is_read_only() -> None:
             assert error.code == 405
         else:
             raise AssertionError("POST must be rejected")
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)

@@ -50,8 +50,11 @@ exclude = ["tests*"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
-extend-exclude = ["references", "build", "dist", "docs"]
-src = ["cpt", "tests"]
+# ``whitelist.py`` 是 vulture 的忽略清单：里面**故意**是一堆裸名字（不是合法 Python），
+# ruff 会在上面报 83 条 F821。CI 只跑 ``ruff check cpt tests`` 所以不会红，但任何人跑
+# ``ruff check .`` 或编辑器保存时都会炸。vulture 白名单的惯例就是排除在 lint 之外。
+extend-exclude = ["references", "build", "dist", "docs", "whitelist.py"]
+src = ["cpt", "tests", "scripts"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "B", "UP"]
@@ -60,6 +63,9 @@ ignore = []
 [tool.ruff.lint.per-file-ignores]
 "tests/*" = ["B011"]
 "references/**" = ["ALL"]
+# 兜住"显式传路径"的场景（编辑器保存、`ruff check whitelist.py`）：`extend-exclude`
+# 默认**不作用于显式传入的路径**，只加 exclude 的话编辑器里照样报 83 条。
+"whitelist.py" = ["ALL"]
 
 [tool.ruff.format]
 quote-style = "double"

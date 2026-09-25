@@ -9,10 +9,8 @@
 from __future__ import annotations
 
 import json
-import threading
 import urllib.request
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
 from typing import Any
 
 import pytest
@@ -25,7 +23,8 @@ from cpt.adapters.source_registry import (
     probe_all,
     probe_source,
 )
-from cpt.web.app import serve_snapshot
+
+from tests.conftest import served
 
 
 @pytest.fixture(autouse=True)
@@ -167,33 +166,20 @@ def test_capabilities_payload_shape(monkeypatch: pytest.MonkeyPatch) -> None:
 # --------------------------------------------------------------- HTTP 路由
 
 
-@contextmanager
-def _served() -> Iterator[str]:
-    server = serve_snapshot(lambda: {"schema_version": "dashboard.v2", "candles": []})
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
-
-
 def _get(url: str) -> dict[str, Any]:
     with urllib.request.urlopen(url, timeout=30) as response:  # noqa: S310
         return json.load(response)
 
 
 def test_sources_route_returns_registry() -> None:
-    with _served() as base:
+    with served() as base:
         payload = _get(f"{base}/api/dashboard/sources")
     assert payload["schema_version"] == "sources.v1"
     assert {entry["id"] for entry in payload["sources"]} == {source.id for source in SOURCES}
 
 
 def test_sources_route_filters_by_market() -> None:
-    with _served() as base:
+    with served() as base:
         payload = _get(f"{base}/api/dashboard/sources?markets=crypto")
     ids = {entry["id"] for entry in payload["sources"]}
     assert ids == {"binance_futures", "ccxt"}
@@ -207,7 +193,7 @@ def test_sources_route_defaults_to_no_quota(monkeypatch: pytest.MonkeyPatch) -> 
         return {"status": "skipped" if not enabled else "ok"}
 
     monkeypatch.setitem(source_registry._PROBES, "wind", _spy)  # noqa: SLF001
-    with _served() as base:
+    with served() as base:
         default = _get(f"{base}/api/dashboard/sources?markets=a_share")
         with_quota = _get(f"{base}/api/dashboard/sources?markets=a_share&include_quota=1")
     assert default["include_quota"] is False

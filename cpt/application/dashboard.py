@@ -38,6 +38,7 @@ from dataclasses import asdict
 from itertools import pairwise
 from typing import Final
 
+from cpt.application._bar_dict import bar_to_dict
 from cpt.domain.config import RulesConfig
 from cpt.domain.models import (
     Bi,
@@ -64,13 +65,6 @@ DEFAULT_SYMBOL: Final[str] = "BTCUSDT"
 
 #: 毫秒/分钟换算：``RulesConfig.levels`` 的单位是分钟。
 _MS_PER_MINUTE: Final[int] = 60_000
-
-
-def _bar_to_dict(bar: CanonicalBar) -> dict[str, object]:
-    """``CanonicalBar`` → dashboard candle 对象（补 ``direction`` 派生字段）。"""
-    data: dict[str, object] = asdict(bar)
-    data["direction"] = bar.direction
-    return data
 
 
 def _infer_interval_ms(bars: Sequence[CanonicalBar], config: RulesConfig) -> int:
@@ -198,7 +192,7 @@ def build_dashboard_snapshot(
     return {
         "schema_version": DASHBOARD_SCHEMA_VERSION,
         "market": _market(bars, config, symbol),
-        "candles": [_bar_to_dict(bar) for bar in bars],
+        "candles": [bar_to_dict(bar) for bar in bars],
         "overlays": _overlays(fractals, bis, zhongshus, trend_types),
         "signal": asdict(signal) if signal is not None else None,
         "events": [asdict(event) for event in events],

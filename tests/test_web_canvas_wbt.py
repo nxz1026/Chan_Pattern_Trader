@@ -7,15 +7,13 @@ CI 没有 wbt（可选依赖 extra ``report``），所以这里只断言**响应
 from __future__ import annotations
 
 import json
-import threading
 import urllib.error
 import urllib.request
-from collections.abc import Iterator
-from contextlib import contextmanager
 from typing import Any
 
 import pytest
-from cpt.web.app import serve_snapshot
+
+from tests.conftest import served
 
 
 def _snapshot() -> dict[str, Any]:
@@ -94,26 +92,13 @@ def _ashare_like_snapshot() -> dict[str, Any]:
     return base
 
 
-@contextmanager
-def _served() -> Iterator[str]:
-    server = serve_snapshot(_snapshot)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
-    thread.start()
-    try:
-        yield f"http://127.0.0.1:{server.server_port}"
-    finally:
-        server.shutdown()
-        server.server_close()
-        thread.join(timeout=2)
-
-
 def _get(url: str) -> dict[str, Any]:
     with urllib.request.urlopen(url, timeout=30) as response:
         return json.load(response)
 
 
 def test_canvas_wbt_route_returns_stable_shape() -> None:
-    with _served() as base:
+    with served(_snapshot) as base:
         payload = _get(f"{base}/api/canvas/wbt?start_ms=1700000000000&end_ms=1700018000000")
     assert set(payload) == {
         "available",
@@ -132,7 +117,7 @@ def test_canvas_wbt_route_returns_stable_shape() -> None:
 
 
 def test_canvas_wbt_route_honours_window() -> None:
-    with _served() as base:
+    with served(_snapshot) as base:
         full = _get(f"{base}/api/canvas/wbt?start_ms=1700000000000&end_ms=1700018000000")
         narrow = _get(f"{base}/api/canvas/wbt?start_ms=1700000000000&end_ms=1700003600000")
     assert full["counts"]["candles"] == 6
@@ -142,13 +127,13 @@ def test_canvas_wbt_route_honours_window() -> None:
 
 
 def test_canvas_wbt_route_without_window_does_not_filter() -> None:
-    with _served() as base:
+    with served(_snapshot) as base:
         payload = _get(f"{base}/api/canvas/wbt")
     assert payload["counts"]["candles"] == 6
 
 
 def test_canvas_wbt_route_rejects_non_integer_window() -> None:
-    with _served() as base:
+    with served(_snapshot) as base:
         with pytest.raises(urllib.error.HTTPError) as excinfo:
             _get(f"{base}/api/canvas/wbt?start_ms=abc&end_ms=def")
     assert excinfo.value.code == 400
@@ -156,7 +141,7 @@ def test_canvas_wbt_route_rejects_non_integer_window() -> None:
 
 def test_canvas_wbt_route_requires_both_bounds() -> None:
     # 只给一端 ⇒ 不过滤（不报错），避免客户端半截参数把画布打成空白
-    with _served() as base:
+    with served(_snapshot) as base:
         payload = _get(f"{base}/api/canvas/wbt?start_ms=1700000000000")
     assert payload["counts"]["candles"] == 6
 
@@ -176,7 +161,7 @@ def test_canvas_wbt_route_with_code_uses_ashare_snapshot(monkeypatch: pytest.Mon
         return _ashare_like_snapshot()
 
     monkeypatch.setattr(a_share_routes, "snapshot_payload", _fake_snapshot)
-    with _served() as base:
+    with served(_snapshot) as base:
         payload = _get(
             f"{base}/api/canvas/wbt?start_ms=1700000000000&end_ms=1700018000000&code=002614"
         )
@@ -191,13 +176,13 @@ def test_canvas_wbt_route_with_code_uses_ashare_snapshot(monkeypatch: pytest.Mon
 
 def test_canvas_wbt_route_without_code_keeps_crypto_snapshot() -> None:
     """不带 code 必须保持原行为（加密侧零影响）。"""
-    with _served() as base:
+    with served(_snapshot) as base:
         payload = _get(f"{base}/api/canvas/wbt?start_ms=1700000000000&end_ms=1700018000000")
     assert payload["counts"]["candles"] == 6
 
 
 def test_canvas_wbt_route_rejects_bad_code() -> None:
-    with _served() as base:
+    with served(_snapshot) as base:
         with pytest.raises(urllib.error.HTTPError) as excinfo:
             _get(f"{base}/api/canvas/wbt?code=abc")
     assert excinfo.value.code == 400
