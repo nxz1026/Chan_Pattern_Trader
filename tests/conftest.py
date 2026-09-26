@@ -45,10 +45,14 @@ _MINIMAL_SNAPSHOT: dict[str, Any] = {"schema_version": "dashboard.v2", "candles"
 
 #: 无头 Chrome 的公共参数。
 #:
-#: ``--disable-dev-shm-usage`` 是关键：GitHub runner 的 ``/dev/shm`` 默认只有 64MB，
-#: 不关掉共享内存文件时 Chrome 会**随机**卡死到超时 —— 2026-09-25 排查时 CI 三次
-#: 运行里两次 ``subprocess.TimeoutExpired``，3.12 / 3.14 两条腿都中过，与 Python
-#: 版本无关（一开始误以为是 3.14 专属问题）。
+#: ``--disable-dev-shm-usage`` 是**防御性**的（CI runner 的 ``/dev/shm`` 常见只有
+#: 64MB）。但 2026-09-25 的 A/B 实验**没能证实它是 CI 超时的根因**：在私有 mount
+#: namespace 里把 ``/dev/shm`` 压到 64MB 后，加 / 不加该参数各跑 8 次都是 **0 失败**。
+#:
+#: 站得住的解释是**争抢导致的变慢**：本机 4 核单跑 1.1s，12 路并发涨到 9.4–11.4s
+#: （约 10×）。CI runner 核更少且与他人共享，30s 超时确实偏紧 ——
+#: 所以真正起作用的处置是下面的 ``CHROME_TIMEOUT_SECONDS`` 提到 60，这些 flag 是
+#: 顺带加固。**不要再把 flake 的根因写成 /dev/shm。**
 CHROME_FLAGS: tuple[str, ...] = (
     "--headless",
     "--no-sandbox",
@@ -61,7 +65,11 @@ CHROME_FLAGS: tuple[str, ...] = (
     "--disable-sync",
 )
 
-#: 浏览器子进程超时（秒）。CI 共享 runner 上 Chrome 冷启动偶尔很慢，30s 会假红。
+#: 浏览器子进程超时（秒）。
+#:
+#: 30 → 60 是这次 flake 的**主要**处置：Chrome 在本机单跑只要 ~1.1s，但 4 核 12 路
+#: 并发时涨到 ~11s（约 10×）。CI runner 核更少、还和别的 job 共享，冷启动叠加争抢
+#: 后偶尔超过 30s 完全说得通（实测到的失败就是 ``subprocess.TimeoutExpired``）。
 CHROME_TIMEOUT_SECONDS = 60
 
 

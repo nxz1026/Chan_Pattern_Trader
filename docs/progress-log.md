@@ -1484,7 +1484,7 @@ CI 的 `Run unit and integration tests` 失败后，**后面的"静态质量门�
 | P1 | `pending-wiring.md` 行数混用两种口径 | 统一 `wc -l`，919 → 981 |
 | P1 | CI 里 vulture 注释传错误说法 | 更正 |
 | P2 | pre-commit 与 CI 各缺一半 + 版本漂移 | 对齐（ruff 对齐锁文件；其余走 system + 同命令）；vulture 锁进 `requirements-dev.txt` |
-| P2 | 浏览器测试 CI 随机超时 | 补 `--disable-dev-shm-usage` 等 + 超时 30→60s |
+| P2 | 浏览器测试 CI 随机超时 | 超时 30→60s（主因：争抢变慢）；顺带补 `--disable-dev-shm-usage` 等 flag |
 | P2 | `skipif` 形同虚设（本机假红） | `chromium_path()` 收进 conftest 并校验存在性 |
 | P2 | 4 类"像 bug 其实不是" | 新增 `docs/known-traps.md` |
 
@@ -1500,6 +1500,13 @@ CI 的 `Run unit and integration tests` 失败后，**后面的"静态质量门�
    就以为是版本兼容，实际是 fresh venv 缺可选依赖；后来 3.14 腿单独红，
    又差点归因成"3.14 专属问题"，实际是**环境 flake**（那次 3.12 也红了）。
    两次都是**造出可复现环境**之后才看清。
+   **第三次差点又归因错**：修 flake 时我在提交信息里写"根因是 runner 的
+   /dev/shm 只有 64MB"，但那只是**常见经验**，没验证。事后补了 A/B：
+   `sudo unshare -m` 起私有 mount namespace 把 `/dev/shm` 压到 64MB，
+   加 / 不加 `--disable-dev-shm-usage` **各跑 8 次都是 0 失败** —— **证伪了**。
+   真正站得住的是**争抢变慢**：本机 4 核单跑 1.1s，12 路并发涨到 9.4–11.4s（~10×），
+   CI runner 核更少还共享，30s 超时确实偏紧。所以真正起作用的处置是超时提到 60s。
+   **教训：`unshare -m` 能把"经验之谈"变成可证伪的实验，成本只有一条命令。**
 4. **同一逻辑写两份必然漂移。** `_browser()` 在 smoke 与 interactions 里各一份，
    一份校验存在性、一份不校验 —— 于是后者"本机没装 chromium"时直接
    `AssertionError` 而不是 skip。这跟 `pending-wiring` 混用两种行数口径是同一种病。
