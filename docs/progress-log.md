@@ -1437,3 +1437,74 @@ HTML/CSS 看起来完全正常，所以很容易误判成"前端代码写错了"
   本轮 `sudo -n id` 一条命令就证伪。凡"我做不到"的结论，都要留下**当场可复现的命令
   与原始输出**，否则下一个会话会把假前提当事实继续传下去。
 
+---
+
+## 仓库坑排查 + 14 个坑全部修复 · 2026-09-25（第二轮）
+
+一次系统排查（**不读文档下结论，逐条实跑取证**）查出 14 个坑，全部处置。
+提交 `ce613f4` → `db5b085`。完整报告见仓库外的
+`/home/ubuntu/work/报告-20260925-仓库坑排查.md`。
+
+### 最重要的发现：**CI 其实一直是红的，而且静态门禁从未在 CI 里跑过**
+
+前一轮我写了"门禁全绿"，那是**本地**全绿。查 GitHub Actions 的真实结论：
+
+```
+bba12b2 / d897920 / 4ecc816 / 7676f3c  →  conclusion: failure（全部）
+```
+
+CI 的 `Run unit and integration tests` 失败后，**后面的"静态质量门禁"与
+"vulture"两步全部 `skipped`** —— 也就是说 **ruff / mypy / vulture 在 CI 里
+从来没跑过**。本地手跑全绿给了我们"门禁在守"的错觉。
+
+**根因**：`tests/test_web_a_share_routes.py::test_ashare_routes_survive_broken_crypto_provider`
+用了**真** `AShareLocalClient` → `_get_conn()` → 顶层 `import psycopg`，
+而 psycopg 只在 `.[db]` extra 里、CI 只装 `requirements-dev.txt`。
+本机 `.venv` 恰好装了 psycopg 才"过"。
+
+讽刺的是本文件 `_no_real_name_lookup` 的 docstring 早就精确警告过这一类
+"本机侥幸能过、CI 行为完全不同"，作者守住了 `_names` 与自选落盘，
+**漏了 `_get_conn` 这条路径**。
+
+**修**：该用例改用 `_FakeClient`（与同文件兄弟用例一致，也才符合它自己
+"只验加密 provider 挂掉"的意图）。
+
+### 处置清单
+
+| # | 坑 | 处置 |
+|---|---|---|
+| P0 | CI 一直红、静态门禁被 skip | 测试改用假客户端 |
+| P0 | CI 不跑 `lint-imports` | 静态门禁步骤补上 |
+| P0 | CI 3.12 vs 本地 3.14 | 改 3.12/3.14 矩阵（真 3.12.14 实测两边一致） |
+| P0 | 照 `deploy/README.md` 重建服务会挂 | 模板补 `--poll-seconds`、`EnvironmentFile` 去掉 `-`、`.example` 改 8010/realtime/30 |
+| P1 | `.gitignore` 的 `env/` 吞掉 `deploy/env/` | 四条规则放行 `.example` |
+| P1 | README 说"realtime 会拒绝启动"是假的 | 更正（线上就是 realtime，已健康跑 12h） |
+| P1 | nginx 模板与线上 vhost 完全不同 | 加横幅 + 补 301 + timeout 对齐 |
+| P1 | 根目录陈旧审计 md（落后 65 提交） | 移入 `docs/audit/` + 历史快照横幅 |
+| P1 | `pending-wiring.md` 行数混用两种口径 | 统一 `wc -l`，919 → 981 |
+| P1 | CI 里 vulture 注释传错误说法 | 更正 |
+| P2 | pre-commit 与 CI 各缺一半 + 版本漂移 | 对齐（ruff 对齐锁文件；其余走 system + 同命令）；vulture 锁进 `requirements-dev.txt` |
+| P2 | 浏览器测试 CI 随机超时 | 补 `--disable-dev-shm-usage` 等 + 超时 30→60s |
+| P2 | `skipif` 形同虚设（本机假红） | `chromium_path()` 收进 conftest 并校验存在性 |
+| P2 | 4 类"像 bug 其实不是" | 新增 `docs/known-traps.md` |
+
+### 踩坑与方法论（这轮最值钱的部分）
+
+1. **"本地全绿"≠"门禁在守"。** 要主动查 CI 的 `conclusion`，
+   **还要看哪几步被 `skipped`** —— 失败步骤后面的门禁根本不会跑。
+2. **拿不到 CI 日志时，把日志"顶"成 annotation。** Actions 原始日志要 admin
+   （`/actions/jobs/{id}/logs` → 403），而 annotations 公开可读。
+   在 pytest 步骤加失败兜底把尾部输出 `sed 's/^/::error::/'`，
+   下一次推送就拿到了 `subprocess.TimeoutExpired` 的原文。
+3. **差异先怀疑环境，再怀疑版本。** 两次都差点归因错：先看到 3.12/3.14 结果不同
+   就以为是版本兼容，实际是 fresh venv 缺可选依赖；后来 3.14 腿单独红，
+   又差点归因成"3.14 专属问题"，实际是**环境 flake**（那次 3.12 也红了）。
+   两次都是**造出可复现环境**之后才看清。
+4. **同一逻辑写两份必然漂移。** `_browser()` 在 smoke 与 interactions 里各一份，
+   一份校验存在性、一份不校验 —— 于是后者"本机没装 chromium"时直接
+   `AssertionError` 而不是 skip。这跟 `pending-wiring` 混用两种行数口径是同一种病。
+5. **改 `.gitignore` 的否定规则必须实测。** 直觉写法会让真实 `.env` 也变成可提交，
+   我在 scratch 仓库跑过两种写法才敢下结论。
+6. **`language: system` 的 pre-commit hook 依赖 PATH。** 不激活 venv 直接
+   `.venv/bin/pre-commit run` 会看到 4 个 hook 齐刷刷 `Executable not found`。
+

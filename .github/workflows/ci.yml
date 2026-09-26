@@ -3,6 +3,9 @@ name: CPT CI
 on:
   push:
   pull_request:
+  # 允许在 UI / API 上重跑同一提交的 CI，不必为了重试而推一个空提交
+  # （2026-09-25 排查时想验证浏览器测试是否还会 flake，但重跑需要凭据）。
+  workflow_dispatch:
 
 jobs:
   unit:
