@@ -25,7 +25,15 @@ jobs:
       - name: Install locked development dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Run unit and integration tests
-        run: pytest tests -rsq
+        run: |
+          set -o pipefail
+          # 失败时把尾部输出顶成 **annotation**：Actions 的原始日志要仓库 admin
+          # 权限才能下载（`/actions/jobs/{id}/logs` → 403），而 annotations 是
+          # 公开可读的。这样在没有凭据的环境里也能定位失败原因（2026-09-25）。
+          pytest tests -rsq 2>&1 | tee pytest-output.log || {
+            tail -n 40 pytest-output.log | sed 's/^/::error::/'
+            exit 1
+          }
       - name: Static quality gates
         run: |
           # `scripts/` 也纳入：它是 364 行的运维入口（cron 跑 backfill），
