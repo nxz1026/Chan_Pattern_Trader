@@ -72,6 +72,7 @@ llm/           独立 LLM 服务层（可关闭、可审计、永不回写结构
 | `docs/implementation-plan.md` | 实施计划（M0–M6 垂直切片里程碑 + M-LLM 独立线） |
 | `docs/reference-audit.md` | 参考仓库许可证与复用边界 |
 | `docs/progress-log.md` | 逐轮进度日志（R13 起；更早见 `docs/archive/`） |
+| `docs/known-traps.md` | 已知陷阱与非缺陷清单（8 类"像 bug 其实不是"，每条附判定命令） |
 | `deploy/README.md` | Nginx / systemd / 静态看板部署说明（含权限坑） |
 
 ## 参考仓库
