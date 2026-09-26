@@ -25,9 +25,11 @@ R17-3 的按需补因子会在本地因子缺失时**联网拉腾讯并写生产
 
 from __future__ import annotations
 
+import shutil
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -40,6 +42,49 @@ _ONDEMAND_ENV = "CPT_ASHARE_ONDEMAND_FACTOR"
 #: ``served()`` 未显式给 provider 时的最小可用 v2 快照。
 #: 与各路由测试原先各自内联的那份**逐字相同**（只有 ``schema_version`` + 空 ``candles``）。
 _MINIMAL_SNAPSHOT: dict[str, Any] = {"schema_version": "dashboard.v2", "candles": []}
+
+#: 无头 Chrome 的公共参数。
+#:
+#: ``--disable-dev-shm-usage`` 是关键：GitHub runner 的 ``/dev/shm`` 默认只有 64MB，
+#: 不关掉共享内存文件时 Chrome 会**随机**卡死到超时 —— 2026-09-25 排查时 CI 三次
+#: 运行里两次 ``subprocess.TimeoutExpired``，3.12 / 3.14 两条腿都中过，与 Python
+#: 版本无关（一开始误以为是 3.14 专属问题）。
+CHROME_FLAGS: tuple[str, ...] = (
+    "--headless",
+    "--no-sandbox",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--disable-background-networking",
+    "--disable-extensions",
+    "--disable-sync",
+)
+
+#: 浏览器子进程超时（秒）。CI 共享 runner 上 Chrome 冷启动偶尔很慢，30s 会假红。
+CHROME_TIMEOUT_SECONDS = 60
+
+
+def chromium_path() -> str | None:
+    """找一个可用的 Chromium/Chrome；**找不到就返回 None**，让 ``skipif`` 生效。
+
+    这里必须逐个 ``Path(...).exists()`` 校验。早先
+    ``test_dashboard_chromium_interactions.py`` 写的是
+    ``shutil.which("chromium") or str(Path.home() / ".local/bin/chromium")`` ——
+    后半段**不校验存在性**，于是"本机没装 chromium"时它也不是 ``None``，
+    ``skipif`` 形同虚设、测试直接 ``AssertionError``（本机假红、CI 假红）。
+    两个文件各写一份实现正是它漂移的原因，故收到这里共用。
+    """
+    candidates = (
+        shutil.which("chromium"),
+        shutil.which("google-chrome"),
+        Path.home() / ".local/bin/chromium",
+        Path.home() / ".cache/ms-playwright/chromium-1243/chrome-linux-arm64/chrome",
+    )
+    for candidate in candidates:
+        if candidate and Path(candidate).exists():
+            return str(candidate)
+    return None
 
 
 @pytest.fixture(autouse=True)

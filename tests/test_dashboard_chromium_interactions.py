@@ -1,29 +1,25 @@
 from __future__ import annotations
 
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
 import pytest
 
+from tests.conftest import CHROME_FLAGS, CHROME_TIMEOUT_SECONDS, chromium_path
+
 ROOT = Path(__file__).parents[1]
 
 
-def _browser() -> str | None:
-    return shutil.which("chromium") or str(Path.home() / ".local/bin/chromium")
-
-
-@pytest.mark.skipif(_browser() is None, reason="Chromium not installed")
+@pytest.mark.skipif(chromium_path() is None, reason="Chromium/Chrome not installed")
 def test_chromium_smoke_exposes_interaction_contracts() -> None:
-    browser = _browser()
-    assert browser is not None and Path(browser).exists()
+    browser = chromium_path()
+    assert browser is not None
     result = subprocess.run(
         [
             browser,
-            "--headless",
-            "--no-sandbox",
-            "--disable-gpu",
+            *CHROME_FLAGS,
+            "--virtual-time-budget=1500",
             "--dump-dom",
             f"file://{ROOT / 'dashboard/index.html'}?mode=watch",
         ],
@@ -31,7 +27,7 @@ def test_chromium_smoke_exposes_interaction_contracts() -> None:
         text=True,
         check=True,
         env={**os.environ, "HOME": str(Path.home())},
-        timeout=30,
+        timeout=CHROME_TIMEOUT_SECONDS,
     )
     markers = (
         'data-testid="mode-switch"',
