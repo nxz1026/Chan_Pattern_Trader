@@ -197,8 +197,24 @@ def test_snapshot_reason_db_error_still_distinct() -> None:
     assert snapshot["runtime"]["degraded_reason"] == "db_error:RuntimeError"
 
 
-def test_ashare_routes_survive_broken_crypto_provider() -> None:
-    """A 股路由不能依赖加密 provider：provider 抛异常时它必须照常工作。"""
+def test_ashare_routes_survive_broken_crypto_provider(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 股路由不能依赖加密 provider：provider 抛异常时它必须照常工作。
+
+    **必须把 ``AShareLocalClient`` 换成假客户端。** 本用例的意图是"加密 provider 挂了
+    A 股路由照样工作"，与数据库无关；用真客户端会走 ``_get_conn()`` → 顶层
+    ``import psycopg``，而 psycopg 只在 ``.[db]`` extra 里 —— CI 只装
+    ``requirements-dev.txt``（不含任何 extra），于是 CI 直接
+    ``ModuleNotFoundError``；本机因为 ``.venv`` 恰好装了 psycopg 才"过"。
+    这正是本文件 ``_no_real_name_lookup`` docstring 里警告过的
+    "本机侥幸能过、CI 行为完全不同"，当时守住了 ``_names`` 与自选落盘，
+    **漏了 ``_get_conn`` 这条路径** —— 结果 CI 从这个用例开始一路红，
+    后面的静态门禁与 vulture 全被 skip（2026-09-25 排查 P0-1）。
+    """
+    monkeypatch.setattr(
+        "cpt.adapters.a_share_local.AShareLocalClient", lambda *a, **k: _FakeClient()
+    )
 
     def _boom() -> dict[str, Any]:
         raise RuntimeError("crypto upstream down")

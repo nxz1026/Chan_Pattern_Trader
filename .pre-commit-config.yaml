@@ -1,24 +1,63 @@
+# 目标：**pre-commit 与 CI 跑同一套**。
+#
+# 2026-09-25 排查（P2-4）发现两边各缺一半、且版本漂移：
+#   - pre-commit 有 ruff/ruff-format/mypy/import-linter，但**没有** vulture 与 pytest；
+#   - CI 有 pytest/vulture，但**没有** import-linter；
+#   - pre-commit 钉的 ruff v0.6.9 / mypy v1.11.2 与锁文件的 ruff 0.16.8 /
+#     mypy 2.3.1 差了十几个版本 → 出现"pre-commit 全过、CI 却红"。
+#
+# 现在：ruff 版本对齐锁文件；mypy/vulture/pytest/import-linter 走 language: system
+# 并用与 CI **逐字相同**的命令与范围（pass_filenames: false）。
+# 依赖来自 requirements-dev.txt，先 `pip install -r requirements-dev.txt`。
+#
+# ⚠️ **必须先激活 venv 再 commit**（`source .venv/bin/activate`，或让 `.venv/bin`
+#    在 PATH 里）。`language: system` 的 hook 直接在当前 PATH 上找可执行文件，
+#    venv 没激活时 git commit 会看到 4 个 hook 齐刷刷 `Executable 'mypy' not found`
+#    —— 那不是配置错，是 PATH 里没有 venv。用 `pre-commit run --all-files` 手动验证
+#    时同理。
 repos:
+  # 版本必须与 requirements-dev.txt 的 ruff==0.16.8 一致，否则本地 lint 结论不可信。
   - repo: https://github.com/astral-sh/ruff-pre-commit
-    rev: v0.6.9
+    rev: v0.16.8
     hooks:
       - id: ruff-format
       - id: ruff
         args: ["--fix"]
 
-  - repo: https://github.com/pre-commit/mirrors-mypy
-    rev: v1.11.2
-    hooks:
-      - id: mypy
-        args: []
-        additional_dependencies: ["types-requests"]
-
   - repo: local
     hooks:
+      # 用 system mypy（= 锁文件的 mypy==2.3.1）而不是 mirrors-mypy，三个原因：
+      #   ① 镜像版版本旧，类型结论可能与 CI 不同；
+      #   ② 镜像版默认把**本次暂存的文件**逐个传给 mypy，而对"部分文件"跑与对
+      #      "整个包"跑结论可能不同；
+      #   ③ whitelist.py 若被暂存，会被 mypy 解析并报 41 个 name-defined
+      #      （它故意是一堆裸名字）。这里改成与 CI 完全相同的全量范围。
+      - id: mypy
+        name: mypy (cpt + scripts，与 CI 同范围)
+        entry: mypy cpt scripts
+        language: system
+        types: [python]
+        pass_filenames: false
+
+      - id: vulture
+        name: vulture 死代码扫描 (与 CI 同参数)
+        entry: vulture --min-confidence 60 cpt whitelist.py
+        language: system
+        types: [python]
+        pass_filenames: false
+
       - id: import-linter
-        name: Import Linter
+        name: Import Linter（层契约）
         entry: import-linter
         language: system
         types: [python]
         pass_filenames: false
         args: ["lint", "--config", ".importlinter"]
+
+      # 全量测试：CI 必跑，本地提前跑掉。嫌慢可以 `SKIP=pytest git commit`。
+      - id: pytest
+        name: pytest (全量，可用 SKIP=pytest 跳过)
+        entry: pytest tests -q
+        language: system
+        types: [python]
+        pass_filenames: false

@@ -7,11 +7,21 @@ on:
 jobs:
   unit:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 3.12 = pyproject 声明的下限（requires-python >=3.12）
+        # 3.14 = 开发机 .venv 与 requirements-dev.txt 锁文件的生成版本
+        # 此前只跑 3.12，而开发机是 3.14 —— "本地全绿"并不等于 CI 绿。
+        # 2026-09-25 排查：用 python-build-standalone 拉真 3.12.14 实测，
+        # 装上同一套可选依赖后两边结果**完全一致**（462 passed，6 项门禁全绿），
+        # 所以矩阵是安全的，同时让 >=3.12 这个声明真正被验证。
+        python-version: ['3.12', '3.14']
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: '3.12'
+          python-version: ${{ matrix.python-version }}
       - name: Install locked development dependencies
         run: python -m pip install -r requirements-dev.txt
       - name: Run unit and integration tests
@@ -25,12 +35,20 @@ jobs:
           ruff check cpt tests scripts
           ruff format --check cpt tests scripts
           mypy cpt scripts
+          # 层契约（.importlinter 的 3 条）此前**只在本地/pre-commit 跑**，CI 从不调用
+          # —— 也就是说层级可以被打破而 CI 依然全绿（2026-09-25 排查 P0-2）。
+          # 依赖早已在 requirements-dev.txt 里（import-linter==2.15 + grimp==3.17）。
+          lint-imports
       - name: Dead-code audit (vulture)
         run: |
-          python -m pip install 'vulture==2.14'
+          # vulture==2.14 自 2026-09-25 起已在 requirements-dev.txt 锁文件里，
+          # 不再单独 pip install —— 那样它的版本不受锁文件约束，pre-commit 也拿不到。
           # 阈值 60（不是 80）：vulture 给「未使用的函数/类」打的置信度正是 60%，
           # 阈值 80 会把它们全部滤掉，使本步骤永远 exit 0 —— 2026-09-25 审核 P0-3。
-          # 选项必须写在位置参数之前，否则 argparse 报 unrecognized arguments。
+          # 选项的摆法：放最前、放最后都可以；**唯独夹在两个位置参数中间**会报
+          # `unrecognized arguments`（argparse 的 nargs='*' 被选项打断）。
+          # 实测：`vulture cpt --min-confidence 60 whitelist.py` → exit 2。
+          # 2026-09-25 排查更正：旧注释说"必须写在位置参数之前"，与实测不符。
           # 不再 --exclude 'cpt/web/app.py'：那会连带隐藏 app.py 里对别处符号的真实
           # 使用（曾把 binance_futures.resolve_interval_label 误报为死代码）；
           # 改由 whitelist.py 逐条登记框架回调。

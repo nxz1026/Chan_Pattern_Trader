@@ -352,7 +352,10 @@ with psycopg.connect(**connection_kwargs()) as c, c.cursor() as cur:
 
 - `docs/audit/cpt-code-audit-20260925.md` —— 原始审核报告
 - `docs/audit/` 下另有验证报告（v2）与 `audit.json` 原始产物
-- `docs/pending-wiring.md` —— 待接线清单（16 个模块 / 919 行，**设计如此，不是缺陷**）
+- `docs/pending-wiring.md` —— 待接线清单（16 个模块 / 981 行，**设计如此，不是缺陷**；
+  原写 919 是混用了"总行数"与"非空行数"两种口径，2026-09-25 排查已统一为 `wc -l`）
+- `docs/audit/cpt-feature-review-and-deadcode-audit.md` —— 从仓库根目录移入，
+  头部加了"历史快照"横幅（原先落后 65 个提交且位置扎眼，易被误当现状）
 - `docs/export-schema-v1.md` —— 本轮新增
 - `docs/progress-log.md` —— 活文档，每轮都要追加
 - `deploy/README.md` —— 部署步骤（含 `chmod` 的 `X` 坑）

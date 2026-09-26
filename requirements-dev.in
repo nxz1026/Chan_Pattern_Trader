@@ -13,3 +13,7 @@ pre-commit>=3.7
 import-linter>=2.0
 types-requests
 pip-tools>=7.0
+# 死代码扫描。2026-09-25 排查前它**不在锁文件里**：CI 单独 `pip install
+# 'vulture==2.14'`、pre-commit 完全没装，于是版本不受锁文件约束、本地也不一定有。
+# 锁进来之后 CI 与 pre-commit 用同一份。
+vulture==2.14

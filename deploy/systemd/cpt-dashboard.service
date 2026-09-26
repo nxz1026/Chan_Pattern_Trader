@@ -7,8 +7,13 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/work/Chan_Pattern_Trader
-EnvironmentFile=-/home/ubuntu/work/Chan_Pattern_Trader/deploy/env/cpt-dashboard.env
-ExecStart=/home/ubuntu/work/Chan_Pattern_Trader/.venv/bin/python -m cpt.web --host ${CPT_HOST} --port ${CPT_PORT} --mode ${CPT_MODE} --symbol ${CPT_SYMBOL} --interval ${CPT_INTERVAL}
+# 注意：**没有** `-` 前缀。带 `-` 时 systemd 在文件缺失时会静默跳过，于是下面
+# `${CPT_*}` 全部展开成空串，ExecStart 变成 `--host --port --mode ...`，服务以
+# 一句晦涩的 `argument --host: expected one argument` 挂掉（2026-09-25 排查 P0-1）。
+# 去掉 `-` 后，文件缺失会在启动时直接报 "Failed to load environment files" —— 一眼
+# 看出是缺配置，而不是去猜参数解析。复制 deploy/env/cpt-dashboard.env.example 即可。
+EnvironmentFile=/home/ubuntu/work/Chan_Pattern_Trader/deploy/env/cpt-dashboard.env
+ExecStart=/home/ubuntu/work/Chan_Pattern_Trader/.venv/bin/python -m cpt.web --host ${CPT_HOST} --port ${CPT_PORT} --mode ${CPT_MODE} --poll-seconds ${CPT_POLL_SECONDS} --symbol ${CPT_SYMBOL} --interval ${CPT_INTERVAL}
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true

@@ -27,7 +27,12 @@
 > **功能描述**（不是模块名）覆盖了它们，遂全部回滚。教训：判据文档必须按**功能**而
 > 非**文件名**比对。
 
-## 清单（16 个模块，919 行）
+## 清单（16 个模块，981 行）
+
+> 行数口径：`wc -l`（**含空行与 docstring**）。2026-09-25 排查时发现原表混用了两种
+> 口径（`signal.py`/`a_share_rules.py`/`dashboard_parity.py`/`dashboard_runs.py`
+> 记的是总行数，其余 dashboard_* 记的是**非空行数**），合计因此写成 919 ——
+> 按统一口径实测为 **981**。已全部改回总行数。
 
 | 模块 | 行数 | 产品位置 | 接线目标 |
 |---|---:|---|---|
@@ -35,18 +40,18 @@
 | `cpt/domain/a_share_rules.py` | 152 | 台账「**实现位置**」一节明确列出（涨跌停/停牌/T+1）；R17-3 刚落地 A 股主看板 | 结构标签接进 A 股主看板 |
 | `cpt/application/dashboard_parity.py` | 83 | roadmap §「Phase 2：Oracle 对比」+ §「后端代码框架」 | 接 oracle 对比。**HTTP 路由已活**：`cpt/web/app.py:208`，但 `dashboard_snapshot_v2.py:61` 恒填占位 |
 | `cpt/application/dashboard_runs.py` | 37 | roadmap §「R1 数据集/运行浏览器」+ §「后端代码框架」 | 接运行浏览器。**HTTP 路由已活**：`cpt/web/app.py:210`，但 `dashboard_snapshot_v2.py:62` 硬编码 `[]` |
-| `cpt/application/dashboard_levels.py` | 35 | roadmap Phase 5 P1「级别递归树」 | 级别递归树视图 |
-| `cpt/application/dashboard_event_audit.py` | 37 | roadmap Phase 5 P1「事件前后状态对比」 | 事件前后状态对比 |
-| `cpt/application/dashboard_quality.py` | 28 | roadmap Phase 5 P1「数据质量报告」 | 数据质量报告面板 |
-| `cpt/application/dashboard_stats.py` | 25 | roadmap Phase 6 P2「一买统计」 | 研究统计面板 |
-| `cpt/application/dashboard_signal_history.py` | 41 | roadmap Phase 4 P1「信号历史列表」+ Phase 6 P2「alert→confirmed 转化率」「invalidated 原因分布」 | 信号历史与状态转移 |
-| `cpt/application/dashboard_export.py` | 20 | roadmap Phase 6 P2「时间范围切片导出」 | 时间范围切片导出 |
-| `cpt/application/dashboard_multi_run.py` | 23 | roadmap Phase 6 P2「双数据集同步对比」 | 多运行对齐 |
-| `cpt/application/dashboard_compare.py` | 26 | roadmap R5「两份 snapshot 字段级 diff」+ Phase 6 P2「双数据集同步对比」 | A/B 快照对比（依赖 `dashboard_reproducibility.snapshot_diff`） |
-| `cpt/application/dashboard_watchlist.py` | 23 | roadmap Phase 4 P1「多交易对」 | 多标的盯盘列表 |
-| `cpt/application/dashboard_watch.py` | 24 | roadmap Phase 4 P1「reconnect/stale」 | 盯盘真实指标投影 |
-| `cpt/application/dashboard_market_fetch.py` | 20 | roadmap Phase 3 P0「真实 24h 高低点和成交量，无法提供时明确 unavailable」 | 市场聚合归一化（现由活模块 `dashboard_market` 承担一部分） |
-| `cpt/application/dashboard_realtime.py` | 34 | roadmap Phase 4 P1「SSE 或高效实时更新」 | 实时刷新投影（现由活路径 `_RealtimeProvider` 承担一部分） |
+| `cpt/application/dashboard_levels.py` | 40 | roadmap Phase 5 P1「级别递归树」 | 级别递归树视图 |
+| `cpt/application/dashboard_event_audit.py` | 42 | roadmap Phase 5 P1「事件前后状态对比」 | 事件前后状态对比 |
+| `cpt/application/dashboard_quality.py` | 33 | roadmap Phase 5 P1「数据质量报告」 | 数据质量报告面板 |
+| `cpt/application/dashboard_stats.py` | 30 | roadmap Phase 6 P2「一买统计」 | 研究统计面板 |
+| `cpt/application/dashboard_signal_history.py` | 47 | roadmap Phase 4 P1「信号历史列表」+ Phase 6 P2「alert→confirmed 转化率」「invalidated 原因分布」 | 信号历史与状态转移 |
+| `cpt/application/dashboard_export.py` | 25 | roadmap Phase 6 P2「时间范围切片导出」 | 时间范围切片导出 |
+| `cpt/application/dashboard_multi_run.py` | 28 | roadmap Phase 6 P2「双数据集同步对比」 | 多运行对齐 |
+| `cpt/application/dashboard_compare.py` | 31 | roadmap R5「两份 snapshot 字段级 diff」+ Phase 6 P2「双数据集同步对比」 | A/B 快照对比（依赖 `dashboard_reproducibility.snapshot_diff`） |
+| `cpt/application/dashboard_watchlist.py` | 28 | roadmap Phase 4 P1「多交易对」 | 多标的盯盘列表 |
+| `cpt/application/dashboard_watch.py` | 29 | roadmap Phase 4 P1「reconnect/stale」 | 盯盘真实指标投影 |
+| `cpt/application/dashboard_market_fetch.py` | 25 | roadmap Phase 3 P0「真实 24h 高低点和成交量，无法提供时明确 unavailable」 | 市场聚合归一化（现由活模块 `dashboard_market` 承担一部分） |
+| `cpt/application/dashboard_realtime.py` | 40 | roadmap Phase 4 P1「SSE 或高效实时更新」 | 实时刷新投影（现由活路径 `_RealtimeProvider` 承担一部分） |
 
 另有 **3 个函数**（非独立模块）同样待接线，它们所在模块本身是活的：
 

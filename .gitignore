@@ -18,6 +18,19 @@ venv/
 env/
 ENV/
 
+# `env/` 在 gitignore 语义里匹配**任意层级**名为 env 的目录，于是把
+# `deploy/env/` 整个吞掉了 —— deploy/README.md 让执行
+# `cp deploy/env/cpt-dashboard.env.example ...`，而那个 .example 根本提交不进来，
+# fresh clone 连第一步都做不了（2026-09-25 排查 P1-1）。
+# 下面三条按顺序重新放行**只有 .example**：
+#   ① 先把目录本身从忽略里摘出来（否则里面的文件无法被单独放行）
+#   ② 再把目录内容整体排除 ③ 最后只放行 *.example
+# ② 不能省：只用 ①②③ 里的 ①③ 会让真实 `deploy/env/cpt-dashboard.env`
+# 也变成可提交（将来放了 DB 口令就是泄密）。已在 scratch 仓库实测过两种写法。
+!deploy/env/
+deploy/env/*
+!deploy/env/*.example
+
 # Build artifacts
 build/
 dist/
