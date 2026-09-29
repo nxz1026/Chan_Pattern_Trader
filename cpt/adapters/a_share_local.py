@@ -100,7 +100,13 @@ def fetch_security_names(
     owned = False
     if conn is None:
         if conn_factory is None:
-            import psycopg  # noqa: PLC0415
+            try:
+                import psycopg  # noqa: PLC0415
+            except ModuleNotFoundError as exc:
+                raise AShareLocalError(
+                    "psycopg 未安装。A 股本地数据层需要 psycopg[binary]，"
+                    "运行 `pip install -e '.[db]'` 后重启服务。"
+                ) from exc
 
             conn = psycopg.connect(**connection_kwargs())
         else:
@@ -187,7 +193,13 @@ class AShareLocalClient:
     def _get_conn(self) -> Any:
         if self._conn is None:
             if self._conn_factory is None:
-                import psycopg  # noqa: PLC0415
+                try:
+                    import psycopg  # noqa: PLC0415
+                except ModuleNotFoundError as exc:
+                    raise AShareLocalError(
+                        "psycopg 未安装。A 股本地数据层需要 psycopg[binary]，"
+                        "运行 `pip install -e '.[db]'` 后重启服务。"
+                    ) from exc
 
                 self._conn = psycopg.connect(**connection_kwargs())
             else:

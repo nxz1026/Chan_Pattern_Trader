@@ -230,20 +230,28 @@ def pool_payload(
     自选读的是 ``_store()``（服务端 JSON，见 ``DEFAULT_WATCHLIST_PATH``）——
     **不是** localStorage。手输的代码必须跨登录保留，这是本次改动的起因。
     """
-    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+    from cpt.adapters.a_share_local import AShareLocalClient, AShareLocalError  # noqa: PLC0415
     from cpt.adapters.a_share_pool import fetch_hot_pool  # noqa: PLC0415
     from cpt.adapters.strategy_signal import fetch_strategy_top  # noqa: PLC0415
 
     client = AShareLocalClient()
+    db_error: str | None = None
+    entries: list[Any] = []
+    picks: list[Any] = []
+    strategy_error: str | None = None
     try:
         conn = client._get_conn()  # noqa: SLF001
         entries = fetch_hot_pool(conn, limit=hot_limit)
         try:
             picks = fetch_strategy_top(conn, limit=strategy_limit)
-            strategy_error: str | None = None
         except Exception as exc:  # noqa: BLE001 — 策略表读不到也要能出池子
             picks = []
             strategy_error = f"{type(exc).__name__}: {exc}"
+    except AShareLocalError as exc:  # noqa: BLE001 — 缺 psycopg/DB 不可达时降级
+        db_error = f"{type(exc).__name__}: {exc}"
+        entries = []
+        picks = []
+        strategy_error = None
     finally:
         client.close()
 
@@ -277,6 +285,7 @@ def pool_payload(
         "factor_error": factor_error,
         "strategy_error": strategy_error,
         "watchlist_error": watchlist_error,
+        "db_error": db_error,
         "items": merged,
     }
 
