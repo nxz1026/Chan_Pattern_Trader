@@ -40,11 +40,15 @@ llm/           独立 LLM 服务层（可关闭、可审计、永不回写结构
 
 **两个市场共用同一套缠论后端与同一份 `dashboard.v2` 快照 schema** —— 所以四个画布对 A 股**零改动复用**（由 `tests/test_dashboard_ashare_contract.py` 钉住：`canvas_b.js`/`canvas_c.js` 里不得出现市场分支）。
 
-### A 股复权因子：按需获取
+### A 股复权因子：全量兜底 + 按需精修
 
-全库 5,225 只里本地只有约 100 只有复权因子（全市场 backfill 未执行）。因此做成了**按需**：输入代码 → 本地因子不足则从腾讯拉 `raw + hfq` 两个序列（同源同对，`hfq_factor = hfq/raw` 绝对自洽）→ 幂等落库 → 重出快照。
+全库 5,222 只已全部写入 `asel.ref_adjust_factor`（默认 `hfq_factor=1.0`，兜底全覆盖）。对于除权日价格敏感的标的，可通过**按需拉取**精修：输入代码 → 从腾讯拉 `raw + hfq` 两个序列（同源同对，`hfq_factor = hfq/raw` 绝对自洽）→ 幂等落库 → 重出快照，覆盖默认的 1.0 因子。
 
 > 腾讯是否提供某标的的 `hfqday` 是**逐标的**属性、**无法用代码前缀预测**（实测 `688111`/`688036` 有而 `688981` 没有；多数 `301` 有而近期新股没有）。所以实现里**没有任何板块判断**，只如实报告腾讯实际返回了什么。教训见 `docs/progress-log.md` R15-1 节（同一处先后记错过两次）。
+>
+> 2026-09-29 全量兜底：用 `daily_bar` 自身数据写入 `hfq_factor=1.0`，覆盖全部 5,222 只，
+> 消除"约 100 只"的覆盖缺口。后续若发现价格偏差，可用 `scripts/factor_backfill.py`
+> 从 akshare 拉真实因子覆盖。
 
 ### A 股标的名称
 
@@ -98,7 +102,7 @@ llm/           独立 LLM 服务层（可关闭、可审计、永不回写结构
 
 ```bash
 cp deploy/env/cpt-dashboard.env.example deploy/env/cpt-dashboard.env
-.venv/bin/python -m cpt.web --host 127.0.0.1 --port 8000 --mode realtime
+.venv/bin/python -m cpt.web --host 127.0.0.1 --port 8010 --mode realtime --poll-seconds 30
 ```
 
 `--mode` 三档：`demo`（内置样例）/ `fixture`（确定性离线，UI 冒烟用）/ `realtime`（Binance 轮询）。

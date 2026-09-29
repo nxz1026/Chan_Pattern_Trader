@@ -67,12 +67,22 @@ sudo chmod -R u=rwX,go=rX /var/www/cpt-dashboard   # X = 只给目录加执行�
 
 ## systemd
 
-`deploy/systemd/cpt-dashboard.service` 是模板。安装前**先创建环境文件**，否则服务会
-拒绝启动（模板里的 `EnvironmentFile=` 故意不带 `-` 前缀，文件缺失时直接报
+`deploy/systemd/cpt-dashboard.service` 是 hardened 模板（`NoNewPrivileges=true`
+`PrivateTmp=true` `EnvironmentFile=` + `Restart=on-failure`）。安装前**先创建环境文件**，
+否则服务会拒绝启动（模板里的 `EnvironmentFile=` 故意不带 `-` 前缀，文件缺失时直接报
 `Failed to load environment files`，而不是静默把参数展开成空串）：
 
 ```bash
-cp deploy/env/cpt-dashboard.env.example deploy/env/cpt-dashboard.env
+# 环境文件（不入仓，需手动创建）
+cat > deploy/env/cpt-dashboard.env << 'EOF'
+CPT_HOST=127.0.0.1
+CPT_PORT=8010
+CPT_MODE=realtime
+CPT_POLL_SECONDS=30
+CPT_SYMBOL=BTCUSDT
+CPT_INTERVAL=1h
+EOF
+
 sudo cp deploy/systemd/cpt-dashboard.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now cpt-dashboard
@@ -83,6 +93,9 @@ sudo systemctl status cpt-dashboard
 `--mode realtime --poll-seconds 30`，`/api/dashboard/health` 返回
 `ok=true / degraded=false`。需要空数据调试时才用 `CPT_MODE=demo`；不要把 demo 的
 空 snapshot 当作真实行情。
+
+> 2026-09-29 状态：服务以 nohup 运行（容器内 systemd 需 interactive auth，不可用）。
+> 单元文件入仓供参考，部署时手动 cp + daemon-reload + restart。
 
 ## 安全边界
 

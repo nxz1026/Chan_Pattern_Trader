@@ -8,12 +8,13 @@ commit 规范：每个里程碑验收通过后一次 commit；阶段内允许 wo
 
 ## 0. 开局盘点（R13 起点）
 
-- 仓库：`/home/ubuntu/work/Chan_Pattern_Trader/`
+- 仓库：`/home/ubuntu/DSH/Chan_Pattern_Trader/`
 - remote：`https://github.com/nxz1026/Chan_Pattern_Trader.git`，分支 `main`
 - 起点 HEAD：`930051b`（R12），R1–R12 全部已推
 - 测试基线：**182 passed**
 - 门禁：ruff / ruff format / mypy / vulture / import-linter 全绿
-- 看板：`https://127.0.0.1/cpt/`，后端 `127.0.0.1:8010`，前端 `/var/www/cpt-dashboard/`
+- 看板：`https://140.83.62.161/cpt/`，后端 `127.0.0.1:8010`，前端 `/var/www/cpt-dashboard/`
+- 2026-09-29：服务以 nohup 运行（容器内 systemd 不可用）
 
 ## 1. 决策日志
 
