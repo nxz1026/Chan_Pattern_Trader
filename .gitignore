@@ -51,6 +51,10 @@ dist/
 # OMP runtime logs and stop flags
 .omp-logs/
 
+# GraphFlow runtime artifacts
+.graphflow-cache/
+graphflow-out/
+
 # Local secrets and runtime data.
 .env
 *.sqlite3
