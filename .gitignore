@@ -14,6 +14,11 @@ __pycache__/
 .coverage.*
 htmlcov/
 .venv/
+# 变体虚拟环境目录（例如迁移残留的 .venv.before-migration）也要盖住：
+# graphflow 的忽略名单是**精确目录名**，只认 .venv/venv/env，靠 .gitignore 兜底，
+# 否则 `git ls-files --others` 会把整个 site-packages 报出来并被照单索引
+# （2026-09-29 实测：581 个文件节点里 401 个是 pip 源码）。
+.venv*/
 venv/
 env/
 ENV/
