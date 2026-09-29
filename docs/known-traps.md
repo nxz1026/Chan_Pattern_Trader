@@ -47,10 +47,11 @@ grep -c "^SKIPPED" /dev/null   # 直接看 skip 原因：
 
 **判定**：`sed -n '16,40p' pyproject.toml`（注释写明了每个 extra 的降级行为）。
 
-> **唯一不一致的地方**：`ccxt`/`czsc`/`wbt` 缺失时会抛带安装指引的自定义异常，
-> 而 `psycopg`（`a_share_local.py:103,190`）和 `pandas`/`plotly`
-> （`canvas_wbt.py:158,345`）是**裸 import**，缺了只报
-> `ModuleNotFoundError`。想改进的话给它们也加同样的守卫即可。
+> **已修平的不一致**：`psycopg` 现在在 `a_share_local.py:103,190` 两处都是
+> `try/except ModuleNotFoundError` → 抛带安装指引的 `AShareLocalError`，
+> `a_share_routes.py:pool_payload()` 捕获后降级为 `db_error` 字段，前端不白屏。
+> 剩余 `pandas`/`plotly`（`canvas_wbt.py:158,345`）仍是裸 import —— 但画布 D
+> 走 `wbt` extra，装 `.[report]` 时连带装上 pandas/plotly，实际不会触发。
 
 ---
 
