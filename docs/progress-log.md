@@ -1956,26 +1956,32 @@ hfq 被调连续（002594 `raw -67%` / `hfq ±0`）；腾讯退化 = raw 正常�
 **票池**：近一年 `cont_days>=2` ∪ `signal` = 1,296 只
 **数据源**：akshare `stock_hot_rank_detail_em`（东财个股人气排行历史），600519 实测 366 行
 **回填脚本**：`emotion-core/scripts/backfill_hot_rank_r21.py`（后台 pid 1596464 在跑）
-**进度**：已插入 ~4,855 行 / 110 只（截至 09:00），预计 ~2 小时完成
+**进度**：已插入 ~4,855 行 / 110 只（截至 09:00）
+- akshare `stock_hot_rank_detail_em` 在新版 API 下报错（`Length mismatch: Expected axis has 1 elements, new values have 3`，API 字段从 `[时间, 排名]` 列表改为 `{"calcTime":..., "rank":...}` dict），绕过 akshare 直连原始接口修复
+- 重启回填 pid 1601611
 
-### 四、验收
+### 四、一卖信号（R21 扩展，commit 9f1af06，CI 绿）
 
-- 门禁：pytest **480 passed, 29 skipped**；ruff check / format / mypy / vulture 0 告警全绿
-- CI：待推
+### 四、一卖信号（R21 扩展，commit 9f1af06，CI 绿）
 
-### 五、踩坑
+**一卖镜像一买链路**（7 文件，+425/-24）：
+- `cpt/domain/models.py` Signal.signal_type Literal 扩展为 `["first_buy", "first_sell"]`
+- `cpt/domain/signal.py` 新增 `assess_first_sell`（镜像 `assess_first_buy`，方向 `_UP`，`_structure_ready` 去掉方向硬校验）；`_signal_id` 支持 signal_type 前缀；`_validate_previous` 接受两种 signal_type
+- `cpt/application/first_buy_bridge.py` 新增 `derive_first_sell_facts`（镜像 `derive_first_buy_facts`，`_UP` 方向找背驰段与反向笔）；复用 `FirstBuyFacts` 结构体
+- `cpt/application/a_share_snapshot.py` 新增 `_derive_first_sell_signal`（镜像 `_derive_first_buy_signal`）；`build_ashare_snapshot` 并行推导一买 + 一卖
+- `cpt/application/dashboard_snapshot_v2.py` 接受 `signal_first_sell` 形参，写入 `summary`
+- 测试：`test_signal.py` 加 5 条 `assess_first_sell` 口径锁定；`test_first_buy_bridge.py` 加 7 条 `derive_first_sell_facts` 口径锁定
 
-1. **subagent 全部失败**：3 个 subagent 全部 `failed before it finished`，无一留结论 → 实证 subagent 在本机不可靠，改主 agent 自挖
-2. **CPT 写入能力实测为零**：全仓 grep `INSERT INTO|UPDATE|DELETE FROM` 仅 1 处命中 `cpt/adapters/a_share_factor.py:399`（asel.ref_adjust_factor，R20 补因子）→ 信号事件表真从零
-3. **`alert_transition` 是死路（实证）**：`cpt/application/dashboard_alerts.py:9-24` 只比较 `previous["signal"]["status"]` vs `current["signal"]["status"]`，`triggered = current_status in {"alert","candidate"} and changed`。唯一调用方 `cpt/web/__main__.py:792-794 _compute_alerts`，其所在 `:747-770 build_dashboard_snapshot_v2(...)` **没传 `signal=`** → `current.get("signal")` 恒 None → `current_status` 恒 `"none"` → `triggered` 恒 False
-4. **`_derive_first_buy_signal` 内 `config.levels[0]` 默认是 5 不是 0**：测试数据 level=0 会早返 None，集成测试须 monkeypatch RulesConfig.levels=(0,)
-5. **emotion-core DB 连接**：`utils/db.py`（非 `data/_dbconfig.py`），需 `sys.path.insert(0, os.path.join(_HERE, "..", "src"))`
-6. **`fetch_hot_history` 返回 int 非 list**：`backfill_hot_rank` 逐票容错，单票失败记录不中断
+**踩坑**：ruff format 对中文注释对齐要求严格（`_bi(1, 50, 60),   #` 三个空格 vs 两个空格），CI 红了才发现，本地 `ruff check` 不检格式。
 
-### 六、仍未做
+### 五、验收
 
-- **全量 5,222 只因子回填**：后台 pid 1561177 仍卡腾讯 501（与 hot_rank 回填并行跑，互不干扰）
-- **hot_rank 回补**：后台 pid 1596464 在跑，待完成
-- **一卖 `check_first_sell`**：纯函数可直接接，待排
-- **`alert` 态**：需盘中反向 K 线，待排
-- **signal 状态推进**：需持久化信号历史（已落 `cpt_signal_event` 表，待接线）
+- 门禁：pytest **493 passed, 29 skipped**（+13 条一卖测试）；ruff check / format / mypy / vulture 0 告警全绿
+- CI：**全绿**（commit 9f1af06）
+
+### 六、踩坑（追加）
+
+7. **ruff format 中文注释对齐**：ruff check 不检格式，`ruff format --check` 才检；CI 绿但本地 `ruff check` 全绿不等于 CI 全绿，务必跑 `ruff format --check`
+8. **akshare API 字段变更**：`stock_hot_rank_detail_em` 在新版 API 下发 `Length mismatch` 异常，绕过 akshare 直连 `emappdata.eastmoney.com/stockrank/getHisList`，按新字段名 `calcTime` / `rank` 入库
+
+### 七、仍未做
