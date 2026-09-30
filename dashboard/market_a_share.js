@@ -318,7 +318,12 @@
       const verb = method === "POST" ? "保存" : "移除";
       const url = `${state.base}/watchlist?code=${encodeURIComponent(code)}`;
       try {
-        const response = await fetch(url, { method, headers: { Accept: "application/json" } });
+        const response = await fetch(url, {
+          method,
+          // 服务端（审计 M1）要求 application/json：声明 json 的跨站请求会触发
+          // CORS 预检，抬高 CSRF 门槛。
+          headers: { Accept: "application/json", "Content-Type": "application/json" },
+        });
         const body = await response.json().catch(() => null);
         if (!response.ok) {
           const detail = body && body.error ? body.error.message : `HTTP ${response.status}`;

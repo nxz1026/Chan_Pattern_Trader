@@ -417,12 +417,14 @@ def make_handler(
             path = urlsplit(self.path)
             if path.path != "/api/dashboard/a-share/watchlist":
                 return False
-            # 审计 M1：写接口至少校验 Content-Type，提高跨站触发门槛。
-            # 不引入完整鉴权（看板是单用户内网应用），但拒绝非 JSON 的写请求。
+            # 审计 M1：写接口无鉴权（单用户看板经 nginx 暴露）。至少要求
+            # ``Content-Type: application/json``——HTML 表单 / 简单请求只能发
+            # form-urlencoded / text/plain，而声明 json 的跨站 fetch 会触发
+            # CORS 预检并失败。不引入鉴权系统，仅抬高跨站触发门槛。
             content_type = self.headers.get("Content-Type", "")
             if "application/json" not in content_type.lower():
                 self._write_json_error(
-                    HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                    HTTPStatus.BAD_REQUEST,
                     "content_type_required",
                     "写接口要求 Content-Type: application/json",
                 )
