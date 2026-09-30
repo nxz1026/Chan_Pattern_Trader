@@ -32,7 +32,7 @@
 > 非**文件名**比对。
 
 > ⚠️ **复核踩坑记录（R19，2026-09-30）**：上一轮把 5 个模块判为「已有活替代实现」，
-> 依据是**函数名概念相近**。逐行读函数体后只有 1 个成立（`dashboard_market_fetch`），
+> 依据是**函数名概念相近**。逐行读函数体后只有 1 个成立（`dashboard_market_fetch`，R20 已删），
 > 另 4 个的比对对象根本不同语义（配置 diff ≠ 快照 diff；计数投影 ≠ 结构树；
 > 质量口径互补；轮询线程 ≠ 纯函数）。教训：**判「重复实现」必须比对函数体，
 > 不能比对名字**——这与本仓 2026-09-30 报告里「只查关键词不读函数体」是同一个错。
@@ -154,18 +154,18 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:61` 的
 | `cpt/application/dashboard_realtime.py` | 40 | 纯未接线 | Phase 4 P1 SSE/高效实时更新 | 0 |
 | `dashboard_watch.py` | 29 | 纯未接线 | Phase 4 P1 reconnect/stale 指标 | 0 |
 | `dashboard_watchlist.py` | 28 | 纯未接线 | Phase 4 P1 多交易对 | 0 |
-| `dashboard_market_fetch.py` | 25 | **真重复** | Phase 3 P0 真实 24h 高低点/成交量 | 0 |
 
-### 簇三里唯一确认的重复：`dashboard_market_fetch`
+### 簇三里唯一确认的重复：`dashboard_market_fetch` —— **已删除（R20）**
 
 内层逻辑 `normalize_24h`（`cpt/application/dashboard_market.py:42`）**已经被活路径
 直接调用**——`cpt/web/__main__.py:790` 的 `_safe_24h_for`。本模块的
 `market_snapshot` 只是在它外面包了 `symbol` / `interval_ms` / `source` 三个字段，
-且**自己 0 个导入方**。
+且自己 0 个导入方。
 
-> 处置二选一：
-> - **删** `dashboard_market_fetch.py`（25 行，包装层无独立价值）← 倾向此项
-> - 或把 `_safe_24h_for` 改成调 `market_snapshot`（多一层，收益不明）
+> **处置：已删除**（R20）。删 `cpt/application/dashboard_market_fetch.py`（25 行）
+> 与 `tests/test_dashboard_market_fetch.py`（14 行），并摘掉 `whitelist.py` 的
+> `market_snapshot` 豁免。Phase 3 P0「真实 24h 高低点/成交量」的需求**不受影响**——
+> 活路径本就直接调 `normalize_24h`，包装层删掉后行为完全一致。
 
 ---
 

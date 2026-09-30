@@ -60,7 +60,6 @@ compare_snapshots  # dashboard_compare —— R5 两份 snapshot 字段级 diff
 event_audit  # dashboard_event_audit —— Phase 5 P1 事件前后状态对比
 slice_snapshot  # dashboard_export —— Phase 6 P2 时间范围切片导出
 level_tree  # dashboard_levels —— Phase 5 P1 级别递归树
-market_snapshot  # dashboard_market_fetch —— Phase 3 P0 真实 24h
 align_runs  # dashboard_multi_run —— Phase 6 P2 双数据集同步对比
 build_parity_snapshot  # dashboard_parity —— Phase 2 Oracle 对比
 quality_report  # dashboard_quality —— Phase 5 P1 数据质量报告
