@@ -22,16 +22,35 @@
 - M5：实时窗口、未收盘 alert、收盘 confirmed、窗口截断和冲突/缺口拒绝。
 - schema v1 导出及既有人工 fixture 的稳定哈希测试保持通过。
 
+> ⚠️ **2026-09-30 更正**（本文为带日期的质量快照，§2/§4 结论不改写，仅就地标注）：
+> §3 第 1、8 条**已解决**，第 5 条**表述需修正**。详见下方各条。
+> 处置轮次记录见 `docs/progress-log.md` R18。
+
 ## 3. 已知限制
 
-1. 历史人工 fixture 仍使用早期 600ms 演示时间边界；它们通过兼容低层 `run_replay()` 测试，不代表 Binance 5m 契约。真实数据和新 M4 入口要求 `close_time = open_time + interval_ms - 1`。
+1. ~~历史人工 fixture 仍使用早期 600ms 演示时间边界；它们通过兼容低层 `run_replay()` 测试，不代表 Binance 5m 契约。真实数据和新 M4 入口要求 `close_time = open_time + interval_ms - 1`。~~
+   → **2026-09-30 已解决**：8 个 fixture 全部迁移为真实 5m 契约
+   （起点 `1706745600000` = 2024-02-01T00:00:00Z，与 oracle fixture 同源；
+   `interval_ms=300000`，`close_time = open_time + 299999`）。
+   同时修正了 9 根 **OHLC 越界**（`open`/`close` 落在 `[low, high]` 外）——
+   这批数据从未过 M4 入口，是本次迁移才暴露的第二处契约违规。
+   实测：迁移前全部 fixture 走 `python -m cpt.application.replay --validate-only` **rc=2**，
+   迁移后 **rc=0 / interval_ms=300000**。
+   回归网已补：`tests/test_replay_integration.py::test_fixture_passes_m4_entry`
+   （对旧数据实测 FAIL，确认是真守门而非同义反复）。
 2. Rust 参考实现与 CPT 不是同一规则实现；M2 报告是诊断对照，不是算法等价证明。
 3. `chanlun-pro` 固定版本仍因运行许可不可执行。
 4. `scan_stale_dependents()` 只能识别 `source_id@rN` 版本化引用；裸 source id 无法推断依赖版本。
-5. 当前一买模块只实现确定性状态机和输入门槛，MACD 背驰计算尚未接入。
+5. ~~当前一买模块只实现确定性状态机和输入门槛，MACD 背驰计算尚未接入。~~
+   → **2026-09-30 表述修正**：`cpt/domain/first_buy.py:104 _is_divergent` **已实现背驰判定**，
+   走 **czsc 笔力度口径**（`power_price` 变小 **且**（`power_volume` 或 `length` 至少一个变小）），
+   且 `_require_power_metrics` 对缺失力度度量显式报错、不静默降级。
+   准确表述应为本条描述的是**指标口径差异**（MACD vs 笔力度），**不是功能缺失**。
 6. 当前实时引擎每次收盘使用窗口重建，未做增量性能优化；窗口上限控制成本。
 7. LLM 独立服务层（M-LLM）尚未实现，且不影响核心结构链路。
-8. M4 回放新入口尚未把旧人工 fixture 自动迁移为真实 5m 时间契约。
+8. ~~M4 回放新入口尚未把旧人工 fixture 自动迁移为真实 5m 时间契约。~~
+   → **2026-09-30 已解决**：同第 1 条。迁移为**一次性数据订正**（非自动化迁移脚本），
+   已加守门用例防止回退。
 
 ## 4. 结论
 

@@ -7,8 +7,8 @@
   },
   "bars": [
     {
-      "open_time": 1000000,
-      "close_time": 1000600,
+      "open_time": 1706745600000,
+      "close_time": 1706745899999,
       "open": 100.0,
       "high": 101.0,
       "low": 99.0,
@@ -21,8 +21,8 @@
       "is_closed": true
     },
     {
-      "open_time": 1000600,
-      "close_time": 1001200,
+      "open_time": 1706745900000,
+      "close_time": 1706746199999,
       "open": 100.5,
       "high": 102.0,
       "low": 100.0,

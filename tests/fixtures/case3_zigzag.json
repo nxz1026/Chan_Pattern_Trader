@@ -7,8 +7,8 @@
   },
   "bars": [
     {
-      "open_time": 1000000,
-      "close_time": 1000600,
+      "open_time": 1706745600000,
+      "close_time": 1706745899999,
       "open": 100.0,
       "high": 100.0,
       "low": 100.0,
@@ -21,8 +21,8 @@
       "is_closed": true
     },
     {
-      "open_time": 1000600,
-      "close_time": 1001200,
+      "open_time": 1706745900000,
+      "close_time": 1706746199999,
       "open": 105.0,
       "high": 110.0,
       "low": 102.0,
@@ -35,9 +35,9 @@
       "is_closed": true
     },
     {
-      "open_time": 1001200,
-      "close_time": 1001800,
-      "open": 108.0,
+      "open_time": 1706746200000,
+      "close_time": 1706746499999,
+      "open": 102.0,
       "high": 102.0,
       "low": 100.0,
       "close": 100.0,
@@ -49,9 +49,9 @@
       "is_closed": true
     },
     {
-      "open_time": 1001800,
-      "close_time": 1002400,
-      "open": 100.0,
+      "open_time": 1706746500000,
+      "close_time": 1706746799999,
+      "open": 102.0,
       "high": 120.0,
       "low": 102.0,
       "close": 119.0,
@@ -63,9 +63,9 @@
       "is_closed": true
     },
     {
-      "open_time": 1002400,
-      "close_time": 1003000,
-      "open": 119.0,
+      "open_time": 1706746800000,
+      "close_time": 1706747099999,
+      "open": 102.0,
       "high": 102.0,
       "low": 100.0,
       "close": 100.0,
@@ -77,9 +77,9 @@
       "is_closed": true
     },
     {
-      "open_time": 1003000,
-      "close_time": 1003600,
-      "open": 100.0,
+      "open_time": 1706747100000,
+      "close_time": 1706747399999,
+      "open": 102.0,
       "high": 130.0,
       "low": 102.0,
       "close": 129.0,
@@ -91,9 +91,9 @@
       "is_closed": true
     },
     {
-      "open_time": 1003600,
-      "close_time": 1004200,
-      "open": 129.0,
+      "open_time": 1706747400000,
+      "close_time": 1706747699999,
+      "open": 102.0,
       "high": 102.0,
       "low": 100.0,
       "close": 100.0,

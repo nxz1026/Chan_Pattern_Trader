@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 from cpt.application.export import dataset_hash
-from cpt.application.replay import load_fixture, run_replay
+from cpt.application.replay import load_fixture, replay_bars, run_replay
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -30,6 +30,30 @@ ALL_CASES: list[str] = [
     "case7_long",
     "case8_integration",
 ]
+
+
+@pytest.mark.parametrize("case_name", ALL_CASES)
+def test_fixture_passes_m4_entry(case_name: str) -> None:
+    """每个 fixture 都能过 M4 新入口 ``replay_bars``（含 Binance K 线契约校验）。
+
+    ``run_replay`` 是**低层**入口，不校验契约；fixture 历史上只被它跑到，
+    于是"600ms 演示时间边界 + OHLC 越界"能一路绿灯（m6-quality-report §3.1/§3.8）。
+    这里锚定 M4 推荐入口，把契约校验拉进回归网：
+
+    - ``close_time == open_time + interval_ms - 1``（5m → +299999）
+    - ``low <= open, close <= high``
+    - 相邻 ``open_time`` 间隔恰为 ``interval_ms``（无缺口）
+
+    曾经的欠账：8 个 fixture 全部 rc=2，现在全部通过。
+    """
+    cfg, bars, meta = load_fixture(FIXTURES_DIR / f"{case_name}.json")
+    payload = replay_bars(bars=bars, config=cfg, metadata=meta)
+    assert payload["schema_version"] == "v1"
+    # 契约自检：逐根 close_time 边界 + OHLC 包络（不依赖被测代码，独立断言）
+    for i, bar in enumerate(bars):
+        assert bar.close_time == bar.open_time + 300000 - 1, f"{case_name}.bars[{i}] 时间边界"
+        assert bar.low <= bar.open <= bar.high, f"{case_name}.bars[{i}] open 越界"
+        assert bar.low <= bar.close <= bar.high, f"{case_name}.bars[{i}] close 越界"
 
 
 @pytest.mark.parametrize("case_name", ALL_CASES)
