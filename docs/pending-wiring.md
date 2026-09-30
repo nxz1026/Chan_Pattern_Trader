@@ -2,8 +2,33 @@
 
 > 建立：2026-09-25（代码审核 P0-2 处置）
 > 重写：2026-09-30（R19——按**功能簇 + 处境**重排，替换原「平铺 16 行」表）
+> 收尾：2026-09-30（R22——簇二/簇三 **9 个模块 + 3 个函数全部接线**，本清单只剩 T+1 一项）
 > 来源：`docs/audit/cpt-code-audit-20260925.md` §3.4、`docs/audit/verification-20260925.md` §4
 > 维护：新增待接线模块必须登记在此；接线完成或决定删除时从此表移除，并在提交信息里说明。
+
+## R22 收尾：本清单现状（2026-09-30）
+
+**唯一仍在册的待接线项**：`cpt/domain/a_share_rules.py::t_plus_one_purchase_allowed`
+（T+1 读取点。标签能力 R19 已接，R22 未动，仍留 `whitelist.py` §4b 豁免）。
+
+簇一/二/三与「另有 3 个函数」的其余条目**全部已接线**，处置明细见下表。
+R22 的 9 个接线点（路由与调用方均已 grep 复核）：
+
+| D 类模块 | R22 接线点 |
+|---|---|
+| `dashboard_export.py` | `cpt/web/app.py:513`（C1 `GET /export?start_ms=&end_ms=`） |
+| `dashboard_levels.py` | `dashboard_snapshot_v2.py:48`（`_level_tree_payload`）+ `cpt/web/app.py:541`（C2 `/levels`） |
+| `dashboard_compare.py` | `cpt/web/app.py:562`（C3 `/compare?left=&right=`，序列值降级为 `{__summary__,count,hash}`） |
+| `dashboard_multi_run.py` | `cpt/web/app.py:602`（C4 `/multi-run?run_ids=`） |
+| `dashboard_stats.py` | `cpt/web/app.py:160`（C5 `/signal-stats?days=&code=`，自报 `basis`） |
+| `dashboard_watchlist.py` | `cpt/web/app.py:234`（C6 `/watchlist`，投影自 A 股候选池） |
+| `dashboard_quality.py` | `cpt/application/dashboard.py:140`（v1 `_data_quality` 重写 ⇒ v1/v2 两条活路径都过） |
+| `dashboard_watch.py` | `dashboard_snapshot_v2.py:29`（`_watch_payload` → `v2["watch_metrics"]`） |
+| `dashboard_realtime.py` | `cpt/web/__main__.py:572`（`_RealtimeProvider._cached_snapshot`，容量 8 的 LRU） |
+
+`dashboard_runs.py` 顺带补齐**运行本体**（此前只存索引行）：
+`dashboard_runs.py:158 run_body()` / `:173 find_run()`，被 `cpt/web/app.py:553-554`、`:570`、`:590` 调用。
+
 
 ## 为什么有这份清单
 
@@ -39,12 +64,12 @@
 
 ## 先看结论：16 个模块是 3 个功能簇，不是 16 件散货
 
-| 簇 | 模块 | 行数 | 性质 |
-|---|---:|---:|---|
-| **一、A 股信号链** | 2 | 463 | **唯一影响「信号对不对」**（R19 已接 1 个） |
-| **二、研究者模式面板** | 10 | 396 | 只读展示/分析 |
-| **三、盯盘模式面板** | 4 | 122 | 只读展示 |
-| 合计 | 16 | **981** | |
+| 簇 | 模块 | 行数 | 性质 | R22 后 |
+|---|---:|---:|---|---|
+| **一、A 股信号链** | 2 | 463 | **唯一影响「信号对不对」**（R19 已接 1 个，R20 已接 1 个） | 只剩 `t_plus_one_purchase_allowed` 一个符号 |
+| **二、研究者模式面板** | 10 | 396 | 只读展示/分析 | 7 个全部接线（另 3 个 R20/R21 已删） |
+| **三、盯盘模式面板** | 4 | 122 | 只读展示 | 3 个全部接线（另 1 个 R20 已删） |
+| 合计 | 16 | **981** | | **15 个模块已接线/已删，1 个符号待接（T+1）** |
 
 **优先级判据**：簇一改错 = 信号本身是错的；簇二/三改错 = 面板难看。故顺序为
 **簇一 → 簇二 → 簇三**。簇一里的两个模块是**真正有待建价值**的部分；簇二/三里
@@ -141,13 +166,13 @@
 | ~~`cpt/application/dashboard_parity.py`~~ | ~~83~~ | **已删除（R20）** | Phase 2「Oracle 对比」——oracle 参照 R13 已删，永久未启用 | 28 处（空面板保留） |
 | ~~`dashboard_signal_history.py`~~ | ~~47~~ | **已删除（R21）** | Phase 4/6 — 依赖 `Signal` 域对象，生产线不产出，留了也是假希望 | — |
 | ~~`dashboard_event_audit.py`~~ | ~~42~~ | **已删除（R21）** | Phase 5 — 依赖 `StructureEvent` 域对象，生产线不产出，留了也是假希望 | — |
-| `dashboard_levels.py` | 40 | 纯未接线 | Phase 5 P1 级别递归树 | 0 |
-| `dashboard_runs.py` | 37 | **半接线** | R1 数据集/运行浏览器 | 2 处 |
-| `dashboard_quality.py` | 33 | 纯未接线 | Phase 5 P1 数据质量报告 | 0 |
-| `dashboard_compare.py` | 31 | 纯未接线 | R5 两份 snapshot 字段级 diff + Phase 6 P2 | 0 |
-| `dashboard_stats.py` | 30 | 纯未接线 | Phase 6 P2 一买统计 | 0 |
-| `dashboard_multi_run.py` | 28 | 纯未接线 | Phase 6 P2 双数据集同步对比 | 0 |
-| `dashboard_export.py` | 25 | 纯未接线 | Phase 6 P2 时间范围切片导出 | 0 |
+| ~~`dashboard_levels.py`~~ | ~~40~~ | **已接线（R22）** | Phase 5 P1 级别递归树 | v2 `level_tree` + C2 `/levels` |
+| ~~`dashboard_runs.py`~~ | ~~37~~ | **已接线（R20/R22）** | R1 数据集/运行浏览器 | 2 处 |
+| ~~`dashboard_quality.py`~~ | ~~33~~ | **已接线（R22）** | Phase 5 P1 数据质量报告 | v1/v2 两条路径 |
+| ~~`dashboard_compare.py`~~ | ~~31~~ | **已接线（R22）** | R5 两份 snapshot 字段级 diff + Phase 6 P2 | C3 `/compare` |
+| ~~`dashboard_stats.py`~~ | ~~30~~ | **已接线（R22）** | Phase 6 P2 一买统计 | C5 `/signal-stats` |
+| ~~`dashboard_multi_run.py`~~ | ~~28~~ | **已接线（R22）** | Phase 6 P2 双数据集同步对比 | C4 `/multi-run` |
+| ~~`dashboard_export.py`~~ | ~~25~~ | **已接线（R22）** | Phase 6 P2 时间范围切片导出 | C1 `/export` |
 
 ### 簇二的两条特殊条目
 
@@ -170,11 +195,17 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:61` 的
 > - 前端契约测试 `tests/test_dashboard_parity_navigation.py` **保留**（它守的是
 >   仍然活着的空面板交互，不是被删的投影函数）。
 
-**② `dashboard_runs` —— 半接线：路由活、前端读、数据恒空。**
+**② `dashboard_runs` —— 已接线（R20 路由 + R22 本体）。**
 
 `cpt/web/app.py:210` 路由活着，`dashboard.js:827` 真的在读 `snapshot.runs`，
-但 `dashboard_snapshot_v2.py:62` 硬编码 `v2["runs"] = []`。**通的是一条死管道。**
-补数据源即可（有 `build_run_index` 可用）。
+R20 补了索引行数据源，但 `dashboard_snapshot_v2.py:62` 的硬编码 `v2["runs"] = []`
+让「通的是一条死管道」。**R22 补上运行本体**：`dashboard_runs.py` 新增
+`_RUN_BODIES: deque[dict | None]`（与 `_RUN_RING` 严格同步 append/clear，否则错位）、
+`RUN_BODY_MAX_BYTES = 4_000_000`（超限**仍收索引行、只是不存本体**）、
+`run_body(run_id)`(:158，返回深拷) 与 `find_run(run_id)`(:173)。C3/C4 由此才有入参。
+
+> 遗留口径：run 本体存在**进程内 deque**，重启即失效——`/compare`、`/multi-run`
+> 因此只对**本进程活过的 run** 可比。要跨重启必须落库（见 roadmap 的持久化前置）。
 
 ---
 
@@ -182,9 +213,9 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:61` 的
 
 | 模块 | 行数 | 处境 | 功能 / roadmap 位置 | 前端消费 |
 |---|---:|---|---|---:|
-| `cpt/application/dashboard_realtime.py` | 40 | 纯未接线 | Phase 4 P1 SSE/高效实时更新 | 0 |
-| `dashboard_watch.py` | 29 | 纯未接线 | Phase 4 P1 reconnect/stale 指标 | 0 |
-| `dashboard_watchlist.py` | 28 | 纯未接线 | Phase 4 P1 多交易对 | 0 |
+| ~~`cpt/application/dashboard_realtime.py`~~ | ~~40~~ | **已接线（R22）** | Phase 4 P1 SSE/高效实时更新 | `_cached_snapshot` LRU |
+| ~~`dashboard_watch.py`~~ | ~~29~~ | **已接线（R22）** | Phase 4 P1 reconnect/stale 指标 | v2 `watch_metrics` |
+| ~~`dashboard_watchlist.py`~~ | ~~28~~ | **已接线（R22）** | Phase 4 P1 多交易对 | C6 `/watchlist` |
 
 ### 簇三里唯一确认的重复：`dashboard_market_fetch` —— **已删除（R20）**
 
@@ -208,7 +239,7 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:61` 的
 |---:|---|---|
 | 56 | `market_24h` | `{"available": False, "reason": "upstream_aggregate_unavailable"}` |
 | 61 | `parity` | `{"available": False, "reason": "oracle_reference_unavailable"}` |
-| 62 | `runs` | `[]`（硬编码，无 `available` 包装） |
+| ~~62~~→`99` | `runs` | v2 体内的 `[]` **仍在**，但活路径不经它：`cpt/web/app.py:69 _with_run_index()` 在**HTTP 响应层**注入真值（R20），`:660`/`:699` 调用 |
 | 63 | `multi_level` | `{"available": False, "reason": "multi_level_unavailable"}` |
 | 67 | `config_compare` | `{"available": False, "reason": "config_compare_unavailable"}` |
 
@@ -221,13 +252,23 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:61` 的
 
 ---
 
-## 另有 3 个函数（非独立模块）同样待接线
+## 另有 3 个函数（非独立模块）——**R22 全部接线**
 
-| 函数 | 产品位置 | 处境 | 说明 |
+| 函数 | 产品位置 | 处境 | R22 处置 |
 |---|---|---|---|
-| `dashboard_reproducibility.py::snapshot_diff` | roadmap R5 | 纯未接线 | 唯一调用方是 `dashboard_compare.py:30`——**两个待接线模块互调**，都不在生产链路上 |
-| `adapters/a_share_local.py::_to_wind_code` | 台账决策 C1 | 纯未接线 | 仅被**注释**提及（`a_share_public.py:115`、`scripts/factor_backfill.py:130`），无代码调用 |
-| `adapters/wind_source.py::fetch_adjust_factors` | 台账决策 C1 | 纯未接线 | 全仓 0 引用 |
+| `dashboard_reproducibility.py::snapshot_diff` | roadmap R5 | **已接线（R22）** | 调用方 `dashboard_compare.py` 已接进 C3 `/compare`（`cpt/web/app.py:562`）；序列型值由 `_summarize_diff_value` 递归降级，避免原始 candles 灌进响应 |
+| `adapters/a_share_local.py::_to_wind_code` | 台账决策 C1 | **已接线（R22）** | 调用方 `scripts/factor_backfill.py:209`（`fetch_wind_factor_rows`）→ 循环体 `:520` 的 `_wind_fallback`，由 `--wind-fallback`（`:391-396`，**默认关闭**）开启；同时把非法输入从静默兜底改成抛 `ValueError` |
+| `adapters/wind_source.py::fetch_adjust_factors` | 台账决策 C1 | **已接线（R22）** | 同上调用链 `scripts/factor_backfill.py:212`；取数失败只转文案、绝不向上抛 |
+
+> ⚠️ **前两版本文里的 `scripts/factor_backfill.py:130` 是错行号**，且"有 bug/两份重复实现"的描述
+> 已过期（`_to_wind_code` 的顺序 bug 在 R17 已修，那份重复的 `_code_to_tx` 也已删除）。
+> R22 复核后按上表更正。
+
+> ⚠️ **这两个 Wind 符号在 `whitelist.py` §4c 里保留，但性质已变**：它们**不是待接线**，
+> 而是**门禁盲区**——CI 的 vulture 只扫 `cpt/`（`.github/workflows/ci.yml`），调用方在
+> `scripts/`，于是已接线的符号照样被报"未使用"。要摘这两条需把 vulture 范围扩到
+> `scripts/`，实测那样会另带出 `scripts/factor_backfill.py` 里 2 条真死代码
+> （`REPO_ROOT` 未使用变量、`latest_factor_date` 未使用函数），属本次范围外。
 
 ---
 
@@ -237,12 +278,22 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:61` 的
 2. 这些模块的现有测试是**自证式**的（测一段不运行的代码），**不能**当作「已在生产验证」。
    R19 的接线守门用例补了一条新规矩：**入口必须是生产构造函数**
    （`build_ashare_snapshot`），只改模块函数体而忘接线的改动**不会**被原有用例发现。
+   R22 沿用这条：`tests/test_dashboard_wiring_d.py` 的守门用例把 spy 挂在**使用点**
+   （`monkeypatch.setattr(dashboard_mod, "quality_report", spy(...))`）——实测删掉
+   `v2["watch_metrics"] = ...` 一行立刻 `assert 0 == 1`。
 3. CI 的 vulture 门禁（`.github/workflows/ci.yml`，阈值已从 80 降到 60）对这批名字走
    `whitelist.py` 白名单。白名单是「已知未接线」的登记，不是「忽略告警」。
+   **注意白名单的覆盖范围只到 `cpt/`**：调用方在 `scripts/` 的符号，即使已接线也会被报
+   未使用（R22 实测，见「另有 3 个函数」）。
 4. 接线时**先写从生产入口可达的集成测试**，再把模块从本清单和 `whitelist.py` 里移除。
 5. **删模块时三处同步**：本文件 + `whitelist.py` + `tests/test_<module>.py`。
 6. **白名单是逐个符号的，不是逐个模块的**：一个模块接了一半，剩下的符号仍要留豁免
    （例：`a_share_rules` 的标签函数已摘，`t_plus_one_purchase_allowed` 仍留）。
+7. **接线的三层要一起补**：R22 勘察发现 D 类 9 个功能是「后端函数 + HTTP 路由 + 生产
+   数据源」**三层全缺**，只补其中一层等于没接。销账前必须对每条路由做真实 curl，
+   而不是只看单测——单测里的替身会掩盖"路由不存在"。
+8. **别把「同名/相近概念」当「已接线」**：R19 因此误判过 4 个模块（见上方复核踩坑记录）。
+   判据是**函数体**，不是函数名。
 
 ## 相关
 

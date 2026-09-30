@@ -62,6 +62,12 @@ _SECURITY_MASTER: Final[str] = "asel.security_master"
 #: ``ST 中 侨`` → ``ST中侨``、``TCL 通讯`` → ``TCL通讯``，都是正确写法。
 _WHITESPACE_RE: Final[re.Pattern[str]] = re.compile(r"\s+")
 
+#: Wind 代码的**裸码部分**：只认 6 位 ASCII 数字。
+#:
+#: 不用 ``str.isdigit()``：它会放过全角数字（``６００５１９``）和上标（``²``），
+#: 那些拼进 Wind 代码同样查不到票。
+_WIND_BARE_RE: Final[re.Pattern[str]] = re.compile(r"[0-9]{6}")
+
 
 @dataclass(frozen=True)
 class SecurityName:
@@ -243,18 +249,34 @@ class AShareLocalClient:
     @staticmethod
     def _to_wind_code(code: str) -> str:
         """``000002`` → ``000002.SZ`` / ``600519`` → ``600519.SH`` /
-        ``920025`` → ``920025.BJ``。"""
-        if "." in code:
-            return code
+        ``920025`` → ``920025.BJ``。
+
+        **非法输入抛 ``ValueError``，不再静默兜底**：接线前本函数对既非 6 位数字、
+        又无已知后缀的输入（``""`` / ``"abc"`` / ``"600519.XX"`` / ``"700000"``）
+        一律返回 ``"<原样>.SZ"``，等于拿一个不存在的 Wind 代码去查库，报回来的是
+        "查无此码"—— 把"输入不合法"伪装成"Wind 没有这只票"。调用方
+        （``scripts/factor_backfill.py`` 的 Wind 兜底）按 ``ValueError`` 降级。
+        """
+        raw = str(code).strip().upper()
+        digits, _, suffix = raw.partition(".")
+        if _WIND_BARE_RE.fullmatch(digits) is None:
+            raise ValueError(f"不是 6 位 A 股裸码：{code!r}")
+        if suffix:
+            if suffix not in {"SH", "SZ", "BJ"}:
+                raise ValueError(f"无法识别的交易所后缀：{code!r}")
+            return f"{digits}.{suffix}"
         # 顺序敏感：`92`（北交所 920xxx）必须早于 `9`（沪 B），否则 920025 会被
         # 推成 920025.SH，Wind 那边直接查无此码（R17 修）。
-        if code.startswith(("92", "43", "83", "87", "88")):
-            return f"{code}.BJ"
-        if code.startswith(("6", "9", "5")):
-            return f"{code}.SH"
-        if code.startswith("4"):
-            return f"{code}.BJ"
-        return f"{code}.SZ"
+        if digits.startswith(("92", "43", "83", "87", "88")):
+            return f"{digits}.BJ"
+        if digits.startswith(("6", "9", "5")):
+            return f"{digits}.SH"
+        if digits.startswith("4"):
+            return f"{digits}.BJ"
+        if digits.startswith(("0", "3", "2", "1")):
+            return f"{digits}.SZ"
+        # 剩下的首位（7 等）在 A 股不存在：宁可抛，也不推一个错的交易所出去。
+        raise ValueError(f"无法从代码推断交易所：{code!r}")
 
     def fetch_validated_klines(
         self,

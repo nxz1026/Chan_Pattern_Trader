@@ -1,8 +1,10 @@
 """Structured research data-quality projections.
 
-**状态：待接线（pending-wiring，2026-09-25 审核 P0-2）**——生产代码零导入，尚无
-调用方；对应 `docs/dashboard-product-roadmap.md` Phase 5 P1「数据质量报告」，故保留。
-改动前请先读 `docs/pending-wiring.md`。
+**状态：已接线（R22，2026-09-30）**——进活路径 `cpt/application/dashboard.py`
+的 `_data_quality`（v1 与 v2 两条快照路径都过），对应
+`docs/dashboard-product-roadmap.md` Phase 5 P1「数据质量报告」。v2 的
+`data_quality` 保留既有 4 个布尔/计数键，本模块补 `severity`/`gap_count`/
+`out_of_order_count`/`gaps`/`out_of_order`。
 """
 
 from __future__ import annotations

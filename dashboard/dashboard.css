@@ -1767,3 +1767,117 @@ noscript p {
 .a-share-source[hidden] {
   display: none;
 }
+
+/* ---- Phase D2：D 类运维面板（范围导出 / 信号统计聚合 / 盯盘指标 / 自选列表 / 运行对比 / 多数据集对比）----
+   全部复用既有变量：--color-up(涨) / --color-down(跌) / --color-gap / --color-alert /
+   --color-stale / --color-empty / --color-border / --color-text-dim / --color-text-faint。
+   仓内没有 --color-warn（见上方 :1011 的注释），所以不再引入新变量。 */
+
+.panel-subtle {
+  color: var(--color-text-faint);
+  font-size: var(--font-size-xs);
+}
+
+/* 运维面板通用表格：窄屏可横向滚动，不挤压其它面板 */
+.ops-table-wrap {
+  overflow-x: auto;
+}
+
+.ops-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: var(--font-size-sm);
+}
+
+.ops-table th,
+.ops-table td {
+  padding: 4px 8px;
+  border-bottom: 1px solid var(--color-border);
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+
+.ops-table th {
+  color: var(--color-text-faint);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* 数值列等宽，便于纵向比对 */
+.ops-table td:nth-child(n + 2) {
+  font-family: var(--font-mono);
+}
+
+.ops-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.ops-controls label {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  color: var(--color-text-dim);
+  font-size: var(--font-size-xs);
+}
+
+/* 多运行勾选：一行放不下就换行 */
+.ops-controls-wrap {
+  gap: var(--space-2) var(--space-3);
+}
+
+/* 涨跌色：与 .market-price 同一口径（>=0 记 up） */
+.kv dd[data-state="up"],
+.ops-table td[data-state="up"] {
+  color: var(--color-up);
+}
+
+.kv dd[data-state="down"],
+.ops-table td[data-state="down"] {
+  color: var(--color-down);
+}
+
+.kv dd[data-state="flat"] {
+  color: var(--color-flat);
+}
+
+/* 自选行：alert 醒目；无因子数据整行降透明 */
+.ops-table tr[data-state="alert"] td:first-child {
+  color: var(--color-alert);
+  font-weight: 600;
+}
+
+.ops-table tr[data-state="unavailable"] {
+  opacity: 0.55;
+}
+
+.ops-table tr[data-testid="watchlist-empty"] td,
+.ops-table tr[data-testid="compare-empty"] td,
+.ops-table tr[data-testid="multi-run-empty"] td {
+  color: var(--color-text-faint);
+}
+
+/* 数据质量明细：严重度直接标在行上，复用既有 gap/stale/ok 语义色 */
+.quality-list li[data-testid="data-quality-detail"] > span:last-child {
+  font-family: var(--font-mono);
+}
+
+.quality-list li[data-testid="data-quality-detail"][data-state="gap"] > span:last-child {
+  color: var(--color-gap);
+}
+
+.quality-list li[data-testid="data-quality-detail"][data-state="stale"] > span:last-child {
+  color: var(--color-stale);
+}
+
+.quality-list li[data-testid="data-quality-detail-list"] ul {
+  margin: 0;
+  padding-left: var(--space-3);
+  color: var(--color-text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+}

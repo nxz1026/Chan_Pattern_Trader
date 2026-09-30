@@ -1,9 +1,9 @@
 """Read-only realtime refresh and alert projections.
 
-**状态：待接线（pending-wiring，2026-09-25 审核 P0-2）**——生产代码零导入，尚无
-调用方；对应 `docs/dashboard-product-roadmap.md` Phase 4 P1「SSE 或高效实时更新」
-（现由活路径 `cpt/web/__main__.py` 的 `_RealtimeProvider` 承担一部分），故保留。
-改动前请先读 `docs/pending-wiring.md`。
+**状态：已接线（R22，2026-09-30）**——`cpt/web/__main__.py` 的
+`_RealtimeProvider._cached_snapshot` 用它做 `(symbol, interval_ms)` 进程内 LRU
+命中判定，使带 `?symbol=&interval_ms=` 的请求不再等一个轮询周期；对应
+`docs/dashboard-product-roadmap.md` Phase 4 P1「SSE 或高效实时更新」。
 """
 
 from __future__ import annotations

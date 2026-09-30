@@ -1962,8 +1962,6 @@ hfq 被调连续（002594 `raw -67%` / `hfq ±0`）；腾讯退化 = raw 正常�
 
 ### 四、一卖信号（R21 扩展，commit 9f1af06，CI 绿）
 
-### 四、一卖信号（R21 扩展，commit 9f1af06，CI 绿）
-
 **一卖镜像一买链路**（7 文件，+425/-24）：
 - `cpt/domain/models.py` Signal.signal_type Literal 扩展为 `["first_buy", "first_sell"]`
 - `cpt/domain/signal.py` 新增 `assess_first_sell`（镜像 `assess_first_buy`，方向 `_UP`，`_structure_ready` 去掉方向硬校验）；`_signal_id` 支持 signal_type 前缀；`_validate_previous` 接受两种 signal_type
@@ -2014,3 +2012,115 @@ hfq 被调连续（002594 `raw -67%` / `hfq ±0`）；腾讯退化 = raw 正常�
 **门禁**：vulture exit 0，CI 全绿（commit `ef5682c`）。
 
 ### 十、仍未做
+
+- **全量 5,222 只因子回填未实跑**：本机 IP 被腾讯限流（`HTTP 501` 持续中），迁移与防护已就位，待限流恢复后执行 `--mode full`。
+- **hot_rank 历史回补未跑完**：R21 起的回填脚本（票池 1,296 只）收工时仍在跑，已入库 ~4,855 行 / 110 只。
+- **前端 `ashare:` 前缀专门渲染**（虚线/降透明）—— 奎爷 2026-09-30 拍板**暂停**。
+- **T+1 读取点** `cpt/domain/a_share_rules.py::t_plus_one_purchase_allowed` —— R22 未接，是
+  `docs/pending-wiring.md` 上剩余的**唯一**待接线符号。
+
+---
+
+## R22 · D 类 9 模块全部接线（含运行本体缓冲）
+
+**时间**：2026-09-30
+**授权**：奎爷 m01650「都要做，一个不能差。omp 可以派出 2-3 个，给 omp 用 10 个 G 的内存绰绰有余」
+**上游依据**：D 类探索报告（本会话 chat 内交付，未落文档）——结论是 D 类 **9 个**模块（不是 5 个），
+全部零生产导入，且每个功能的**后端函数 + HTTP 路由 + 生产数据源三层全缺**。用户拍板全部接线，删除路径作废。
+
+### 一、执行方式：三份冻结工单 + 3 个 omp 并行
+
+先冻结 HTTP 契约 C1–C8 并写成三份工单（`omp-task-d1-backend.md` / `d2-frontend.md` / `d3-adapters.md`），
+按**文件所有权互斥**切分，三方一律不许 `git commit/add/push`（此前 omp 擅自提交过一次 `b27a0a8`）：
+
+| 成员 | job | 只碰的文件 | 交付 |
+|---|---|---:|---|
+| d1 后端 | pwsh-604 | `cpt/**`（除 `cpt/adapters/**`）、`tests/**`（除 3 个 adapters 测试） | 6 条新路由 + 快照扩键 + 运行本体 |
+| d2 前端 | pwsh-605 | `dashboard/**` | 8 个面板/控件 |
+| d3 adapters | pwsh-606 | `cpt/adapters/{a_share_local,a_share_public,wind_source}.py`、`scripts/factor_backfill.py` + 3 个测试 | Wind 兜底链路 |
+
+### 二、后端 d1：9 个模块 + 6 条新路由
+
+契约 C1–C6 各自成路由（`cpt/web/app.py`）：`:488 /api/dashboard/export`、`:521 /levels`、`:543 /compare`、
+`:579 /multi-run`、`:604 /signal-stats`、`:615 /watchlist`，全部嵌在既有 `do_GET` 的 `elif path.path == ...` 链里。
+模块接线点：`dashboard_quality→dashboard.py:140`、`dashboard_watch→dashboard_snapshot_v2.py:29`、
+`dashboard_levels→dashboard_snapshot_v2.py:48`、`dashboard_export→app.py:513`、`dashboard_compare→app.py:562`、
+`dashboard_multi_run→app.py:602`、`dashboard_stats→app.py:160`、`dashboard_watchlist→app.py:234`、
+`dashboard_realtime→cpt/web/__main__.py:572`。
+
+**C3 的关键设计**：`compare_snapshots` 直出 `snapshot_diff` 会把**两份完整 candles 数组**灌进响应。
+新增 `_diff_digest()`（sha256 of `json.dumps(sort_keys=True)`，**刻意不用内置 `hash` 因为它带随机种子**）、
+`_summarize_diff_value()`（**递归**：list/tuple → `{__summary__,count,hash}`，dict 逐键递归）与
+`_summarize_diff_entries()`。**只判顶层的写法会漏掉 `overlays` 这种"dict 里套 4 个 list"**。
+实测 C3 响应 5,676 bytes、`differences: 14`、`candles` 降级为 `{__summary__:candles, count:56, hash:736585b5c2f9}`。
+
+**运行本体（`dashboard_runs.py` 补历史快照）**：此前 `_RUN_RING` **只存索引行、不存 candles**，
+`/compare` 与 `/multi-run` 因此没有入参。新增 `_RUN_BODIES: deque[dict | None]`（与 `_RUN_RING`
+**严格同步 append/clear，否则错位**）、`RUN_BODY_MAX_BYTES = 4_000_000`（超限**仍收索引行、只是不存本体**，
+防病态请求吃穿常驻进程）、`_snapshot_body()`（deepcopy，序列化失败/超限都返回 None 且**绝不抛**）、
+`run_body(run_id)`(:158，返回深拷) 与 `find_run(run_id)`(:173)。内存上界 ≈ 50×4MB=200MB 序列化体积。
+**遗留口径**：本体在进程内 deque，重启即失效 ⇒ `/compare`、`/multi-run` 只对**本进程活过的 run** 可比。
+
+**C5 的口径自报**：`/signal-stats` 响应带 `"basis": "signal_event_transitions"`。这不是装饰——
+统计的是 `public.cpt_signal_event` 里的**状态跃迁事件**，不是"当前若干只票的状态"，
+两者在同一个「一买统计」标题下会得出不同数字，必须让消费方看得见口径。
+新增 `signal_event_store.py:212 load_signal_events()` + `a_share_routes.py:300 recent_closes()`（供 C6 算涨跌幅，异常降级 None）。
+
+### 三、前端 d2：8 个面板（**只改 `dashboard/`**）
+
+后端缺的从来不是 UI——D 类报告已查明壳子早在（范围导出面板导的是全量、配置对比面板的
+`{field,left,right}` 与 `snapshot_diff` 输出同形、级别递归在前端自己现算）。d2 补的是**取数与渲染的对接**：
+`buildSignalStatsAggregate()`(:1188)、`loadSignalStats()`(:1263)、`renderWatchMetrics()`(:1149)、
+`renderWatchlistPanel()`(:1274)、`loadWatchlist()`(:1343)、`renderCompareResult()`(:1415)、
+`renderMultiRunResult()`(:1485)、`loadMultiRun()`(:1545)、质量明细(`renderChrome` :552-630)、
+`installOpsPanels()`(:1556，`boot()` :4322 调用)。`dashboard.js` 4390 行、`index.html` 574、`dashboard.css` 1883。
+
+- C3 的 `{__summary__}` 条目渲染成「candles · 120 项 · hash ab12cd34ef56」，**不做 `JSON.stringify`**。
+- `level_tree` 优先用后端，**后端不可用时回退**到 overlays 现算，`ul[data-source=backend|overlays]` 标注来源。
+- **C5/C6 故意不进 30s 轮询**（只 boot 首次 + 手动按钮）——避免重演 B1/B2 的"每轮多 2 个请求"。
+- 真机验证：omp 托管 Chromium + 临时 Python 服务，**五种模式下 `tab.errors()` 全部为 `[]`**（normal /
+  降级 / 400 / 503 宕机 / 老快照）；`node --check dashboard/dashboard.js` exit 0。
+
+### 四、adapters d3：Wind 兜底链路
+
+`_to_wind_code` 与 `fetch_adjust_factors` 的缺口**不是"没人调用"这么简单**：前者对非法输入静默兜底，
+后者全仓 0 引用。d3 顺带纠正了工单里两个**过期前提**（`_to_wind_code` 的 92/9 顺序 bug R17 已修；
+`factor_backfill.py` 里那份重复的 `_code_to_tx` 已删除），并把非法输入改成**抛 `ValueError`**
+（新增 `_WIND_BARE_RE` 只认 ASCII 6 位——`str.isdigit()` 会放过全角数字）。
+调用链：`scripts/factor_backfill.py:main()`(:419) → 循环体 `:520 _wind_fallback()` → `:410 fetch_wind_factor_rows()`
+→ `:209 _to_wind_code()` + `:212 fetch_adjust_factors()`，由 `--wind-fallback`（`:391-396`，**默认关闭**）开启。
+**默认路径逐字复现旧日志与计数**，任何 Wind 异常只转文案绝不向上抛。
+
+### 五、验收
+
+- 新增 `tests/test_dashboard_wiring_d.py`（15 条）：6 条路由各含正常 + 降级；守门用例把 spy 挂在**使用点**
+  （`monkeypatch.setattr(dashboard_mod, "quality_report", spy(...))`）——实测删掉 `v2["watch_metrics"] = ...`
+  一行立刻 `assert 0 == 1`。15 passed。
+- 全量：**571 collected / 527 passed / 31 skipped / 13 failed / 0 errors**。13 条红点全在
+  `tests/test_web_a_share_routes.py`（`No module named 'fcntl'` 系列 + 2 条同源的 `RemoteDisconnected`），
+  **与本机 HEAD 基线同文件同数量**——Windows 缺 POSIX `fcntl`，Linux CI 不出现，**无新增红点**。
+- `ruff check` → All checks passed；`ruff format --check` → 138 files already formatted；
+  `mypy cpt scripts` → 4 errors in 1 file（全是 `cpt/adapters/a_share_pool.py:202/207` 的
+  `flock`/`LOCK_EX`/`LOCK_UN` Windows 伪影）；`vulture --min-confidence 60 cpt whitelist.py` → exit 0；
+  `lint-imports` → **3 kept, 0 broken**（Analyzed 95 files, 414 dependencies）。
+- ⚠️ **实测发现 HEAD 上 CI 的 Static quality gates 早已是红的**（用 `git worktree add "$env:TEMP\cpt-head" HEAD`
+  建干净检出测出：`ruff check` 2 条 E501 在 `cpt/web/app.py:313/321`、`ruff format --check` 1 file、
+  `mypy` 7 errors）。本轮修掉其中在本机可复现的部分：ruff format 顺手折行了那 2 条 E501、
+  修掉 d1 新引入的 1 条 mypy（`dashboard_snapshot_v2.py:43` 的 `asdict` 重载失配——元组展开让
+  四类 dataclass 的并集退化成 `object`，改为四条 `structures.extend(...)`）+ 3 条既有 mypy
+  （`cpt/web/app.py` 的 `_radar_entry` 缺注解）。
+
+### 六、踩坑
+
+1. **`-q -q` 会吞掉 pytest 的最终统计行**：本仓 `pyproject.toml` 的 `addopts` 已含 `-q`，命令行再传一个
+   变成 `-qq`，输出里**没有**"N passed, M failed"这一行。取权威计数用 `--junit-xml`（本次：571/13/31）。
+2. **Windows 上 `lint-imports` 直接跑会崩**：`.importlinter` 里有中文注释，import-linter 2.15 用
+   locale 默认编码（本机 GBK）读配置，报 `'gbk' codec can't decode byte 0x8e ...`。加 `PYTHONUTF8=1` 即可。
+3. **vulture 门禁只扫 `cpt/`，`scripts/` 是盲区**：调用方在 `scripts/factor_backfill.py` 的两个 Wind 符号
+   即使已接线仍被报"未使用"。把范围扩到 `scripts/` 会另带出 2 条真死代码（`REPO_ROOT`、`latest_factor_date`），
+   属本次范围外 ⇒ 决定**不动 CI 配置**，改在 `whitelist.py` 把它们重分类为「门禁盲区」并写明原因。
+4. **单测里的替身会掩盖"路由根本不存在"**：销账必须真起服务 `curl` 每条路由，并覆盖降级分支。
+5. **`git worktree add <tmp> HEAD` 是定位"红点是新引入还是既有的"的关键手段**（不碰工作区，胜过 stash）。
+6. **omp 的 `edit` 模糊匹配会误删**：d2 一次大段编辑误删了 `renderReproducibility` 的函数头 3 行（含
+   `const panel = …`），当场修回。omp 退出码为 1 时**不是失败**（stderr 有 `Working...` 就会被 PowerShell
+   当 `NativeCommandError`），要看 stdout 正文 + 落盘文件。

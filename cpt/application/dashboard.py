@@ -39,6 +39,7 @@ from itertools import pairwise
 from typing import Final
 
 from cpt.application._bar_dict import bar_to_dict
+from cpt.application.dashboard_quality import quality_report
 from cpt.domain.config import RulesConfig
 from cpt.domain.models import (
     Bi,
@@ -117,15 +118,36 @@ def _overlays(
 
 
 def _data_quality(bars: Sequence[CanonicalBar], stale: bool, gap: bool) -> dict[str, object]:
-    """数据质量：外部判定标记 + 序列内已收盘/未收盘根数。"""
+    """数据质量：外部判定标记 + 序列内已收盘/未收盘根数 + 结构化的缺口/乱序明细。
+
+    明细来自 ``dashboard_quality.quality_report``：它逐对相邻 K 线比较
+    ``open_time`` 与上一根 ``close_time``，把缺口区间与乱序对**原样列出**，
+    比调用方传入的布尔 ``gap`` 更有信息量（后者只说明"有没有"），故两者并存。
+
+    退化输入（空序列、仅一根、缺 ``close_time`` 的鸭子类型 bar）不得拖垮整条
+    快照：明细失败时降级为 ``severity="unknown"`` 并把计数留 ``None``，
+    而不是伪造 ``0``/``"ok"`` 掩盖问题。
+    """
     bar_count = len(bars)
     closed_bar_count = sum(1 for bar in bars if bar.is_closed)
-    return {
+    merged: dict[str, object] = {
         "stale": stale,
         "gap": gap,
         "closed_bar_count": closed_bar_count,
         "unclosed_bar_count": bar_count - closed_bar_count,
     }
+    try:
+        detail = quality_report(bars, stale=stale)
+    except Exception:  # noqa: BLE001 —— 质量明细是旁路信息，绝不该让快照构建失败
+        detail = {
+            "severity": "unknown",
+            "gap_count": None,
+            "out_of_order_count": None,
+            "gaps": [],
+            "out_of_order": [],
+        }
+    merged.update(detail)
+    return merged
 
 
 def _runtime(

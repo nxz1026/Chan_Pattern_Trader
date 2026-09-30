@@ -192,3 +192,58 @@ def test_fetch_validated_bars_returns_barlike_list(full_db):
     for b in bars:
         for attr in ("open_time", "open", "high", "low", "close"):
             assert hasattr(b, attr)
+
+
+# --------------------------------------------------------------------------- #
+# Wind 代码转换（接线前全仓 0 代码引用，只在两处注释里被点名）
+# --------------------------------------------------------------------------- #
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("600519", "600519.SH"),
+        ("601398", "601398.SH"),
+        ("900901", "900901.SH"),  # 沪 B
+        ("510300", "510300.SH"),  # 沪 ETF
+        ("688981", "688981.SH"),  # 科创板（`6` 开头，仍走沪市）
+        ("000002", "000002.SZ"),
+        ("300750", "300750.SZ"),  # 创业板
+        ("200002", "200002.SZ"),  # 深 B
+        ("159915", "159915.SZ"),  # 深 ETF
+        # 北交所各段：`92` 必须先于 `9` 判，43/83/87/88 也必须认
+        ("920025", "920025.BJ"),
+        ("430047", "430047.BJ"),
+        ("830799", "830799.BJ"),
+        ("870204", "870204.BJ"),
+        ("889999", "889999.BJ"),
+        # 已带后缀：规范化大小写后原样返回
+        ("600519.sh", "600519.SH"),
+        ("000002.BJ", "000002.BJ"),
+    ],
+)
+def test_to_wind_code_maps_both_exchanges(raw: str, expected: str) -> None:
+    assert AShareLocalClient._to_wind_code(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "",
+        "abc",
+        "60051",  # 5 位
+        "6005190",  # 7 位
+        "600519.XX",  # 未知后缀
+        "700000",  # 首位 7 在 A 股不存在
+        "６００５１９",  # 全角数字（str.isdigit() 会放过）
+        "600 519",
+    ],
+)
+def test_to_wind_code_rejects_invalid_instead_of_guessing(bad: str) -> None:
+    """非法输入必须抛 ``ValueError``。
+
+    接线前这里一律兜底成 ``"<原样>.SZ"``，等于拿一个不存在的 Wind 代码去查库，
+    报回来的是"查无此码"—— 把"输入不合法"伪装成"Wind 没有这只票"。
+    """
+    with pytest.raises(ValueError):
+        AShareLocalClient._to_wind_code(bad)

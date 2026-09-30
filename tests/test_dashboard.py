@@ -32,12 +32,18 @@ def test_snapshot_contains_stable_market_overlays_and_quality() -> None:
     assert snapshot["schema_version"] == "dashboard.v1"
     assert snapshot["market"]["symbol"] == "BTCUSDT"
     assert snapshot["market"]["bar_count"] == 2
-    assert snapshot["data_quality"] == {
-        "stale": True,
-        "gap": False,
-        "closed_bar_count": 1,
-        "unclosed_bar_count": 1,
-    }
+    # C7（D 类接线）起 data_quality 多了质量明细键；既有 4 键语义不变，故这里断言
+    # 「逐键相等」而不是整字典全等——全等会在每次扩字段时假红。
+    quality = snapshot["data_quality"]
+    assert quality["stale"] is True
+    assert quality["gap"] is False
+    assert quality["closed_bar_count"] == 1
+    assert quality["unclosed_bar_count"] == 1
+    assert quality["severity"] == "stale"  # stale=True 优先于 gap 判定
+    assert quality["gap_count"] == 0
+    assert quality["out_of_order_count"] == 0
+    assert quality["gaps"] == []
+    assert quality["out_of_order"] == []
     assert snapshot["runtime"]["status"] == "alert"
     assert snapshot["candles"][1]["direction"] == 1
 

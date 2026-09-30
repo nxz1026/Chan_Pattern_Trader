@@ -22,7 +22,12 @@ from cpt.domain.models import Signal
 
 _LOG = logging.getLogger(__name__)
 
-__all__ = ["load_previous_signal", "record_signal_event", "SignalEventError"]
+__all__ = [
+    "load_previous_signal",
+    "load_signal_events",
+    "record_signal_event",
+    "SignalEventError",
+]
 
 
 class SignalEventError(RuntimeError):
@@ -150,3 +155,93 @@ def record_signal_event(
         raise SignalEventError(f"记录信号事件失败: {exc}") from exc
 
     return True
+
+
+#: 历史投影列顺序，必须与 ``load_signal_events`` 的 SELECT 一致。
+_HISTORY_COLUMNS = (
+    "id",
+    "signal_id",
+    "code",
+    "signal_type",
+    "level",
+    "structure_id",
+    "prev_status",
+    "status",
+    "transition_time",
+    "price",
+    "source_revision",
+    "center_ids",
+    "divergence_status",
+    "alert_time",
+    "candidate_time",
+    "confirmed_time",
+    "invalidated_time",
+    "created_at",
+)
+
+#: 这些列在库里是 ``timestamptz``，出参统一转 Unix 毫秒。
+_HISTORY_TIME_COLUMNS = frozenset(
+    {
+        "transition_time",
+        "alert_time",
+        "candidate_time",
+        "confirmed_time",
+        "invalidated_time",
+        "created_at",
+    }
+)
+
+
+def _history_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    """把一条事件行投影成普通 ``dict``（无 psycopg 类型，可直接 JSON 化）。
+
+    取 5 个必需字段之外的完整列，是因为历史面板要展示跃迁前后状态与价格；
+    时间列统一用 ``_timestamptz_to_ms`` 转毫秒，与前端其余时间轴口径一致。
+    """
+    out: dict[str, Any] = {}
+    for name, value in zip(_HISTORY_COLUMNS, row, strict=False):
+        if name in _HISTORY_TIME_COLUMNS:
+            out[name] = _timestamptz_to_ms(value)
+        elif name == "center_ids":
+            out[name] = list(value) if value else []
+        else:
+            out[name] = value
+    return out
+
+
+def load_signal_events(
+    conn: Any, *, days: int = 30, code: str | None = None
+) -> tuple[dict[str, Any], ...]:
+    """读最近 ``days`` 天的信号事件，**时间倒序**（最新在前）。
+
+    :param conn: psycopg 连接（只读，不开事务）。
+    :param days: 回看天数，走 ``make_interval(days => %s)`` 参数化下推给库，
+        不在 Python 侧过滤（避免全表拉取后本地裁剪）。
+    :param code: 非空时只取该 6 位代码的事件；空串按「不过滤」处理。
+    :returns: 普通 ``dict`` 元组，至少含 ``signal_id`` / ``code`` / ``status`` /
+        ``divergence_status`` / ``transition_time``（Unix 毫秒）。
+
+    读失败**必须**抛 ``SignalEventError``，不返回 ``None``、不返回伪造的空
+    元组——「库读不到」与「确实没有事件」是两件事，前者不能冒充后者。由调用方
+    （``cpt/web/app.py``）捕获后降级成
+    ``{"available": false, "reason": "signal_history_unavailable"}``，
+    面板据此显式提示历史不可用，而不是显示一条骗人的空历史。
+    """
+    params: list[Any] = [days]
+    where = ["transition_time >= now() - make_interval(days => %s)"]
+    if code:
+        where.append("code = %s")
+        params.append(code)
+    sql = f"""SELECT {", ".join(_HISTORY_COLUMNS)}
+           FROM public.cpt_signal_event
+           WHERE {" AND ".join(where)}
+           ORDER BY transition_time DESC, id DESC"""
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall() or ()
+        return tuple(_history_row_to_dict(row) for row in rows)
+    except Exception as exc:
+        _LOG.warning("加载信号事件历史失败 days=%s code=%s: %s", days, code, exc)
+        raise SignalEventError(f"加载信号事件历史失败: {exc}") from exc

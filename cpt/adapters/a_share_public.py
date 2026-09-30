@@ -112,8 +112,10 @@ def normalize_code(code: str) -> str:
     digits = match.group("digits")
     if market is None:
         # 顺序敏感：`92`（北交所新代码段）必须在 `9`（沪 B）之前判断，否则
-        # 920025 会被推成 sh920025 —— `a_share_local._to_wind_code` 就有这个
-        # 先后顺序 bug，R17 一并修掉。
+        # 920025 会被推成 sh920025 —— `a_share_local._to_wind_code` 上真实存在过
+        # 这个先后顺序 bug，R17 一并修掉；两处现在都有回归用例
+        # （tests/test_a_share_local.py 的 `_to_wind_code` 参数化用例、
+        # tests/test_factor_backfill_script.py 的 920201/830799 用例）。
         if digits.startswith(("92", "43", "83", "87", "88")):
             market = "bj"
         elif digits[0] in {"6", "9", "5"}:

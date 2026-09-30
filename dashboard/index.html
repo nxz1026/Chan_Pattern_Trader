@@ -421,6 +421,88 @@
     </section>
 
     <section
+      data-testid="watch-metrics"
+      class="panel watch-metrics-panel"
+      aria-labelledby="watch-metrics-title"
+    >
+      <header class="panel-header">
+        <h2 id="watch-metrics-title" class="panel-title">盯盘指标</h2>
+      </header>
+      <dl class="kv" data-testid="watch-metrics-body">
+        <div><dt>最新价</dt><dd data-testid="watch-last-price">—</dd></div>
+        <div><dt>涨跌幅</dt><dd data-testid="watch-change-pct" data-state="flat">—</dd></div>
+        <div><dt>窗口最高</dt><dd data-testid="watch-window-high">—</dd></div>
+        <div><dt>窗口最低</dt><dd data-testid="watch-window-low">—</dd></div>
+        <div><dt>窗口成交量</dt><dd data-testid="watch-window-volume">—</dd></div>
+      </dl>
+      <p class="hint" data-testid="watch-metrics-note" hidden></p>
+    </section>
+
+    <section
+      data-testid="watchlist-panel"
+      class="panel watchlist-panel"
+      aria-labelledby="watchlist-panel-title"
+    >
+      <header class="panel-header">
+        <h2 id="watchlist-panel-title" class="panel-title">自选盯盘列表</h2>
+        <span data-testid="watchlist-as-of" class="panel-subtle">—</span>
+        <button type="button" data-testid="watchlist-refresh">刷新列表</button>
+      </header>
+      <table class="ops-table">
+        <thead>
+          <tr><th>标的</th><th>最新价</th><th>涨跌幅</th><th>信号状态</th><th>可用</th></tr>
+        </thead>
+        <tbody data-testid="watchlist-rows">
+          <tr data-testid="watchlist-empty"><td colspan="5">尚未加载</td></tr>
+        </tbody>
+      </table>
+      <p class="hint" data-testid="watchlist-note" hidden></p>
+    </section>
+
+    <section
+      data-testid="run-compare"
+      class="panel run-compare-panel"
+      aria-labelledby="run-compare-title"
+    >
+      <header class="panel-header">
+        <h2 id="run-compare-title" class="panel-title">运行对比</h2>
+      </header>
+      <div class="ops-controls">
+        <label>左运行 <select data-testid="compare-left"></select></label>
+        <label>右运行 <select data-testid="compare-right"></select></label>
+        <button type="button" data-testid="compare-run">对比</button>
+      </div>
+      <p class="hint" data-testid="compare-note" hidden></p>
+      <table class="ops-table">
+        <thead><tr><th>字段</th><th>左值</th><th>右值</th></tr></thead>
+        <tbody data-testid="compare-rows">
+          <tr data-testid="compare-empty"><td colspan="3">尚未对比</td></tr>
+        </tbody>
+      </table>
+    </section>
+
+    <section
+      data-testid="multi-run"
+      class="panel multi-run-panel"
+      aria-labelledby="multi-run-title"
+    >
+      <header class="panel-header">
+        <h2 id="multi-run-title" class="panel-title">多数据集对比</h2>
+        <button type="button" data-testid="multi-run-load">加载对比</button>
+      </header>
+      <div data-testid="multi-run-selects" class="ops-controls ops-controls-wrap"></div>
+      <p class="hint" data-testid="multi-run-note" hidden></p>
+      <div class="ops-table-wrap">
+        <table class="ops-table">
+          <thead data-testid="multi-run-head"><tr><th>时间</th></tr></thead>
+          <tbody data-testid="multi-run-rows">
+            <tr data-testid="multi-run-empty"><td>尚未加载</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section
       data-testid="event-panel"
       class="panel event-panel"
       data-only-mode="research"

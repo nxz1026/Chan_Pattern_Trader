@@ -55,27 +55,28 @@ revision  # cpt/domain/models.py —— StructureEvent dataclass 字段
 occurred_at  # cpt/domain/models.py —— StructureEvent dataclass 字段
 
 # --------------------------------------------------------------------------- #
-# 4. 待接线模块（**保留**，非死代码）：产品位置与接线目标逐条见
+# 4. 待接线符号与门禁盲区（**保留**，非死代码）：产品位置与接线目标逐条见
 #    `docs/pending-wiring.md`。接线后请把对应名字从本文件与那份清单同时移除。
 # --------------------------------------------------------------------------- #
-# 4a. roadmap 功能对应的 dashboard 服务
-compare_snapshots  # dashboard_compare —— R5 两份 snapshot 字段级 diff
-slice_snapshot  # dashboard_export —— Phase 6 P2 时间范围切片导出
-level_tree  # dashboard_levels —— Phase 5 P1 级别递归树
-align_runs  # dashboard_multi_run —— Phase 6 P2 双数据集同步对比
-quality_report  # dashboard_quality —— Phase 5 P1 数据质量报告
-realtime_update  # dashboard_realtime —— Phase 4 P1 高效实时更新
-signal_statistics  # dashboard_stats —— Phase 6 P2 一买统计
-watch_metrics  # dashboard_watch —— Phase 4 P1 reconnect/stale
-watchlist_rows  # dashboard_watchlist —— Phase 4 P1 多交易对
+# 4a（R22 已清空）. roadmap 功能对应的 9 个 dashboard 服务全部于 R22 接线：
+# compare_snapshots / slice_snapshot / level_tree / align_runs / quality_report /
+# realtime_update / signal_statistics / watch_metrics / watchlist_rows
+# 已从本文件移除，逐个接线点见 `docs/pending-wiring.md` 的 R22 记录。
 # 4b. A 股信号层
 # `fetch_daily_tags` / `apply_ashare_tags_to_bis` / `AShareDailyTag` 已于 R19 接进
 # A 股主看板（adapters/a_share_local.py::AShareLocalClient.fetch_daily_tags →
 # application/a_share_snapshot.py::_apply_daily_tags），故不再豁免。
 t_plus_one_purchase_allowed  # domain/a_share_rules —— C4 T+1（待 signal 桥接线）
-# 4c. Wind 复权因子接入（台账决策 C1「复权因子 backfill 走 Wind」）
-_to_wind_code  # adapters/a_share_local —— 000002 → 000002.SZ 代码转换
-fetch_adjust_factors  # adapters/wind_source —— Wind 复权因子取数
+# 4c. **门禁盲区**（不是待接线）：调用方在 `scripts/factor_backfill.py`，而 CI 的
+#     vulture 只扫 `cpt/`（`.github/workflows/ci.yml` → `vulture --min-confidence
+#     60 cpt whitelist.py`），所以这两个**已接线**的符号仍被报「未使用」。
+#     R22 接线点：`scripts/factor_backfill.py` 的 `--wind-fallback` 兜底路径
+#     （默认关闭）。
+#     要摘掉这两条豁免，得先把 vulture 的扫描范围扩到 `scripts/`；实测那样做会
+#     另带出 2 条真死代码（`REPO_ROOT` 未使用变量、`latest_factor_date` 未使用
+#     函数），属本次范围外，故不动门禁范围。
+_to_wind_code  # adapters/a_share_local —— Wind 代码转换（调用方在 scripts/）
+fetch_adjust_factors  # adapters/wind_source —— Wind 复权因子取数（调用方在 scripts/）
 
 # --------------------------------------------------------------------------- #
 # 5. 仅测试使用的有意公开 API：无生产调用方，但是明确的窄接口，由测试直接驱动

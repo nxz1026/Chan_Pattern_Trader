@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 from collections.abc import Callable
@@ -11,7 +12,13 @@ from typing import Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, urlsplit
 
 from cpt.adapters.binance_futures import resolve_interval_label
-from cpt.application.dashboard_runs import recent_runs, record_run
+from cpt.application.dashboard_compare import compare_snapshots
+from cpt.application.dashboard_export import slice_snapshot
+from cpt.application.dashboard_levels import level_tree
+from cpt.application.dashboard_multi_run import align_runs
+from cpt.application.dashboard_runs import find_run, recent_runs, record_run, run_body
+from cpt.application.dashboard_stats import signal_statistics
+from cpt.application.dashboard_watchlist import watchlist_rows
 
 _LOG = logging.getLogger("cpt.web.handler")
 
@@ -80,6 +87,152 @@ def _with_run_index(payload: dict[str, Any]) -> dict[str, Any]:
     enriched = dict(payload)
     enriched["runs"] = list(recent_runs())
     return enriched
+
+
+#: diff 摘要里的内容指纹长度（hex 字符）。12 位足够区分，又不会把响应撑大。
+_DIFF_HASH_CHARS = 12
+
+
+def _diff_digest(value: Any) -> str:
+    """序列内容指纹：同内容同摘要、跨进程稳定（内置 ``hash`` 带随机种子，不能用）。"""
+    encoded = json.dumps(value, sort_keys=True, ensure_ascii=False, default=str).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()[:_DIFF_HASH_CHARS]
+
+
+def _summarize_diff_value(name: str, value: Any) -> Any:
+    """把 diff 里的序列型值降级成 ``{"__summary__": ..., "count": ..., "hash": ...}``。
+
+    ``snapshot_diff`` 是**顶层**字段级 diff，而 ``overlays`` 是「dict 里套 4 个 list」——
+    只判顶层是不是 list 会漏掉它，一份快照几百根 K 线的原始数组正是从这个口子漏进
+    响应的（前端 ``JSON.stringify`` 会渲染成几兆巨串），所以这里必须递归。
+    """
+    if isinstance(value, (list, tuple)):
+        return {"__summary__": name, "count": len(value), "hash": _diff_digest(value)}
+    if isinstance(value, dict):
+        return {key: _summarize_diff_value(f"{name}.{key}", item) for key, item in value.items()}
+    return value
+
+
+def _summarize_diff_entries(entries: Any) -> list[dict[str, Any]]:
+    """把 ``snapshot_diff`` 的每条差异摘要化（理由见 :func:`_summarize_diff_value`）。"""
+    summarized: list[dict[str, Any]] = []
+    for entry in entries or ():
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("field"))
+        summarized.append(
+            {
+                "field": entry.get("field"),
+                "left": _summarize_diff_value(name, entry.get("left")),
+                "right": _summarize_diff_value(name, entry.get("right")),
+            }
+        )
+    return summarized
+
+
+def _signal_stats_payload(days: int, code: str | None) -> dict[str, Any]:
+    """C5 信号事件统计。**降级不抛**：psycopg 缺失 / DB 不可达 / 表不存在都回 available=false。
+
+    ``basis`` 是刻意自报的口径：这批统计是**信号状态跃迁事件**的分布，不是「当前若干
+    只票的状态快照」。不自报的话前端只能猜，而两者数值完全不同。
+    """
+    payload: dict[str, Any] = {
+        "schema_version": "dashboard_signal_stats.v1",
+        "basis": "signal_event_transitions",
+        "days": days,
+    }
+    try:
+        # CI 只跑 ``pip install -e .``（不带 [db]），故连接层必须惰性导入。
+        from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+        from cpt.application.signal_event_store import load_signal_events  # noqa: PLC0415
+
+        client = AShareLocalClient()
+        try:
+            events = load_signal_events(client._get_conn(), days=days, code=code)  # noqa: SLF001
+        finally:
+            client.close()
+    except Exception as exc:  # noqa: BLE001 — 只读增强，DB 抖动不该让主视图 500
+        _LOG.warning("signal stats unavailable: %s", exc)
+        payload["available"] = False
+        payload["reason"] = "signal_history_unavailable"
+        return payload
+    payload["available"] = True
+    payload["stats"] = signal_statistics(list(events))
+    return payload
+
+
+def _latest_signal_statuses() -> dict[str, str]:
+    """各 code 的最新信号状态；事件流不可用 → 空表（调用方补 ``"none"``）。
+
+    返回空 dict 是**诚实**的缺省：``watchlist_rows`` 的 ``signal_status`` 缺省本就是
+    ``"none"``，所以「没读到」不会伪装成别的结论，只是这一列失去信息量。
+    """
+    try:
+        from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+        from cpt.application.signal_event_store import load_signal_events  # noqa: PLC0415
+
+        client = AShareLocalClient()
+        try:
+            events = load_signal_events(client._get_conn(), days=30)  # noqa: SLF001
+        finally:
+            client.close()
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("watchlist signal statuses unavailable: %s", exc)
+        return {}
+    latest: dict[str, str] = {}
+    for event in events:  # 已按 transition_time 倒序 → 首次出现即最新
+        event_code = event.get("code")
+        if isinstance(event_code, str) and event_code not in latest:
+            latest[event_code] = str(event.get("status", "none"))
+    return latest
+
+
+def _watchlist_payload() -> dict[str, Any]:
+    """C6 候选池 → ``watchlist_rows`` 入参形状。**只做映射**，不新增计算口径。
+
+    价格/涨跌幅来自本地库最近两根收盘价，信号状态来自信号事件流最新一条。任一环取不到
+    就填诚实的缺省值（``None`` / ``"none"``），而不是 500 —— 一只票取不到价不该把整个
+    列表搞挂。
+    """
+    from cpt.web import a_share_routes  # noqa: PLC0415 — 避免顶层拖入 psycopg
+
+    schema = {"schema_version": "dashboard_watchlist.v1"}
+    try:
+        pool = a_share_routes.pool_payload()
+    except Exception as exc:  # noqa: BLE001 — 池子不可用是正常降级
+        _LOG.warning("watchlist pool unavailable: %s", exc)
+        return {**schema, "available": False, "reason": "pool_unavailable"}
+    items = pool.get("items") or []
+    # 池子全空 + 记了 db_error ⇒ 是「库连不上」而不是「今天确实没票」。
+    if pool.get("db_error") and not items:
+        return {**schema, "available": False, "reason": "pool_unavailable"}
+
+    statuses = _latest_signal_statuses()
+    markets: list[dict[str, Any]] = []
+    for item in items:
+        code = item.get("code")
+        closes = a_share_routes.recent_closes(code) if isinstance(code, str) and code else None
+        prev_close = closes[0] if closes else None
+        last_close = closes[1] if closes else None
+        change_pct: float | None = None
+        if prev_close:  # 0 或 None 都算取不到：除以 0 会炸，且 0 价本身无意义
+            if last_close is not None:
+                change_pct = (last_close - prev_close) / prev_close * 100
+        markets.append(
+            {
+                "symbol": code,
+                "last_price": last_close,
+                "change_pct": change_pct,
+                "signal_status": statuses.get(code, "none") if isinstance(code, str) else "none",
+                "available": bool(item.get("drawable")),
+            }
+        )
+    return {
+        **schema,
+        "available": True,
+        "as_of": pool.get("as_of"),
+        "rows": list(watchlist_rows(markets)),
+    }
 
 
 def make_handler(
@@ -278,7 +431,13 @@ def make_handler(
                 # 翻译成前端友好的扁平结构，含状态中文标签与新鲜度。
                 from time import time as _now  # noqa: PLC0415
 
-                def _radar_entry(signal, code, name, market, source_label=""):
+                def _radar_entry(
+                    signal: dict[str, Any] | None,
+                    code: str,
+                    name: str,
+                    market: str,
+                    source_label: str = "",
+                ) -> dict[str, Any] | None:
                     if not signal:
                         return None
                     status = signal.get("status", "none")
@@ -310,7 +469,9 @@ def make_handler(
 
                 market_label = (snapshot.get("market", {}) or {}).get("symbol", "")
                 market_name = (snapshot.get("market", {}) or {}).get("name", market_label)
-                market_type = "a_share" if market_label and not market_label.endswith("USDT") else "crypto"
+                market_type = (
+                    "a_share" if market_label and not market_label.endswith("USDT") else "crypto"
+                )
 
                 entries = []
                 sig = snapshot.get("summary", {}).get("signal") if snapshot.get("summary") else None
@@ -318,7 +479,11 @@ def make_handler(
                     entry = _radar_entry(sig, market_label, market_name, market_type)
                     if entry:
                         entries.append(entry)
-                sig_sell = snapshot.get("summary", {}).get("signal_first_sell") if snapshot.get("summary") else None
+                sig_sell = (
+                    snapshot.get("summary", {}).get("signal_first_sell")
+                    if snapshot.get("summary")
+                    else None
+                )
                 if sig_sell:
                     entry = _radar_entry(sig_sell, market_label, market_name, market_type, "一卖")
                     if entry:
@@ -332,6 +497,135 @@ def make_handler(
                         "不构成投资建议、要约或任何买卖/持仓建议。市场有风险，投资须谨慎。"
                     ),
                 }
+            elif path.path == "/api/dashboard/export":
+                # Phase 6 P2：时间范围切片导出。范围参数是**必填**的 —— 导出默认全量
+                # 会给出几百根 K 线的响应，而调用方要的从来是某个可研究的区间。
+                raw_start = (query.get("start_ms") or [""])[0]
+                raw_end = (query.get("end_ms") or [""])[0]
+                try:
+                    start_ms = int(raw_start)
+                    end_ms = int(raw_end)
+                except ValueError:
+                    self._write_json_error(
+                        HTTPStatus.BAD_REQUEST, "invalid_range", "start_ms/end_ms 必须是整数"
+                    )
+                    return
+                if start_ms >= end_ms:
+                    self._write_json_error(
+                        HTTPStatus.BAD_REQUEST, "invalid_range", "start_ms 必须早于 end_ms"
+                    )
+                    return
+                if not snapshot:
+                    payload = {
+                        "schema_version": "dashboard_export.v1",
+                        "available": False,
+                        "reason": "snapshot_unavailable",
+                    }
+                else:
+                    sliced = slice_snapshot(dict(snapshot), start_ms, end_ms)
+                    payload = {
+                        "schema_version": "dashboard_export.v1",
+                        "available": True,
+                        "slice": {"start_ms": start_ms, "end_ms": end_ms},
+                        "candle_count": len(sliced.get("candles", [])),
+                        "snapshot": sliced,
+                    }
+            elif path.path == "/api/dashboard/levels":
+                # Phase 5 P1：级别递归树。吃的是**带 level 键的结构序列**，
+                # 活路径上就是 overlays 的四类结构（asdict 后含 level）。
+                raw_overlays = snapshot.get("overlays")
+                overlays: dict[str, Any] = raw_overlays if isinstance(raw_overlays, dict) else {}
+                structures: list[dict[str, Any]] = []
+                for key in ("fractals", "bis", "zhongshus", "trend_types"):
+                    chunk = overlays.get(key) if isinstance(overlays, dict) else None
+                    if isinstance(chunk, list):
+                        structures.extend(chunk)
+                if not structures:
+                    payload = {
+                        "schema_version": "dashboard_levels.v1",
+                        "available": False,
+                        "reason": "overlays_unavailable",
+                    }
+                else:
+                    payload = {
+                        "schema_version": "dashboard_levels.v1",
+                        "available": True,
+                        "levels": list(level_tree(structures)),
+                    }
+            elif path.path == "/api/dashboard/compare":
+                left_id = (query.get("left") or [""])[0].strip()
+                right_id = (query.get("right") or [""])[0].strip()
+                if not left_id or not right_id:
+                    self._write_json_error(
+                        HTTPStatus.BAD_REQUEST,
+                        "missing_run_id",
+                        "必须同时提供 left 与 right 两个 run_id",
+                    )
+                    return
+                left_body = run_body(left_id)
+                right_body = run_body(right_id)
+                if left_body is None or right_body is None:
+                    payload = {
+                        "schema_version": "dashboard_compare.v1",
+                        "available": False,
+                        "reason": "run_body_unavailable",
+                    }
+                else:
+                    compared = compare_snapshots(left_body, right_body)
+                    # 摘要化：``differences`` 里绝不允许出现整段 candles/overlays
+                    # 原始数组（几百根 K 线的字符串会让前端渲染卡死）。
+                    compared["differences"] = _summarize_diff_entries(compared.get("differences"))
+                    # 索引行里的 dataset_hash/run_id 比本体里的更权威：本体可能被摘要/
+                    # 裁剪过，而 fixture 模式的 runtime 根本不带 run_id（索引行由
+                    # `runtime.run_id or dataset_hash` 推导出来），不回填就会是 null。
+                    for side, run_id in (("left", left_id), ("right", right_id)):
+                        index_row = find_run(run_id) or {}
+                        compared[f"{side}_run_id"] = index_row.get("run_id") or run_id
+                        if index_row.get("dataset_hash") is not None:
+                            compared[f"{side}_dataset_hash"] = index_row["dataset_hash"]
+                    payload = {
+                        "schema_version": "dashboard_compare.v1",
+                        "available": True,
+                        **compared,
+                    }
+            elif path.path == "/api/dashboard/multi-run":
+                raw_ids = (query.get("run_ids") or [""])[0]
+                run_ids = [part.strip() for part in raw_ids.split(",") if part.strip()]
+                if not 2 <= len(run_ids) <= 5:
+                    self._write_json_error(
+                        HTTPStatus.BAD_REQUEST,
+                        "invalid_run_ids",
+                        "run_ids 需为 2..5 个逗号分隔的 run_id",
+                    )
+                    return
+                bodies = [
+                    body for body in (run_body(run_id) for run_id in run_ids) if body is not None
+                ]
+                if not bodies:
+                    payload = {
+                        "schema_version": "dashboard_multi_run.v1",
+                        "available": False,
+                        "reason": "run_body_unavailable",
+                    }
+                else:
+                    payload = {
+                        "schema_version": "dashboard_multi_run.v1",
+                        "available": True,
+                        **align_runs(bodies),
+                    }
+            elif path.path == "/api/dashboard/signal-stats":
+                days_raw = (query.get("days") or ["30"])[0]
+                try:
+                    days = int(days_raw)
+                except ValueError:
+                    self._write_json_error(
+                        HTTPStatus.BAD_REQUEST, "invalid_days", "days 必须是整数"
+                    )
+                    return
+                code_filter = (query.get("code") or [""])[0].strip() or None
+                payload = _signal_stats_payload(days, code_filter)
+            elif path.path == "/api/dashboard/watchlist":
+                payload = _watchlist_payload()
             elif path.path == "/api/canvas/wbt":
                 # 画布 D（R16-5）：服务端用 wbt 的 HtmlReportBuilder 渲染报告片段。
                 # 客户端必须传可视窗口（start_ms/end_ms），否则只画窗口的 A/B/C

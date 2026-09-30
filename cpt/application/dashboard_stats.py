@@ -1,8 +1,10 @@
 """Read-only research statistics projections.
 
-**状态：待接线（pending-wiring，2026-09-25 审核 P0-2）**——生产代码零导入，尚无
-调用方；对应 `docs/dashboard-product-roadmap.md` Phase 6 P2「一买统计」，故保留。
-改动前请先读 `docs/pending-wiring.md`。
+**状态：已接线（R22，2026-09-30）**——`GET /api/dashboard/signal-stats?days=&code=`
+（`cpt/web/app.py`）的唯一实现，事件来自 `signal_event_store.load_signal_events`；
+对应 `docs/dashboard-product-roadmap.md` Phase 6 P2「一买统计」。响应必须自报
+`basis: "signal_event_transitions"`：这是**状态跃迁事件**分布，不是「当前若干只票
+的状态」。
 """
 
 from __future__ import annotations

@@ -549,6 +549,86 @@
       setText("[data-testid=data-quality-factor-fetch]", "—");
     }
 
+    // C7：数据质量明细（severity / 缺口数 / 乱序数 + 明细列表）。
+    // 后端这几个字段缺失（老快照）时整块隐藏，既有输出一个字不动。
+    const qualityList = q("[data-testid=data-quality] .quality-list");
+    if (qualityList) {
+      const upsertQualityRow = (testid) => {
+        let node = q(`[data-testid=${testid}]`);
+        if (!node) {
+          node = document.createElement("li");
+          node.className = "quality-wide";
+          node.dataset.testid = testid;
+          qualityList.appendChild(node);
+        }
+        return node;
+      };
+      const severity = typeof quality.severity === "string" ? quality.severity : "";
+      const gapCount = num(quality.gap_count);
+      const outOfOrderCount = num(quality.out_of_order_count);
+      const gaps = asArray(quality.gaps);
+      const outOfOrder = asArray(quality.out_of_order);
+
+      const detailRow = upsertQualityRow("data-quality-detail");
+      if (!severity && gapCount === null && outOfOrderCount === null) {
+        detailRow.hidden = true;
+        detailRow.replaceChildren();
+      } else {
+        detailRow.hidden = false;
+        // 严重度直接用后端 severity 标 data-state；缺省时按既有 gap/stale 口径兜底。
+        detailRow.dataset.state = severity || (gap ? "gap" : stale ? "stale" : "ok");
+        const label = document.createElement("span");
+        label.textContent = "质量明细";
+        const value = document.createElement("span");
+        value.dataset.testid = "data-quality-detail-text";
+        const parts = [];
+        if (severity) parts.push(`severity ${severity}`);
+        if (gapCount) parts.push(`缺口 ${gapCount} 处`);
+        if (outOfOrderCount) parts.push(`乱序 ${outOfOrderCount} 处`);
+        value.textContent = parts.length ? parts.join(" · ") : "无异常";
+        detailRow.replaceChildren(label, value);
+      }
+
+      const listRow = upsertQualityRow("data-quality-detail-list");
+      const describeQualityEntry = (kind, entry) => {
+        if (isObject(entry)) {
+          const start = num(entry.start_ms);
+          const end = num(entry.end_ms);
+          if (start !== null || end !== null) {
+            return `${kind} · ${start === null ? "—" : formatDateTime(start)} → ${end === null ? "—" : formatDateTime(end)}`;
+          }
+          const at = num(entry.open_time);
+          if (at !== null) return `${kind} · ${formatDateTime(at)}`;
+          return `${kind} · ${JSON.stringify(entry)}`;
+        }
+        return `${kind} · ${String(entry)}`;
+      };
+      const entries = [
+        ...gaps.map((entry) => describeQualityEntry("缺口", entry)),
+        ...outOfOrder.map((entry) => describeQualityEntry("乱序", entry)),
+      ];
+      if (!entries.length) {
+        listRow.hidden = true;
+        listRow.replaceChildren();
+      } else {
+        listRow.hidden = false;
+        listRow.dataset.state = "gap";
+        const detailList = document.createElement("ul");
+        detailList.dataset.testid = "data-quality-detail-entries";
+        entries.slice(0, 20).forEach((text) => {
+          const item = document.createElement("li");
+          item.textContent = text;
+          detailList.appendChild(item);
+        });
+        if (entries.length > 20) {
+          const more = document.createElement("li");
+          more.textContent = `… 仅显示前 20 条（共 ${entries.length} 条）`;
+          detailList.appendChild(more);
+        }
+        listRow.replaceChildren(detailList);
+      }
+    }
+
     // T+1 交易日历（A 股专属）：快照未带上这一块时整行隐藏，加密模式不受影响。
     const tPlusOne = isObject(snapshot) && isObject(snapshot.t_plus_one) ? snapshot.t_plus_one : null;
     const tPlusOneNode = q("[data-testid=t-plus-one]");
@@ -887,6 +967,61 @@
     return `已选中 ${payload.kind}`;
   }
 
+  /* ---- Phase D2：远程运维面板（C1–C7） ---- */
+
+  // fetch 结果不在 snapshot 里（C5/C6/C3/C4 是独立路由），存这里供重渲染；
+  // 只由 boot() 与手动刷新按钮触发，**不进 30s 轮询**（避免每轮多打几个请求）。
+  const remoteOps = { signalStats: null, watchlist: null, compare: null, multiRun: null, days: "30" };
+
+  const SIGNAL_STATS_REASON_LABELS = { signal_history_unavailable: "信号历史不可用" };
+  const WATCHLIST_REASON_LABELS = { pool_unavailable: "上游股票池不可用" };
+  const COMPARE_REASON_LABELS = { run_body_unavailable: "运行正文不可用（该 run 未保存数据集）" };
+  const MULTI_RUN_REASON_LABELS = { run_body_unavailable: "运行正文不可用（所选 run 未保存数据集）" };
+  const WATCH_METRICS_REASON_LABELS = { bars_unavailable: "K 线不可用" };
+
+  const reasonText = (map, reason, fallback = "原因未知") =>
+    typeof reason === "string" && reason ? map[reason] || reason : fallback;
+
+  // 路由型面板（C3/C4/C5/C6）走网络：拿不到 reason 时多半是服务不可达 / 响应异常，
+  // 这比"原因未知"对用户更有用。
+  const NETWORK_FALLBACK = "服务不可达或响应异常";
+
+  /**
+   * 统一的 JSON 请求封装：**永不抛**。
+   *
+   * 返回 `{ok, status, body}`；网络中断 / 非 JSON 正文各自降级成 `status:0` / `body:null`，
+   * 调用方据此渲染中文降级文案——后端 404 或服务不可达都不能把异常抛进渲染链。
+   */
+  async function requestJson(url) {
+    try {
+      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      let body = null;
+      try {
+        body = await response.json();
+      } catch (error) {
+        body = null;
+      }
+      return { ok: response.ok, status: response.status, body };
+    } catch (error) {
+      return { ok: false, status: 0, body: null };
+    }
+  }
+
+  /** 后端 400 的 `{error:{code,message}}` → 中文提示；否则 null。 */
+  function errorMessage(body) {
+    if (isObject(body) && isObject(body.error) && typeof body.error.message === "string") {
+      return body.error.message;
+    }
+    if (isObject(body) && isObject(body.error) && typeof body.error.code === "string") {
+      return body.error.code;
+    }
+    return null;
+  }
+
+  const DASHBOARD_BASE = () => dashboardApiBase(snapshotEndpoint());
+
+  /* ---------------- C1 范围导出 ---------------- */
+
   function installSliceExport() {
     const panel = q("[data-testid=event-panel]");
     if (!panel || q("[data-testid=slice-export]")) return;
@@ -916,8 +1051,543 @@
         showError(`导出失败：${error && error.message ? error.message : String(error)}`);
       }
     });
-    section.append(heading, button);
+
+    // 区间导出（C1）：范围模式快照带 snapshot.range，直接用它预填；没有则留空。
+    const rangeControls = document.createElement("div");
+    rangeControls.className = "ops-controls";
+    const startInput = document.createElement("input");
+    startInput.type = "number";
+    startInput.dataset.testid = "slice-start-ms";
+    startInput.placeholder = "start_ms";
+    startInput.setAttribute("aria-label", "区间开始（Unix 毫秒）");
+    const endInput = document.createElement("input");
+    endInput.type = "number";
+    endInput.dataset.testid = "slice-end-ms";
+    endInput.placeholder = "end_ms";
+    endInput.setAttribute("aria-label", "区间结束（Unix 毫秒）");
+    const rangePreview = document.createElement("span");
+    rangePreview.className = "panel-subtle";
+    rangePreview.dataset.testid = "slice-range-preview";
+    rangePreview.textContent = "—";
+    const rangeButton = document.createElement("button");
+    rangeButton.type = "button";
+    rangeButton.dataset.testid = "slice-export-range";
+    rangeButton.textContent = "导出所选范围";
+
+    const preview = () => {
+      const start = num(startInput.value);
+      const end = num(endInput.value);
+      rangePreview.textContent =
+        start === null || end === null
+          ? "—"
+          : `${formatDateTime(start)} → ${formatDateTime(end)}`;
+    };
+    startInput.addEventListener("input", preview);
+    endInput.addEventListener("input", preview);
+
+    const hydrateRange = () => {
+      const range = isObject(state.snapshot) && isObject(state.snapshot.range) ? state.snapshot.range : null;
+      const start = range ? num(range.start_ms) : null;
+      const end = range ? num(range.end_ms) : null;
+      if (start !== null && end !== null) {
+        startInput.value = String(start);
+        endInput.value = String(end);
+      }
+      preview();
+    };
+    hydrateRange();
+    section.dataset.hydrated = state.snapshot ? "true" : "false";
+
+    rangeButton.addEventListener("click", async () => {
+      hydrateRange();
+      const start = num(startInput.value);
+      const end = num(endInput.value);
+      if (start === null || end === null) {
+        setConnection("degraded", "当前快照未提供区间，请先填入 start_ms / end_ms");
+        return;
+      }
+      if (end < start) {
+        setConnection("degraded", "区间非法：end_ms 小于 start_ms");
+        return;
+      }
+      rangeButton.disabled = true;
+      const url = `${DASHBOARD_BASE()}/export?start_ms=${start}&end_ms=${end}`;
+      const { status, body } = await requestJson(url);
+      rangeButton.disabled = false;
+      const failure = errorMessage(body);
+      if (failure) {
+        setConnection("degraded", `区间导出失败：${failure}`);
+        return;
+      }
+      if (!isObject(body) || body.available !== true || !isObject(body.snapshot)) {
+        const reason = isObject(body) ? body.reason : null;
+        setConnection("degraded", `区间导出失败：${reasonText(EXPORT_REASON_LABELS, reason)}`);
+        return;
+      }
+      try {
+        const candles = asArray(body.snapshot.candles).length;
+        const blob = new Blob([JSON.stringify(body.snapshot, null, 2)], { type: "application/json" });
+        const url2 = URL.createObjectURL(blob);
+        const link = document.createElement("a");
+        link.href = url2;
+        link.download = `cpt-dashboard-${start}-${end}-${candles}bars.json`;
+        link.click();
+        URL.revokeObjectURL(url2);
+        setConnection("live", `已导出区间快照（${candles} 根 K 线）`);
+      } catch (error) {
+        setConnection("degraded", `区间导出失败：${error && error.message ? error.message : String(error)}`);
+      }
+    });
+
+    rangeControls.append(startInput, endInput, rangeButton, rangePreview);
+    section.append(heading, button, rangeControls);
     panel.appendChild(section);
+  }
+
+  /* ---------------- C7 盯盘指标 ---------------- */
+
+  function renderWatchMetrics(snapshot) {
+    const metrics = isObject(snapshot) && isObject(snapshot.watch_metrics) ? snapshot.watch_metrics : null;
+    const note = q("[data-testid=watch-metrics-note]");
+    const setNote = (text) => {
+      if (!note) return;
+      note.hidden = !text;
+      if (text) note.textContent = text;
+    };
+    if (!metrics || metrics.available !== true) {
+      ["[data-testid=watch-last-price]", "[data-testid=watch-window-high]", "[data-testid=watch-window-low]", "[data-testid=watch-window-volume]"].forEach(
+        (selector) => setText(selector, "—"),
+      );
+      setState(setText("[data-testid=watch-change-pct]", "—"), "flat");
+      setNote(
+        metrics
+          ? `盯盘指标不可用：${reasonText(WATCH_METRICS_REASON_LABELS, metrics.reason)}`
+          : "当前快照未提供 watch_metrics（盯盘指标）。",
+      );
+      return;
+    }
+    const lastPrice = num(metrics.last_price);
+    const changePct = num(metrics.change_pct);
+    setText("[data-testid=watch-last-price]", lastPrice === null ? "—" : formatPrice(lastPrice));
+    // 涨跌色跟既有 market-change 口径：>=0 记 "up"（本仓 --color-up 是涨色）。
+    setState(
+      setText("[data-testid=watch-change-pct]", changePct === null ? "—" : `${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`),
+      changePct === null ? "flat" : changePct >= 0 ? "up" : "down",
+    );
+    const high = num(metrics.window_high);
+    const low = num(metrics.window_low);
+    const volume = num(metrics.window_volume);
+    setText("[data-testid=watch-window-high]", high === null ? "—" : formatPrice(high));
+    setText("[data-testid=watch-window-low]", low === null ? "—" : formatPrice(low));
+    setText("[data-testid=watch-window-volume]", volume === null ? "—" : formatVolume(volume));
+    setNote("");
+  }
+
+  /* ---------------- C5 信号统计 ---------------- */
+
+  function buildSignalStatsAggregate() {
+    const wrap = document.createElement("div");
+    wrap.dataset.testid = "signal-stats-aggregate";
+    const daysLabel = document.createElement("label");
+    daysLabel.className = "panel-subtle";
+    daysLabel.textContent = "统计窗口（天）";
+    const days = document.createElement("select");
+    days.dataset.testid = "signal-stats-days";
+    ["7", "30", "90"].forEach((value) => {
+      const option = document.createElement("option");
+      option.value = value;
+      option.textContent = `${value} 天`;
+      days.appendChild(option);
+    });
+    days.value = remoteOps.days;
+    days.addEventListener("change", () => {
+      remoteOps.days = days.value;
+      loadSignalStats();
+    });
+    wrap.append(daysLabel, days);
+
+    const payload = remoteOps.signalStats;
+    const basis = isObject(payload) ? payload.basis : null;
+    const explain = document.createElement("p");
+    explain.className = "hint";
+    explain.dataset.testid = "signal-stats-basis";
+    explain.textContent = isObject(payload)
+      ? `口径：${basis === "signal_event_transitions" || !basis ? "信号状态跃迁事件" : String(basis)}（近 ${payload.days || remoteOps.days} 天）· 不是"当前若干只票的状态"`
+      : "口径：信号状态跃迁事件（尚未拉取）";
+    wrap.appendChild(explain);
+
+    if (!isObject(payload)) {
+      const p = document.createElement("p");
+      p.textContent = "聚合统计尚未加载。";
+      wrap.appendChild(p);
+      return wrap;
+    }
+    if (payload.available !== true) {
+      const p = document.createElement("p");
+      p.textContent = `聚合统计不可用：${reasonText(SIGNAL_STATS_REASON_LABELS, payload.reason, NETWORK_FALLBACK)}`;
+      wrap.appendChild(p);
+      return wrap;
+    }
+    const stats = isObject(payload.stats) ? payload.stats : {};
+    const list = document.createElement("dl");
+    list.className = "kv";
+    const row = (key, value) => {
+      const item = document.createElement("div");
+      const term = document.createElement("dt");
+      term.textContent = key;
+      const detail = document.createElement("dd");
+      detail.textContent = value;
+      item.append(term, detail);
+      list.appendChild(item);
+    };
+    row("总事件数", stats.total == null ? "—" : String(stats.total));
+    const statusCounts = isObject(stats.status_counts) ? stats.status_counts : {};
+    Object.keys(statusCounts).forEach((key) => {
+      row(`状态 · ${STATUS_LABELS[key] || key}`, String(statusCounts[key]));
+    });
+    const divergenceCounts = isObject(stats.divergence_counts) ? stats.divergence_counts : {};
+    Object.keys(divergenceCounts).forEach((key) => {
+      row(`背驰 · ${DIVERGENCE_LABELS[key] || key}`, String(divergenceCounts[key]));
+    });
+    // status_counts 为空时不显示任何状态行——补一行占位，避免用户以为漏渲染
+    if (!Object.keys(statusCounts).length && !Object.keys(divergenceCounts).length) {
+      row("分项", "无跃迁事件");
+    }
+    const rate = num(stats.alert_to_confirmed_rate);
+    row("预警→确认率", rate === null ? "—" : `${(rate * 100).toFixed(1)}%`);
+    row("失效数", stats.invalidated_count == null ? "—" : String(stats.invalidated_count));
+    wrap.appendChild(list);
+    return wrap;
+  }
+
+  async function loadSignalStats() {
+    const params = new URLSearchParams({ days: remoteOps.days });
+    const symbol = isObject(state.snapshot) && isObject(state.snapshot.market) ? state.snapshot.market.symbol : null;
+    if (typeof symbol === "string" && /^\d{6}$/.test(symbol)) params.set("code", symbol);
+    const { body } = await requestJson(`${DASHBOARD_BASE()}/signal-stats?${params.toString()}`);
+    remoteOps.signalStats = isObject(body) ? body : null;
+    renderSignalStats(state.snapshot);
+  }
+
+  /* ---------------- C6 自选盯盘列表 ---------------- */
+
+  function renderWatchlistPanel() {
+    const rows = q("[data-testid=watchlist-rows]");
+    if (!rows) return;
+    const note = q("[data-testid=watchlist-note]");
+    const asOf = q("[data-testid=watchlist-as-of]");
+    const payload = remoteOps.watchlist;
+    if (asOf) {
+      asOf.textContent = isObject(payload) && typeof payload.as_of === "string" ? `as_of ${payload.as_of}` : "—";
+    }
+    const setNote = (text) => {
+      if (!note) return;
+      note.hidden = !text;
+      if (text) note.textContent = text;
+    };
+    if (!isObject(payload)) {
+      rows.replaceChildren(objectRow(["加载失败：服务不可达", "", "", "", ""], "watchlist-empty"));
+      setNote("自选列表不可用：服务不可达。");
+      return;
+    }
+    if (payload.available !== true) {
+      rows.replaceChildren(objectRow(["—", "", "", "", ""], "watchlist-empty"));
+      setNote(`自选列表不可用：${reasonText(WATCHLIST_REASON_LABELS, payload.reason, NETWORK_FALLBACK)}`);
+      return;
+    }
+    const entries = asArray(payload.rows);
+    if (!entries.length) {
+      rows.replaceChildren(objectRow(["（空）", "", "", "", ""], "watchlist-empty"));
+      setNote("");
+      return;
+    }
+    rows.replaceChildren(
+      ...entries.map((entry) => {
+        const available = entry.available === true;
+        const cells = [
+          entry.symbol == null ? "—" : String(entry.symbol),
+          num(entry.last_price) === null ? "—" : formatPrice(num(entry.last_price)),
+          num(entry.change_pct) === null ? "—" : `${num(entry.change_pct) >= 0 ? "+" : ""}${num(entry.change_pct).toFixed(2)}%`,
+          entry.signal_status ? STATUS_LABELS[entry.signal_status] || String(entry.signal_status) : "—",
+          available ? "可点" : "无因子数据",
+        ];
+        const row = document.createElement("tr");
+        row.dataset.testid = "watchlist-row";
+        row.dataset.symbol = String(entry.symbol || "");
+        row.dataset.state = available ? (entry.alert === true ? "alert" : "ok") : "unavailable";
+        cells.forEach((text, index) => {
+          const cell = document.createElement("td");
+          cell.textContent = text;
+          if (index === 2 && num(entry.change_pct) !== null) {
+            cell.setAttribute("data-state", num(entry.change_pct) >= 0 ? "up" : "down");
+          }
+          row.appendChild(cell);
+        });
+        return row;
+      }),
+    );
+    setNote("");
+  }
+
+  const objectRow = (cells, testid) => {
+    const row = document.createElement("tr");
+    row.dataset.testid = testid;
+    cells.forEach((text) => {
+      const cell = document.createElement("td");
+      cell.textContent = text;
+      row.appendChild(cell);
+    });
+    return row;
+  };
+
+  async function loadWatchlist() {
+    const { body } = await requestJson(`${DASHBOARD_BASE()}/watchlist`);
+    remoteOps.watchlist = isObject(body) ? body : null;
+    renderWatchlistPanel();
+  }
+
+  /* ---------------- C3 运行对比 ---------------- */
+
+  let runOptionsSignature = null;
+
+  const snapshotRunIds = (snapshot) =>
+    asArray(isObject(snapshot) ? snapshot.runs : [])
+      .map((entry) => (isObject(entry) ? entry.run_id || entry.id : null))
+      .filter((id) => typeof id === "string" && id);
+
+  function renderRunOptions(snapshot) {
+    const ids = snapshotRunIds(snapshot);
+    const signature = ids.join("|");
+    if (signature === runOptionsSignature) return;
+    runOptionsSignature = signature;
+    ["[data-testid=compare-left]", "[data-testid=compare-right]"].forEach((selector, index) => {
+      const node = q(selector);
+      if (!node) return;
+      const previous = node.value;
+      node.replaceChildren(
+        ...ids.map((id) => {
+          const option = document.createElement("option");
+          option.value = id;
+          option.textContent = id;
+          return option;
+        }),
+      );
+      node.value = ids.includes(previous) ? previous : ids[Math.min(index, Math.max(ids.length - 1, 0))] || "";
+    });
+    const box = q("[data-testid=multi-run-selects]");
+    if (box) {
+      if (!ids.length) {
+        const span = document.createElement("span");
+        span.className = "panel-subtle";
+        span.textContent = "当前快照未提供 runs，暂无可对比的运行。";
+        box.replaceChildren(span);
+      } else {
+        box.replaceChildren(
+          ...ids.map((id) => {
+            const label = document.createElement("label");
+            const input = document.createElement("input");
+            input.type = "checkbox";
+            input.value = id;
+            input.dataset.testid = "multi-run-id";
+            const span = document.createElement("span");
+            span.textContent = id;
+            label.append(input, span);
+            return label;
+          }),
+        );
+      }
+    }
+  }
+
+  // `{__summary__: "candles", count: 100, hash: "ab12.."}` 必须专门渲染，
+  // 不能 JSON.stringify 出一坨——后端对序列型字段就是降级成这个形状的。
+  function formatCompareValue(value) {
+    if (value === null || value === undefined) return "—";
+    if (isObject(value) && typeof value.__summary__ === "string") {
+      const count = value.count == null ? "?" : value.count;
+      const hash = typeof value.hash === "string" && value.hash ? ` · hash ${value.hash}` : "";
+      return `${value.__summary__} · ${count} 项${hash}`;
+    }
+    if (isObject(value) || Array.isArray(value)) return JSON.stringify(value);
+    return String(value);
+  }
+
+  function renderCompareResult() {
+    const rows = q("[data-testid=compare-rows]");
+    if (!rows) return;
+    const note = q("[data-testid=compare-note]");
+    const setNote = (text) => {
+      if (!note) return;
+      note.hidden = !text;
+      if (text) note.textContent = text;
+    };
+    const payload = remoteOps.compare;
+    if (!isObject(payload)) {
+      rows.replaceChildren(objectRow(["尚未对比", "", ""], "compare-empty"));
+      setNote("");
+      return;
+    }
+    const failure = errorMessage(payload);
+    if (failure) {
+      rows.replaceChildren(objectRow(["对比失败", "", ""], "compare-empty"));
+      setNote(`对比失败：${failure}`);
+      return;
+    }
+    if (payload.available !== true) {
+      rows.replaceChildren(objectRow(["—", "", ""], "compare-empty"));
+      setNote(`对比不可用：${reasonText(COMPARE_REASON_LABELS, payload.reason, NETWORK_FALLBACK)}`);
+      return;
+    }
+    const leftHash = typeof payload.left_dataset_hash === "string" ? payload.left_dataset_hash : "";
+    const rightHash = typeof payload.right_dataset_hash === "string" ? payload.right_dataset_hash : "";
+    setNote(
+      leftHash && rightHash && leftHash === rightHash
+        ? `两份运行数据集一致（dataset_hash ${leftHash}）`
+        : "",
+    );
+    const differences = asArray(payload.differences);
+    if (!differences.length) {
+      rows.replaceChildren(objectRow(["无差异", "—", "—"], "compare-empty"));
+      return;
+    }
+    rows.replaceChildren(
+      ...differences.map((entry) => {
+        const row = document.createElement("tr");
+        const field = document.createElement("td");
+        field.textContent = String(entry.field || "—");
+        const left = document.createElement("td");
+        left.textContent = formatCompareValue(entry.left);
+        const right = document.createElement("td");
+        right.textContent = formatCompareValue(entry.right);
+        row.append(field, left, right);
+        return row;
+      }),
+    );
+  }
+
+  async function loadRunCompare(left, right) {
+    if (!left || !right) {
+      remoteOps.compare = { error: { code: "missing_run_id", message: "请先选择两个运行" } };
+      renderCompareResult();
+      return;
+    }
+    const { body } = await requestJson(
+      `${DASHBOARD_BASE()}/compare?left=${encodeURIComponent(left)}&right=${encodeURIComponent(right)}`,
+    );
+    remoteOps.compare = isObject(body) ? body : null;
+    renderCompareResult();
+  }
+
+  /* ---------------- C4 多数据集对比 ---------------- */
+
+  const MULTI_RUN_ROW_LIMIT = 200;
+
+  function renderMultiRunResult() {
+    const head = q("[data-testid=multi-run-head]");
+    const rows = q("[data-testid=multi-run-rows]");
+    if (!head || !rows) return;
+    const note = q("[data-testid=multi-run-note]");
+    const setNote = (text) => {
+      if (!note) return;
+      note.hidden = !text;
+      if (text) note.textContent = text;
+    };
+    const payload = remoteOps.multiRun;
+    const failure = errorMessage(payload);
+    if (failure) {
+      rows.replaceChildren(objectRow(["对比失败", ""], "multi-run-empty"));
+      setNote(`多数据集对比失败：${failure}`);
+      return;
+    }
+    if (!isObject(payload)) {
+      rows.replaceChildren(objectRow(["尚未加载", ""], "multi-run-empty"));
+      setNote("");
+      return;
+    }
+    if (payload.available !== true) {
+      rows.replaceChildren(objectRow(["—", ""], "multi-run-empty"));
+      setNote(`多数据集对比不可用：${reasonText(MULTI_RUN_REASON_LABELS, payload.reason, NETWORK_FALLBACK)}`);
+      return;
+    }
+    const points = asArray(payload.points);
+    const runCount = num(payload.run_count) === null ? 0 : num(payload.run_count);
+    const header = document.createElement("tr");
+    const timeHead = document.createElement("th");
+    timeHead.textContent = "时间";
+    header.appendChild(timeHead);
+    for (let index = 0; index < runCount; index += 1) {
+      const cell = document.createElement("th");
+      cell.textContent = `run_${index}`;
+      header.appendChild(cell);
+    }
+    head.replaceChildren(header);
+    const shown = points.slice(0, MULTI_RUN_ROW_LIMIT);
+    rows.replaceChildren(
+      ...shown.map((point) => {
+        const row = document.createElement("tr");
+        const time = document.createElement("td");
+        time.textContent = formatDateTime(num(point.open_time));
+        row.appendChild(time);
+        for (let index = 0; index < runCount; index += 1) {
+          const cell = document.createElement("td");
+          const candle = isObject(point[`run_${index}`]) ? point[`run_${index}`] : null;
+          const close = candle ? num(candle.close) : null;
+          cell.textContent = close === null ? "—" : formatPrice(close);
+          row.appendChild(cell);
+        }
+        return row;
+      }),
+    );
+    if (!shown.length) rows.replaceChildren(objectRow(["（无数据点）", ""], "multi-run-empty"));
+    setNote(points.length > MULTI_RUN_ROW_LIMIT ? `仅显示前 ${MULTI_RUN_ROW_LIMIT} 行（共 ${points.length} 行）` : "");
+  }
+
+  async function loadMultiRun(ids) {
+    if (ids.length < 2 || ids.length > 5) {
+      remoteOps.multiRun = { error: { code: "invalid_run_ids", message: "请勾选 2–5 个运行" } };
+      renderMultiRunResult();
+      return;
+    }
+    const { body } = await requestJson(`${DASHBOARD_BASE()}/multi-run?run_ids=${ids.map(encodeURIComponent).join(",")}`);
+    remoteOps.multiRun = isObject(body) ? body : null;
+    renderMultiRunResult();
+  }
+
+  function installOpsPanels() {
+    const watchlistButton = q("[data-testid=watchlist-refresh]");
+    if (watchlistButton) {
+      watchlistButton.addEventListener("click", () => {
+        watchlistButton.disabled = true;
+        loadWatchlist().finally(() => {
+          watchlistButton.disabled = false;
+        });
+      });
+    }
+    const compareButton = q("[data-testid=compare-run]");
+    if (compareButton) {
+      compareButton.addEventListener("click", () => {
+        const left = q("[data-testid=compare-left]");
+        const right = q("[data-testid=compare-right]");
+        compareButton.disabled = true;
+        loadRunCompare(left ? left.value : "", right ? right.value : "").finally(() => {
+          compareButton.disabled = false;
+        });
+      });
+    }
+    const multiButton = q("[data-testid=multi-run-load]");
+    if (multiButton) {
+      multiButton.addEventListener("click", () => {
+        const ids = [...root.querySelectorAll("[data-testid=multi-run-id]")]
+          .filter((input) => input.checked)
+          .map((input) => input.value);
+        multiButton.disabled = true;
+        loadMultiRun(ids).finally(() => {
+          multiButton.disabled = false;
+        });
+      });
+    }
+    loadWatchlist();
+    loadSignalStats();
   }
 
   function renderReproducibility(snapshot) {
@@ -1039,16 +1709,22 @@
     }
     while (section.children.length > 1) section.removeChild(section.lastChild);
     const signal = snapshot && isObject(snapshot.signal) ? snapshot.signal : null;
-    if (!signal || !signal.status) {
-      // 没有一买信号时整块折叠，避免"暂无信号统计"占位
+    // 只要拿到过 C5 响应（哪怕 available=false）就展示，好把降级原因说清楚；
+    // 只有"当前无信号 且 从未拉取"才沿用旧行为整块折叠。
+    const hasAggregate = isObject(remoteOps.signalStats);
+    if ((!signal || !signal.status) && !hasAggregate) {
+      // 当前信号与聚合都为空时整块折叠，避免"暂无信号统计"占位
       section.hidden = true;
       return;
     }
     section.hidden = false;
-    const text = `当前：${statusLabel(signal.status)} · 背驰：${divergenceLabel(signal.divergence_status)}`;
-    const summary = document.createElement("p");
-    summary.textContent = text;
-    section.appendChild(summary);
+    if (signal && signal.status) {
+      const text = `当前：${statusLabel(signal.status)} · 背驰：${divergenceLabel(signal.divergence_status)}`;
+      const summary = document.createElement("p");
+      summary.textContent = text;
+      section.appendChild(summary);
+    }
+    section.appendChild(buildSignalStatsAggregate());
   }
 
   function renderEngineState(snapshot) {
@@ -1091,14 +1767,34 @@
       panel.appendChild(section);
     }
     while (section.children.length > 1) section.removeChild(section.lastChild);
-    const items = Object.values(normalizeOverlays(snapshot && snapshot.overlays)).flat();
-    const levels = [...new Set(items.map((item) => item.level).filter((level) => Number.isInteger(level)))].sort((a, b) => a - b);
     const list = document.createElement("ul");
-    levels.forEach((level) => {
-      const item = document.createElement("li");
-      item.textContent = `level ${level} · ${items.filter((entry) => entry.level === level).length} elements`;
-      list.appendChild(item);
-    });
+    // C2/C7：优先读后端 level_tree（含 parent_level 链接与元素数）；
+    // 缺失或 available=false 时回退到本地从 overlays 现算，保证不空图。
+    const backend = isObject(snapshot) && isObject(snapshot.level_tree) ? snapshot.level_tree : null;
+    const backendLevels = backend && backend.available === true ? asArray(backend.levels) : [];
+    if (backendLevels.length) {
+      list.dataset.source = "backend";
+      backendLevels.forEach((entry) => {
+        const item = document.createElement("li");
+        const level = num(entry.level);
+        const count = asArray(entry.elements).length;
+        const parent = num(entry.parent_level);
+        let text = `level ${level === null ? "—" : level} · ${count} elements`;
+        if (parent !== null) text += ` · ← 上级 ${parent}`;
+        item.textContent = text;
+        item.dataset.state = "ok";
+        list.appendChild(item);
+      });
+    } else {
+      list.dataset.source = "overlays";
+      const items = Object.values(normalizeOverlays(snapshot && snapshot.overlays)).flat();
+      const levels = [...new Set(items.map((item) => item.level).filter((level) => Number.isInteger(level)))].sort((a, b) => a - b);
+      levels.forEach((level) => {
+        const item = document.createElement("li");
+        item.textContent = `level ${level} · ${items.filter((entry) => entry.level === level).length} elements`;
+        list.appendChild(item);
+      });
+    }
     if (!list.children.length) list.appendChild(document.createElement("li")).textContent = "暂无级别结构";
     section.appendChild(list);
   }
@@ -2845,6 +3541,8 @@
     state.selection = null;
     state.selectedNode = null;
     renderChrome(state.snapshot);
+    renderWatchMetrics(state.snapshot);
+    renderRunOptions(state.snapshot);
     // 回放渲染不重放提醒（前缀快照沿用同一 alerts，重复触发无意义）
     if (!isReplay) syncAlerts(state.snapshot);
     refreshLevelSelect(state.snapshot);
@@ -3621,6 +4319,7 @@
     installReplayControls();
     installTermGlossary();
     installSourcePanel();
+    installOpsPanels();
 
     if (typeof window.ResizeObserver === "function") {
       const observer = new window.ResizeObserver(() => scheduleDraw());

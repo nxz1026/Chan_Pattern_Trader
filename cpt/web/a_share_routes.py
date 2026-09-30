@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -30,6 +31,7 @@ __all__ = [
     "DEFAULT_WATCHLIST_PATH",
     "InvalidCodeError",
     "pool_payload",
+    "recent_closes",
     "snapshot_payload",
     "watchlist_add",
     "watchlist_payload",
@@ -44,6 +46,11 @@ DEFAULT_HOT_TOP: int | None = 5
 
 #: 策略观察候选同样只留 Top5。
 DEFAULT_STRATEGY_TOP: int | None = 5
+
+#: 取"最近两根收盘价"时向前回溯的自然日数。放 30 天而不是 3~5 天：A 股有周末、
+#: 长假和停牌，窗口太窄会让窗口内不足两根而白白降级；30 天足够覆盖任何常规假期，
+#: 又不会把查询代价抬起来（日线一天一行）。
+CLOSE_LOOKBACK_DAYS: int = 30
 
 #: 合并去重后的分组顺序。**手输排第一**：用户自己的选择绝不能被算法分组盖掉 ——
 #: 否则他会以为手输又丢了，而"手输丢失"正是这次要修的问题。策略排最后，它是外部
@@ -288,6 +295,45 @@ def pool_payload(
         "db_error": db_error,
         "items": merged,
     }
+
+
+def recent_closes(code: str) -> tuple[float, float] | None:
+    """取 ``code`` 的最近两根日线收盘价，返回 ``(prev_close, last_close)``。
+
+    顺序是**时间升序**（前一根在前），与调用方算涨跌幅的直觉一致。
+
+    降级为 ``None`` 而不是抛异常：调用方会**逐只**问价，任何一只票取不到价（连不上
+    DB、窗口内不足两根、缺复权因子……）都不该把整张列表搞挂 —— 同
+    :func:`_names` / :func:`_manual_entries` 的"装饰性/局部失败不拖垮主视图"哲学一致。
+
+    读的是 :class:`AShareLocalClient` 既有的日线接口（后复权口径与画布同源），不另写
+    SQL：口径一旦分成两份，列表上的涨跌幅和画布上的 K 线迟早对不上。
+
+    惰性 import：``AShareLocalClient`` 的构造会在无 DB 配置时抛错，且它的模块链会去
+    找 psycopg —— CI 没装 psycopg，顶层 import 会让本模块整个导入失败（连 crypto 看板
+    都起不来）。放到函数内，导入失败/无 DB 时正好走下面的 ``except`` 降级。
+    """
+    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+
+    end = datetime.now(UTC)
+    start_ms = int((end - timedelta(days=CLOSE_LOOKBACK_DAYS)).timestamp() * 1000)
+    end_ms = int(end.timestamp() * 1000)
+
+    client = AShareLocalClient()
+    try:
+        bars = client.fetch_validated_klines(code, start_ms, end_ms).bars
+    except Exception as exc:  # noqa: BLE001 — 逐票失败只代表这一票没价
+        _LOG.debug("最近收盘价读取失败 code=%s: %s", code, exc)
+        return None
+    finally:
+        client.close()  # 无论成败都要放连接，池子里每只票都会走这里
+
+    if len(bars) < 2:
+        return None
+    # 接口本身已按日期升序返回，这里再排一次是为把"顺序=时间升序"变成显式契约，
+    # 上游实现换了排序也不会悄悄反过来。
+    ordered = sorted(bars, key=lambda bar: bar.open_time)
+    return (float(ordered[-2].close), float(ordered[-1].close))
 
 
 def _entries_payload() -> dict[str, Any]:

@@ -43,6 +43,13 @@
 - ``--batch-size``: 批大小（默认 500）
 - ``--sleep-ms``: 请求间隔（默认 100ms，腾讯节流友好）
 - ``--dry-run``: 不写 DB，只打印统计
+- ``--wind-fallback``: 本地（腾讯）取不到时改用 **Wind 补取**（台账决策 C1），
+  **默认关闭**——Wind 每次调用消耗真实额度，不适合当默认路径。走这条路时：
+  裸码经 ``a_share_local.AShareLocalClient._to_wind_code`` 转 Wind 代码，
+  因子由 ``wind_source.WindSourceClient.fetch_adjust_factors``（同区间
+  不复权/后复权两次 K 线相除）算出，落库 ``source`` 标成
+  ``wind:get_stock_kline`` 以便与腾讯行区分。**Wind 不可用或取数失败只记
+  原因并继续**，绝不中断整轮回填。
 """
 
 from __future__ import annotations
@@ -57,7 +64,7 @@ import urllib.error
 import urllib.request
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 from cpt.adapters._dbconfig import connection_kwargs as _shared_connection_kwargs
@@ -66,10 +73,17 @@ from cpt.adapters.a_share_factor import (
     build_factor_rows,
     upsert_factor_rows,
 )
+from cpt.adapters.a_share_local import AShareLocalClient
 from cpt.adapters.a_share_public import (
     TENCENT_KLINE_URL,
     ASharePublicError,
     normalize_code,
+)
+from cpt.adapters.wind_source import (
+    WindQuotaError,
+    WindSourceClient,
+    WindSourceError,
+    WindUnavailableError,
 )
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -80,6 +94,15 @@ REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: 迁移完毕（库里现只有 ``tx:fqkline``）。
 UA = "Mozilla/5.0"
 DEFAULT_KLINE_DAYS = 800  # 腾讯单次上限 801 根（实测 count=800 → 801 根，覆盖 2023-06 至今）
+
+#: Wind 兜底行写库时用的 ``source`` / ``source_url``。
+#:
+#: **必须与腾讯行区分**（``a_share_factor.SOURCE_TX`` / ``TENCENT_KLINE_URL``）：
+#: 台账决策 C1 的验收就是"能分辨这一行是本地源还是 Wind 源补的"，同一个
+#: ``source`` 会让 ``WHERE source=...`` 再也分不清，正是 2026-09-25 那个
+#: ``tencent_fqkline`` / ``tx:fqkline`` 分裂坑的翻版。
+SOURCE_WIND: Final[str] = "wind:get_stock_kline"
+WIND_SOURCE_URL: Final[str] = "wind://stock_data.get_stock_kline"
 
 logger = logging.getLogger("factor_backfill")
 
@@ -147,6 +170,58 @@ def fetch_tx_factor_rows(code_wind: str, *, days: int = DEFAULT_KLINE_DAYS) -> l
     raw, hfq = _fetch_tx_pair(tx_sym, days)
     rows = build_factor_rows(normalize_code(code_wind)[2:], _to_bars(raw), _to_bars(hfq))
     return [replace(row, code=code_wind) for row in rows]
+
+
+# --------------------------------------------------------------------------- #
+# Wind 兜底（台账决策 C1）
+# --------------------------------------------------------------------------- #
+
+
+def wind_client() -> WindSourceClient:
+    """Wind 客户端工厂。
+
+    **构造不发请求、不花额度**（见 ``wind_source`` 模块 docstring），真正花钱的是
+    :meth:`WindSourceClient.probe`。抽成函数是为了让测试注入假 runner —— 否则
+    "接线是否真的通了"只能靠真花额度去试。
+    """
+    return WindSourceClient()
+
+
+def fetch_wind_factor_rows(
+    code: str,
+    *,
+    days: int = DEFAULT_KLINE_DAYS,
+    client: WindSourceClient | None = None,
+) -> list[FactorRow]:
+    """Wind 兜底：6 位裸码 → Wind 代码 → 同区间两次 K 线相除 → ``FactorRow``。
+
+    本函数是这两个"待接线"函数的**生产调用点**（接线前全仓 0 代码引用）：
+
+    - ``a_share_local.AShareLocalClient._to_wind_code``（裸码 → ``600519.SH``）
+    - ``wind_source.WindSourceClient.fetch_adjust_factors``（``{日期: 后复权因子}``）
+
+    Raises:
+        ValueError: ``code`` 非法 —— ``_to_wind_code`` 不再静默兜底成 ``.SZ``。
+        WindUnavailableError / WindQuotaError / WindSourceError: Wind 侧分级失败，
+            调用方据此决定记哪种原因（这三类必须分开，否则运维分不清"没接上"
+            和"额度没了"）。
+    """
+    windcode = AShareLocalClient._to_wind_code(code)
+    end = datetime.now(tz=UTC).date()
+    begin = end - timedelta(days=days)
+    factors = (client or wind_client()).fetch_adjust_factors(
+        windcode, begin_date=begin, end_date=end
+    )
+    return [
+        FactorRow(
+            code=code,
+            trade_date=day,
+            hfq_factor=value,
+            source=SOURCE_WIND,
+            source_ref=f"wind get_stock_kline {day}",
+        )
+        for day, value in sorted(factors.items())
+    ]
 
 
 @dataclass(frozen=True, slots=True)
@@ -314,6 +389,40 @@ def _retry(code: str, idx: int, exc: Exception, retries: int) -> bool:
 # --------------------------------------------------------------------------- #
 
 
+def _failure_text(kind: str, etype: str, detail: str) -> str:
+    """本地源失败原因的可读文案（Wind 兜底日志里"本地那一半"）。"""
+    if kind == "empty":
+        return "本地源无数据"
+    if not detail:
+        return f"本地源{kind}失败"
+    return f"本地源{kind}失败 {etype}: {detail}"
+
+
+def _wind_fallback(code: str) -> tuple[list[FactorRow], str]:
+    """跑一次 Wind 兜底，返回 ``(行, 状态文案)``。
+
+    **任何异常都只转成文案，绝不向上抛**：兜底失败不能把整轮回填带崩（任务硬约束）。
+    文案前缀区分"功能没接通"（``wind_unavailable``）与"接通了但取不到"
+    （``wind_error`` / ``wind_quota`` / ``wind_empty``）—— 否则运维看到一行
+    "没数据"分不清是去修数据还是去装 CLI。
+    """
+    try:
+        rows = fetch_wind_factor_rows(code)
+    except ValueError as e:
+        return [], f"wind_code_invalid: {e}"
+    except WindUnavailableError as e:
+        return [], f"wind_unavailable: {e}"
+    except WindQuotaError as e:
+        return [], f"wind_quota: {e}"
+    except WindSourceError as e:
+        return [], f"wind_error: {e}"
+    except Exception as e:  # noqa: BLE001
+        return [], f"wind_unexpected: {type(e).__name__}: {e}"
+    if not rows:
+        return [], "wind_empty: Wind 未返回可用因子行"
+    return rows, "wind ok"
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="A 股复权因子 backfill（腾讯财经）")
     parser.add_argument("--mode", choices=("full", "incremental"), default="incremental")
@@ -321,6 +430,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--batch-size", type=int, default=500)
     parser.add_argument("--sleep-ms", type=int, default=100)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--wind-fallback",
+        action="store_true",
+        help="本地（腾讯）取不到时改用 Wind 源补取。默认关闭：Wind 调用消耗真实额度",
+    )
     parser.add_argument(
         "--retries",
         type=int,
@@ -344,12 +458,13 @@ def main(argv: list[str] | None = None) -> int:
         codes = [c for c in codes if c.startswith(args.code_prefix)]
 
     logger.info(
-        "模式=%s 待处理=%d 前缀=%s dry_run=%s sleep=%dms",
+        "模式=%s 待处理=%d 前缀=%s dry_run=%s sleep=%dms wind_fallback=%s",
         args.mode,
         len(codes),
         args.code_prefix or "(all)",
         args.dry_run,
         args.sleep_ms,
+        args.wind_fallback,
     )
     if not codes:
         logger.info("无代码可处理，退出。")
@@ -361,33 +476,65 @@ def main(argv: list[str] | None = None) -> int:
     fail_count = 0
     with psycopg.connect(**connection_kwargs()) as conn:
         for idx, code in enumerate(codes, 1):
+            # 本地源（腾讯）取数。失败按**类别**记下来：默认路径要逐字复现接线前的
+            # 日志与计数，Wind 兜底路径要能分辨"本地源没数据"和"Wind 没接通"。
+            rows: list[FactorRow] = []
+            source_url = TENCENT_KLINE_URL
+            failure = ""  # ""=本地成功 / empty / permanent / network / unknown
+            etype = ""
+            detail = ""
             try:
                 rows = fetch_tx_factor_rows(code)
+                if not rows:
+                    failure = "empty"
             except (ValueError, ASharePublicError) as e:
                 # 永久错误：代码本身不认识/无法推断市场、腾讯不供该标的后复权 ——
                 # 重试没有意义，直接跳过。``normalize_code`` 抛的是 ``ASharePublicError``
                 # （基类是 ``RuntimeError`` 而不是 ``ValueError``），必须显式列出；
                 # 这条要在下面那条 ``RuntimeError`` 之前，否则会被归类成"可重试的
                 # 网络失败"。
-                logger.info("跳过 %s: %s", code, str(e)[:100])
-                fail_count += 1
-                time.sleep(args.sleep_ms / 1000)
-                continue
+                failure, etype, detail = "permanent", type(e).__name__, str(e)[:100]
             except (urllib.error.URLError, RuntimeError, json.JSONDecodeError) as e:
                 if _retry(code, idx, e, args.retries):
                     continue
-                logger.warning("腾讯因子失败 %s: %s: %s", code, type(e).__name__, str(e)[:100])
-                fail_count += 1
-                time.sleep(args.sleep_ms / 1000)
-                continue
+                failure, etype, detail = "network", type(e).__name__, str(e)[:100]
             except Exception as e:  # noqa: BLE001
-                logger.warning("未知错误 %s: %s: %s", code, type(e).__name__, str(e)[:100])
-                fail_count += 1
-                time.sleep(args.sleep_ms / 1000)
-                continue
-            if not rows:
-                time.sleep(args.sleep_ms / 1000)
-                continue
+                failure, etype, detail = "unknown", type(e).__name__, str(e)[:100]
+
+            if failure:
+                if not args.wind_fallback:
+                    # ---- 默认路径：与接线前逐字一致 ----
+                    if failure == "permanent":
+                        logger.info("跳过 %s: %s", code, detail)
+                        fail_count += 1
+                    elif failure == "network":
+                        logger.warning("腾讯因子失败 %s: %s: %s", code, etype, detail)
+                        fail_count += 1
+                    elif failure == "unknown":
+                        logger.warning("未知错误 %s: %s: %s", code, etype, detail)
+                        fail_count += 1
+                    # failure == "empty"：本地无数据，不打日志也不计失败（旧行为）。
+                    time.sleep(args.sleep_ms / 1000)
+                    continue
+                # ---- Wind 兜底（--wind-fallback）----
+                wind_rows, wind_note = _wind_fallback(code)
+                if not wind_rows:
+                    logger.warning(
+                        "Wind 兜底未取到 %s：本地[%s]；Wind[%s]",
+                        code,
+                        _failure_text(failure, etype, detail),
+                        wind_note,
+                    )
+                    fail_count += 1
+                    time.sleep(args.sleep_ms / 1000)
+                    continue
+                rows, source_url = wind_rows, WIND_SOURCE_URL
+                logger.info(
+                    "Wind 兜底命中 %s：本地[%s] → Wind 取到 %d 行",
+                    code,
+                    _failure_text(failure, etype, detail),
+                    len(wind_rows),
+                )
             # 过滤：**只**跳过已写入真实数据的行（``source IS NOT NULL``）。存量占位行
             # （``source IS NULL``）必须放行，否则 ``max(trade_date)`` 已经是最新那天、
             # 全部行都被过滤掉，脚本会"成功"地写入 0 行。详见 unverifiable_dates()。
@@ -397,7 +544,7 @@ def main(argv: list[str] | None = None) -> int:
                 if not rows:
                     time.sleep(args.sleep_ms / 1000)
                     continue
-            n = upsert_factor_rows(conn, rows, source_url=TENCENT_KLINE_URL, dry_run=args.dry_run)
+            n = upsert_factor_rows(conn, rows, source_url=source_url, dry_run=args.dry_run)
             total += n
             logger.info(
                 "[%d/%d] %s 新增 %d 行 (%s ~ %s)",

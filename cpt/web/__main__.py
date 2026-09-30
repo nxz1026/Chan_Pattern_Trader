@@ -20,6 +20,7 @@ import math
 import sys
 import threading
 import time as _time
+from collections import OrderedDict
 from collections.abc import Sequence
 from typing import Any
 
@@ -34,6 +35,7 @@ from cpt.application.dashboard_alerts import alert_transition
 from cpt.application.dashboard_config_compare import compare_configs
 from cpt.application.dashboard_inspector import inspect_bar
 from cpt.application.dashboard_market import normalize_24h
+from cpt.application.dashboard_realtime import realtime_update
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
 from cpt.application.multi_level import build_multi_level, format_multi_level, structures_for_level
 from cpt.application.replay import compute_domain_structures, replay_bars
@@ -424,6 +426,13 @@ def fixture_provider(
     return _FixtureProvider(symbol=symbol, interval=interval, limit=limit, backend=backend)
 
 
+# 进程内快照缓存容量（键 = (symbol, interval_ms)）。取 8 的理由：前端 symbol
+# picker 的常用自选就在这个量级，容量再大只是把更早的历史快照留在内存里，命中
+# 价值递减；而每条目只是「已有快照 + 其 K 线元组」的引用，不复制数据，8 条的内存
+# 上界可忽略。超出即按 LRU 淘汰最久未访问的一条。
+_SNAPSHOT_CACHE_SIZE = 8
+
+
 class _RealtimeProvider:
     """Thread-safe poll-driven snapshot builder fed by Binance REST.
 
@@ -456,6 +465,13 @@ class _RealtimeProvider:
         self._lock = threading.Lock()
         self._snapshot: dict[str, Any] = demo_snapshot(symbol, interval)
         self._bars: tuple[CanonicalBar, ...] = ()
+        # (symbol, interval_ms) → (已发布快照, 该快照的 K 线)。命中即省掉一次
+        # 「REST 拉 K 线 + 全流水线重算」的阻塞（HTTP 的 ?symbol=&interval_ms=
+        # 请求原先为此要等 ≤1 个轮询周期）。写入只发生在 _poll_once 成功之后，
+        # 降级快照不入缓存 —— 否则「上游挂了」的空快照会被当成兜底数据复用。
+        self._snapshot_cache: OrderedDict[
+            tuple[str, int], tuple[dict[str, Any], tuple[CanonicalBar, ...]]
+        ] = OrderedDict()
         self._last_signal_status: str = "none"
         self._last_alert_at: float = 0.0
         # 上游健康状态：/api/dashboard/health 直接读这些字段，避免「永远 ok」
@@ -508,11 +524,57 @@ class _RealtimeProvider:
         poll body reads ``self._symbol`` under the lock that ``_run`` itself
         doesn't take (it only mutates ``_snapshot`` / ``_bars`` under the
         lock), so the new thread just races to publish last.
+
+        **缓存快路径**：当前 ``(symbol, interval_ms)`` 若在进程内 LRU 里已有已发布
+        快照（用户切回此前看过的自选，或重复请求同一对），直接发布缓存那份就返回，
+        不再花 ≤1 个轮询周期去拉上游 + 跑全流水线阻塞 HTTP 响应。后台轮询线程并未
+        停止，它会按自己的节奏刷新该条目 —— 对「正在看的这一对」缓存至多落后一个
+        轮询周期，对「切回来的旧对」可能更旧，这正是用新鲜度换掉请求延迟的取舍。
+        只有未命中才落到下面的原同步轮询逻辑。
         """
+        cached = self._cached_snapshot()
+        if cached is not None:
+            with self._lock:
+                self._snapshot = cached[0]
+                self._bars = cached[1]
+            return
         fresh, fresh_bars = self._poll_once()
         with self._lock:
             self._snapshot = fresh
             self._bars = fresh_bars
+
+    def _cached_snapshot(self) -> tuple[dict[str, Any], tuple[CanonicalBar, ...]] | None:
+        """按当前 symbol/interval 取一份已发布的缓存快照；未命中返回 ``None``。
+
+        缓存读取与 LRU 提升都在 ``_lock`` 内完成，避免与轮询线程的写入竞争；随后
+        在锁外调 ``realtime_update``（纯函数、不碰网络）做 symbol/interval_ms 匹配，
+        别在持锁期间执行可能抛错的逻辑。本方法自身不再取锁，调用方也不得持锁进入
+        —— ``self._lock`` 是普通 ``threading.Lock``，同线程二次 acquire 会永久阻塞
+        （审计 H1 的既有坑），所以这里刻意不引入任何重入路径。
+        """
+        with self._lock:
+            symbol = self._symbol
+            interval = self._interval
+        try:
+            interval_ms = resolve_interval_ms(interval)
+        except ValueError:
+            # 周期标签不可解析：不抢先在这里抛，交给原有 _poll_once 路径按既有方式
+            # 降级/报错，保持失败行为一字不变。
+            return None
+        with self._lock:
+            key = (symbol, interval_ms)
+            entry = self._snapshot_cache.get(key)
+            if entry is None:
+                return None
+            # 命中即算一次访问，把该键提升到队尾（LRU）。
+            self._snapshot_cache.move_to_end(key)
+            candidates = [item[0] for item in self._snapshot_cache.values()]
+        update = realtime_update(candidates, selected_symbol=key[0], selected_interval_ms=key[1])
+        if not update.get("available"):
+            # 缓存条目的 market 字段与请求的 symbol/interval_ms 对不上：当未命中，
+            # 走原路径重新拉取，绝不把不匹配的快照伪装成命中结果。
+            return None
+        return update["snapshot"], entry[1]
 
     def stop(self) -> None:
         self._stop.set()
@@ -753,14 +815,26 @@ class _RealtimeProvider:
                 "generated_at": _time.time() * 1000,
             },
         )
+        interval_ms = resolve_interval_ms(target_interval)
         snapshot["market"]["symbol"] = target_symbol
-        snapshot["market"]["interval_ms"] = resolve_interval_ms(target_interval)
+        snapshot["market"]["interval_ms"] = interval_ms
         snapshot["runtime"]["symbol"] = target_symbol
         snapshot["runtime"]["interval"] = target_interval
         snapshot["runtime"]["buffer_size"] = len(bars)
         snapshot["runtime"]["window_size"] = len(bars)
         snapshot["alerts"] = self._compute_alerts(snapshot)
-        return snapshot, tuple(bars)
+        fresh_bars = tuple(bars)
+        # 只有走到这里（数据守卫通过、上游可用）才算「成功发布」，才允许进缓存：
+        # 降级快照在上面几条 return 里就返回了，不会被缓存成兜底数据。
+        # 键用轮询开始时锁定的 target 对（而非当前 self._symbol），避免 fetch 期间
+        # 被 select_symbol 改写后把快照挂到别的键上。
+        cache_key = (target_symbol, interval_ms)
+        with self._lock:
+            self._snapshot_cache[cache_key] = (snapshot, fresh_bars)
+            self._snapshot_cache.move_to_end(cache_key)
+            while len(self._snapshot_cache) > _SNAPSHOT_CACHE_SIZE:
+                self._snapshot_cache.popitem(last=False)
+        return snapshot, fresh_bars
 
     def _safe_24h(self) -> dict[str, Any]:
         with self._lock:

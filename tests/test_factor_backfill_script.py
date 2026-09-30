@@ -222,3 +222,219 @@ def test_fetch_pair_uses_the_shared_endpoint(script: Any, monkeypatch: Any) -> N
     # 第一次是不复权（adj 为空串，URL 以逗号收尾），第二次才是 hfq
     assert seen[0].endswith(",") and not seen[0].endswith("hfq")
     assert seen[1].endswith(",hfq")
+
+
+# --------------------------------------------------------------------------- #
+# Wind 兜底接线（台账决策 C1）
+#
+# 守门规矩（docs/pending-wiring.md 约束 4）：**入口必须是生产路径**。这里全部从
+# ``scripts.factor_backfill.main()`` 出发，只把 DB 与 Wind CLI 这两个**外部边界**
+# 换成假的；``_to_wind_code`` 与 ``fetch_adjust_factors`` 跑的是真实现 ——
+# "接线接上了没有"必须由这条链路证明，模块级自证式用例不算数。
+# --------------------------------------------------------------------------- #
+
+
+def _install_fake_psycopg(monkeypatch: Any) -> list[tuple[str, Any]]:
+    """注入够用的假 ``psycopg``（CI 没装、也没库）。
+
+    只实现 ``main()`` 走到的部分：``connect(**kwargs)`` 上下文 + ``cursor()``。
+    返回 SQL 日志，供断言"写库时带的 source/source_url 是哪一个源"。
+    """
+    import types
+
+    logs: list[tuple[str, Any]] = []
+
+    class _Cursor:
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+        def execute(self, sql: str, params: Any = None) -> None:
+            logs.append((sql, params))
+
+        def fetchall(self) -> list[Any]:
+            # unverifiable_dates 的查询：返回空 = 没有不可考日期，行全部放行
+            return []
+
+        def executemany(self, sql: str, payload: Any) -> None:
+            logs.append((sql, payload))
+
+    class _Conn:
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+        def cursor(self) -> Any:
+            return _Cursor()
+
+        def commit(self) -> None:
+            return None
+
+        def rollback(self) -> None:
+            return None
+
+    module = types.ModuleType("psycopg")
+    module.connect = lambda **kwargs: _Conn()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psycopg", module)
+    return logs
+
+
+def _prepare_main(script: Any, monkeypatch: Any, codes: list[str]) -> list[tuple[str, Any]]:
+    """把 ``main()`` 的 DB 边界全部假掉（代码清单 + 连接参数 + psycopg）。"""
+    monkeypatch.setattr(script, "list_all_a_codes", lambda: list(codes))
+    monkeypatch.setattr(script, "connection_kwargs", lambda: {"dbname": "fake"})
+    return _install_fake_psycopg(monkeypatch)
+
+
+def test_main_default_path_never_touches_wind(script: Any, monkeypatch: Any) -> None:
+    """**默认行为不得改变**：不带 ``--wind-fallback`` 时一个 Wind 调用都不许发。"""
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("默认路径不该走到 Wind")
+
+    monkeypatch.setattr(script, "fetch_wind_factor_rows", forbidden)
+
+    def boom(code: str, *, days: int = 0) -> Any:
+        raise script.ASharePublicError("腾讯不供该标的后复权")
+
+    monkeypatch.setattr(script, "fetch_tx_factor_rows", boom)
+    _prepare_main(script, monkeypatch, ["600519"])
+
+    assert script.main(["--mode", "full", "--sleep-ms", "0", "--dry-run"]) == 0
+
+
+def test_main_wind_fallback_wires_both_orphan_functions(
+    script: Any, monkeypatch: Any, caplog: Any
+) -> None:
+    """**接线守门**：``main()`` + ``--wind-fallback`` 必须真的调到
+
+    - ``a_share_local.AShareLocalClient._to_wind_code``（裸码 → Wind 代码）
+    - ``wind_source.WindSourceClient.fetch_adjust_factors``（取因子）
+
+    两者接线前全仓 0 代码引用；本用例用 spy 包住**真实现**，断言的既是"调到了"，
+    也是"传进去的 Wind 代码对"。
+    """
+    from cpt.adapters import a_share_local as local_mod
+    from cpt.adapters import wind_source as wind_mod
+
+    seen: dict[str, Any] = {}
+    real_code = local_mod.AShareLocalClient._to_wind_code
+
+    def spy_code(code: str) -> str:
+        seen["code_in"] = code
+        windcode = real_code(code)
+        seen["windcode"] = windcode
+        return windcode
+
+    def spy_factors(self: Any, windcode: str, **kwargs: Any) -> dict[str, float]:
+        seen["fetch_windcode"] = windcode
+        seen["fetch_kwargs"] = kwargs
+        return {"2026-09-30": 2.5}
+
+    monkeypatch.setattr(local_mod.AShareLocalClient, "_to_wind_code", staticmethod(spy_code))
+    monkeypatch.setattr(wind_mod.WindSourceClient, "fetch_adjust_factors", spy_factors)
+
+    def boom(code: str, *, days: int = 0) -> Any:
+        raise script.ASharePublicError("腾讯不供该标的后复权")
+
+    monkeypatch.setattr(script, "fetch_tx_factor_rows", boom)
+    logs = _prepare_main(script, monkeypatch, ["600519"])
+
+    with caplog.at_level("INFO", logger="factor_backfill"):
+        assert script.main(["--mode", "full", "--wind-fallback", "--sleep-ms", "0"]) == 0
+
+    assert seen["code_in"] == "600519"
+    assert seen["windcode"] == "600519.SH"
+    assert seen["fetch_windcode"] == "600519.SH"  # 用转换后的代码去查 Wind
+    assert "begin_date" in seen["fetch_kwargs"] and "end_date" in seen["fetch_kwargs"]
+
+    # 写库必须带上 Wind 的 source/source_url，能和腾讯行区分
+    inserts = [payload for sql, payload in logs if "INSERT INTO asel.ref_adjust_factor" in sql]
+    assert inserts, "Wind 兜底取到行之后必须真的写库"
+    row = inserts[0][0]
+    assert (row[0], row[1], row[3], row[4]) == (
+        "600519",
+        "2026-09-30",
+        script.SOURCE_WIND,
+        script.WIND_SOURCE_URL,
+    )
+    assert "Wind 兜底命中 600519" in caplog.text
+
+
+def test_main_wind_fallback_degrades_when_wind_missing(
+    script: Any, monkeypatch: Any, caplog: Any
+) -> None:
+    """Wind 不可用（CI 的常态：没有 CLI、没有密钥）→ 记原因、继续，返回码仍是 0。
+
+    这里**不注入假 runner**：走的就是真实 ``WindSourceClient.availability()``。
+    """
+
+    def boom(code: str, *, days: int = 0) -> Any:
+        raise script.ASharePublicError("腾讯不供该标的后复权")
+
+    monkeypatch.setattr(script, "fetch_tx_factor_rows", boom)
+    _prepare_main(script, monkeypatch, ["600519"])
+
+    with caplog.at_level("INFO", logger="factor_backfill"):
+        rc = script.main(["--mode", "full", "--wind-fallback", "--sleep-ms", "0", "--dry-run"])
+
+    assert rc == 0, "Wind 接不通绝不能把整轮回填搞崩"
+    assert "wind_unavailable" in caplog.text
+    assert "本地源permanent失败" in caplog.text  # 两类原因必须可分
+
+
+def test_main_wind_fallback_keeps_local_rows_untouched(
+    script: Any, monkeypatch: Any, caplog: Any
+) -> None:
+    """本地成功时不该走 Wind（兜底只在"本地取不到"时触发）。"""
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("本地成功时不该调 Wind")
+
+    monkeypatch.setattr(script, "fetch_wind_factor_rows", forbidden)
+    monkeypatch.setattr(
+        script,
+        "fetch_tx_factor_rows",
+        lambda code, *, days=0: [
+            script.FactorRow(code=code, trade_date="2026-09-30", hfq_factor=1.5)
+        ],
+    )
+    logs = _prepare_main(script, monkeypatch, ["600519"])
+
+    with caplog.at_level("INFO", logger="factor_backfill"):
+        assert script.main(["--mode", "full", "--wind-fallback", "--sleep-ms", "0"]) == 0
+
+    inserts = [payload for sql, payload in logs if "INSERT INTO asel.ref_adjust_factor" in sql]
+    assert inserts and inserts[0][0][4] == TENCENT_KLINE_URL  # 仍标腾讯源
+
+
+def test_main_wind_fallback_reports_invalid_code(
+    script: Any, monkeypatch: Any, caplog: Any
+) -> None:
+    """非法代码 → ``wind_code_invalid``，且**不许**伪造一个 Wind 调用。
+
+    这条走的是真 ``fetch_wind_factor_rows``（``_to_wind_code`` 在转码阶段就抛），
+    所以同时钉住"非法输入不会静默产出错误代码"这条契约。
+    """
+    from cpt.adapters import wind_source as wind_mod
+
+    def forbidden(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("非法代码不该发出任何 Wind 调用")
+
+    monkeypatch.setattr(wind_mod.WindSourceClient, "fetch_adjust_factors", forbidden)
+
+    def boom(code: str, *, days: int = 0) -> Any:
+        raise script.ASharePublicError("腾讯不认识")
+
+    monkeypatch.setattr(script, "fetch_tx_factor_rows", boom)
+    _prepare_main(script, monkeypatch, ["700000"])
+
+    with caplog.at_level("INFO", logger="factor_backfill"):
+        rc = script.main(["--mode", "full", "--wind-fallback", "--sleep-ms", "0", "--dry-run"])
+
+    assert rc == 0
+    assert "wind_code_invalid" in caplog.text

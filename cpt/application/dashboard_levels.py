@@ -1,8 +1,9 @@
 """Read-only level recursion projection for research mode.
 
-**状态：待接线（pending-wiring，2026-09-25 审核 P0-2）**——生产代码零导入，尚无
-调用方；对应 `docs/dashboard-product-roadmap.md` Phase 5 P1「级别递归树」，故保留。
-改动前请先读 `docs/pending-wiring.md`。
+**状态：已接线（R22，2026-09-30）**——落到 `snapshot.level_tree`
+（`dashboard_snapshot_v2.py::_level_tree_payload`，三条活路径都汇聚到 v2），
+另经 `GET /api/dashboard/levels`（`cpt/web/app.py`）直接暴露；对应
+`docs/dashboard-product-roadmap.md` Phase 5 P1「级别递归树」。
 """
 
 from __future__ import annotations

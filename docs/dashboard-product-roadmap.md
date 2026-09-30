@@ -88,7 +88,9 @@ raw bar → 所有关联结构
 - engine version；
 - source；
 - generated_at；
-- 两份 snapshot 字段级 diff。
+- 两份 snapshot 字段级 diff（✅ R22：`dashboard_compare.py` 接进 `GET /api/dashboard/compare?left=&right=`，
+  底层 `dashboard_reproducibility.py::snapshot_diff`；序列型值降级为 `{__summary__,count,hash}`，
+  防止原始 candles 数组灌进响应）。
 
 ## Phase 2：Oracle 对比
 
@@ -118,30 +120,47 @@ parity
 
 - 信号历史列表；
 - 信号到达提醒（✅ R21：`_attach_signal_change` 检测 status 变化，前端弹 ⚡ 通知）；
-- 多交易对；
+- 多交易对（✅ R22：`GET /api/dashboard/watchlist` 投影自 A 股候选池 `pool_payload`，
+  条目含 code/name/board/drawable/group/last_price/change_pct；`watchlist_rows` 接进 `cpt/web/app.py:234`）；
 - 最新价线；
 - 成交额；
-- reconnect/stale；
-- SSE 或高效实时更新。
+- reconnect/stale（✅ R22：`dashboard_watch.py::watch_metrics` 接进 `dashboard_snapshot_v2.py:29`
+  → `snapshot.watch_metrics`，前端 `renderWatchMetrics()` 显示最新价/涨跌幅/窗口高低/窗口量；
+  **注意 `"24h": None` 仍是硬编码**——窗口统计来自 bars，不是 24h 聚合）；
+- SSE 或高效实时更新（✅ R22：`dashboard_realtime.py::realtime_update` 接进
+  `cpt/web/__main__.py:572` 的 `_RealtimeProvider._cached_snapshot`，容量 8 的 `(symbol, interval_ms)` LRU；
+  仍是 HTTP 轮询 + 缓存命中，**不是真的 SSE 推流**）。
 
 ## Phase 5：研究模式 P1
 
-- 级别递归树；
+- 级别递归树（✅ R22：`dashboard_levels.py::level_tree` 接进 `dashboard_snapshot_v2.py:48`
+  → `snapshot.level_tree`，并另有 `GET /api/dashboard/levels`；前端 `renderLevelTree()` 优先读后端，
+  后端不可用时**回退**到从 `snapshot.overlays` 现算，`ul[data-source=backend|overlays]` 标注来源）；
 - 事件前后状态对比；
 - 配置字段 diff；
 - 回放与引擎内部状态；
-- 数据质量报告；
+- 数据质量报告（✅ R22：`dashboard_quality.py::quality_report` 接进 `dashboard.py:140 _data_quality`，
+  两条活路径都过；`data_quality` 由 4 键扩为 9 键，新增 severity/gap_count/out_of_order_count/gaps/out_of_order）；
 - localStorage 本地注释（✅ R21：`dashboard.js:1113/1119` setItem/getItem 已实现）；
 
 本地注释不进入数据集、不影响 hash、不修改结构数据。
 
 ## Phase 6：研究模式 P2 与最终验收
 
-- 一买统计；
-- alert→confirmed 转化率；
-- invalidated 原因分布；
-- 双数据集同步对比（✅ R21：`_attach_dual_compare` 直连东财 `push2.eastmoney.com`，比 CPT 本地 vs 实时）；
-- 时间范围切片导出。
+- 一买统计（✅ R22：`dashboard_stats.py::signal_statistics` 接进 `GET /api/dashboard/signal-stats`，
+  数据源 `signal_event_store.py::load_signal_events` 读 `public.cpt_signal_event` 的**状态跃迁事件**）；
+- alert→confirmed 转化率（✅ R22：同一路由的 `alert_to_confirmed_rate`；
+  **口径必须自报** —— 响应带 `"basis": "signal_event_transitions"`，因为这是"事件流里的转化率"，
+  不是"当前若干只票的状态"）；
+- invalidated 原因分布（✅ R22：同一路由的 `invalidated_count`；**降级**：无 psycopg/无库时
+  返回 `{"available": false, "reason": "signal_history_unavailable"}`，不假装是 0）；
+- 双数据集同步对比（✅ R21：`_attach_dual_compare` 直连东财 `push2.eastmoney.com`，比 CPT 本地 vs 实时。
+  ⚠️ **这与 `dashboard_multi_run.py::align_runs` 不是同一件事** —— 后者比的是**本进程内两次 run 的快照**，
+  R22 接进 `GET /api/dashboard/multi-run?run_ids=a,b,c`（2–5 个），输出
+  `{run_count, timestamps, points[{open_time, run_0, run_1, ...}]}`，故本行两条并列，互不替代）；
+- 时间范围切片导出（✅ R22：`dashboard_export.py::slice_snapshot` 接进
+  `GET /api/dashboard/export?start_ms=&end_ms=`，前端「范围导出」面板加起止时间输入；
+  与 `docs/export-schema-v1.md` 的**数据集导出 schema v1 是两件事**，后者未动）。
 
 ## 后端代码框架
 
