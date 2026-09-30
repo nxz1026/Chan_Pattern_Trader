@@ -111,13 +111,13 @@ parity
 - 周期切换；
 - 多级别筛选；
 - MACD 副图；
-- 收盘倒计时；
+- 收盘倒计时（✅ R21：`_attach_close_countdown` 接 `public.trade_calendar`）；
 - 当前信号状态。
 
 ## Phase 4：盯盘模式 P1
 
 - 信号历史列表；
-- 信号到达提醒；
+- 信号到达提醒（✅ R21：`_attach_signal_change` 检测 status 变化，前端弹 ⚡ 通知）；
 - 多交易对；
 - 最新价线；
 - 成交额；
@@ -140,7 +140,7 @@ parity
 - 一买统计；
 - alert→confirmed 转化率；
 - invalidated 原因分布；
-- 双数据集同步对比；
+- 双数据集同步对比（✅ R21：`_attach_dual_compare` 直连东财 `push2.eastmoney.com`，比 CPT 本地 vs 实时）；
 - 时间范围切片导出。
 
 ## 后端代码框架

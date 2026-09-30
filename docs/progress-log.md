@@ -1984,4 +1984,25 @@ hfq 被调连续（002594 `raw -67%` / `hfq ±0`）；腾讯退化 = raw 正常�
 7. **ruff format 中文注释对齐**：ruff check 不检格式，`ruff format --check` 才检；CI 绿但本地 `ruff check` 全绿不等于 CI 全绿，务必跑 `ruff format --check`
 8. **akshare API 字段变更**：`stock_hot_rank_detail_em` 在新版 API 下发 `Length mismatch` 异常，绕过 akshare 直连 `emappdata.eastmoney.com/stockrank/getHisList`，按新字段名 `calcTime` / `rank` 入库
 
-### 七、仍未做
+### 八、R21 三项 gap 回填（收盘倒计时 / 信号到达提醒 / 双数据集同步对比）
+
+**后端**（`cpt/application/a_share_snapshot.py`，+215 行）：
+- `_attach_close_countdown(snapshot, client)` — 接 `public.trade_calendar`，查当日 `is_open` + `date`，算距 15:00 秒数；非交易日 / 收盘后 / 查询失败 → `available=False`；输出 `{available, is_open, seconds_to_close, close_time, reason}`
+- `_attach_signal_change(snapshot, client)` — 查 `public.cpt_signal_event` 对比上一轮 status，变化时写 `summary.signal_changed=True` + `signal_change_type`（如 `structure_ready→confirmed`）
+- `_attach_dual_compare(snapshot, client)` — 直连 `push2.eastmoney.com` 拉东财实时行情（价格/涨跌幅），与 CPT 本地 candles 末笔 close 比偏差；无 akshare 依赖，纯 `urllib`；输出 `{available, cpt_close, realtime_price, divergence_pct, source}`
+
+**前端**（`dashboard/dashboard.js` + `dashboard/index.html`）：
+- 倒计时：`[data-testid=close-countdown]` 优先用 `snapshot.closeCountdown`（A 股模式），回退到 K 线间隔（加密模式）
+- 信号变化：`renderSignalHistory` 内检测 `summary.signal_changed` → 弹 `⚡ 信号状态变化: ${changeType}`
+- 双数据集：新增 `[data-testid=dual-compare]` 面板，显示 CPT 收盘价 / 东财实时价 / 偏差百分比
+
+**测试**（`tests/test_ashare_snapshot_extras.py`，14 条全绿）：覆盖 trade day / not trade day / calendar unknown / before open / during hours / after close / no signal / status changed / unchanged / fetch failure / price format (分→元) / pct format (百分之一→百分之一) / cpt close fallback
+
+**门禁**：pytest **511 passed, 29 skipped**；ruff check / format / mypy / vulture 0 告警全绿
+
+**roadmap 更新**（`docs/dashboard-product-roadmap.md`）：
+- Phase 3 P0「收盘倒计时」→ ✅ R21
+- Phase 4 P1「信号到达提醒」→ ✅ R21
+- Phase 6 P2「双数据集同步对比」→ ✅ R21
+
+### 九、仍未做

@@ -265,6 +265,9 @@ def build_ashare_snapshot(
     _attach_factor_fetch(snapshot, outcome)
     _attach_ashare_tags(snapshot, tags_audit)
     _attach_t_plus_one(snapshot, active_client)
+    _attach_close_countdown(snapshot, active_client)
+    _attach_signal_change(snapshot, active_client)
+    _attach_dual_compare(snapshot, code, active_client)
     return snapshot
 
 
@@ -477,6 +480,159 @@ def _apply_daily_tags(
 def _attach_ashare_tags(snapshot: dict[str, Any], audit: dict[str, Any]) -> None:
     """把审计块塞进 ``data_quality``（与 :func:`_attach_factor_fetch` 同款，零 schema 变更）。"""
     snapshot.setdefault("data_quality", {})["ashare_tags"] = audit
+
+
+def _attach_close_countdown(snapshot: dict[str, Any], client: Any) -> None:
+    """计算距 A 股收盘秒数（15:00），接 ``public.trade_calendar``。
+
+    非交易日 / 收盘后 / 查询失败 → ``available=False``，前端隐藏倒计时。
+    """
+    import datetime as _dt
+
+    today = _dt.date.today()
+    try:
+        getter = getattr(client, "_get_conn", None)
+        conn = getter() if callable(getter) else None
+        if conn is None:
+            raise RuntimeError("no db conn")
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT is_open FROM public.trade_calendar WHERE date = %s",
+                (today.isoformat(),),
+            )
+            row = cur.fetchone()
+        if row is None or not row[0]:
+            snapshot["close_countdown"] = {
+                "available": False,
+                "reason": "not_a_trade_day" if row is not None else "calendar_unknown",
+            }
+            return
+        now = _dt.datetime.now()
+        close_time = now.replace(hour=15, minute=0, second=0, microsecond=0)
+        remaining = max(0, int((close_time - now).total_seconds()))
+        snapshot["close_countdown"] = {
+            "available": True,
+            "seconds_to_close": remaining,
+            "close_time": "15:00:00",
+            "is_open": remaining > 0,
+        }
+    except Exception as exc:  # noqa: BLE001
+        _LOG.debug("收盘倒计时查询失败 %s: %s", snapshot.get("market", {}).get("symbol"), exc)
+        snapshot["close_countdown"] = {
+            "available": False,
+            "reason": "countdown_check_failed",
+        }
+
+
+def _attach_signal_change(snapshot: dict[str, Any], client: Any) -> None:
+    """检测 signal status 跨轮询变化 → 写 ``summary.signal_changed`` / ``signal_change_type``。
+
+    前端据此弹「信号到达/变化」提醒。无 signal 或无变化 → ``signal_changed=False``。
+    """
+    signal = snapshot.get("signal")
+    if not isinstance(signal, dict) or not signal.get("status"):
+        snapshot["summary"]["signal_changed"] = False
+        snapshot["summary"]["signal_change_type"] = None
+        return
+    try:
+        getter = getattr(client, "_get_conn", None)
+        conn = getter() if callable(getter) else None
+        if conn is None:
+            raise RuntimeError("no db conn")
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT status FROM public.cpt_signal_event
+                WHERE signal_id = %s
+                ORDER BY event_time DESC LIMIT 1
+                """,
+                (signal.get("signal_id", ""),),
+            )
+            row = cur.fetchone()
+        prev_status = row[0] if row else None
+        cur_status = signal.get("status")
+        changed = prev_status is not None and prev_status != cur_status
+        snapshot["summary"]["signal_changed"] = changed
+        if changed:
+            snapshot["summary"]["signal_change_type"] = f"{prev_status}→{cur_status}"
+        elif prev_status is None:
+            snapshot["summary"]["signal_change_type"] = "new"
+        else:
+            snapshot["summary"]["signal_change_type"] = None
+    except Exception as exc:  # noqa: BLE001
+        _LOG.debug("信号变化检测失败 %s: %s", snapshot.get("market", {}).get("symbol"), exc)
+        snapshot["summary"]["signal_changed"] = False
+        snapshot["summary"]["signal_change_type"] = None
+
+
+def _attach_dual_compare(snapshot: dict[str, Any], code: str, client: Any) -> None:
+    """双数据集同步对比：CPT 本地 vs 东财实时行情（直连 eastmoney，无 akshare 依赖）。
+
+    比较最新收盘价 / 成交量 / 最高 / 最低。东财不可用时降级为 unavailable。
+    """
+    import json as _json
+    import urllib.request as _url
+    from urllib.error import URLError as _URLError
+
+    prefix = "1" if code.startswith(("6", "9")) else "0"
+    secid = f"{prefix}.{code[:6]}"
+    fields = "f43,f44,f45,f46,f47,f48,f57,f58,f60,f170"
+    url = (
+        f"https://push2.eastmoney.com/api/qt/stock/get"
+        f"?secid={secid}&fields={fields}&_={int(__import__('time').time() * 1000)}"
+    )
+    try:
+        req = _url.Request(
+            url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}
+        )
+        with _url.urlopen(req, timeout=5) as resp:
+            data = _json.loads(resp.read().decode())
+        d = data.get("data") or {}
+        if not d or d.get("f43") is None:
+            raise ValueError(f"东财返回空数据: {data}")
+
+        # 价格单位：分 → 元（f43/f44/f45/f46/f60）；涨跌幅单位：百分之一（f170）
+        def _c(v: Any) -> float | None:
+            return float(v) / 100 if v is not None and v != "-" else None
+
+        def _pct(v: Any) -> float | None:
+            return float(v) / 100 if v is not None and v != "-" else None
+
+        realtime = {
+            "price": _c(d.get("f43")),
+            "high": _c(d.get("f44")),
+            "low": _c(d.get("f45")),
+            "open": _c(d.get("f46")),
+            "volume": float(d["f47"]) if d.get("f47") and d["f47"] != "-" else None,
+            "turnover": float(d["f48"]) if d.get("f48") and d["f48"] != "-" else None,
+            "prev_close": _c(d.get("f60")),
+            "change_pct": _pct(d.get("f170")),
+        }
+        candles = snapshot.get("candles", [])
+        last_close = float(candles[-1].get("close") or 0) if candles else 0.0
+        snapshot["dual_compare"] = {
+            "available": True,
+            "cpt_close": last_close,
+            "realtime_price": realtime["price"],
+            "divergence_pct": (
+                round((realtime["price"] - last_close) / last_close * 100, 4)
+                if last_close > 0 and realtime["price"] is not None
+                else None
+            ),
+            "realtime": realtime,
+        }
+    except (_URLError, ValueError, KeyError, TypeError) as exc:
+        _LOG.debug("双数据集对比失败 %s: %s", code, exc)
+        snapshot["dual_compare"] = {
+            "available": False,
+            "reason": "realtime_unavailable",
+        }
+    except Exception as exc:  # noqa: BLE001
+        _LOG.debug("双数据集对比未知错误 %s: %s", code, exc)
+        snapshot["dual_compare"] = {
+            "available": False,
+            "reason": "realtime_error",
+        }
 
 
 def _attach_t_plus_one(snapshot: dict[str, Any], client: Any) -> None:

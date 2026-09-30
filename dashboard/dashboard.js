@@ -493,10 +493,36 @@
       );
     }
     const countdownNode = q("[data-testid=close-countdown]");
-    if (countdownNode && last) {
-      const interval = num(market.interval_ms) || 300000;
-      const remaining = Math.max(0, last.openTime + interval - Date.now());
-      countdownNode.textContent = `${Math.floor(remaining / 60000)}m ${Math.floor((remaining % 60000) / 1000)}s`;
+    if (countdownNode) {
+      const cc = snapshot.closeCountdown;
+      if (cc && cc.available && cc.is_open) {
+        const mins = Math.floor(cc.seconds_to_close / 60);
+        const secs = cc.seconds_to_close % 60;
+        countdownNode.textContent = `${mins}m ${secs}s`;
+        countdownNode.title = `距 A 股收盘 (${cc.close_time})`;
+      } else if (cc && !cc.available) {
+        countdownNode.textContent = "—";
+        countdownNode.title = cc.reason === "not_a_trade_day" ? "今日非交易日" : "收盘倒计时不可用";
+      } else if (last) {
+        const interval = num(market.interval_ms) || 300000;
+        const remaining = Math.max(0, last.openTime + interval - Date.now());
+        countdownNode.textContent = `${Math.floor(remaining / 60000)}m ${Math.floor((remaining % 60000) / 1000)}s`;
+        countdownNode.title = "距下一根 K 线";
+      }
+    }
+    // 双数据集对比（R21 Phase 6 P2）
+    const dualSection = q("[data-testid=dual-compare]");
+    if (dualSection) {
+      const dc = snapshot.dualCompare;
+      if (dc && dc.available) {
+        dualSection.hidden = false;
+        setText("[data-testid=dual-cpt-close]", dc.cpt_close ? formatPrice(dc.cpt_close) : "—");
+        setText("[data-testid=dual-realtime-price]", dc.realtime_price ? formatPrice(dc.realtime_price) : "—");
+        const div = dc.divergence_pct;
+        setText("[data-testid=dual-divergence]", div === null ? "—" : `${div >= 0 ? "+" : ""}${div.toFixed(2)}%`);
+      } else {
+        dualSection.hidden = true;
+      }
     }
     const previous = candles.length > 1 ? candles[candles.length - 2] : null;
     const trendDirection = last && previous ? (last.close > previous.close ? 1 : last.close < previous.close ? -1 : 0) : 0;
@@ -963,6 +989,14 @@
     const row = document.createElement("p");
     row.textContent = `${signal.signal_id || "signal"} · ${signal.status || "none"} · ${signal.divergence_status || "—"}`;
     section.appendChild(row);
+    // 信号变化提醒（R21 Phase 4 P1）
+    const changeType = snapshot && snapshot.summary && snapshot.summary.signal_change_type;
+    if (snapshot && snapshot.summary && snapshot.summary.signal_changed && changeType) {
+      const note = document.createElement("p");
+      note.className = "signal-change-note";
+      note.textContent = `⚡ 信号状态变化: ${changeType}`;
+      section.appendChild(note);
+    }
   }
 
   function renderParityCharts(snapshot) {
