@@ -1803,13 +1803,101 @@ R18 收尾后的 6 项队列，按「一件一件来」的约定推进；本轮�
   万科Ａ，而它恰在人气榜 rank 2 → `_merge_sources` 按 `sources[0]` 归入 hot 组，
   同时保留双标签 `sources: ['hot_rank', 'strategy']`。去重合并的正确行为。
 
-### 五、仍未做
+### 五、⑤ `dashboard_runs` —— 注入点放在 HTTP 响应层 · `bad8d37`
 
-- ⑤ `dashboard_runs` 数据源：**待拍板**建表落库 vs 内存环形缓冲。附带已发现的字段名
-  不一致：`dashboard_runs.py:31` 输出 `generated_at`，前端 `dashboard.js:836` 读
-  `entry.created_at` —— 接上时间戳也永远空白。
-- `asel.ref_adjust_factor` 全 1.0：**待拍板**回填范围。根因已锁定为表结构与脚本预期
-  不符（只有 3 列、`hfq_factor` 列默认值 1.0，而脚本按含 `source`/`source_url`
-  写 → `UndefinedColumn`），338 万行是建表时灌的占位。数据源已实测正常
-  （腾讯 fqkline：600519 raw 1240.31 / hfq 7930.73 → 真值 **6.394**）。
+拍板：数据源 = **内存环形缓冲**（不建表落库）。理由：6 处生产调用点里 realtime 每
+30s 一轮，落库即 2,880 行/天的低价值流水，而 realtime 进程 systemd 常驻、内存
+本就在。
+
+**第一版（写进领域层）被真库测试推翻并整体回退**。`build_dashboard_snapshot_v2`
+里加 `runs_limit` + `record_run(v2)` + `v2["runs"]`，单测 8 条全绿，但
+`tests/test_web_a_share.py:106 test_provider_caches_snapshot_within_ttl` 红：
+`AssertionError: assert s1 == s2`。根因不是 TTL 逻辑坏了，而是 ring 累积使第二次
+调用的 `runs` 多一条；`tests/test_dashboard_snapshot_v2.py:25` 的
+`assert snapshot["runs"] == []` 同样红。
+
+**这不是能靠调参解决的矛盾**：`runs` 挂在 snapshot 本体上，固定窗口和含墙钟时间戳
+（`as_of_ms = int(datetime.now(UTC).timestamp()*1000)` 每次都变）两种口径都会破坏
+「同输入同输出」——而那正是 A 股 provider 缓存的契约。**解法 = 注入点移到 HTTP
+响应层**：领域层纯函数保持确定性，HTTP 响应里 `runs` 有真历史，前端零改动（实测
+前端从不 fetch `/api/dashboard/runs`，只读 `snapshot.runs`）。
+
+- `cpt/application/dashboard_runs.py`：`RUN_RING_SIZE = 50`（30s/轮 ≈ 25 分钟）、
+  `_RUN_RING: deque[dict[str, Any]]`、新增 `record_run` / `_same_run` /
+  `recent_runs`（倒序）/ `clear_runs`。
+- `cpt/web/app.py`：模块级 `_with_run_index(payload)`（`if "market" not in payload`
+  时不注入 —— `/api/dashboard/reproducibility` 等子字段响应没有 market），主出口与
+  A 股出口各包一层；`/api/dashboard/runs` 改读 ring。
+- 顺带修的字段名不一致：`dashboard_runs.py` 一直出 `generated_at`、前端一直读
+  `created_at`，因为 runs 恒空从未暴露。现在**两个字段同值双写**，前端以
+  `generated_at` 为主、`created_at` 兜底。
+- `created_at` 还得兜底墙钟：A 股 runtime 只有 `as_of_ms`、没有 `generated_at`
+  （`a_share_snapshot.py:225-231`），不兜底则该行永远空白。
+- 去重：realtime 30s 内十几次请求命中同一份缓存 snapshot，`(run_id, dataset_hash)`
+  相同则不追加，否则「一次运行」被记成十几条。
+- 守门用例改为**全部打真 HTTP server**（`tests/conftest.py::served`），10 条，含
+  `test_domain_layer_snapshot_stays_deterministic` 把「领域层不得混入进程级状态」
+  钉死。**守门力实测**：还原成未接线版 → 8 failed, 2 passed。
+
+### 六、`asel.ref_adjust_factor` 六列补齐 + 腾讯 hfq 退化防护 · `dd46a2b`
+
+拍板：补 `source`/`source_url` 等六列（不改脚本适配 3 列）；回填范围 = **A 股全量
+5,222 只**。
+
+**危害已从「可能不准」升级为「确定画错」**：338 万行全 1.0 = 全库全票全历史画的都是
+不复权价，600519 图上 1235 元 vs 后复权约 7930 元（**差 6.4 倍**），而
+`wind_source.py:22-24` 的注释明说本地库口径是后复权 —— 设计意图就是后复权，现在是
+坏的。除权假跳空本身影响有限（300750 近 320 日最大口径差 1.57%）。
+
+**补列有理据（不是新设计）**：列当年存在过、表被重建时丢了 ——
+`progress-log:1402` 记「`asel.ref_adjust_factor.source` 7,200 行迁移 ✅」、
+`docs/handoff-20260925-leftover-fixes.md:232` 有
+`UPDATE ... SET source='tx:fqkline' WHERE source='tencent_fqkline'`。本仓**没有任何
+`.sql` 迁移文件**（脚本注释引用的 `migrations/0002_p0_reference.sql` 不存在），
+所以补一个幂等迁移文件 `scripts/migrations/2026-09-30_r20_factor_columns.sql`
+（`ADD COLUMN IF NOT EXISTS` × 6），**已实跑执行**；行数仍 3,388,417，不回填数据，
+`source IS NULL` 即「补列前写入、来源不可考」。
+
+**腾讯 hfq 会整根退化（2026-09-30 实测扫 40 只票，15 只中招）**，两种形态：
+hfq 那根与 raw **逐字相同**（300750 factor=1.0000）；hfq 那根比值乱成量级错误
+（000002 因子 115.08、600276 29.46、300059 32.18）。判据用**方向**不用幅度：
+`_looks_degenerate(raw_ret, hfq_ret, tol)` = `abs(hfq_ret) > abs(raw_ret) + tol`。
+脏日**不推进锚点**，否则下一个好日会拿脏值当基准被连坐判脏。
+
+**第一版判据「因子比值跳变 > 15%」被实测证伪**：002594 在 2025-07-29 真送转，
+比值 3.0355（**跳 203.55%**），比任何脏数据都狠。真除权与脏数据在幅度上重叠，任何
+单阈值都必然在漏脏与误伤除权之间二选一。方向上两者相反且稳定：真除权 = raw 假跳空、
+hfq 被调连续（002594 `raw -67%` / `hfq ±0`）；腾讯退化 = raw 正常、hfq 单根崩
+（300750 `raw +1.10%` / `hfq -47.87%`）。两侧同步是停牌复牌，因子照旧正确。
+`MAX_FACTOR_RATIO_JUMP = 0.15` 语义变成**容差带**（卡在 A 股涨跌停 10/20% 之上）。
+
+**同时修掉三处会让全量回填静默空转的 drift**：
+
+1. `list_all_a_codes` 查 `asel.daily_bar_raw` —— 该表不存在（实跑
+   `UndefinedTable`），真表是 `public.daily_bar`。
+2. `fetch_tx_factor_rows` 自带一份 `h/r` 循环，只保护了 `r == 0`，挡不住上面的腾讯
+   退化 → 收口到 `build_factor_rows`，脏数据防护只剩一处实现。
+3. 增量过滤用 `trade_date > max(trade_date)`，而 `max` 已是 2026-09-29 → 腾讯返回的
+   801 天**全被过滤掉**，脚本打「新增 0 行」并返回 0，看着像成功。改为按
+   `unverifiable_dates()`（判据 `source IS NULL`）覆盖。
+
+**两个反直觉的口径选择**：不能按 `hfq_factor = 1.0` 判占位（真除权因子恰好 1.0 的
+日子合法，且从没除过权的票因子恒为 1.0 会被误判反复回填）；也不能只补最近 30 天
+（因子乘在 OHLC 上，窗口边界会造出 1.0 → 6.39 的**假跳空**，比全表 1.0 危害更大）。
+实测全库 `source IS NULL` = 3,388,417 行 / 5,222 code。
+
+网络失败加退避（`--retries`，默认 3，退避 5/10/20s）：腾讯按 IP 限流返回
+`HTTP 501 Not Implemented`，换 UA / 加 Referer 均无效，而同时 `qt.gtimg.cn` 快照
+端点 200 → **限流是按端点的**；且限流是全局的，原地重试无意义，改为退避后跳过
+本轮、由 `--mode incremental` 统一补。
+
+- 验收：pytest **467 passed, 29 skipped**（450 → 467，+17）；ruff check /
+  format(138 files) / mypy(66 source) / lint-imports(3 kept, 0 broken) / vulture
+  0 告警全绿。**守门力实测**：`_looks_degenerate` 改成 `return False` → 5 failed,
+  36 passed，且两条反向用例（真送转、同步跳变）保持绿 —— 不是靠滥杀取胜。
+
+### 七、仍未做
+
+- **全量 5,222 只因子回填未实跑**：本机 IP 已被腾讯限流（`HTTP 501`，持续中），
+  迁移与防护已就位、待限流恢复后执行 `--mode full`。
 - 前端 `ashare:` 前缀渲染（虚线/降透明）—— 奎爷 2026-09-30 拍板**暂停**。
