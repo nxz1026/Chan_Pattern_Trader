@@ -2005,4 +2005,12 @@ hfq 被调连续（002594 `raw -67%` / `hfq ±0`）；腾讯退化 = raw 正常�
 - Phase 4 P1「信号到达提醒」→ ✅ R21
 - Phase 6 P2「双数据集同步对比」→ ✅ R21
 
-### 九、仍未做
+### 九、CI 修复（vulture whitelist 补 StructureEvent 字段）
+
+**问题**：vulture 2.14 对 `cpt/domain/models.py` 的 `StructureEvent` dataclass 字段（`event_type` / `revision` / `occurred_at`）报 60% 置信度「未使用」，CI 门禁失败。
+
+**修复**：`whitelist.py` 补 3 条白名单条目（与 `first_seen_at` / `confirmed_at` / `invalidated_at` 同属 dataclass 字段类）。
+
+**门禁**：vulture exit 0，CI 全绿（commit `ef5682c`）。
+
+### 十、仍未做

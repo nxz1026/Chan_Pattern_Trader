@@ -131,7 +131,7 @@ parity
 - 配置字段 diff；
 - 回放与引擎内部状态；
 - 数据质量报告；
-- localStorage 本地注释。
+- localStorage 本地注释（✅ R21：`dashboard.js:1113/1119` setItem/getItem 已实现）；
 
 本地注释不进入数据集、不影响 hash、不修改结构数据。
 
@@ -152,7 +152,6 @@ cpt/domain/inspector.py
 cpt/application/dashboard_snapshot.py
 cpt/application/dashboard_runs.py
 cpt/application/dashboard_inspector.py
-cpt/application/dashboard_parity.py
 cpt/application/dashboard_reproducibility.py
 cpt/web/app.py                 # 有 HTTP 需求后再引入
 ```

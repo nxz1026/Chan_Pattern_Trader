@@ -26,7 +26,6 @@
 - **B3 逐根检查器接后端 inspect 端点**：调用 `trace_containment` 产出 `containment_chain`（决策 + resulting_high/low + direction），非手工常量；
 - merged bar 和 containment decision 溯源；
 - source_ids 结构树；
-- parity summary、CPT/Oracle 双 SVG 逐元素对比和差异选择定位；
 - dataset/config/rules/schema/engine 复现信息；
 - snapshot 字段 diff 和多运行 open_time 对齐（`config_compare` 由 `compare_configs(default, current)` 注入）；
 - 信号历史；
@@ -52,29 +51,27 @@
 - Dashboard 始终只读；
 - 不提供下单、撤单、账户、持仓、盘口或结构写入；
 - 不在浏览器复制 Binance HTTP 逻辑；
-- oracle 只作为独立参考实现，不视为绝对正确答案；无 oracle 数据时 parity 显式 `available: false`，不再假装 0% 匹配（A2）；
 - 本地研究注释不改变原始 snapshot、dataset hash 或结构数据。
 
 ## 自动化验收
 
 ```text
 pytest tests -q -rs
-ruff check cpt tests scripts/compare_oracle.py
-ruff format --check cpt tests scripts/compare_oracle.py
-mypy cpt
-import-linter lint --config .importlinter
+ruff check cpt tests scripts
+ruff format --check cpt tests scripts
+mypy cpt scripts
+lint-imports
 node --check dashboard/dashboard.js
 git diff --check
-vulture cpt scripts/compare_oracle.py --min-confidence 80 \
-    --exclude 'cpt/web/app.py:77'
+vulture cpt --min-confidence 60 whitelist.py
 ```
 
-验收结果：全部通过；当前测试总数 160 passed，vulture 仅命中 `cpt/web/app.py:77`（`BaseHTTPRequestHandler.log_message` 标准签名，保留）。
+验收结果：全部通过；当前测试总数 **511 passed, 29 skipped**，vulture 0 告警（whitelist.py 逐条登记）。
 
 ## 已知边界
 
 - 多级别真实叠加已通过递归链（classify_trend → map_trend_types → detect_fractals → build_bis/build_zhongshus）端到端跑通；最小级别由 `RulesConfig.levels[0]` 驱动，高级级别是递归链产出（target_level 由调用方传入）。默认 `RulesConfig.levels = (5, 30)` → 多级别返回 `{5: {...}, 30: {...}}`。
-- HTTP adapter 现提供 snapshot、health、reproducibility、parity、runs、market-24h、engine-state、inspect 八组只读 GET 路由；snapshot 支持 `level` 查询参数触发多级别重算。
+- HTTP adapter 现提供 snapshot、health、reproducibility、runs、market-24h、engine-state、inspect 七组只读 GET 路由；snapshot 支持 `level` 查询参数触发多级别重算。
 - 已安装 Chromium 153.0.8010.12 ARM64 至 `$HOME/.local/bin/chromium`；真实 headless dump-dom smoke 已通过。
-- vulture 已接入 GitHub Actions CI（min-confidence 80）；dead-code 审计进入持续门禁。
+- vulture 已接入 GitHub Actions CI（min-confidence 60，whitelist.py 逐条登记）；dead-code 审计进入持续门禁。
 - `cpt/llm/` 死代码已删除（审计 A1 处置）；架构文档保留 LLM 层蓝图但标注"预留，未实现"。
