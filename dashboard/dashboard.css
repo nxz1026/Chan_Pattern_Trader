@@ -885,11 +885,39 @@ button {
   color: var(--color-text-faint);
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
+  white-space: nowrap;
+  flex: 0 0 auto;
 }
 
 .quality-list li > span:last-child {
   color: var(--color-text);
   font-family: var(--font-mono);
+  min-width: 0;
+  text-align: right;
+  /* reason 形如 no_factor_fetch_failed:network：无空格且很长，必须允许任意位置断行，
+     否则单列宽度兜不住会溢出并与相邻项视觉重叠（实测截图踩到）。 */
+  overflow-wrap: anywhere;
+}
+
+/* 长文本项（质量原因 / 因子获取）：占满两列，留出断行空间 */
+.quality-list li.quality-wide {
+  grid-column: 1 / -1;
+}
+
+/* T+1 日历：A 股专属，加密模式由 JS 置 hidden 整行隐藏。
+   可买沿用「涨」色、不可买沿用「跌」色（与 --color-up/--color-down 同口径，
+   仓内没有 --color-signal-buy/sell 这两个 token）。 */
+.quality-list li.t-plus-one[data-state="ok"] > span:last-child {
+  color: var(--color-up);
+}
+
+.quality-list li.t-plus-one[data-state="blocked"] > span:last-child {
+  color: var(--color-down);
+}
+
+/* 查询区间：未成功时标红（复用既有 alert 语义色） */
+.quality-list li.range-query[data-state="blocked"] > span:last-child {
+  color: var(--color-alert);
 }
 
 /* 质量标志：布尔值由 dashboard.js 写入 data-state="true"/"false" */
@@ -976,6 +1004,40 @@ button {
   border-radius: var(--radius-sm);
   background-color: var(--color-confirmed-bg);
   color: var(--color-confirmed);
+}
+
+/* 结构预警：笔序列跌破前低（A 股专属，加密模式由 JS 置 hidden）。
+   配色沿用仓库既有的 alert 三件套 --color-alert / -bg / -border
+   （没有 --color-warn / --color-warn-text 这两个 token）。 */
+.structural-alert {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-width) solid var(--color-alert-border);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-alert-bg);
+  color: var(--color-alert);
+  font-size: var(--font-size-sm);
+}
+
+.structural-alert .alert-icon {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  background-color: var(--color-alert-border);
+  color: var(--color-bg);
+  font-weight: 700;
+  font-size: var(--font-size-xs);
+}
+
+.structural-alert .alert-text {
+  color: var(--color-alert);
 }
 
 .chart-shell {
@@ -1165,6 +1227,60 @@ body[data-runtime-mode="offline"] .chart-canvas::after {
 
 .kv dd[data-state="true"] {
   color: var(--color-alert);
+}
+
+/* ---- Phase B1/B2：数据源与运行状态面板 ---- */
+
+/* health 三态：复用既有 confirmed/alert/dim 语义色（仓内没有 --color-warn） */
+.source-panel .kv dd[data-state="ok"] {
+  color: var(--color-confirmed);
+}
+
+.source-panel .kv dd[data-state="blocked"] {
+  color: var(--color-alert);
+}
+
+.source-panel .kv dd[data-state="unknown"] {
+  color: var(--color-text-dim);
+}
+
+.source-panel .source-list {
+  list-style: none;
+  margin: var(--space-2) 0 0;
+  padding: 0;
+  display: grid;
+  gap: 6px;
+}
+
+.source-panel .source-list li {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--space-2);
+  padding: 6px 8px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  overflow-wrap: anywhere;
+}
+
+.source-panel .source-list li > .source-title {
+  color: var(--color-text);
+}
+
+.source-panel .source-list li > .source-meta {
+  color: var(--color-text-dim);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  text-align: right;
+}
+
+.source-panel .source-list li[data-state="unavailable"] .source-meta,
+.source-panel .source-list li[data-state="degraded"] .source-meta {
+  color: var(--color-alert);
+}
+
+.source-panel .source-list li[data-state="empty"] {
+  justify-content: flex-start;
+  color: var(--color-text-faint);
 }
 
 /* -------------------------------------------------------- event panel */

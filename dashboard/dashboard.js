@@ -61,6 +61,23 @@
     first_sell: "一卖信号",
   };
 
+  /* ---- Phase A1：range.reason 中文映射（历史区间查询失败原因） ---- */
+  const RANGE_REASON_LABELS = {
+    range_too_short: "区间过短（不足 3 根 K 线）",
+    upstream_range_unavailable: "上游区间数据不可用",
+  };
+
+  /* ---- Phase B1/B2：数据源探活面板文案 ---- */
+  // probe.status 中文映射（数据源探活）
+  const PROBE_STATUS_LABELS = {
+    ok: "可用",
+    degraded: "降级",
+    unavailable: "不可用",
+    skipped: "已跳过",
+  };
+  // source.role 中文映射
+  const SOURCE_ROLE_LABELS = { primary: "主通道", fallback: "兜底", local: "本地库" };
+
   function statusLabel(status) {
     return STATUS_LABELS[status] || STATUS_LABELS.none;
   }
@@ -520,6 +537,66 @@
     setState(setText("[data-testid=data-quality-stale]", stale ? "true" : "false"), stale ? "true" : "false");
     setState(setText("[data-testid=data-quality-gap]", gap ? "true" : "false"), gap ? "true" : "false");
 
+    const reason = quality.reason;
+    setText("[data-testid=data-quality-reason]", typeof reason === "string" && reason ? reason : "—");
+    const factorFetch = isObject(quality.factor_fetch) ? quality.factor_fetch : null;
+    if (factorFetch) {
+      const fetched = factorFetch.fetched === true;
+      const rows = factorFetch.rows != null ? `${factorFetch.rows} 行` : "";
+      const reasonSuffix = typeof factorFetch.reason === "string" ? ` (${factorFetch.reason})` : "";
+      setText("[data-testid=data-quality-factor-fetch]", fetched ? `已获取 ${rows}`.trim() : `未获取${reasonSuffix}`);
+    } else {
+      setText("[data-testid=data-quality-factor-fetch]", "—");
+    }
+
+    // T+1 交易日历（A 股专属）：快照未带上这一块时整行隐藏，加密模式不受影响。
+    const tPlusOne = isObject(snapshot) && isObject(snapshot.t_plus_one) ? snapshot.t_plus_one : null;
+    const tPlusOneNode = q("[data-testid=t-plus-one]");
+    if (tPlusOneNode) {
+      if (tPlusOne && tPlusOne.available !== undefined) {
+        tPlusOneNode.hidden = false;
+        const available = tPlusOne.available === true;
+        const today = typeof tPlusOne.today === "string" ? tPlusOne.today : null;
+        const nextDate = typeof tPlusOne.next_trade_date === "string" ? tPlusOne.next_trade_date : null;
+        const reason = typeof tPlusOne.reason === "string" ? tPlusOne.reason : "";
+        let statusText = available ? "今日可买" : "今日不可买";
+        if (today) statusText += `（${today}）`;
+        if (!available && nextDate) statusText += `，下一交易日 ${nextDate}`;
+        setText("[data-testid=t-plus-one-status]", statusText);
+        tPlusOneNode.dataset.state = available ? "ok" : "blocked";
+        tPlusOneNode.setAttribute("title", reason || "");
+      } else {
+        tPlusOneNode.hidden = true;
+      }
+    }
+
+    // 历史区间查询（replay/range 模式）：live 模式快照无 range 字段 → 整行隐藏。
+    const rangeInfo = isObject(snapshot) && isObject(snapshot.range) ? snapshot.range : null;
+    const rangeNode = q("[data-testid=range-query]");
+    if (rangeNode) {
+      const rangeStart = rangeInfo ? num(rangeInfo.start_ms) : null;
+      const rangeEnd = rangeInfo ? num(rangeInfo.end_ms) : null;
+      if (rangeInfo && rangeStart !== null && rangeEnd !== null) {
+        rangeNode.hidden = false;
+        const rangeAvailable = rangeInfo.available === true;
+        const rangeCount = rangeInfo.bar_count != null ? `（${rangeInfo.bar_count} 根）` : "";
+        const rangeReason =
+          typeof rangeInfo.reason === "string" && rangeInfo.reason
+            ? RANGE_REASON_LABELS[rangeInfo.reason] || rangeInfo.reason
+            : "";
+        let rangeText = `${formatDateTime(rangeStart)} → ${formatDateTime(rangeEnd)}${rangeCount}`;
+        if (!rangeAvailable && rangeReason) rangeText += ` · ${rangeReason}`;
+        setText("[data-testid=range-query-status]", rangeText);
+        rangeNode.dataset.state = rangeAvailable ? "ok" : "blocked";
+        rangeNode.setAttribute(
+          "title",
+          rangeAvailable ? "本次历史区间查询返回的 K 线区间" : `区间查询未成功：${rangeReason || "原因未知"}`,
+        );
+      } else {
+        rangeNode.hidden = true;
+      }
+    }
+
     const lastPrice = num(market.last_price);
     setText("[data-testid=market-last-price]", lastPrice === null ? "—" : formatPrice(lastPrice));
     const last = candles.length ? candles[candles.length - 1] : null;
@@ -650,6 +727,12 @@
         setConnection("live", `实时 snapshot（${candles.length} 根 K 线，binance_realtime）`);
       }
     }
+
+    // 结构预警（A 股专属）：summary.structural_alert = 笔序列首次跌破前低。
+    // 加密快照没有这个字段 → 恒为 false，横幅保持 hidden。
+    const summary = isObject(snapshot) && isObject(snapshot.summary) ? snapshot.summary : {};
+    const structuralAlert = summary.structural_alert === true;
+    setHidden("[data-testid=structural-alert]", !structuralAlert);
   }
 
   /* ---------------------------------------------------------- 结构面板填充 */
@@ -2027,9 +2110,48 @@
     volumeNode.appendChild(svg);
   }
 
+  // 后端预计算 MACD（snapshot.indicators.macd）优先。与后端 macd_series 同源，
+  // 避免前端重算的信号线 EMA 种子与后端口径不一致（面板标着 12/26/9 却和后端对不上）。
+  // 按 open_time 建索引：view.candles 可能是缩放窗口（甚至回放前缀），
+  // 而 indicators.macd 始终是全量序列，用下标对齐会错位。
+  function backendMacdSeries(view) {
+    const snapshot = view && view.snapshot;
+    const indicators = isObject(snapshot) && isObject(snapshot.indicators) ? snapshot.indicators : null;
+    const entries = indicators ? asArray(indicators.macd) : [];
+    if (!entries.length) return null;
+    const byOpenTime = new Map();
+    entries.forEach((entry) => {
+      if (!isObject(entry)) return;
+      const openTime = num(entry.open_time);
+      if (openTime !== null) byOpenTime.set(openTime, entry);
+    });
+    if (!byOpenTime.size) return null;
+    const dif = [];
+    const dea = [];
+    const histogram = [];
+    let matched = 0;
+    view.candles.forEach((bar) => {
+      const entry = byOpenTime.get(bar.openTime);
+      if (!entry) {
+        dif.push(null);
+        dea.push(null);
+        histogram.push(null);
+        return;
+      }
+      matched += 1;
+      dif.push(num(entry.macd));
+      dea.push(num(entry.signal));
+      histogram.push(num(entry.histogram));
+    });
+    // 一根都对不上说明这份 indicators 与当前 K 线不同源，宁可回退重算也不要画错。
+    if (!matched) return null;
+    return { dif, dea, histogram };
+  }
+
   function drawMacd(macdNode, view, macdHeight) {
     const closes = view.candles.map((bar) => bar.close);
-    const series = computeMacd(closes);
+    // 后端预计算优先；缺失（老快照 / demo fixture）时回退到前端重算，保证不空图。
+    const series = backendMacdSeries(view) || computeMacd(closes);
     if (!series) {
       appendNote(macdNode, "K 线不足或无 close 字段，跳过 MACD");
       macdNode.dataset.rendered = "false";
@@ -3366,6 +3488,122 @@
     root.dataset.canvas = state.canvas;
   }
 
+  /* ---- Phase B1/B2：数据源与运行状态面板 ---- */
+
+  /**
+   * 从 snapshot 地址推出看板 API 基址（与 ``market_a_share.js`` 的 ``aShareBase`` 同源推导）。
+   *
+   * **不能写死 ``/cpt/api/...``**：看板可挂在任意 nginx 前缀下（本地 ``/cpt/``、独立
+   * 服务在根路径），写死会在换前缀时静默 404。
+   */
+  function dashboardApiBase(snapshotUrl) {
+    const fallback = "/api/dashboard";
+    const raw = String(snapshotUrl || "");
+    const marker = "/api/dashboard";
+    const index = raw.indexOf(marker);
+    return index >= 0 ? raw.slice(0, index + marker.length) : fallback;
+  }
+
+  async function loadHealth() {
+    const base = dashboardApiBase(snapshotEndpoint());
+    let data = null;
+    try {
+      const response = await fetch(`${base}/health`, { headers: { Accept: "application/json" } });
+      if (response.ok) data = await response.json();
+    } catch (error) {
+      data = null;
+    }
+    const node = q("[data-testid=health-status]");
+    if (node) {
+      if (!isObject(data)) {
+        node.dataset.state = "unknown";
+        setText("[data-testid=health-status]", "无法获取");
+      } else {
+        const ok = data.ok === true;
+        const degraded = data.degraded === true;
+        node.dataset.state = ok && !degraded ? "ok" : "blocked";
+        setText("[data-testid=health-status]", ok && !degraded ? "正常" : degraded ? "已降级" : "异常");
+        setState(
+          setText("[data-testid=health-read-only]", data.read_only === true ? "是" : "否"),
+          data.read_only === true ? "true" : "false",
+        );
+        setState(
+          setText("[data-testid=health-degraded]", degraded ? "是" : "否"),
+          degraded ? "true" : "false",
+        );
+        const lastError = typeof data.last_error === "string" && data.last_error ? data.last_error : "";
+        const errorRow = q("[data-testid=health-error-row]");
+        if (errorRow) errorRow.hidden = !lastError;
+        if (lastError) setText("[data-testid=health-last-error]", lastError);
+      }
+    }
+    return data;
+  }
+
+  async function loadSources({ refresh = false } = {}) {
+    const base = dashboardApiBase(snapshotEndpoint());
+    const url = `${base}/sources${refresh ? "?refresh=1" : ""}`;
+    let data = null;
+    try {
+      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      if (response.ok) data = await response.json();
+    } catch (error) {
+      data = null;
+    }
+    const list = q("[data-testid=source-list]");
+    if (!list) return data;
+    const sources = data ? asArray(data.sources) : [];
+    if (!sources.length) {
+      // 保留空态占位；已有渲染结果时不要被一次瞬时失败清空。
+      if (!list.querySelector("[data-testid=source-item]")) {
+        setText("[data-testid=source-list-empty]", data ? "数据源列表为空" : "数据源探活失败（服务不可达）");
+      }
+      return data;
+    }
+    const items = sources.map((source) => {
+      const item = document.createElement("li");
+      item.dataset.testid = "source-item";
+      item.dataset.sourceId = String(source.id || "");
+      item.dataset.state = isObject(source.probe) ? String(source.probe.status || "") : "unknown";
+
+      const title = document.createElement("span");
+      title.className = "source-title";
+      title.textContent = source.label || source.id || "未知数据源";
+      item.appendChild(title);
+
+      const meta = document.createElement("span");
+      meta.className = "source-meta";
+      const role = SOURCE_ROLE_LABELS[source.role] || source.role || "";
+      const probe = isObject(source.probe) ? source.probe : null;
+      const statusLabel = probe ? PROBE_STATUS_LABELS[probe.status] || probe.status || "" : "未探测";
+      const latency = probe && num(probe.latency_ms) !== null ? `${Math.round(num(probe.latency_ms))}ms` : "";
+      const quota = source.quota === "wind" ? "消耗额度" : "";
+      meta.textContent = [role, statusLabel, latency, quota].filter(Boolean).join(" · ");
+      item.appendChild(meta);
+
+      const detail = probe && typeof probe.detail === "string" ? probe.detail : "";
+      const note = typeof source.note === "string" ? source.note : "";
+      item.title = [detail, note].filter(Boolean).join(" | ");
+      return item;
+    });
+    list.replaceChildren(...items);
+    return data;
+  }
+
+  function installSourcePanel() {
+    const refreshButton = q("[data-testid=source-refresh]");
+    if (refreshButton) {
+      refreshButton.addEventListener("click", () => {
+        refreshButton.disabled = true;
+        Promise.all([loadHealth(), loadSources({ refresh: true })]).finally(() => {
+          refreshButton.disabled = false;
+        });
+      });
+    }
+    loadHealth();
+    loadSources();
+  }
+
   function boot() {
     installRuntimeStyle();
     registerBuiltinCanvasA();
@@ -3382,6 +3620,7 @@
     ensureSelectionSection();
     installReplayControls();
     installTermGlossary();
+    installSourcePanel();
 
     if (typeof window.ResizeObserver === "function") {
       const observer = new window.ResizeObserver(() => scheduleDraw());

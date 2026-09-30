@@ -204,6 +204,10 @@
             <dt>时间范围</dt>
             <dd data-testid="market-time-range">—</dd>
           </div>
+          <div class="stat">
+            <dt>板块</dt>
+            <dd data-testid="market-board" data-field="market.board">—</dd>
+          </div>
         </dl>
 
         <section data-testid="dual-compare" class="dual-compare" hidden>
@@ -243,6 +247,22 @@
               <span>未收盘</span>
               <span data-testid="data-quality-unclosed" data-field="data_quality.unclosed_bar_count">0</span>
             </li>
+            <li class="quality-wide">
+              <span>质量原因</span>
+              <span data-testid="data-quality-reason">—</span>
+            </li>
+            <li class="quality-wide">
+              <span>因子获取</span>
+              <span data-testid="data-quality-factor-fetch">—</span>
+            </li>
+            <li class="quality-wide t-plus-one" data-testid="t-plus-one" hidden>
+              <span>T+1 交易日历</span>
+              <span data-testid="t-plus-one-status">—</span>
+            </li>
+            <li class="quality-wide range-query" data-testid="range-query" hidden>
+              <span>查询区间</span>
+              <span data-testid="range-query-status">—</span>
+            </li>
           </ul>
         </section>
       </aside>
@@ -264,6 +284,11 @@
             <li data-testid="legend-confirmed" data-state="confirmed">confirmed 已确认</li>
           </ul>
         </header>
+
+        <div data-testid="structural-alert" class="structural-alert" role="status" hidden>
+          <span class="alert-icon" aria-hidden="true">!</span>
+          <span class="alert-text">结构预警：笔序列跌破前低</span>
+        </div>
 
         <section data-testid="chart-shell" class="chart-shell" aria-label="K 线图表容器">
           <div
@@ -366,6 +391,33 @@
 
     <section data-testid="signal-radar" class="panel signal-radar" aria-labelledby="signal-radar-title">
       <h2 id="signal-radar-title" class="panel-title">信号雷达</h2>
+    </section>
+
+    <section
+      data-testid="source-panel"
+      class="panel source-panel"
+      aria-labelledby="source-panel-title"
+    >
+      <header class="panel-header">
+        <h2 id="source-panel-title" class="panel-title">数据源与运行状态</h2>
+        <button type="button" data-testid="source-refresh">刷新探活</button>
+      </header>
+
+      <dl class="kv">
+        <div><dt>服务状态</dt><dd data-testid="health-status" data-state="unknown">未探测</dd></div>
+        <div><dt>只读</dt><dd data-testid="health-read-only" data-state="false">—</dd></div>
+        <div><dt>降级</dt><dd data-testid="health-degraded" data-state="false">—</dd></div>
+        <div hidden data-testid="health-error-row">
+          <dt>最近错误</dt><dd data-testid="health-last-error">—</dd>
+        </div>
+      </dl>
+
+      <ul data-testid="source-list" class="source-list">
+        <li data-testid="source-list-empty" data-state="empty">尚未加载数据源探活结果</li>
+      </ul>
+      <p class="hint">
+        默认不探测消耗额度的数据源（如 Wind）；「刷新探活」会重新探测并清空服务端 60 秒缓存。
+      </p>
     </section>
 
     <section
