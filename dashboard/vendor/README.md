@@ -43,4 +43,7 @@ https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.0/font/fonts/bootstrap-icons.w
 ## 升级方式
 
 改版本号 → 重新下载 → 更新本文件的 sha256 → 跑
-`node /home/ubuntu/work/cpt-audit/audit_R16.js`（含「无 CDN 请求」断言）。
+`pytest tests/test_dashboard_canvas_contract.py -q`（含「页面无任何 CDN 外链」断言）。
+
+> 原写 `node /home/ubuntu/work/cpt-audit/audit_R16.js` —— 该脚本与整个 `cpt-audit/`
+> 目录已于 2026-09-30 前消失。等价断言现已收进 pytest（CI 也跑），故改为上句。

@@ -3,8 +3,14 @@
 维护人：队长（DSH 会话）
 本轮起算：2026-09-24（R13）
 上一本日志：`docs/archive/progress-log-至R12-2026-09-24.md`（R1–R12，1067 行，含已废弃的 chanlun 参照记录）
-总计划：`/home/ubuntu/work/cpt-audit/CPT-总计划-2026-09-24.md`（唯一任务台账，轮次与验收以它为准）
+总计划：~~`/home/ubuntu/work/cpt-audit/CPT-总计划-2026-09-24.md`（唯一任务台账，轮次与验收以它为准）~~
 commit 规范：每个里程碑验收通过后一次 commit；阶段内允许 working commit
+
+> ⚠️ **2026-09-30 台账变更**：上行的总计划文件**已不存在**（`/home/ubuntu/work/cpt-audit/`
+> 目录整个消失，全盘 `find -iname "*CPT-总计划*"` 无果）。R13 起"轮次与验收以总计划为准"
+> 的判据自 2026-09-30 起**收归本文件**——本文件的「2. 轮次记录」是唯一任务台账。
+> 凡引用该总计划的旧文（`docs/pending-wiring.md` 判据第 1 条、`docs/implementation-plan.md`）
+> 均已就地标注失效；**不要再按那份文件论证任何模块的去留**。
 
 ## 0. 开局盘点（R13 起点）
 
@@ -14,7 +20,9 @@ commit 规范：每个里程碑验收通过后一次 commit；阶段内允许 wo
 - 测试基线：**182 passed**
 - 门禁：ruff / ruff format / mypy / vulture / import-linter 全绿
 - 看板：`https://140.83.62.161/cpt/`，后端 `127.0.0.1:8010`，前端 `/var/www/cpt-dashboard/`
-- 2026-09-29：服务以 nohup 运行（容器内 systemd 不可用）
+- ~~2026-09-29：服务以 nohup 运行（容器内 systemd 不可用）~~
+  → **2026-09-30 更正**：服务已由 systemd 托管（`ActiveState=active` /
+  `UnitFileState=enabled` / `PPID=1`），安装于 2026-09-29 经宿主机 namespace 完成。
 
 ## 1. 决策日志
 
@@ -1516,3 +1524,85 @@ CI 的 `Run unit and integration tests` 失败后，**后面的"静态质量门�
 6. **`language: system` 的 pre-commit hook 依赖 PATH。** 不激活 venv 直接
    `.venv/bin/pre-commit run` 会看到 4 个 hook 齐刷刷 `Executable not found`。
 
+
+---
+
+## R18 — 未完成任务盘点 + 文档漂移收口 · 2026-09-30
+
+**触发**：奎爷「梳理一下 CPT 项目，有哪些未完成的任务？」→ 盘点后指示「该修就修」。
+
+**盘点方式**：不读文档下结论，进程 / API / 生产 DB / 全量单测 / GitHub Actions API 逐项实跑取证。
+产出报告在仓库外 `/home/ubuntu/work/reports/2026-09-30-CPT未完成任务盘点.md`。
+
+### 一、已修（本轮提交）
+
+| # | 问题 | 处置 |
+|---|---|---|
+| A2 | 三处文档写「服务以 nohup 运行」，实测早已 systemd 托管 | 就地更正 |
+| A3 | 总计划台账 `/home/ubuntu/work/cpt-audit/CPT-总计划-2026-09-24.md` 已消失，却有 5 处仍拿它当判据 | 判据职责收归本文件；4 处引用就地标注失效 |
+
+**A2 证据**（可复现）：
+```
+systemctl show cpt-dashboard -p ActiveState -p UnitFileState -p MainPID
+  → active / enabled / 1499200
+ps -o pid,ppid,cmd -p 1499200  →  PPID=1（systemd）
+```
+更正点：`deploy/README.md`（systemd 节）、`docs/audit/cpt-audit-20260929.md`
+（头部加更正横幅 + §4.3 + §7，历史快照正文不改写）、本文件 §0。
+
+**A3 处置**：`docs/progress-log.md:6` 改为台账职责收归本文件并加「台账变更」注；
+`docs/pending-wiring.md` 判据第 1 条与清单里两处「台账在范围内」论证标注失效；
+`docs/implementation-plan.md` 两处引用改指本文件；
+`dashboard/vendor/README.md:46` 与 `tests/test_dashboard_canvas_contract.py:3`
+引用的 `audit_R16.js`（同目录，已消失）改为指向仓内等价 pytest 断言。
+
+### 二、盘错了、当场撤销的两条（重要）
+
+**① 浏览器测试那 2 个红灯不是仓库缺陷。**
+盘点时 `pytest` 见 2 failed（`test_dashboard_chromium_smoke` /
+`test_dashboard_chromium_interactions`，报
+`Failed to create a unique user data directory for headless`）。
+**根因是盘点会话自身的文件沙箱**：chromium 默认 user-data-dir 落
+`$HOME/.config/google-chrome-for-testing`，而当时沙箱下 `/home/ubuntu/.config` 不可写。
+切到 danger-full-access 后**全量 434 passed, 28 skipped，两个用例各自 1 passed in 1.11s**。
+→ **不改测试代码**。加"起不来就 skip"的降级属于堆补丁，且会掩盖真实回归。
+
+**② `first_buy` 的背驰**：`docs/m6-quality-report.md` §3.5 写「MACD 背驰计算尚未接入」，
+我在盘点里写成「算法缺口」。复核 `cpt/domain/first_buy.py:104 _is_divergent` ——
+**背驰判定已实现**，走的是 **czsc 笔力度口径**（`power_price` 变小 **且**
+`power_volume` 或 `length` 至少一个变小），非 MACD 口径。
+准确表述应是：**功能已补齐，口径与质量报告当时设想的 MACD 不同**；该条应从"算法缺口"降级。
+
+### 三、踩坑
+
+1. **盘点环境本身会污染结论。** 沙箱边界造成的失败极易被读成"代码坏了"——
+   本项目 2026-09-25 已经踩过同型的坑（"不要凭一次失败就断言能力不可用"）。
+   判定"环境问题 vs 代码问题"的廉价判据：**换权限档位复跑一次**。
+2. **`grep -c` 会把同名变量算成引用。** 首轮扫 `signal` 得 45 处，全是 `signal.xxx` 命中。
+   判"是否接线"必须锚 `cpt.domain.<module>` 或先剔自身定义行。
+3. **`timeout ... | head` 时 `$?` 是 `head` 的。** 须存变量再判，否则失败被报成成功。
+4. **`--user-data-dir` 不是万能药**：实测单独加**仍挂**（60s 超时，exit 124）。
+   起作用的是 `HOME`/`XDG_CONFIG_HOME` 整体重定向。结论只能来自 A/B 对照。
+5. **`.venv` 缺门禁工具**：本轮 `ruff`/`mypy` 在，`lint-imports`/`vulture` 不在，
+   需临时 `pip install vulture==2.14 import-linter` 才能跑全门禁 —— 与 CI 的
+   `requirements-dev.txt` 安装路径不一致，复查时注意。
+
+### 四、验收（实跑）
+
+| 门禁 | 结果 |
+|---|---|
+| `pytest tests -q -o addopts=""` | **434 passed, 28 skipped** |
+| `ruff check cpt tests scripts` | All checks passed |
+| `ruff format --check cpt tests scripts` | 138 files already formatted |
+| `mypy cpt scripts` | Success, 67 source files, 0 error |
+| `lint-imports` | 3 kept, 0 broken |
+| `vulture --min-confidence 60 cpt whitelist.py` | 零输出、exit 0 |
+
+### 五、仍未做（待奎爷拍板，非本轮范围）
+
+- **B1/B2/B3**：16 个模块 981 行待接线（`docs/pending-wiring.md`），
+  `/api/dashboard/runs` 与 `/parity` 路由活载荷死，roadmap Phase 3–6 未落地。
+  **要接要删是产品决策**，我不擅动。
+- **C1**：`public.hot_rank` 空表（热门池只剩 ladder 一腿）。
+- **C2**：`asel.ref_adjust_factor` 3,388,417 行全 `hfq_factor=1.0`，待 factor_backfill。
+- **M4 旧 fixture 迁移**（`m6-quality-report` §3.1/§3.8）。

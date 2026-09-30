@@ -1,6 +1,9 @@
 """R16-5 四画布前端契约：离线可用、脚本加载顺序、vendor 资产完整性。
 
-这些是**源码级**断言，用真实浏览器跑的是 ``/home/ubuntu/work/cpt-audit/audit_R16.js``。
+这些是**源码级**断言。原注称「用真实浏览器跑的是
+``/home/ubuntu/work/cpt-audit/audit_R16.js``」—— 该脚本与 `cpt-audit/` 目录已于
+2026-09-30 前消失；真实浏览器渲染目前由 ``tests/test_dashboard_chromium_smoke.py``
+与 ``tests/test_dashboard_chromium_interactions.py`` 覆盖（CI 不装浏览器，故本地跑）。
 放在 pytest 里的理由是：CI 不装浏览器，但"页面不许出现任何 CDN 外链"这条验收
 必须在每次提交时都有人守。
 """

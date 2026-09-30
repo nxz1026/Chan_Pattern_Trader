@@ -94,8 +94,21 @@ sudo systemctl status cpt-dashboard
 `ok=true / degraded=false`。需要空数据调试时才用 `CPT_MODE=demo`；不要把 demo 的
 空 snapshot 当作真实行情。
 
-> 2026-09-29 状态：服务以 nohup 运行（容器内 systemd 需 interactive auth，不可用）。
-> 单元文件入仓供参考，部署时手动 cp + daemon-reload + restart。
+> 2026-09-30 状态：**服务已由 systemd 托管**。安装于 2026-09-29 经宿主机 namespace
+> 完成（容器内 systemd 需 interactive auth 不可用，改用
+> `docker run --rm -i --privileged --pid=host -v /:/host <img> chroot /host ...` 写入单元）。
+>
+> 实测证据（可复现）：
+>
+> ```
+> systemctl show cpt-dashboard -p ActiveState -p UnitFileState -p MainPID
+>   → ActiveState=active  UnitFileState=enabled  MainPID=<pid>
+> ps -o pid,ppid,cmd -p <pid>
+>   → PPID=1（systemd），无 nohup 残留
+> ```
+>
+> ⚠️ 历史口径：本文与 `docs/audit/cpt-audit-20260929.md` 曾写"服务以 nohup 运行、
+> 不享受自动重启"，那是**安装完成前**的状态，已于 2026-09-30 更正。
 
 ## 安全边界
 

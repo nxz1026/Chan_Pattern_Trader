@@ -17,7 +17,10 @@
 
 判据文档（按效力排序）：
 
-1. `/home/ubuntu/work/cpt-audit/CPT-总计划-2026-09-24.md`——现行**唯一任务台账**（仓库外）
+1. ~~`/home/ubuntu/work/cpt-audit/CPT-总计划-2026-09-24.md`——现行**唯一任务台账**（仓库外）~~
+   → **已失效（2026-09-30）**：该文件与整个 `cpt-audit/` 目录均已不存在。
+   台账职责收归 `docs/progress-log.md` 的「2. 轮次记录」。
+   本清单的去留判定**改以 `docs/progress-log.md` + 下条 roadmap 为准**。
 2. `docs/dashboard-product-roadmap.md`——`docs/dashboard-plan.md:151` 明确「**后续产品路线
    以本文件 Phase 0-6 为准**」
 3. `docs/implementation-plan.md`——头部已声明自己是**历史记录**，**不作为**判据
@@ -36,8 +39,8 @@
 
 | 模块 | 行数 | 产品位置 | 接线目标 |
 |---|---:|---|---|
-| `cpt/domain/signal.py` | 311 | `CPT-总计划-2026-09-24.md` 在范围内；`a_share_rules.py` docstring 写明「C4 T+1…由 `cpt.domain.signal` 在评估一买/一卖时读取」 | 一买状态机接进 A 股信号链；`signal_id` 已按**稳定 upsert 主键**设计 |
-| `cpt/domain/a_share_rules.py` | 152 | 台账「**实现位置**」一节明确列出（涨跌停/停牌/T+1）；R17-3 刚落地 A 股主看板 | 结构标签接进 A 股主看板 |
+| `cpt/domain/signal.py` | 311 | ~~`CPT-总计划-2026-09-24.md` 在范围内~~（该台账已失效）；`a_share_rules.py` docstring 写明「C4 T+1…由 `cpt.domain.signal` 在评估一买/一卖时读取」 | 一买状态机接进 A 股信号链；`signal_id` 已按**稳定 upsert 主键**设计 |
+| `cpt/domain/a_share_rules.py` | 152 | ~~台账「**实现位置**」一节明确列出（涨跌停/停牌/T+1）~~（该台账已失效）；R17-3 刚落地 A 股主看板 | 结构标签接进 A 股主看板 |
 | `cpt/application/dashboard_parity.py` | 83 | roadmap §「Phase 2：Oracle 对比」+ §「后端代码框架」 | 接 oracle 对比。**HTTP 路由已活**：`cpt/web/app.py:208`，但 `dashboard_snapshot_v2.py:61` 恒填占位 |
 | `cpt/application/dashboard_runs.py` | 37 | roadmap §「R1 数据集/运行浏览器」+ §「后端代码框架」 | 接运行浏览器。**HTTP 路由已活**：`cpt/web/app.py:210`，但 `dashboard_snapshot_v2.py:62` 硬编码 `[]` |
 | `cpt/application/dashboard_levels.py` | 40 | roadmap Phase 5 P1「级别递归树」 | 级别递归树视图 |
