@@ -222,7 +222,7 @@ def test_sell_bridge_uses_last_two_centers_and_upward_leg() -> None:
         _zs(5, 40, 50, "fx:c"),
     ]
     bis = [
-        _bi(1, 50, 60),   # 背驰段（中枢三之后、向上）
+        _bi(1, 50, 60),  # 背驰段（中枢三之后、向上）
         _bi(-1, 60, 70),  # 反向笔（向下）
     ]
     facts = derive_first_sell_facts(level=5, trend_direction=1, bis=bis, zhongshus=centers)
