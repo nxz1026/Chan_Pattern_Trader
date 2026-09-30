@@ -34,13 +34,14 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 
-from cpt.domain.first_buy import check_first_buy
+from cpt.domain.first_buy import check_first_buy, check_first_sell
 from cpt.domain.models import Bi, ZhongShu
 
-__all__ = ["FirstBuyFacts", "derive_first_buy_facts"]
+__all__ = ["FirstBuyFacts", "derive_first_buy_facts", "derive_first_sell_facts"]
 
 #: 一买只对**向下**趋势有意义，与 ``signal._DOWN`` 同值。
 _DOWN: int = -1
+_UP: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,4 +139,73 @@ def _divergence_status(first_center: ZhongShu, level_bis: Sequence[Bi]) -> str:
     except ValueError:
         # ``_require_power_metrics`` 报的是「力度度量未填充」——这是**数据缺**，
         # 不是「不背驰」，必须与 not_detected 区分开，否则面板会显示错的结论。
+        return "not_checked"
+
+
+def derive_first_sell_facts(
+    *,
+    level: int,
+    trend_direction: int,
+    bis: Sequence[Bi],
+    zhongshus: Sequence[ZhongShu],
+) -> FirstBuyFacts | None:
+    """由结构对象推导一卖三事实（``derive_first_buy_facts`` 的镜像）。
+
+    :param trend_direction: 走势方向，必须 ``1`` 或 ``-1``。
+    :returns: ``None`` 表示**不适用**（``trend_direction != 1``，一卖无意义）。
+    """
+    if trend_direction not in (1, -1):
+        raise ValueError(f"trend_direction 必须是 1 或 -1, 实测 {trend_direction!r}")
+    if trend_direction != _UP:
+        return None
+
+    centers = sorted(
+        (zs for zs in zhongshus if zs.level == level), key=lambda zs: (zs.start_time, zs.end_time)
+    )
+    level_bis = sorted(
+        (bi for bi in bis if bi.level == level), key=lambda bi: (bi.start_time, bi.end_time)
+    )
+    has_two_centers = len(centers) >= 2
+
+    center_ids: tuple[str, ...] = ()
+    structure_id = ""
+    has_divergence_leg = False
+    has_reversal_bi = False
+    divergence_status = "not_checked"
+
+    if has_two_centers:
+        second = centers[-1]
+        center_ids = (_center_id(centers[-2]), _center_id(second))
+        structure_id = f"level{level}:{center_ids[1]}"
+        # 背驰段：中枢二结束之后、仍沿原方向（向上）运行的**第一笔**。
+        leg_index = next(
+            (
+                index
+                for index, bi in enumerate(level_bis)
+                if bi.start_time >= second.end_time and bi.direction == _UP
+            ),
+            None,
+        )
+        if leg_index is not None:
+            has_divergence_leg = True
+            # 反向笔：背驰段之后的第一笔反向笔（向下）。
+            has_reversal_bi = any(bi.direction != _UP for bi in level_bis[leg_index + 1 :])
+        divergence_status = _divergence_status_sell(centers[-2], level_bis)
+
+    return FirstBuyFacts(
+        has_two_centers=has_two_centers,
+        has_divergence_leg=has_divergence_leg,
+        has_reversal_bi=has_reversal_bi,
+        center_ids=center_ids,
+        structure_id=structure_id,
+        divergence_status=divergence_status,
+    )
+
+
+def _divergence_status_sell(first_center: ZhongShu, level_bis: Sequence[Bi]) -> str:
+    """一卖背驰三态：``detected`` / ``not_detected`` / ``not_checked``。"""
+    segment = [bi for bi in level_bis if bi.end_time > first_center.start_time]
+    try:
+        return "detected" if check_first_sell(segment) else "not_detected"
+    except ValueError:
         return "not_checked"

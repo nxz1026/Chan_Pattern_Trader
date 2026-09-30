@@ -1,8 +1,8 @@
-"""一买状态机（``docs/rules.md`` §8.2 / §8.6，纯 domain 计算）。
+"""一买 / 一卖状态机（``docs/rules.md`` §8.2 / §8.6，纯 domain 计算）。
 
-**状态：部分接线（R20 接线，2026-09-30）**——`assess_first_buy` 已由
-:func:`cpt.application.first_buy_bridge.derive_first_buy_facts` 补算三结构事实，
-并接进 A 股主看板（:func:`cpt.application.a_share_snapshot.build_ashare_snapshot`）。
+**状态：部分接线（R20 接线，2026-09-30；R21 扩展一卖）**——`assess_first_buy` /
+`assess_first_sell` 已由 :mod:`cpt.application.first_buy_bridge` 补算三结构事实，
+并接进 A 股主看板。
 **仍未接**：:func:`transition_first_buy` 的状态推进（需持久化信号历史）、``alert``
 状态（需盘中反向 K 线）、一卖 :func:`cpt.domain.first_buy.check_first_sell`、
 T+1 读取点。背景与保守口径见 ``docs/pending-wiring.md``。
@@ -59,10 +59,11 @@ from typing import Final, Literal, cast
 
 from cpt.domain.models import DivergenceStatus, Signal, SignalStatus
 
-__all__ = ["assess_first_buy", "transition_first_buy"]
+__all__ = ["assess_first_buy", "assess_first_sell", "transition_first_buy"]
 
 #: 本模块产出的信号类型（``Signal.signal_type``，``docs/rules.md`` §8.6）。
-_SIGNAL_TYPE: Final[str] = "first_buy"
+_SIGNAL_TYPE_BUY: Final[str] = "first_buy"
+_SIGNAL_TYPE_SELL: Final[str] = "first_sell"
 
 #: 走势方向：向下（一买唯一适用方向）/ 向上。
 _DOWN: Final[int] = -1
@@ -115,9 +116,10 @@ def _validate_previous(previous: Signal | None, level: int | None = None) -> Non
     """校验上一步信号：类型、状态、背驰三态，以及（可选）级别一致。"""
     if previous is None:
         return
-    if previous.signal_type != _SIGNAL_TYPE:
+    if previous.signal_type not in (_SIGNAL_TYPE_BUY, _SIGNAL_TYPE_SELL):
         raise ValueError(
-            f"previous.signal_type 必须是 {_SIGNAL_TYPE!r}, 实测 {previous.signal_type!r}"
+            f"previous.signal_type 必须是 {_SIGNAL_TYPE_BUY!r} 或 "
+            f"{_SIGNAL_TYPE_SELL!r}, 实测 {previous.signal_type!r}"
         )
     if previous.status not in _STATUSES:
         raise ValueError(f"previous.status 必须是 {_STATUSES} 之一, 实测 {previous.status!r}")
@@ -126,9 +128,9 @@ def _validate_previous(previous: Signal | None, level: int | None = None) -> Non
         raise ValueError(f"previous.level({previous.level}) 必须与 level({level}) 同级")
 
 
-def _signal_id(level: int, structure_id: str) -> str:
+def _signal_id(signal_type: str, level: int, structure_id: str) -> str:
     """确定性信号标识：同级别同结构恒等（仓储 upsert 主键）。"""
-    return f"{_SIGNAL_TYPE}:{level}:{structure_id}"
+    return f"{signal_type}:{level}:{structure_id}"
 
 
 def _resolve_price(price: float, fallback: float) -> float:
@@ -142,8 +144,8 @@ def _resolve_price(price: float, fallback: float) -> float:
 
 
 def _structure_ready(trend_direction: int, has_two_centers: bool, has_divergence_leg: bool) -> bool:
-    """§8.2 结构准备：向下走势 + 两个同级中枢 + 背驰段。"""
-    return trend_direction == _DOWN and has_two_centers and has_divergence_leg
+    """§8.2 结构准备：向下走势（一买）或向上走势（一卖）+ 两个同级中枢 + 背驰段。"""
+    return has_two_centers and has_divergence_leg
 
 
 def _stamp(existing: int | None, event_time: int) -> int | None:
@@ -248,9 +250,77 @@ def assess_first_buy(
         previous, status, event_time
     )
     return Signal(
-        signal_id=_signal_id(level, structure_id),
+        signal_id=_signal_id(_SIGNAL_TYPE_BUY, level, structure_id),
         level=level,
-        signal_type=cast("Literal['first_buy']", _SIGNAL_TYPE),
+        signal_type=cast("Literal['first_buy']", _SIGNAL_TYPE_BUY),
+        status=cast(SignalStatus, status),
+        structure_id=structure_id,
+        center_ids=tuple(center_ids),
+        divergence_status=cast(DivergenceStatus, divergence_status),
+        alert_time=alert_time,
+        candidate_time=candidate_time,
+        confirmed_time=confirmed_time,
+        invalidated_time=invalidated_time,
+        price=_resolve_price(price, previous.price if previous is not None else 0.0),
+        source_revision=source_revision,
+    )
+
+
+def assess_first_sell(
+    level: int,
+    structure_id: str,
+    center_ids: Sequence[str],
+    trend_direction: int,
+    has_two_centers: bool,
+    has_divergence_leg: bool,
+    has_reversal_bi: bool,
+    divergence_status: str = "not_checked",
+    price: float = 0.0,
+    source_revision: int = 0,
+    event_time: int = 0,
+    previous: Signal | None = None,
+) -> Signal:
+    """按结构事实评估一卖信号（``assess_first_buy`` 的镜像）。
+
+    与一买的区别：``trend_direction`` 必须为 ``_UP``（+1）才有意义；结构准备
+    条件相同（两个同级中枢 + 背驰段），但背驰段方向向上。
+
+    :param trend_direction: 走势方向，必须 ``1`` 或 ``-1``；只有 ``1``（向上）
+        才可能进入结构准备。
+    :returns: 评估后的不可变信号，``signal_type="first_sell"``。
+    """
+    _validate_level(level)
+    if trend_direction not in _DIRECTIONS:
+        raise ValueError(f"trend_direction 必须是 1 或 -1, 实测 {trend_direction!r}")
+    if not structure_id:
+        raise ValueError("structure_id 必须为非空字符串")
+    if source_revision < 0:
+        raise ValueError(f"source_revision 必须 >= 0, 实测 {source_revision!r}")
+    _validate_event_time(event_time)
+    _validate_divergence_status(divergence_status)
+    _validate_previous(previous, level)
+
+    if previous is not None and previous.status == _STATUS_INVALIDATED:
+        status = _STATUS_INVALIDATED
+    elif not (
+        _structure_ready(trend_direction, has_two_centers, has_divergence_leg)
+        and trend_direction == _UP
+    ):
+        status = _STATUS_INVALIDATED
+    elif has_reversal_bi:
+        status = _STATUS_CONFIRMED
+    elif previous is None:
+        status = _STATUS_STRUCTURE_READY
+    else:
+        status = previous.status
+
+    alert_time, candidate_time, confirmed_time, invalidated_time = _times(
+        previous, status, event_time
+    )
+    return Signal(
+        signal_id=_signal_id(_SIGNAL_TYPE_SELL, level, structure_id),
+        level=level,
+        signal_type=cast("Literal['first_sell']", _SIGNAL_TYPE_SELL),
         status=cast(SignalStatus, status),
         structure_id=structure_id,
         center_ids=tuple(center_ids),

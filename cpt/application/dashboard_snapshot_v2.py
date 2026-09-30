@@ -25,6 +25,7 @@ def build_dashboard_snapshot_v2(
     zhongshus: Sequence[ZhongShu] = (),
     trend_types: Sequence[TrendType] = (),
     signal: Signal | None = None,
+    signal_first_sell: Signal | None = None,
     events: Sequence[StructureEvent] = (),
     mode: str = "research",
     status: str = "confirmed",
@@ -79,5 +80,6 @@ def build_dashboard_snapshot_v2(
             "trend_types": len(trend_types),
         },
         "signal": asdict(signal) if signal else None,
+        "signal_first_sell": asdict(signal_first_sell) if signal_first_sell else None,
     }
     return v2

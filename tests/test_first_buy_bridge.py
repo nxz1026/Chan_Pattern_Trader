@@ -1,9 +1,9 @@
-"""一买信号桥（R20 接线）测试。
+"""一买 / 一卖信号桥（R20 接线一买，R21 接线一卖）测试。
 
 **入口纪律**：R19 起本仓的接线类验收规矩是「入口必须是生产构造函数」。R20
 补的用例里 1-3 条一律从 :func:`build_ashare_snapshot` 进，证明生产路径真的
 会走 :mod:`cpt.application.first_buy_bridge`；4-6 条是纯函数级的口径锁定，
-只负责把「保守口径四条」钉死，不负责证明生产可达。
+只负责把「保守口径四条」钉死，不负责证明生产可达。R21 追加一卖镜像用例。
 """
 
 from __future__ import annotations
@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 from cpt.application.a_share_snapshot import build_ashare_snapshot
-from cpt.application.first_buy_bridge import derive_first_buy_facts
+from cpt.application.first_buy_bridge import derive_first_buy_facts, derive_first_sell_facts
 from cpt.domain.models import Bi, ZhongShu
 
 from tests.test_web_a_share import _FakeClient, _make_canonical, _zigzag_bars
@@ -196,3 +196,132 @@ def test_bridge_marks_not_checked_when_power_metrics_missing() -> None:
     facts = derive_first_buy_facts(level=5, trend_direction=-1, bis=[weak], zhongshus=centers)
     assert facts is not None
     assert facts.divergence_status == "not_checked"
+
+
+# --------------------------------------------------------------------------- #
+# 一卖纯函数口径锁定（R21 镜像）
+# --------------------------------------------------------------------------- #
+
+
+def test_sell_bridge_returns_none_for_downward_trend() -> None:
+    """向下趋势 → 一卖无意义，返回 ``None``。"""
+    facts = derive_first_sell_facts(level=5, trend_direction=-1, bis=[], zhongshus=[])
+    assert facts is None, "向下趋势必须返回 None（一卖无意义）"
+
+
+def test_sell_bridge_rejects_invalid_direction() -> None:
+    with pytest.raises(ValueError, match="trend_direction"):
+        derive_first_sell_facts(level=5, trend_direction=0, bis=[], zhongshus=[])
+
+
+def test_sell_bridge_uses_last_two_centers_and_upward_leg() -> None:
+    """一卖背驰段方向向上（与一买镜像）：中枢二结束之后、沿 ``_UP`` 方向运行。"""
+    centers = [
+        _zs(5, 0, 10, "fx:a"),
+        _zs(5, 20, 30, "fx:b"),
+        _zs(5, 40, 50, "fx:c"),
+    ]
+    bis = [
+        _bi(1, 50, 60),   # 背驰段（中枢三之后、向上）
+        _bi(-1, 60, 70),  # 反向笔（向下）
+    ]
+    facts = derive_first_sell_facts(level=5, trend_direction=1, bis=bis, zhongshus=centers)
+    assert facts is not None
+    assert facts.has_two_centers
+    assert facts.has_divergence_leg
+    assert facts.has_reversal_bi
+    # 最后两个 = fx:b / fx:c
+    assert facts.center_ids == ("fx:b", "fx:c")
+    assert facts.structure_id == "level5:fx:c"
+
+
+def test_sell_bridge_no_reversal_without_counter_bi() -> None:
+    """背驰段之后没有反向笔 → ``has_reversal_bi=False``。"""
+    centers = [_zs(5, 0, 10, "fx:a"), _zs(5, 20, 30, "fx:b")]
+    bis = [_bi(1, 30, 40)]  # 只有背驰段，没有反向笔
+    facts = derive_first_sell_facts(level=5, trend_direction=1, bis=bis, zhongshus=centers)
+    assert facts is not None
+    assert facts.has_divergence_leg
+    assert not facts.has_reversal_bi
+
+
+def test_sell_signal_assessed_with_upward_trend() -> None:
+    """``assess_first_sell`` 在向上趋势 + 两个中枢 + 背驰 → ``structure_ready``。"""
+    from cpt.domain.signal import assess_first_sell
+
+    signal = assess_first_sell(
+        level=5,
+        structure_id="level5:fx:z2",
+        center_ids=("fx:z1", "fx:z2"),
+        trend_direction=1,
+        has_two_centers=True,
+        has_divergence_leg=True,
+        has_reversal_bi=False,
+        divergence_status="detected",
+        price=120.0,
+        source_revision=0,
+        event_time=1_700_000_000_000,
+    )
+    assert signal.signal_type == "first_sell"
+    assert signal.status == "structure_ready"
+    assert signal.signal_id == "first_sell:5:level5:fx:z2"
+
+
+def test_sell_signal_invalidated_without_two_centers() -> None:
+    """只有一个中枢 → ``invalidated``（结构不满足）。"""
+    from cpt.domain.signal import assess_first_sell
+
+    signal = assess_first_sell(
+        level=5,
+        structure_id="level5:empty",
+        center_ids=(),
+        trend_direction=1,
+        has_two_centers=False,
+        has_divergence_leg=False,
+        has_reversal_bi=False,
+        price=100.0,
+        source_revision=0,
+        event_time=1_700_000_000_000,
+    )
+    assert signal.signal_type == "first_sell"
+    assert signal.status == "invalidated"
+
+
+def test_sell_signal_confirmed_with_reversal_bi() -> None:
+    """有反向笔 → ``confirmed``。"""
+    from cpt.domain.signal import assess_first_sell
+
+    signal = assess_first_sell(
+        level=5,
+        structure_id="level5:fx:z2",
+        center_ids=("fx:z1", "fx:z2"),
+        trend_direction=1,
+        has_two_centers=True,
+        has_divergence_leg=True,
+        has_reversal_bi=True,
+        divergence_status="detected",
+        price=130.0,
+        source_revision=0,
+        event_time=1_700_000_000_000,
+    )
+    assert signal.status == "confirmed"
+    assert signal.confirmed_time == 1_700_000_000_000
+
+
+def test_sell_signal_rejects_invalid_trend_direction() -> None:
+    """``trend_direction`` 既不是 1 也不是 -1 → ``ValueError``。"""
+    from cpt.domain.signal import assess_first_sell
+
+    with pytest.raises(ValueError, match="trend_direction"):
+        assess_first_sell(
+            level=5,
+            structure_id="level5:empty",
+            center_ids=(),
+            trend_direction=2,  # 无效
+            has_two_centers=False,
+            has_divergence_leg=False,
+            has_reversal_bi=False,
+            price=100.0,
+            source_revision=0,
+            event_time=0,
+        )

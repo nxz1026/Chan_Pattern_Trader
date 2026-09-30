@@ -221,6 +221,13 @@ def build_ashare_snapshot(
         client=active_client,
         code=code,
     )
+    signal_first_sell = _derive_first_sell_signal(
+        bis,
+        zhongshus,
+        validated,
+        client=active_client,
+        code=code,
+    )
     # multi_level 结构递归（R21 接线）：levels=(1,2,3) 表示日线/周线/月线结构递归。
     # 递归失败只降级 multi_level 为 unavailable，不搞挂快照。
     multi_level_data = _compute_multi_level_safe(validated, active_backend)
@@ -232,6 +239,7 @@ def build_ashare_snapshot(
         zhongshus=zhongshus,
         trend_types=(),
         signal=signal,
+        signal_first_sell=signal_first_sell,
         multi_level=multi_level_data,
         mode="watch",
         status="confirmed",
@@ -300,7 +308,8 @@ def _derive_first_buy_signal(
 
     # 加载上一状态（R21 信号历史持久化）
     previous: Signal | None = None
-    conn = client._get_conn() if client is not None else None
+    getter = getattr(client, "_get_conn", None)
+    conn = getter() if callable(getter) else None
     if conn is not None:
         signal_id = f"first_buy:{level}:{structure_id}"
         previous = load_previous_signal(conn, signal_id)
@@ -321,6 +330,74 @@ def _derive_first_buy_signal(
     )
 
     # 记录状态跃迁（status 变化时才 append）
+    if conn is not None and signal is not None:
+        prev_status = previous.status if previous is not None else None
+        record_signal_event(conn, signal, prev_status, code, event_time)
+        try:
+            conn.commit()
+        except Exception as exc:
+            _LOG.warning("提交信号事件失败 %s: %s", code, exc)
+
+    return signal
+
+
+def _derive_first_sell_signal(
+    bis: Sequence[Bi],
+    zhongshus: Sequence[ZhongShu],
+    bars: Sequence[CanonicalBar],
+    *,
+    client: Any = None,
+    code: str = "",
+) -> Signal | None:
+    """由结构对象推导一卖信号（``_derive_first_buy_signal`` 的镜像）。
+
+    趋势方向从数据推导：取本级别**最后一笔**的方向。最后一笔向下时一卖
+    无意义，桥返回 ``None``。
+    """
+    from cpt.application.first_buy_bridge import derive_first_sell_facts
+    from cpt.domain.signal import assess_first_sell
+
+    config = RulesConfig()
+    level = config.levels[0] if config.levels else 0
+    level_bis = [bi for bi in bis if bi.level == level]
+    if not level_bis:
+        return None
+    facts = derive_first_sell_facts(
+        level=level,
+        trend_direction=level_bis[-1].direction,
+        bis=bis,
+        zhongshus=zhongshus,
+    )
+    if facts is None:
+        return None
+    last_bar = bars[-1] if bars else None
+    structure_id = facts.structure_id or f"level{level}:empty"
+    event_time = int(last_bar.close_time) if last_bar is not None else 0
+
+    # 加载上一状态（R21 信号历史持久化）
+    previous: Signal | None = None
+    getter = getattr(client, "_get_conn", None)
+    conn = getter() if callable(getter) else None
+    if conn is not None:
+        signal_id = f"first_sell:{level}:{structure_id}"
+        previous = load_previous_signal(conn, signal_id)
+
+    signal = assess_first_sell(
+        level=level,
+        structure_id=structure_id,
+        center_ids=facts.center_ids,
+        trend_direction=level_bis[-1].direction,
+        has_two_centers=facts.has_two_centers,
+        has_divergence_leg=facts.has_divergence_leg,
+        has_reversal_bi=facts.has_reversal_bi,
+        divergence_status=facts.divergence_status,
+        price=float(last_bar.close) if last_bar is not None else 0.0,
+        source_revision=0,
+        event_time=event_time,
+        previous=previous,
+    )
+
+    # 记录状态跃迁
     if conn is not None and signal is not None:
         prev_status = previous.status if previous is not None else None
         record_signal_event(conn, signal, prev_status, code, event_time)

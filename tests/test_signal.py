@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 from cpt.domain.models import Signal
-from cpt.domain.signal import assess_first_buy, transition_first_buy
+from cpt.domain.signal import assess_first_buy, assess_first_sell, transition_first_buy
 
 
 def ready(**kwargs: object) -> Signal:
@@ -98,3 +98,56 @@ def test_validation_and_invalidated_state() -> None:
         ).status
         == "invalidated"
     )
+
+
+# --------------------------------------------------------------------------- #
+# 一卖（R21 镜像）
+# --------------------------------------------------------------------------- #
+
+
+def sell_ready(**kwargs: object) -> Signal:
+    args: dict[str, object] = {
+        "level": 1,
+        "structure_id": "trend:1",
+        "center_ids": ("zs:1", "zs:2"),
+        "trend_direction": 1,
+        "has_two_centers": True,
+        "has_divergence_leg": True,
+        "has_reversal_bi": False,
+        "event_time": 100,
+        "price": 100.0,
+    }
+    args.update(kwargs)
+    return assess_first_sell(**args)
+
+
+def test_first_sell_structure_ready_on_upward_trend() -> None:
+    """向上趋势 + 两个中枢 + 背驰 → ``structure_ready``。"""
+    result = sell_ready(divergence_status="not_detected")
+    assert result.status == "structure_ready"
+    assert result.signal_type == "first_sell"
+    assert result.signal_id == "first_sell:1:trend:1"
+
+
+def test_first_sell_reversal_confirms() -> None:
+    """反向笔出现 → ``confirmed``。"""
+    result = sell_ready(has_reversal_bi=True, event_time=200, price=101.0)
+    assert result.status == "confirmed"
+    assert result.confirmed_time == 200
+
+
+def test_first_sell_invalidated_without_two_centers() -> None:
+    """只有一个中枢 → ``invalidated``。"""
+    result = sell_ready(has_two_centers=False)
+    assert result.status == "invalidated"
+
+
+def test_first_sell_invalidated_on_downward_trend() -> None:
+    """向下趋势 → 一卖无意义，``invalidated``。"""
+    result = sell_ready(trend_direction=-1)
+    assert result.status == "invalidated"
+
+
+def test_first_sell_rejects_invalid_direction() -> None:
+    with pytest.raises(ValueError, match="trend_direction"):
+        sell_ready(trend_direction=0)

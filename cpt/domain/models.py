@@ -208,12 +208,12 @@ class StructureEvent:
 
 @dataclass(frozen=True, slots=True)
 class Signal:
-    """一买信号（``docs/rules.md`` §8.6）。"""
+    """一买 / 一卖信号（``docs/rules.md`` §8.6）。"""
 
     signal_id: str
     level: int
-    # signal_type = "first_buy"
-    signal_type: Literal["first_buy"]
+    # signal_type = "first_buy" 或 "first_sell"
+    signal_type: Literal["first_buy", "first_sell"]
     # status ∈ {structure_ready, alert, candidate, confirmed, invalidated}
     status: SignalStatus
     structure_id: str
