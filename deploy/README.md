@@ -110,6 +110,46 @@ sudo systemctl status cpt-dashboard
 > ⚠️ 历史口径：本文与 `docs/audit/cpt-audit-20260929.md` 曾写"服务以 nohup 运行、
 > 不享受自动重启"，那是**安装完成前**的状态，已于 2026-09-30 更正。
 
+## A 股快照 timer（每日写 cpt_signal_event）
+
+主服务 `cpt-dashboard` 只跑加密行情（`--mode realtime --symbol BTCUSDT`），
+不触发 `record_signal_event` → `public.cpt_signal_event` 表存在但长期为空，
+`/api/dashboard/signal-stats` 一直 `total:0`。补法：**并列**起一个 oneshot service +
+timer，每天 08:00 UTC（北京时间 16:00）触发一次 `scripts/snapshot_a_share_batch.py`，
+对 `hot_pool Top 50 ∪ 服务端 watchlist` 循环调 `build_ashare_snapshot`，里面
+自动推进状态机、status 变化时 INSERT 一条事件。
+
+```bash
+sudo cp deploy/systemd/cpt-dashboard-ashare.{service,timer} /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now cpt-dashboard-ashare.timer   # 装上 timer（每天 08:00 UTC 触发）
+# 立刻手动触发一次验证（不等明天）：
+sudo systemctl start cpt-dashboard-ashare.service
+sudo journalctl -u cpt-dashboard-ashare -n 200 --no-pager
+# 验表里进了行：
+PGPASSWORD=$(grep '^\$DB_PW' ~/.dbconfig | cut -d= -f2-) \
+  psql -h 127.0.0.1 -U postgres -d emotion_core \
+  -c 'SELECT COUNT(*) FROM public.cpt_signal_event;'
+```
+
+设计要点：
+
+- **oneshot**（不是 simple），跑完即退；`systemctl enable --now cpt-dashboard-ashare.timer`
+  才会按 schedule 触发；不带 `--now` 也不会开机自跑（只 enable 不启动）。
+- **`Persistent=true`**：上次因机器关停错过的时间点，开机后会补跑一次（避免周末
+  /夜间重启导致的事件链长期空段）。
+- **不引 `EnvironmentFile=cpt-dashboard.env`**：本脚本不需要那 6 个加密参数，避免
+  与主服务形成隐式耦合（删那个 env 文件不应打挂 A 股快照）。
+- **DB 鉴权走 `~/.dbconfig`**：`AShareLocalClient` 默认 lazy 连接读
+  `pathlib.Path.home()/".dbconfig"`（仅 ubuntu 可读 600）。如果哪天 env 与 home
+  文件冲突以 home 为准。
+- **跟主服务错开时间**：主服务每 30s 拉加密行情；快照跑的那一两分钟 A 股库的
+  SELECT/INSERT 会多一点，但 `factor_ensurer` 是 lazy + 单只范围隔离，影响有限。
+  仍嫌吵把 timer 调到 `OnCalendar=*-*-* 08:30:00 UTC` 错开 30 分钟即可。
+
+> 2026-09-30 状态：单元已写入 `deploy/systemd/cpt-dashboard-ashare.{service,timer}`
+> 并随仓推送；首次安装命令见上方。
+
 ## 安全边界
 
 - API 只读，不提供下单、撤单、账户、持仓或订单簿接口。

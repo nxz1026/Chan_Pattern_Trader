@@ -1,0 +1,20 @@
+[Unit]
+Description=CPT A-share snapshot batch (writes cpt_signal_event)
+Documentation=脚本：scripts/snapshot_a_share_batch.py；每日触发一次，循环 build_ashare_snapshot 并 INSERT 状态变化事件。
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/DSH/Chan_Pattern_Trader
+# DB 连接走 ~/.dbconfig（仅 ubuntu 可读 600），脚本里 AShareLocalClient 默认连；
+# 不引 cpt-dashboard.env 是为了避免与 cpt-dashboard.service 形成隐式耦合。
+ExecStart=/home/ubuntu/DSH/Chan_Pattern_Trader/.venv/bin/python scripts/snapshot_a_share_batch.py --limit 50
+# 成功失败退出码 0/1 让 timer 上报：oneshot 不需要 Restart
+NoNewPrivileges=true
+PrivateTmp=true
+# 跑 50 只 × ~1s ≈ 50–120s，留 600s 上限避免连崩拖死
+TimeoutStartSec=600
+# oneshot 默认 StandardOutput=journal，运维 journalctl -u cpt-dashboard-ashare 即可

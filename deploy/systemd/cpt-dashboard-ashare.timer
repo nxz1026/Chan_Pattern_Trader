@@ -1,0 +1,15 @@
+[Unit]
+Description=CPT A-share snapshot batch timer (08:00 UTC = 16:00 北京)
+# 跟主服务错开：cpt-dashboard 服务默认每 30s 拉加密行情；快照跑的那一两分钟 A 股
+# 库的 SELECT/INSERT 会稍微多一点，但 factor_ensurer 是 lazy + 单只范围隔离，影响有限。
+# 如果以后发现两者抢锁，把 OnCalendar 错开 30 分钟即可（如 :30）。
+
+[Timer]
+OnCalendar=*-*-* 08:00:00 UTC
+# 上次未跑（机器关停/卡死）开机补跑
+Persistent=true
+# 跑完的 unit 不会自动清理（Type=oneshot 默认 RemainAfterExit=no）
+# Persistent=true 配合 Calibration 时钟允许最大 1 分钟漂移
+
+[Install]
+WantedBy=timers.target
