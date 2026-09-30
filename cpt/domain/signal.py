@@ -386,3 +386,6 @@ def transition_first_buy(
         invalidated_time=invalidated_time,
         price=resolved_price,
     )
+
+
+transition_first_sell = transition_first_buy

@@ -349,10 +349,11 @@ def test_derive_signal_with_client_invokes_load(monkeypatch) -> None:
     assert len(load_calls) == 1
     assert load_calls[0] == "first_buy:0:level0:zs1"
     # 验证 record 被调用（首次评估，prev_status=None）
+    # has_reversal_bi=True 触发状态推进：structure_ready → confirmed
     assert len(record_calls) == 1
     assert record_calls[0]["prev_status"] is None
-    assert record_calls[0]["status"] == "structure_ready"
-    assert result is out_signal
+    assert record_calls[0]["status"] == "confirmed"
+    assert result is not out_signal  # 推进后是新对象
 
 
 def _make_bars(n: int) -> list[Any]:

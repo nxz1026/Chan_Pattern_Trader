@@ -37,7 +37,12 @@ from dataclasses import dataclass
 from cpt.domain.first_buy import check_first_buy, check_first_sell
 from cpt.domain.models import Bi, ZhongShu
 
-__all__ = ["FirstBuyFacts", "derive_first_buy_facts", "derive_first_sell_facts"]
+__all__ = [
+    "FirstBuyFacts",
+    "derive_first_buy_facts",
+    "derive_first_sell_facts",
+    "detect_structural_break",
+]
 
 #: 一买只对**向下**趋势有意义，与 ``signal._DOWN`` 同值。
 _DOWN: int = -1
@@ -209,3 +214,19 @@ def _divergence_status_sell(first_center: ZhongShu, level_bis: Sequence[Bi]) -> 
         return "detected" if check_first_sell(segment) else "not_detected"
     except ValueError:
         return "not_checked"
+
+
+def detect_structural_break(bis: Sequence[Bi]) -> bool:
+    """笔序列**首次**跌破前低 → 结构预警。
+
+    扫描本级别笔序列（按 ``start_time`` 升序），找到第一根**向下**笔，其
+    ``low`` 严格低于**前一根向下**笔的 ``low`` —— 即「首次跌破前低」。
+
+    只比较向下笔（同向笔之间的低点递降才有结构意义），忽略向上笔。
+    空序列 / 不足两根向下笔 → ``False``。
+    """
+    down_bis = [bi for bi in bis if bi.direction == _DOWN]
+    for i in range(1, len(down_bis)):
+        if down_bis[i].low < down_bis[i - 1].low:
+            return True
+    return False

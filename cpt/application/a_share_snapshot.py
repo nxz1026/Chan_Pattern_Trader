@@ -41,7 +41,7 @@ from cpt.adapters.backend_factory import DEFAULT_BACKEND, resolve_backend
 from cpt.adapters.reference_chanlun import ChanlunBackend
 from cpt.adapters.validators import validate_ashare_bars
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
-from cpt.application.first_buy_bridge import derive_first_buy_facts
+from cpt.application.first_buy_bridge import derive_first_buy_facts, detect_structural_break
 from cpt.application.multi_level import build_multi_level, format_multi_level
 from cpt.application.replay import compute_domain_structures
 from cpt.application.signal_event_store import (
@@ -51,7 +51,7 @@ from cpt.application.signal_event_store import (
 from cpt.domain.a_share_rules import apply_ashare_tags_to_bis, check_t_plus_one_calendar
 from cpt.domain.config import RulesConfig
 from cpt.domain.models import Bi, CanonicalBar, Signal, ZhongShu
-from cpt.domain.signal import assess_first_buy
+from cpt.domain.signal import assess_first_buy, transition_first_buy, transition_first_sell
 
 __all__ = [
     "DEFAULT_WIDTH_K",
@@ -231,6 +231,8 @@ def build_ashare_snapshot(
     # multi_level 结构递归（R21 接线）：levels=(1,2,3) 表示日线/周线/月线结构递归。
     # 递归失败只降级 multi_level 为 unavailable，不搞挂快照。
     multi_level_data = _compute_multi_level_safe(validated, active_backend)
+    # 结构预警（R21 扩展）：笔序列首次跌破前低 → structural_alert
+    structural_alert = detect_structural_break(bis)
     snapshot = build_dashboard_snapshot_v2(
         config=RulesConfig(),
         bars=validated,
@@ -259,6 +261,7 @@ def build_ashare_snapshot(
     snapshot["market"]["interval"] = "1d"
     snapshot["market"]["name"] = security_name
     snapshot["market"]["board"] = security_board
+    snapshot["summary"]["structural_alert"] = structural_alert
     _attach_factor_fetch(snapshot, outcome)
     _attach_ashare_tags(snapshot, tags_audit)
     _attach_t_plus_one(snapshot, active_client)
@@ -329,6 +332,15 @@ def _derive_first_buy_signal(
         previous=previous,
     )
 
+    # 状态推进（R21 扩展）：有反向笔时从 structure_ready 推进到 confirmed
+    if signal is not None and facts.has_reversal_bi and signal.status == "structure_ready":
+        signal = transition_first_buy(
+            signal,
+            reversal_closed=True,
+            structure_valid=True,
+            event_time=event_time,
+        )
+
     # 记录状态跃迁（status 变化时才 append）
     if conn is not None and signal is not None:
         prev_status = previous.status if previous is not None else None
@@ -396,6 +408,15 @@ def _derive_first_sell_signal(
         event_time=event_time,
         previous=previous,
     )
+
+    # 状态推进（R21 扩展）：有反向笔时从 structure_ready 推进到 confirmed
+    if signal is not None and facts.has_reversal_bi and signal.status == "structure_ready":
+        signal = transition_first_sell(
+            signal,
+            reversal_closed=True,
+            structure_valid=True,
+            event_time=event_time,
+        )
 
     # 记录状态跃迁
     if conn is not None and signal is not None:

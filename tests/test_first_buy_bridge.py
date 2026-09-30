@@ -14,7 +14,11 @@ from typing import Any
 
 import pytest
 from cpt.application.a_share_snapshot import build_ashare_snapshot
-from cpt.application.first_buy_bridge import derive_first_buy_facts, derive_first_sell_facts
+from cpt.application.first_buy_bridge import (
+    derive_first_buy_facts,
+    derive_first_sell_facts,
+    detect_structural_break,
+)
 from cpt.domain.models import Bi, ZhongShu
 
 from tests.test_web_a_share import _FakeClient, _make_canonical, _zigzag_bars
@@ -117,14 +121,24 @@ def test_uptrend_tail_produces_no_signal() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def _bi(direction: int, start: int, end: int, level: int = 5) -> Bi:
+def _bi(
+    direction: int,
+    start: int,
+    end: int,
+    level: int = 5,
+    *,
+    high: float | None = None,
+    low: float | None = None,
+) -> Bi:
+    _high = high if high is not None else 110.0
+    _low = low if low is not None else 90.0
     return Bi(
         level=level,
         direction=direction,
         start_time=start,
         end_time=end,
-        high=110.0 if direction == 1 else 90.0,
-        low=90.0 if direction == 1 else 110.0,
+        high=_high,
+        low=_low,
         source_ids=(f"fx:{end}",),
         power_price=5.0,
         power_volume=100.0,
@@ -325,3 +339,52 @@ def test_sell_signal_rejects_invalid_trend_direction() -> None:
             source_revision=0,
             event_time=0,
         )
+
+
+# --------------------------------------------------------------------------- #
+# 结构预警（R21 扩展）
+# --------------------------------------------------------------------------- #
+
+
+def test_no_break_with_empty_sequence() -> None:
+    assert detect_structural_break([]) is False
+
+
+def test_no_break_with_single_down_bi() -> None:
+    assert detect_structural_break([_bi(-1, 0, 10)]) is False
+
+
+def test_break_when_low_falls_below_previous() -> None:
+    """第二根向下笔的低点低于第一根 → 预警。"""
+    bis = [_bi(-1, 0, 10), _bi(1, 10, 20), _bi(-1, 20, 30, low=85.0)]
+    # 第一根向下笔 low=90.0, 第二根向下笔 low=85.0 → 跌破
+    assert detect_structural_break(bis) is True
+
+
+def test_no_break_when_low_rises() -> None:
+    """第二根向下笔的低点高于第一根 → 不预警。"""
+    bis = [_bi(-1, 0, 10), _bi(1, 10, 20), _bi(-1, 20, 30, low=95.0)]
+    # 第一根向下笔 low=90.0, 第二根向下笔 low=95.0 → 未跌破
+    assert detect_structural_break(bis) is False
+
+
+def test_break_ignores_upward_bis() -> None:
+    """只比较向下笔，向上笔不参与判断。"""
+    bis = [
+        _bi(-1, 0, 10),  # 向下, low=90
+        _bi(1, 10, 20),  # 向上, 忽略
+        _bi(-1, 20, 30),  # 向下, low=90 (与前一根向下笔相同)
+        _bi(1, 30, 40),  # 向上, 忽略
+        _bi(-1, 40, 50),  # 向下, low=90 (未跌破)
+    ]
+    assert detect_structural_break(bis) is False
+
+
+def test_break_detects_first_occurrence() -> None:
+    """首次跌破即返回，不继续扫描。"""
+    bis = [
+        _bi(-1, 0, 10),  # 向下, low=90
+        _bi(-1, 10, 20, low=85),  # 向下, low=85 → 跌破
+        _bi(-1, 20, 30, low=80),  # 向下, low=80 → 也跌破，但不应扫描到这里
+    ]
+    assert detect_structural_break(bis) is True
