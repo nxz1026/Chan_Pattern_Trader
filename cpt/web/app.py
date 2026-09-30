@@ -11,6 +11,7 @@ from typing import Any, Protocol, runtime_checkable
 from urllib.parse import parse_qs, urlsplit
 
 from cpt.adapters.binance_futures import resolve_interval_label
+from cpt.application.dashboard_runs import recent_runs, record_run
 
 _LOG = logging.getLogger("cpt.web.handler")
 
@@ -56,6 +57,29 @@ class SelectableSource(Protocol):
     def select_symbol(self, symbol: str, interval: str) -> None: ...
 
     def force_refresh(self) -> None: ...
+
+
+def _with_run_index(payload: dict[str, Any]) -> dict[str, Any]:
+    """在 **HTTP 响应层** 注入运行索引（R20 接线）。
+
+    为什么不在 ``build_dashboard_snapshot_v2`` 里接：运行历史是**进程级状态**，
+    放进去会让 snapshot 变成非确定性的 —— 同参数两次调用返回不等，直接打破
+    ``tests/test_web_a_share.py::test_provider_caches_snapshot_within_ttl`` 守的
+    缓存语义，也会让 ``dashboard_compare`` 的字段级 diff 永远有一处差异
+    （``runs``）。这是接线过程中实测踩到的，不是推演。
+
+    只有含 ``market`` 的完整 snapshot 才注入；``/api/dashboard/reproducibility``
+    这类子字段响应保持原样。
+
+    ``record_run`` 自带去重：realtime 模式 30s 内可能有十几次请求命中同一份
+    缓存 snapshot，不去重会把「一次运行」记成十几条。
+    """
+    if "market" not in payload:
+        return payload
+    record_run(payload)
+    enriched = dict(payload)
+    enriched["runs"] = list(recent_runs())
+    return enriched
 
 
 def make_handler(
@@ -208,7 +232,9 @@ def make_handler(
             elif path.path == "/api/dashboard/parity":
                 payload = snapshot.get("parity", {})
             elif path.path == "/api/dashboard/runs":
-                payload = {"runs": snapshot.get("runs", [])}
+                # R20：snapshot 本体的 ``runs`` 恒为 []（领域层必须保持「同输入同
+                # 输出」），运行历史走进程内环形缓冲。理由见 _with_run_index。
+                payload = {"runs": list(recent_runs())}
             elif path.path == "/api/dashboard/market-24h":
                 payload = snapshot.get("market_24h", {"available": False, "reason": "unavailable"})
             elif path.path == "/api/dashboard/engine-state":
@@ -277,7 +303,7 @@ def make_handler(
             else:
                 self.send_error(HTTPStatus.NOT_FOUND)
                 return
-            self._write_json(payload)
+            self._write_json(_with_run_index(payload))
 
         # ---------------------------------------------------------- A 股（R17-3）
 
@@ -316,7 +342,7 @@ def make_handler(
                     # 中文消息不能走 send_error）。
                     self._write_json_error(HTTPStatus.BAD_REQUEST, "invalid_code", str(exc))
                     return
-                self._write_json(payload)
+                self._write_json(_with_run_index(payload))
                 return
             if path == "/api/dashboard/a-share/pool":
                 self._write_json(a_share_routes.pool_payload())

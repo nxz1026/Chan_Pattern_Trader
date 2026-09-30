@@ -834,7 +834,7 @@
     const list = document.createElement("ul");
     runs.forEach((entry) => {
       const row = document.createElement("li");
-      row.textContent = `${entry.run_id || entry.id || "—"} · ${entry.dataset_hash || ""} · ${entry.created_at || ""}`;
+      row.textContent = `${entry.run_id || entry.id || "—"} · ${entry.symbol || "—"} · ${entry.dataset_hash || ""} · ${entry.generated_at || entry.created_at || ""}`;
       list.appendChild(row);
     });
     section.appendChild(list);

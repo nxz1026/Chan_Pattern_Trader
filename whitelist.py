@@ -63,7 +63,6 @@ level_tree  # dashboard_levels —— Phase 5 P1 级别递归树
 align_runs  # dashboard_multi_run —— Phase 6 P2 双数据集同步对比
 quality_report  # dashboard_quality —— Phase 5 P1 数据质量报告
 realtime_update  # dashboard_realtime —— Phase 4 P1 高效实时更新
-build_run_index  # dashboard_runs —— R1 数据集/运行浏览器
 signal_history  # dashboard_signal_history —— Phase 4 P1 信号历史列表
 signal_statistics  # dashboard_stats —— Phase 6 P2 一买统计
 watch_metrics  # dashboard_watch —— Phase 4 P1 reconnect/stale
@@ -82,3 +81,4 @@ fetch_adjust_factors  # adapters/wind_source —— Wind 复权因子取数
 # --------------------------------------------------------------------------- #
 fetch_validated_bars  # adapters/a_share_local —— 取数 + 校验的组合入口
 call_count  # adapters/wind_source —— 调用计数，供测试断言节流行为
+clear_runs  # application/dashboard_runs —— 清空进程内运行环形缓冲（测试用）
