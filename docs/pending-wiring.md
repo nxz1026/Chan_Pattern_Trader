@@ -139,8 +139,8 @@
 | 模块 | 行数 | 处境 | 功能 / roadmap 位置 | 前端消费 |
 |---|---:|---|---|---:|
 | ~~`cpt/application/dashboard_parity.py`~~ | ~~83~~ | **已删除（R20）** | Phase 2「Oracle 对比」——oracle 参照 R13 已删，永久未启用 | 28 处（空面板保留） |
-| `dashboard_signal_history.py` | 47 | 纯未接线 | Phase 4 P1 信号历史 + Phase 6 P2 转化率/失效原因分布 | 0 |
-| `dashboard_event_audit.py` | 42 | 纯未接线 | Phase 5 P1 事件前后状态对比 | 0 |
+| ~~`dashboard_signal_history.py`~~ | ~~47~~ | **已删除（R21）** | Phase 4/6 — 依赖 `Signal` 域对象，生产线不产出，留了也是假希望 | — |
+| ~~`dashboard_event_audit.py`~~ | ~~42~~ | **已删除（R21）** | Phase 5 — 依赖 `StructureEvent` 域对象，生产线不产出，留了也是假希望 | — |
 | `dashboard_levels.py` | 40 | 纯未接线 | Phase 5 P1 级别递归树 | 0 |
 | `dashboard_runs.py` | 37 | **半接线** | R1 数据集/运行浏览器 | 2 处 |
 | `dashboard_quality.py` | 33 | 纯未接线 | Phase 5 P1 数据质量报告 | 0 |

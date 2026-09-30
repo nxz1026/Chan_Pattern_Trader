@@ -57,13 +57,11 @@ invalidated_at  # cpt/domain/models.py
 # --------------------------------------------------------------------------- #
 # 4a. roadmap 功能对应的 dashboard 服务
 compare_snapshots  # dashboard_compare —— R5 两份 snapshot 字段级 diff
-event_audit  # dashboard_event_audit —— Phase 5 P1 事件前后状态对比
 slice_snapshot  # dashboard_export —— Phase 6 P2 时间范围切片导出
 level_tree  # dashboard_levels —— Phase 5 P1 级别递归树
 align_runs  # dashboard_multi_run —— Phase 6 P2 双数据集同步对比
 quality_report  # dashboard_quality —— Phase 5 P1 数据质量报告
 realtime_update  # dashboard_realtime —— Phase 4 P1 高效实时更新
-signal_history  # dashboard_signal_history —— Phase 4 P1 信号历史列表
 signal_statistics  # dashboard_stats —— Phase 6 P2 一买统计
 watch_metrics  # dashboard_watch —— Phase 4 P1 reconnect/stale
 watchlist_rows  # dashboard_watchlist —— Phase 4 P1 多交易对
