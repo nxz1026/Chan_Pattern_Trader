@@ -1538,8 +1538,9 @@ CI 的 `Run unit and integration tests` 失败后，**后面的"静态质量门�
 
 | # | 问题 | 处置 |
 |---|---|---|
-| A2 | 三处文档写「服务以 nohup 运行」，实测早已 systemd 托管 | 就地更正 |
-| A3 | 总计划台账 `/home/ubuntu/work/cpt-audit/CPT-总计划-2026-09-24.md` 已消失，却有 5 处仍拿它当判据 | 判据职责收归本文件；4 处引用就地标注失效 |
+| A2 | 三处文档写「服务以 nohup 运行」，实测早已 systemd 托管 | 就地更正 · `80406da` |
+| A3 | 总计划台账 `/home/ubuntu/work/cpt-audit/CPT-总计划-2026-09-24.md` 已消失，却有 5 处仍拿它当判据 | 判据职责收归本文件；4 处引用就地标注失效 · `80406da` |
+| M4 | 8 个 fixture 仍是 600ms 演示边界 + 9 根 OHLC 越界，过不了 M4 入口 | 迁移至 5m 契约 + 夹取修正 + 新增守门用例 · `c9bf75d` |
 
 **A2 证据**（可复现）：
 ```
@@ -1591,18 +1592,52 @@ ps -o pid,ppid,cmd -p 1499200  →  PPID=1（systemd）
 
 | 门禁 | 结果 |
 |---|---|
-| `pytest tests -q -o addopts=""` | **434 passed, 28 skipped** |
+| `pytest tests -q -o addopts=""` | **442 passed, 28 skipped**（含本轮新增 8 个守门用例） |
 | `ruff check cpt tests scripts` | All checks passed |
 | `ruff format --check cpt tests scripts` | 138 files already formatted |
 | `mypy cpt scripts` | Success, 67 source files, 0 error |
 | `lint-imports` | 3 kept, 0 broken |
 | `vulture --min-confidence 60 cpt whitelist.py` | 零输出、exit 0 |
 
-### 五、仍未做（待奎爷拍板，非本轮范围）
+### 五、M4 旧 fixture 迁移 ✅ `c9bf75d`
+
+`m6-quality-report` §3.1/§3.8 的欠账。8 个人工 fixture 仍是 600ms 演示时间边界
+（`close_time = open_time + 600`），过不了 M4 入口 `replay_bars` 的契约校验；
+低层 `run_replay()` 不校验，所以一路绿灯至今。
+
+**实测复现（迁移前）**：8 个 fixture 走
+`python -m cpt.application.replay --input <f> --validate-only` **全部 rc=2**，
+连 `cpt/application/replay.py:24` 自己的 docstring 示例都跑不通。
+
+**处置**：
+- 时间戳整体迁移为真实 5m 契约：起点 `1706745600000`（2024-02-01T00:00:00Z，
+  与 oracle fixture 同源），`interval_ms=300000`，`close_time = open_time + 299999`。
+- **迁移中暴露第二处契约违规**：9 根 K 线 `open`/`close` 落在 `[low, high]` 之外
+  （case1 3 根 / case2 1 根 / case3 5 根）。这批数据从未过 M4 入口，
+  单看时间边界发现不了。
+- OHLC 修法二选一，**用实测结构不变性选**：
+  | 方案 | case3 结果 | 结论 |
+  |---|---|---|
+  | 扩大 `high`/`low` 包络 | 4 bi 塌成 **0 bi** | ❌ 破坏 zigzag 语义 |
+  | 夹取 `open`/`close` 进包络 | 4 bi 保持 | ✅ 采用 |
+
+**结构不变性（硬约束，逐字段验证）**：8/8 fixture 的
+`bis` / `fractals` / `zhongshus` / `events` / `signals` 与迁移前**完全一致**
+（剥离 `open_time`/`close_time`/`start_time`/`end_time` 后比对）。
+
+**回归网**：`tests/test_replay_integration.py::test_fixture_passes_m4_entry`
+—— 对每个 fixture 走 `replay_bars`（M4 推荐入口）+ 独立断言时间边界与 OHLC 包络。
+**已用旧数据实测该用例 FAIL**（`DataValidationError`），确认是真守门而非同义反复。
+
+> 踩坑：迁移后首次深比对报"结构不一致"，逐字段追下去发现差异全是我自己的
+> JSON 往返伪影——`source_ids` 在内存里是 `tuple`、经 `json.dump` 后变 `list`。
+> **比对前必须先归一化容器类型**，否则会误判成数据被改坏。真正的差异只有
+> 我有意修改的那 9 根 OHLC。
+
+### 六、仍未做（待奎爷拍板，非本轮范围）
 
 - **B1/B2/B3**：16 个模块 981 行待接线（`docs/pending-wiring.md`），
   `/api/dashboard/runs` 与 `/parity` 路由活载荷死，roadmap Phase 3–6 未落地。
   **要接要删是产品决策**，我不擅动。
 - **C1**：`public.hot_rank` 空表（热门池只剩 ladder 一腿）。
 - **C2**：`asel.ref_adjust_factor` 3,388,417 行全 `hfq_factor=1.0`，待 factor_backfill。
-- **M4 旧 fixture 迁移**（`m6-quality-report` §3.1/§3.8）。
