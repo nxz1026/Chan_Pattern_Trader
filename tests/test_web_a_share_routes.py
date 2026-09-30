@@ -114,8 +114,18 @@ class _FakeCursor:
         return None
 
 
-def _request(url: str, method: str = "GET") -> tuple[int, Any]:
-    request = urllib.request.Request(url, method=method)
+def _request(
+    url: str, method: str = "GET", *, content_type: str | None = "application/json"
+) -> tuple[int, Any]:
+    """发一个请求。
+
+    审计 M1 后写接口要求 ``Content-Type: application/json``（否则 415），所以
+    非 GET 默认带上该头；要测"缺头被拒"时显式传 ``content_type=None``。
+    """
+    headers: dict[str, str] = {}
+    if method != "GET" and content_type is not None:
+        headers["Content-Type"] = content_type
+    request = urllib.request.Request(url, method=method, headers=headers)
     try:
         with urllib.request.urlopen(request, timeout=30) as response:  # noqa: S310
             return response.status, json.load(response)
@@ -434,6 +444,26 @@ def test_watchlist_route_rejects_bad_code_with_json(
         status, body = _request(f"{base}/api/dashboard/a-share/watchlist?code=zzz", "POST")
     assert status == 400
     assert body["error"]["code"] == "invalid_code"
+
+
+def test_watchlist_route_requires_json_content_type(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """审计 M1：写接口必须要求 ``Content-Type: application/json``。
+
+    没有该头时跨站 ``fetch`` 属于"简单请求"，不触发 CORS 预检就能打进来；
+    强制声明 json 会触发预检，从而抬高 CSRF 门槛。缺失与错误头都回 **415**。
+    此断言同时钉住 415 与 400（code 非法）不会互相混淆。
+    """
+    monkeypatch.setattr(a_share_routes, "DEFAULT_WATCHLIST_PATH", tmp_path / "wl.json")
+    with served() as base:
+        url = f"{base}/api/dashboard/a-share/watchlist?code=600519"
+        missing, missing_body = _request(url, "POST", content_type=None)
+        wrong, wrong_body = _request(url, "POST", content_type="text/plain")
+    assert missing == 415
+    assert missing_body["error"]["code"] == "content_type_required"
+    assert wrong == 415
+    assert wrong_body["error"]["code"] == "content_type_required"
 
 
 def test_unknown_ashare_subpath_is_404() -> None:

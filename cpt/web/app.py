@@ -423,8 +423,10 @@ def make_handler(
             # CORS 预检并失败。不引入鉴权系统，仅抬高跨站触发门槛。
             content_type = self.headers.get("Content-Type", "")
             if "application/json" not in content_type.lower():
+                # 415（不是 400）：缺/错的 Content-Type 是"媒体类型不受支持"，
+                # 与 code 非法（400 invalid_code）区分开，客户端能精确归因。
                 self._write_json_error(
-                    HTTPStatus.BAD_REQUEST,
+                    HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
                     "content_type_required",
                     "写接口要求 Content-Type: application/json",
                 )
