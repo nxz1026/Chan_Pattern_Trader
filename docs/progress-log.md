@@ -1641,3 +1641,84 @@ ps -o pid,ppid,cmd -p 1499200  →  PPID=1（systemd）
   **要接要删是产品决策**，我不擅动。
 - **C1**：`public.hot_rank` 空表（热门池只剩 ladder 一腿）。
 - **C2**：`asel.ref_adjust_factor` 3,388,417 行全 `hfq_factor=1.0`，待 factor_backfill。
+
+---
+
+## R19 — 待接线清单重排 + A 股规则标签接线 · 2026-09-30
+
+R18 收尾后的 6 项队列，按「一件一件来」的约定推进；本轮完成 ①②。
+
+### 一、`docs/pending-wiring.md` 重排（队列 ①，commit `a078466`）
+
+原表 16 行平铺，掩盖了两个关键事实：**16 个模块其实是 3 个功能簇**，且**处境分四种**。
+重排为三簇（A 股信号链 2/463 行、研究者面板 10/396 行、盯盘面板 4/122 行）+
+四处境（半接线 / 真重复 / 依赖消失 / 纯未接线），并新增「占位集中地」一节：
+`cpt/application/dashboard_snapshot_v2.py:56-70` 五处兜底是半接线的统一病灶，
+五个键都已是关键字形参，**正确接法是传真值而非改函数体**。
+
+### 二、`a_share_rules` 接线（队列 ②）
+
+数据流：`AShareLocalClient.fetch_daily_tags`（`cpt/adapters/a_share_local.py`）
+→ `_apply_daily_tags`（`cpt/application/a_share_snapshot.py`）→ 合成 id 挂到
+`Bi.source_ids`（如 `ashare:is_limit_up:2026-09-21`）+ 审计块写进
+`data_quality.ashare_tags`。`whitelist.py` 里 `fetch_daily_tags` 的豁免已摘
+（实测去掉后 vulture 仍 0 告警 = 生产引用让 vulture 认账）；
+`t_plus_one_purchase_allowed` **仍留** —— 它属于未接的 signal 桥。
+
+**审计块刻意区分三种「没标签」**，否则面板上「没画虚线」分不清是今天真没有涨停
+还是功能没接上：
+
+| 情形 | `available` | `reason` |
+|---|---|---|
+| 客户端没实现 `fetch_daily_tags`（测试替身） | `false` | `client_unsupported` |
+| 查了但失败（DB 挂） | `false` | `tag_fetch_failed` |
+| 查通了，区间内确实没有极端日 | `true` | ——（`tagged_bis: 0`） |
+
+**三条设计约束，各有守门用例**：
+
+1. 标签是纯展示增强，DB 挂了只降级标签、不搞挂快照。
+2. 只注入 `source_ids`、不改 `Bi` 数值——判据与 M4 fixture 迁移同源（结构不变性）。
+3. 标签查询区间 = K 线查询区间——区间错位会让笔的末日查不到标签，且**静默失效**。
+   `end_ms`/`start_ms` 因此从 `try` 块内提到块外共用。
+
+**守门用例的规矩变了**：原有用例是**自证式**的（直接调本模块，证明不了生产会走它）。
+新增 5 条全部以**生产构造函数** `build_ashare_snapshot` 为入口，**已实测未接线时
+4 条红**（`KeyError: 'ashare_tags'` / 标签从未被调用），接线后全绿。
+
+### 三、验收（实跑，非推断）
+
+- 全门禁绿：pytest **447 passed, 28 skipped**（442 → 447，新增 5）、ruff check /
+  format(141 files) / mypy(67 files) / lint-imports(3 kept) / vulture 全绿。
+- **真库端到端**（`build_ashare_snapshot` 直调）：600519 贵州茅台 36 笔 /
+  `tagged_bis=0`（该股近区间无极端日，与 `derived_bar` 实测一致）；
+  603256 宏和科技 34 笔 / 4 笔命中（跌停+涨停+炸板+炸板）；
+  002272 川润股份 42 笔 / 4 笔命中。
+- **HTTP 链路**（重启 `cpt-dashboard`，MainPID 1499200 → 1541429 后）：
+  `/api/dashboard/a-share/snapshot?code=603256` 返回
+  `data_quality.ashare_tags = {available: True, tagged_bis: 4, total_bis: 34}`，
+  笔上带 `ashare:is_limit_down:2026-06-01` 等合成 id。
+
+### 四、踩坑
+
+- **自证式测试是接线工作的隐形陷阱**：本模块原有 12 条用例全绿，但它们直接调
+  `fetch_daily_tags`，**证明不了生产路径会不会走它**。第一版接线时我差点沿用这个
+  形态，被 M4 的纪律（守门必须实测旧代码 FAIL）拦下。接线类改动的验收规矩改为：
+  **入口必须是生产构造函数**。
+- **区间一致性是静默失效**：标签查询区间若与 K 线不一致，笔的末日落在区间外 →
+  标签查不到，**不报错、不降级、只是没标签**。这类 bug 只有专门比对两次调用参数
+  才抓得到，故补了 `test_tag_query_window_matches_kline_window`。
+- mypy 报 `Incompatible types in assignment`：`compute_domain_structures` 返回的
+  `bis` 是 `tuple[Bi, ...]`，直接接收 `Sequence[Bi]` 赋值会炸。改用新变量名
+  `raw_bis` 接住原值，避免对同一变量改变声明类型。
+
+### 五、仍未做
+
+- 队列 ③：`cpt/domain/signal.py` 一买状态机——**缺输入的生产者**
+  （`has_two_centers` / `has_divergence_leg` / `has_reversal_bi` 只存在于
+  `signal.py` 自己和一处 docstring；`TrendType`（`cpt/domain/models.py:163`）
+  没有对应字段）。这座桥**必须新写不是接线**，待拍板。
+- 队列 ④⑤⑥：`dashboard_market_fetch` 删除、`dashboard_runs` 补数据源、parity 去留。
+- 前端尚无 `ashare:` 前缀的专门渲染（虚线/降透明）——标签已随
+  `data-source-ids` 透出，但视觉区分未做，属下一增量。
+- B1/B2/B3（roadmap Phase 3–6）、C1（`public.hot_rank` 空表）、
+  C2（`ref_adjust_factor` 全 `hfq_factor=1.0`）维持原状。

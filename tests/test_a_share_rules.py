@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
+from cpt.application.a_share_snapshot import build_ashare_snapshot
 from cpt.domain.a_share_rules import (
     AShareDailyTag,
     apply_ashare_tags_to_bis,
@@ -15,6 +16,8 @@ from cpt.domain.a_share_rules import (
     t_plus_one_purchase_allowed,
 )
 from cpt.domain.models import Bi
+
+from tests.test_web_a_share import _FakeClient, _zigzag_bars
 
 
 def date(y, m, d):
@@ -222,3 +225,152 @@ def test_t_plus_one_returns_true_when_no_previous_close():
 def test_t_plus_one_returns_true_after_close():
     """前一日已收盘 → 日历允许（持仓层面由仓位模块处理）。"""
     assert t_plus_one_purchase_allowed("2026-09-23") is True
+
+
+# --------------------------------------------------------------------------- #
+# 接线（R19）：本模块从「生产零导入」接进 A 股主看板
+# --------------------------------------------------------------------------- #
+#
+# 上面那些用例是**自证式**的——它们直接调本模块，证明"函数本身没坏"，
+# 证明不了"生产路径真的会走它"。R19 起补下面这组：入口是生产构造函数
+# ``cpt.application.a_share_snapshot.build_ashare_snapshot``，断言的是
+# **快照里真的带上了标签**。改接线代码让标签不落地，这组会红；只改
+# 本模块的函数体而忘了接线，这组**不会**红（那正是原来漏检的形态）。
+
+_CODE = "600519"
+
+
+class _TagClient(_FakeClient):
+    """在 ``_FakeClient`` 之上多实现 ``fetch_daily_tags``（鸭子类型探针要的那个方法）。"""
+
+    def __init__(self, bars, tags, *, explode: bool = False) -> None:
+        super().__init__(bars)
+        self._tags = tags
+        self._explode = explode
+        self.tag_calls: list[tuple[str, int, int]] = []
+
+    def fetch_daily_tags(self, code: str, start_ms: int, end_ms: int):
+        self.tag_calls.append((code, start_ms, end_ms))
+        if self._explode:
+            raise RuntimeError("derived_bar 不可达")
+        return self._tags
+
+
+def _bi_end_dates(snap) -> list[str]:
+    return [
+        datetime.fromtimestamp(b["end_time"] / 1000, tz=UTC).date().isoformat()
+        for b in snap["overlays"]["bis"]
+    ]
+
+
+def test_production_entry_tags_bis_with_extreme_days():
+    """生产入口产出的快照里，涨停日的笔必须带 ``ashare:`` 合成 id。"""
+    baseline = build_ashare_snapshot(_CODE, client=_FakeClient(_zigzag_bars(n=120)))
+    target = _bi_end_dates(baseline)[-1]
+    tag = AShareDailyTag(
+        code=_CODE,
+        trade_date=target,
+        is_limit_up=True,
+        is_limit_down=False,
+        is_bomb=False,
+        is_one_word=False,
+    )
+    snap = build_ashare_snapshot(_CODE, client=_TagClient(_zigzag_bars(n=120), {target: tag}))
+    tagged = [
+        b for b in snap["overlays"]["bis"] if any(i.startswith("ashare:") for i in b["source_ids"])
+    ]
+    assert len(tagged) == 1, "只有末日那根笔应被打标签"
+    assert f"ashare:is_limit_up:{target}" in tagged[0]["source_ids"]
+
+
+def _limit_up_tag(day: str) -> AShareDailyTag:
+    return AShareDailyTag(
+        code=_CODE,
+        trade_date=day,
+        is_limit_up=True,
+        is_limit_down=False,
+        is_bomb=False,
+        is_one_word=False,
+    )
+
+
+def _quiet_tag(day: str) -> AShareDailyTag:
+    return AShareDailyTag(
+        code=_CODE,
+        trade_date=day,
+        is_limit_up=False,
+        is_limit_down=False,
+        is_bomb=False,
+        is_one_word=False,
+    )
+
+
+def test_tags_do_not_change_structure():
+    """标签只注入 ``source_ids``，**不碰**笔的数值与时点。
+
+    与 M4 fixture 迁移用的是同一条判据：接线类改动必须先证明"结构不变"，
+    否则一旦把标签写进 ``Bi`` 的数值字段，缠论结构会静默变形。
+    """
+    baseline = build_ashare_snapshot(_CODE, client=_FakeClient(_zigzag_bars(n=120)))
+    dates = _bi_end_dates(baseline)
+    tags = {d: _limit_up_tag(d) for d in dates}
+    tagged = build_ashare_snapshot(_CODE, client=_TagClient(_zigzag_bars(n=120), tags))
+
+    def shape(snap):
+        return [
+            {k: v for k, v in b.items() if k not in {"source_ids"}} for b in snap["overlays"]["bis"]
+        ]
+
+    assert shape(tagged) == shape(baseline), "打标签改变了笔的结构 → 标签被写进了数值字段"
+    assert tagged["overlays"]["fractals"] == baseline["overlays"]["fractals"]
+    assert tagged["overlays"]["zhongshus"] == baseline["overlays"]["zhongshus"]
+
+
+def test_ashare_tags_audit_block_reports_coverage():
+    """审计块要能区分「查了但没有极端日」和「压根没查」。"""
+    baseline = build_ashare_snapshot(_CODE, client=_FakeClient(_zigzag_bars(n=120)))
+    n_bis = len(baseline["overlays"]["bis"])
+    assert n_bis > 0, "靶子没出笔，下面的断言就是同义反复"
+
+    # ① 没实现 fetch_daily_tags 的假客户端 → available False
+    assert baseline["data_quality"]["ashare_tags"] == {
+        "available": False,
+        "reason": "client_unsupported",
+        "total_bis": n_bis,
+    }
+
+    # ② 实现了但区间内无极端日 → available True / tagged_bis 0
+    dates = _bi_end_dates(baseline)
+    quiet = build_ashare_snapshot(
+        _CODE,
+        client=_TagClient(_zigzag_bars(n=120), {d: _quiet_tag(d) for d in dates}),
+    )
+    assert quiet["data_quality"]["ashare_tags"] == {
+        "available": True,
+        "tagged_bis": 0,
+        "total_bis": n_bis,
+        "source": "public.derived_bar",
+    }
+
+
+def test_tag_fetch_failure_does_not_kill_snapshot():
+    """标签是**纯展示增强**，DB 挂了只能少标签，绝不能把整个快照搞成 degraded。"""
+    snap = build_ashare_snapshot(_CODE, client=_TagClient(_zigzag_bars(n=120), {}, explode=True))
+    assert snap["market"]["bar_count"] == 120
+    assert snap["data_quality"]["ashare_tags"] == {
+        "available": False,
+        "reason": "tag_fetch_failed",
+        "total_bis": len(snap["overlays"]["bis"]),
+    }
+    assert all(
+        not any(i.startswith("ashare:") for i in b["source_ids"]) for b in snap["overlays"]["bis"]
+    )
+
+
+def test_tag_query_window_matches_kline_window():
+    """标签查询区间必须与 K 线查询区间一致 —— 区间错位会让末日笔查不到标签。"""
+    client = _TagClient(_zigzag_bars(n=120), {})
+    build_ashare_snapshot(_CODE, width_k=45, client=client)
+    (_, tag_start, tag_end) = client.tag_calls[0]
+    (_, bar_start, bar_end) = client.calls[0]
+    assert (tag_start, tag_end) == (bar_start, bar_end)

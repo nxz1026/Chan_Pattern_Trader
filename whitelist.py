@@ -70,9 +70,11 @@ signal_history  # dashboard_signal_history —— Phase 4 P1 信号历史列表
 signal_statistics  # dashboard_stats —— Phase 6 P2 一买统计
 watch_metrics  # dashboard_watch —— Phase 4 P1 reconnect/stale
 watchlist_rows  # dashboard_watchlist —— Phase 4 P1 多交易对
-# 4b. A 股信号层（现行台账 `CPT-总计划-2026-09-24.md` 在范围内）
-fetch_daily_tags  # domain/a_share_rules —— C2 涨跌停 / C3 停牌标签
-t_plus_one_purchase_allowed  # domain/a_share_rules —— C4 T+1
+# 4b. A 股信号层
+# `fetch_daily_tags` / `apply_ashare_tags_to_bis` / `AShareDailyTag` 已于 R19 接进
+# A 股主看板（adapters/a_share_local.py::AShareLocalClient.fetch_daily_tags →
+# application/a_share_snapshot.py::_apply_daily_tags），故不再豁免。
+t_plus_one_purchase_allowed  # domain/a_share_rules —— C4 T+1（待 signal 桥接线）
 # 4c. Wind 复权因子接入（台账决策 C1「复权因子 backfill 走 Wind」）
 _to_wind_code  # adapters/a_share_local —— 000002 → 000002.SZ 代码转换
 fetch_adjust_factors  # adapters/wind_source —— Wind 复权因子取数

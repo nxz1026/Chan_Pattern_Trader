@@ -41,7 +41,7 @@
 
 | 簇 | 模块 | 行数 | 性质 |
 |---|---:|---:|---|
-| **一、A 股信号链** | 2 | 463 | **唯一影响「信号对不对」** |
+| **一、A 股信号链** | 2 | 463 | **唯一影响「信号对不对」**（R19 已接 1 个） |
 | **二、研究者模式面板** | 10 | 396 | 只读展示/分析 |
 | **三、盯盘模式面板** | 4 | 122 | 只读展示 |
 | 合计 | 16 | **981** | |
@@ -70,14 +70,44 @@
 | 模块 | 行数 | 处境 | 功能 | 接线目标 |
 |---|---:|---|---|---|
 | `cpt/domain/signal.py` | 311 | 纯未接线 | **一买状态机**：`assess_first_buy` / `transition_first_buy`，管 alert→confirmed→invalidated 转移 | 接进 A 股信号链；`signal_id` 已按**稳定 upsert 主键**设计 |
-| `cpt/domain/a_share_rules.py` | 152 | 纯未接线 | **A 股交易规则标签**：涨跌停 / 停牌 / T+1。`fetch_daily_tags` / `apply_ashare_tags_to_bis` / `t_plus_one_purchase_allowed` | 接进 A 股主看板 |
+| `cpt/domain/a_share_rules.py` | 152 | ✅ **R19 已接线** | **A 股交易规则标签**：涨跌停 / 停牌 / T+1。`fetch_daily_tags` / `apply_ashare_tags_to_bis` / `t_plus_one_purchase_allowed` | 标签能力已进 A 股主看板（见下）；**只剩 T+1 未接** |
 
-**两者是互锁的**：`a_share_rules.py` 的 docstring 写明「C4 T+1 … 由 `cpt.domain.signal`
-在评估一买/一卖时读取」——即 `signal.py` 评估信号时要吃 `a_share_rules` 的标签。
-**必须一起接，不能只接一个**，否则信号会忽略涨跌停/停牌/T+1 约束。
+### `a_share_rules` 的 R19 接线结果
 
-> 注：这两条的判据出处（外置台账）已失效，现行依据是其**功能本身**（A 股主看板
-> R17-3 刚落地，信号链是它的必要下游）+ roadmap 对应位置。
+数据流：`AShareLocalClient.fetch_daily_tags`
+（`cpt/adapters/a_share_local.py`）→ `cpt/application/a_share_snapshot.py`
+的 `_apply_daily_tags` → 合成 id 挂到 `Bi.source_ids`（如
+`ashare:is_limit_up:2026-09-21`）+ 审计块写进 `data_quality.ashare_tags`。
+
+**审计块刻意区分三种「没标签」**，否则面板上「没画虚线」分不清是今天真没有涨停
+还是功能没接上：
+
+| 情形 | `available` | `reason` |
+|---|---|---|
+| 注入的客户端没实现 `fetch_daily_tags`（测试替身） | `false` | `client_unsupported` |
+| 查了但失败（DB 挂） | `false` | `tag_fetch_failed` |
+| 查通了，区间内确实没有极端日 | `true` | ——（`tagged_bis: 0`） |
+
+三条关键设计约束，都有守门用例：
+
+1. **标签是纯展示增强，DB 挂了不能搞挂快照** —— 降级只影响标签，不影响出图。
+2. **只注入 `source_ids`，不改 `Bi` 数值** —— 判据与 M4 fixture 迁移同源：
+   接线类改动必须先证明「结构不变」，否则标签写进数值字段会让缠论结构静默变形。
+3. **标签查询区间 = K 线查询区间** —— 区间错位会让笔的末日查不到标签，且**静默失效**
+   （`end_ms`/`start_ms` 因此从 `try` 块里提到块外共用）。
+
+前端 `dashboard/dashboard.js` 已在笔上输出 `data-source-ids`（`:1492`）并在详情面板
+显示（`:619`），所以标签接上即自动可见；**但前端尚无 `ashare:` 前缀的专门渲染**
+（虚线/降透明）—— 属下一增量。
+
+### 剩下的唯一一块：`signal.py` 的一买状态机
+
+`a_share_rules` 的 docstring 写明「C4 T+1 … 由 `cpt.domain.signal` 在评估一买/一卖
+时读取」，即两者互锁。`signal.py` 没能一起接，根因是**缺输入的生产者**：
+`assess_first_buy` 需要 `has_two_centers` / `has_divergence_leg` / `has_reversal_bi`，
+而这三个值只出现在 `signal.py` 自己和 `cpt/domain/first_buy.py:12` 的 docstring 里；
+`TrendType`（`cpt/domain/models.py:163`）没有中心数/背驰笔/反转笔字段。**这座桥
+必须新写，不是接线**，故挂起待拍板。
 
 ---
 
@@ -174,10 +204,14 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:61` 的
 
 1. **改动本清单内模块前先读本文**——它们没有生产调用方，改错了不会有测试变红。
 2. 这些模块的现有测试是**自证式**的（测一段不运行的代码），**不能**当作「已在生产验证」。
+   R19 的接线守门用例补了一条新规矩：**入口必须是生产构造函数**
+   （`build_ashare_snapshot`），只改模块函数体而忘接线的改动**不会**被原有用例发现。
 3. CI 的 vulture 门禁（`.github/workflows/ci.yml`，阈值已从 80 降到 60）对这批名字走
    `whitelist.py` 白名单。白名单是「已知未接线」的登记，不是「忽略告警」。
 4. 接线时**先写从生产入口可达的集成测试**，再把模块从本清单和 `whitelist.py` 里移除。
 5. **删模块时三处同步**：本文件 + `whitelist.py` + `tests/test_<module>.py`。
+6. **白名单是逐个符号的，不是逐个模块的**：一个模块接了一半，剩下的符号仍要留豁免
+   （例：`a_share_rules` 的标签函数已摘，`t_plus_one_purchase_allowed` 仍留）。
 
 ## 相关
 

@@ -29,6 +29,7 @@ from datetime import UTC, datetime
 from typing import Any, Final
 
 from cpt.adapters._dbconfig import connection_kwargs as _shared_connection_kwargs
+from cpt.domain.a_share_rules import AShareDailyTag, fetch_daily_tags
 from cpt.domain.models import CanonicalBar
 from cpt.domain.types import BarLike
 
@@ -217,6 +218,27 @@ class AShareLocalClient:
         if not bare:
             return None
         return fetch_security_names([bare], conn=self._get_conn()).get(bare)
+
+    def fetch_daily_tags(
+        self,
+        code: str,
+        start_ms: int,
+        end_ms: int,
+    ) -> dict[str, AShareDailyTag]:
+        """拉区间内的 A 股衍生标签（``{ISO 日期: AShareDailyTag}``）。
+
+        同样放在客户端里而不是让 application 自己连库，理由与
+        :meth:`fetch_security_name` 相同：**标签必须和 K 线来自同一条链路**，
+        测试注入假客户端时它自然缺席（不会偷偷连真库），生产用真客户端时
+        标签自动就有（application 侧用 ``getattr`` 鸭子探针，不强制实现）。
+
+        SQL 与标签语义在 :mod:`cpt.domain.a_share_rules`；adapters → domain
+        是允许的方向（``Layered architecture`` 契约只禁止反向）。
+        """
+        bare = str(code).split(".", 1)[0].strip()
+        if not bare:
+            return {}
+        return fetch_daily_tags(self._get_conn(), bare, start_ms, end_ms)
 
     @staticmethod
     def _to_wind_code(code: str) -> str:

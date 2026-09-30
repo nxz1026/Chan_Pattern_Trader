@@ -1,8 +1,15 @@
 """A 股规则标签（C2/C4 — R15-3）。
 
-**状态：待接线（pending-wiring，2026-09-25 审核 P0-2）**——生产代码零导入，尚无
-调用方；`CPT-总计划-2026-09-24.md` 的「实现位置」一节明确列出本模块，故保留。
-接线计划见 ``docs/pending-wiring.md``，改动前请先读该文档。
+**状态：部分接线（R19，2026-09-30）**——标签能力已接进 A 股主看板：
+``AShareLocalClient.fetch_daily_tags``（:mod:`cpt.adapters.a_share_local`）复用本模块
+的 SQL，``cpt.application.a_share_snapshot._apply_daily_tags`` 把标签挂到笔上并写
+``data_quality.ashare_tags`` 审计块。守门用例见
+``tests/test_a_share_rules.py`` 末尾「接线」一节——**入口是生产构造函数**，
+不是本模块自己的函数。
+
+**尚未接线**：:func:`t_plus_one_purchase_allowed` 仍无生产调用方。它要等
+:mod:`cpt.domain.signal` 的趋势→信号桥落地（那座桥缺 ``has_two_centers`` /
+``has_divergence_leg`` / ``has_reversal_bi`` 的生产者），所以仍留在 ``whitelist.py``。
 
 按 plan §5.3：
 - **C2 涨跌停**：涨停日的笔/中枢**端点可信度低**（涨停挂单买不到、卖单大量堆积），

@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import logging
 import os
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
@@ -42,7 +42,9 @@ from cpt.adapters.reference_chanlun import ChanlunBackend
 from cpt.adapters.validators import validate_ashare_bars
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
 from cpt.application.replay import compute_domain_structures
+from cpt.domain.a_share_rules import apply_ashare_tags_to_bis
 from cpt.domain.config import RulesConfig
+from cpt.domain.models import Bi
 
 __all__ = [
     "DEFAULT_WIDTH_K",
@@ -71,6 +73,12 @@ INTERVAL_MS: int = 24 * 3600 * 1000
 #: 120 根（≈半年）才是缠论结构的可读尺度。实测带因子的 61 只**全部**有 ≥250 根
 #: 历史，所以调大默认值零覆盖损失。
 DEFAULT_WIDTH_K: int = 120
+
+#: A 股规则标签的合成 id 前缀（``cpt.domain.a_share_rules`` 生成，审计块按它统计）。
+_TAG_PREFIX = "ashare:"
+
+#: 标签的数据来源（写进审计块，便于前端把"标签哪来的"和 K 线来源区分开）。
+_TAG_SOURCE = "public.derived_bar"
 
 
 def build_ashare_snapshot(
@@ -112,10 +120,12 @@ def build_ashare_snapshot(
     # 生产入口显式传入，见 factor_ensurer_from_env 的注释。
     ensurer = ensure_factors
     outcome: FactorEnsureResult | None = None
+    # 窗口提到 try 外：K 线与 A 股规则标签必须查**同一个区间**，否则笔的末日
+    # 落在标签区间外 → 标签静默失效（提出来也让下面 except 分支引用它是安全的）。
+    end_ms = int(datetime.now(UTC).timestamp() * 1000)
+    # 多预留 60 根以保证缠论结构稳定
+    start_ms = end_ms - (width_k + 60) * INTERVAL_MS
     try:
-        end_ms = int(datetime.now(UTC).timestamp() * 1000)
-        # 多预留 60 根以保证缠论结构稳定
-        start_ms = end_ms - (width_k + 60) * INTERVAL_MS
         result = active_client.fetch_validated_klines(code, start_ms, end_ms)
         canonical = list(result.bars)
         if not canonical or _skipped_no_factor(result):
@@ -190,7 +200,13 @@ def build_ashare_snapshot(
     active_backend = backend or resolve_backend(
         DEFAULT_BACKEND, min_bi_len=RulesConfig().min_bi_len
     )
-    fractals, bis, zhongshus = compute_domain_structures(validated, RulesConfig(), active_backend)
+    fractals, raw_bis, zhongshus = compute_domain_structures(
+        validated, RulesConfig(), active_backend
+    )
+    # A 股规则标签（R19 接线）：涨停/跌停/炸板/一字板的**端点可信度低**，
+    # 把合成 id 挂到笔的 ``source_ids`` 上，让上层知道该把这笔画虚线。
+    # 只注入 id、不改数值 —— 判据见 tests/test_a_share_rules.py::test_tags_do_not_change_structure。
+    bis, tags_audit = _apply_daily_tags(active_client, code, start_ms, end_ms, raw_bis)
     snapshot = build_dashboard_snapshot_v2(
         config=RulesConfig(),
         bars=validated,
@@ -217,7 +233,57 @@ def build_ashare_snapshot(
     snapshot["market"]["name"] = security_name
     snapshot["market"]["board"] = security_board
     _attach_factor_fetch(snapshot, outcome)
+    _attach_ashare_tags(snapshot, tags_audit)
     return snapshot
+
+
+def _apply_daily_tags(
+    client: Any,
+    code: str,
+    start_ms: int,
+    end_ms: int,
+    bis: Sequence[Bi],
+) -> tuple[Sequence[Bi], dict[str, Any]]:
+    """把 A 股衍生标签挂到笔上；返回 ``(打了标签的笔, 审计块)``。
+
+    标签是**纯展示增强**，任何一步失败都只降级标签、不影响出图：DB 不可达时
+    照样返回原笔 + ``reason="tag_fetch_failed"``，绝不把整个快照搞成 degraded。
+
+    审计块刻意区分三种"没有标签"的原因，否则面板上「没画虚线」分不清是
+    **今天真没有涨停**还是**功能没接上**：
+
+    - ``client_unsupported`` —— 注入的客户端没实现 ``fetch_daily_tags``（测试替身）
+    - ``tag_fetch_failed`` —— 查了但失败（DB 挂）
+    - ``available=True, tagged_bis=0`` —— 查通了，区间内确实没有极端日
+    """
+    audit: dict[str, Any] = {
+        "available": False,
+        "reason": "client_unsupported",
+        "total_bis": len(bis),
+    }
+    getter = getattr(client, "fetch_daily_tags", None)
+    if not callable(getter):
+        return bis, audit
+    try:
+        tags = getter(code, start_ms, end_ms)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.info("A 股规则标签查询失败 %s: %s", code, exc)
+        return bis, {**audit, "reason": "tag_fetch_failed"}
+    if not tags:
+        return bis, {**audit, "available": True, "tagged_bis": 0, "source": _TAG_SOURCE}
+    tagged = apply_ashare_tags_to_bis(bis, tags)
+    n_tagged = sum(1 for b in tagged if any(i.startswith(_TAG_PREFIX) for i in b.source_ids))
+    return tagged, {
+        "available": True,
+        "tagged_bis": n_tagged,
+        "total_bis": len(bis),
+        "source": _TAG_SOURCE,
+    }
+
+
+def _attach_ashare_tags(snapshot: dict[str, Any], audit: dict[str, Any]) -> None:
+    """把审计块塞进 ``data_quality``（与 :func:`_attach_factor_fetch` 同款，零 schema 变更）。"""
+    snapshot.setdefault("data_quality", {})["ashare_tags"] = audit
 
 
 def _resolve_security_name(client: Any, code: str) -> Any:
