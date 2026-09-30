@@ -1778,15 +1778,38 @@ R18 收尾后的 6 项队列，按「一件一件来」的约定推进；本轮�
 5. 删 import 后 ruff `I001 Import block is un-sorted` —— `ruff check --fix` +
    `ruff format` 解决。
 
+### 四之二、`public.hot_rank` 0 行 —— **已修（跨仓，改在 emotion-core）**
+
+生产者不在 CPT，在 **emotion-core**。`fetch_hot_snapshot`（唯一写 `hot_rank` 的函数，
+`src/emotion_core/services/ingest.py:587`）与 `backfill_hot_rank`（`:633`）**全仓零
+调用**，而同目录的 `snapshot_daily` 被 `orchestration/daily.py` 正常调用 → **每日
+流程漏了一步**，不是数据源/表问题。
+
+- 改动在 emotion-core commit `05596e3`：`STEPS` 加 `("hot", "人气榜")`。
+- **位置在 `coverage` 之后而非 `sync` 之后**：`test_coverage.py` 守的契约是
+  「coverage 紧跟 sync」（拉完立刻验、早失败），插中间会破坏它；hot 不参与
+  coverage 门槛，排其后同样安全。
+- **历史回补必须跳过而非失败**：人气榜是实时榜单、无法回补，`fetch_hot_snapshot`
+  的守卫 raise 会让 `run_daily(from_step=..., 旧交易日)` 全挂。口径与
+  `_trading_day_guard` 一致（非交易日直接返回 0，不算失败）。这是 `test_coverage.py
+  ::test_run_daily_continues_past_a_passing_gate` 逼出来的——它从「步骤顺序断言」
+  升级成了「真行为回归」。
+- 实测：`fetch_hot_snapshot(date(2026,9,29))` 写入 **100 行**；emotion-core 全量
+  **1837 passed, 2 skipped**。
+- CPT 侧端到端：`/api/dashboard/a-share/pool` 的 hot 5 从「全是 `ladder_day`、
+  `rank` 全 NULL」变成**东财人气榜 rank 1-5 真值**（001246/000002/002074/600825/
+  601238）。
+- **`count` 8→7、`strategy` 组 1→0 不是回归**：唯一那 1 只 strategy 票就是 000002
+  万科Ａ，而它恰在人气榜 rank 2 → `_merge_sources` 按 `sources[0]` 归入 hot 组，
+  同时保留双标签 `sources: ['hot_rank', 'strategy']`。去重合并的正确行为。
+
 ### 五、仍未做
 
 - ⑤ `dashboard_runs` 数据源：**待拍板**建表落库 vs 内存环形缓冲。附带已发现的字段名
   不一致：`dashboard_runs.py:31` 输出 `generated_at`，前端 `dashboard.js:836` 读
   `entry.created_at` —— 接上时间戳也永远空白。
-- `public.hot_rank` 0 行：生产者在 **emotion-core**（不在 CPT），
-  `fetch_hot_snapshot`（`src/emotion_core/services/ingest.py:587`）与
-  `backfill_hot_rank`（`:633`）**全仓零调用**，而同目录 `snapshot_daily` 被
-  `orchestration/daily.py:118` 正常调用 → **每日流程漏了一步**。
-- `asel.ref_adjust_factor`：需先解表结构（补 `source`/`source_url` 列，或改脚本适配
-  现有 3 列），再定回填范围（5222 只全量 vs 部分）。
+- `asel.ref_adjust_factor` 全 1.0：**待拍板**回填范围。根因已锁定为表结构与脚本预期
+  不符（只有 3 列、`hfq_factor` 列默认值 1.0，而脚本按含 `source`/`source_url`
+  写 → `UndefinedColumn`），338 万行是建表时灌的占位。数据源已实测正常
+  （腾讯 fqkline：600519 raw 1240.31 / hfq 7930.73 → 真值 **6.394**）。
 - 前端 `ashare:` 前缀渲染（虚线/降透明）—— 奎爷 2026-09-30 拍板**暂停**。
