@@ -50,6 +50,9 @@ divergence_compare  # cpt/domain/config.py
 first_seen_at  # cpt/domain/models.py
 confirmed_at  # cpt/domain/models.py
 invalidated_at  # cpt/domain/models.py
+event_type  # cpt/domain/models.py —— StructureEvent dataclass 字段
+revision  # cpt/domain/models.py —— StructureEvent dataclass 字段
+occurred_at  # cpt/domain/models.py —— StructureEvent dataclass 字段
 
 # --------------------------------------------------------------------------- #
 # 4. 待接线模块（**保留**，非死代码）：产品位置与接线目标逐条见
