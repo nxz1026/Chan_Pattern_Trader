@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import fcntl
 import json
+import os
 import pathlib
+import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -128,7 +130,11 @@ def fetch_limit_pool_marks(conn: Any, trade_date: str | None = None) -> list[Lim
     if trade_date is None:
         with conn.cursor() as cur:
             cur.execute("SELECT max(date) FROM public.limit_pool_em")
-            trade_date = cur.fetchone()[0].isoformat()
+            row = cur.fetchone()
+        if not row or row[0] is None:
+            # 表为空（首次回填前的正常窗口）：返回干净空态，别让 None.isoformat() 崩。
+            return []
+        trade_date = row[0].isoformat()
 
     with conn.cursor() as cur:
         cur.execute(
@@ -168,9 +174,11 @@ class WatchlistEntry:
 
 
 class WatchlistStore:
-    """自选 JSON 落盘存储（fcntl 进程内锁，**单进程安全**）。
+    """自选 JSON 落盘存储（``fcntl.flock`` 同机**跨进程**劝告锁）。
 
-    多进程 / 多机需要换成走 DB 的实现——本接口设计为**可注入**，方便后续替换。
+    flock 锁挂在打开文件描述上，同机各进程独立 ``open`` 的 FD 之间正常互斥，
+    因此**不止进程内安全**；但它不跨机、在 NFS 上不可靠——多机/网络盘需要换成
+    走 DB 的实现。本接口设计为**可注入**，方便后续替换。
     """
 
     def __init__(self, path: pathlib.Path | str) -> None:
@@ -179,8 +187,18 @@ class WatchlistStore:
         if not self._path.exists():
             self._path.write_text("[]", encoding="utf-8")
 
+    @property
+    def _lock_path(self) -> pathlib.Path:
+        """旁路锁文件（``<data>.lock``）：随数据文件同目录，永不参与原子替换。"""
+        return self._path.with_name(f"{self._path.name}.lock")
+
     def _lock(self) -> Any:
-        f = self._path.open("r+", encoding="utf-8")
+        # 锁挂在**旁路锁文件**上而非数据文件：数据文件用 ``os.replace`` 原子替换会
+        # 换 inode，若锁在被替换的 inode 上，等待中的进程会拿到已 unlink 的旧 inode
+        # 读到陈旧数据（且 Windows 上无法替换一个正被打开的路径）。独立锁文件
+        # inode 稳定，flock 的跨进程互斥始终成立。
+        self._lock_path.touch(exist_ok=True)
+        f = self._lock_path.open("a", encoding="utf-8")
         fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         return f
 
@@ -188,6 +206,24 @@ class WatchlistStore:
     def _unlock(f: Any) -> None:
         fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         f.close()
+
+    def _write_atomic(self, data: list[dict[str, Any]]) -> None:
+        """同目录临时文件写全 + ``os.replace`` 原子替换，避免写途中被杀导致半截 JSON。"""
+        fd, tmp_name = tempfile.mkstemp(
+            dir=self._path.parent, prefix=f".{self._path.name}.", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as tmp:
+                json.dump(data, tmp, ensure_ascii=False, indent=2)
+                tmp.flush()
+                os.fsync(tmp.fileno())
+            os.replace(tmp_name, self._path)
+        except BaseException:
+            try:
+                os.unlink(tmp_name)
+            except OSError:
+                pass
+            raise
 
     def list(self) -> list[WatchlistEntry]:
         try:
@@ -205,7 +241,7 @@ class WatchlistStore:
         f = self._lock()
         try:
             try:
-                data = json.loads(f.read())
+                data = json.loads(self._path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 data = []
             # 幂等：已存在则返回原 entry
@@ -219,9 +255,7 @@ class WatchlistStore:
                     "added_at": entry.added_at,
                 }
             )
-            f.seek(0)
-            f.truncate()
-            json.dump(data, f, ensure_ascii=False, indent=2)
+            self._write_atomic(data)
         finally:
             self._unlock(f)
         return entry
@@ -230,7 +264,7 @@ class WatchlistStore:
         f = self._lock()
         try:
             try:
-                data = json.loads(f.read())
+                data = json.loads(self._path.read_text(encoding="utf-8"))
             except json.JSONDecodeError:
                 return False
             new_data = [
@@ -238,9 +272,7 @@ class WatchlistStore:
             ]
             removed = len(new_data) != len(data)
             if removed:
-                f.seek(0)
-                f.truncate()
-                json.dump(new_data, f, ensure_ascii=False, indent=2)
+                self._write_atomic(new_data)
             return removed
         finally:
             self._unlock(f)

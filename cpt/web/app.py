@@ -357,6 +357,16 @@ def make_handler(
             path = urlsplit(self.path)
             if path.path != "/api/dashboard/a-share/watchlist":
                 return False
+            # 审计 M1：写接口至少校验 Content-Type，提高跨站触发门槛。
+            # 不引入完整鉴权（看板是单用户内网应用），但拒绝非 JSON 的写请求。
+            content_type = self.headers.get("Content-Type", "")
+            if "application/json" not in content_type.lower():
+                self._write_json_error(
+                    HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                    "content_type_required",
+                    "写接口要求 Content-Type: application/json",
+                )
+                return True
             from cpt.web import a_share_routes  # noqa: PLC0415
 
             query = parse_qs(path.query)

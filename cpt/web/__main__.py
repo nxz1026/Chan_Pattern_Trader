@@ -210,7 +210,9 @@ class _FixtureProvider:
             DEFAULT_BACKEND, min_bi_len=self._config.min_bi_len
         )
         self._interval_ms = resolve_interval_ms(interval)
-        self._lock = threading.Lock()
+        # RLock：select_symbol() 持外层锁调用 _build_snapshot()，后者自取锁；
+        # 不可重入锁会在同线程二次 acquire 时永久阻塞（演示模式死锁，审计 H1）。
+        self._lock = threading.RLock()
         self._bars: tuple[CanonicalBar, ...] = tuple(
             _synthetic_bar(index=index, interval_ms=self._interval_ms, symbol=symbol)
             for index in range(limit)
@@ -317,7 +319,7 @@ class _FixtureProvider:
         return inspect_bar(bars, fractals, bis, zhongshus, bar_index)
 
     def _build_snapshot(self) -> dict[str, Any]:
-        # 调用者负责持锁（__init__ / select_symbol 内）
+        # RLock 可重入：本函数自取锁，调用者（__init__ / select_symbol）无需持外层锁。
         with self._lock:
             bars = self._bars
             symbol = self._symbol
