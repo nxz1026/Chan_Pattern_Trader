@@ -628,6 +628,168 @@ button {
   font-size: var(--font-size-xs);
 }
 
+/* ---- Phase N0-N2：新手导航 ---- */
+
+.signal-education {
+  color: var(--color-text-faint);
+  font-size: var(--font-size-xs);
+  font-style: italic;
+}
+
+/* 信号雷达 */
+.signal-radar {
+  margin-top: var(--space-3);
+}
+
+.signal-radar-disclaimer {
+  padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--color-accent-warning, #e6a000);
+  background: color-mix(in srgb, var(--color-accent-warning, #e6a000) 8%, transparent);
+  color: var(--color-text-faint);
+  font-size: var(--font-size-xs);
+  margin: var(--space-2) 0;
+}
+
+.signal-radar-empty {
+  color: var(--color-text-faint);
+  font-size: var(--font-size-sm);
+  padding: var(--space-2) 0;
+}
+
+.signal-radar-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.signal-radar-item {
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--color-border);
+  border-left: 3px solid var(--color-border-strong);
+  border-radius: var(--radius-sm, 4px);
+}
+
+.signal-radar-item.signal-status-confirmed {
+  border-left-color: var(--color-accent-ok, #1a7f37);
+}
+
+.signal-radar-item.signal-status-candidate {
+  border-left-color: var(--color-accent-warning, #e6a000);
+}
+
+.signal-radar-item.signal-status-alert {
+  border-left-color: var(--color-accent-danger, #cf222e);
+}
+
+.signal-radar-item.signal-status-structure_ready {
+  border-left-color: var(--color-text-faint);
+}
+
+.signal-radar-main {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  font-weight: 600;
+}
+
+.signal-radar-type,
+.signal-radar-source {
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  color: var(--color-text-faint);
+}
+
+.signal-radar-status-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-top: var(--space-1);
+}
+
+.signal-radar-status {
+  font-size: var(--font-size-sm);
+}
+
+.signal-radar-freshness {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-faint);
+}
+
+.signal-radar-price {
+  font-size: var(--font-size-xs);
+  color: var(--color-text-faint);
+  margin-top: var(--space-1);
+}
+
+/* 模式切换副标题 */
+.mode-switch button small {
+  display: block;
+  font-size: var(--font-size-xs);
+  font-weight: 400;
+  color: var(--color-text-faint);
+  line-height: 1.2;
+  margin-top: 1px;
+}
+
+/* 术语速查 */
+.term-glossary {
+  margin-top: var(--space-3);
+  padding-top: var(--space-2);
+  border-top: 1px solid var(--color-border);
+}
+
+.term-glossary-title {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-faint);
+  cursor: pointer;
+  user-select: none;
+}
+
+.term-glossary-title small {
+  font-weight: 400;
+  opacity: 0.7;
+}
+
+.term-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  margin: var(--space-2) 0 0;
+}
+
+.term-item {
+  font-size: var(--font-size-xs);
+}
+
+.term-item dt {
+  display: inline;
+  color: var(--color-accent, #0969da);
+  cursor: pointer;
+  font-weight: 600;
+}
+
+.term-item dt:hover {
+  text-decoration: underline;
+}
+
+.term-item dd {
+  display: inline;
+  color: var(--color-text-faint);
+  margin-left: var(--space-1);
+}
+
+/* 一卖信号一行 */
+.signal-first-sell {
+  margin-top: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-left: 2px solid var(--color-accent, #0969da);
+  color: var(--color-text-faint);
+  font-size: var(--font-size-xs);
+}
+
 /* ------------------------------------------------------- market panel */
 
 .market-price {

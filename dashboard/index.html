@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html lang="zh-CN" data-view="readonly">
   <head>
     <meta charset="utf-8" />
@@ -30,8 +30,8 @@
           只读 · 无交易入口
         </span>
         <div data-testid="mode-switch" class="mode-switch" role="group" aria-label="Dashboard 模式">
-          <button type="button" data-mode="watch" data-mode-action="watch">盯盘</button>
-          <button type="button" data-mode="research" data-mode-action="research">研究</button>
+          <button type="button" data-mode="watch" data-mode-action="watch" title="快速看价格与信号">盯盘<small>快速看价格与信号</small></button>
+          <button type="button" data-mode="research" data-mode-action="research" title="看结构为什么这样形成">研究<small>看结构为什么这样形成</small></button>
         </div>
         <div data-testid="canvas-switch" class="canvas-switch" role="group" aria-label="画布切换"></div>
         <div data-testid="market-switch" class="market-switch" role="group" aria-label="市场切换">
@@ -338,17 +338,35 @@
           <h3 id="structure-signal-title">一买信号</h3>
           <dl class="kv">
             <div>
-              <dt>status</dt>
-              <dd data-testid="signal-status" data-field="signal.status" data-state="none">none</dd>
+              <dt>状态</dt>
+              <dd data-testid="signal-status" data-field="signal.status" data-state="none">暂无信号</dd>
             </div>
-            <div><dt>背驰</dt><dd data-testid="signal-divergence-status">—</dd></div>
+            <div><dt>状态说明</dt><dd data-testid="signal-status-education" class="signal-education">—</dd></div>
+             <div><dt>背驰</dt><dd data-testid="signal-divergence-status">—</dd></div>
+             <div><dt>信号时点收盘价</dt><dd data-testid="signal-price" title="这是信号出现那一刻的收盘价，不是买入价，也不是建议价位">—</dd></div>
             <div><dt>revision</dt><dd data-testid="signal-source-revision">—</dd></div>
             <div><dt>关联结构</dt><dd data-testid="signal-structure-id">—</dd></div>
           </dl>
-          <p class="hint">alert 与 confirmed 必须区分展示；未收盘不得显示为 confirmed。</p>
+          <p class="hint">⚠️ 预警/候选信号尚未确认，可能随时重构或消失；未收盘的 alert 不得当作 confirmed。</p>
         </section>
+         <section class="term-glossary" data-testid="term-glossary">
+           <h4 class="term-glossary-title">术语速查 <small>点击展开解释</small></h4>
+           <dl class="term-list">
+             <div class="term-item"><dt data-term="fractal">分型</dt><dd>缠论基本单位：顶分型（三根K线中间最高）和底分型（三根K线中间最低）。</dd></div>
+             <div class="term-item"><dt data-term="bi">笔</dt><dd>相邻顶底分型之间的价格段落，是缠论结构的最小走势单元。</dd></div>
+             <div class="term-item"><dt data-term="zhongshu">中枢</dt><dd>三段重叠笔构成的价格密集区，是多空力量平衡的区间。</dd></div>
+             <div class="term-item"><dt data-term="trend">走势类型</dt><dd>含至少一个中枢的笔组合，分为上涨/下跌/盘整三种。</dd></div>
+             <div class="term-item"><dt data-term="divergence">背驰</dt><dd>价格创新高/新低但力度减弱，预示趋势可能反转——这是结构信号的核心判据。</dd></div>
+             <div class="term-item"><dt data-term="firstbuy">一买</dt><dd>下跌趋势背驰后出现的第一个买点信号，预警下跌可能结束。</dd></div>
+             <div class="term-item"><dt data-term="firstsell">一卖</dt><dd>上涨趋势背驰后出现的第一个卖点信号，预警上涨可能结束。</dd></div>
+           </dl>
+         </section>
       </aside>
     </div>
+
+    <section data-testid="signal-radar" class="panel signal-radar" aria-labelledby="signal-radar-title">
+      <h2 id="signal-radar-title" class="panel-title">信号雷达</h2>
+    </section>
 
     <section
       data-testid="event-panel"
@@ -396,7 +414,7 @@
 
     <footer data-testid="dashboard-footer" class="dashboard-footer">
       <p data-testid="footer-readonly-notice">
-        本页面为只读分析与离线回放界面，不提供下单、撤单、仓位或账户操作。
+        本页面为只读结构分析与学习工具，所有「信号/状态」均为缠论结构术语，<strong>不构成投资建议、要约或任何买卖/持仓建议</strong>。市场有风险，投资须谨慎，决策与后果由用户自行承担。
       </p>
       <p data-testid="footer-schema-version">schema dashboard.v2 · 静态骨架（D2）</p>
     </footer>

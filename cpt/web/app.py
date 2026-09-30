@@ -272,6 +272,66 @@ def make_handler(
                 markets_raw = (query.get("markets") or [""])[0]
                 markets = tuple(part for part in markets_raw.split(",") if part) or None
                 payload = capabilities_payload(include_quota=include_quota, markets=markets)
+            elif path.path == "/api/dashboard/signal-radar":
+                # Phase N1：信号雷达 —— 只读聚合当前 snapshot 的信号数据。
+                # 不新增计算口径，仅把 snapshot 中已有的 signal / signal_first_sell
+                # 翻译成前端友好的扁平结构，含状态中文标签与新鲜度。
+                from time import time as _now  # noqa: PLC0415
+
+                def _radar_entry(signal, code, name, market, source_label=""):
+                    if not signal:
+                        return None
+                    status = signal.get("status", "none")
+                    signal_type = signal.get("signal_type", "first_buy")
+                    # 取最晚的时间戳作为 signal_time
+                    times = [
+                        signal.get("alert_time"),
+                        signal.get("candidate_time"),
+                        signal.get("confirmed_time"),
+                        signal.get("invalidated_time"),
+                    ]
+                    valid_times = [t for t in times if t is not None]
+                    signal_time = max(valid_times) if valid_times else None
+                    now_ms = int(_now() * 1000)
+                    freshness_ms = now_ms - signal_time if signal_time else None
+                    return {
+                        "code": code,
+                        "name": name,
+                        "market": market,
+                        "signal_type": signal_type,
+                        "status": status,
+                        "level": signal.get("level"),
+                        "signal_time": signal_time,
+                        "freshness_ms": freshness_ms,
+                        "price": signal.get("price"),
+                        "divergence_status": signal.get("divergence_status"),
+                        "source_label": source_label,
+                    }
+
+                market_label = (snapshot.get("market", {}) or {}).get("symbol", "")
+                market_name = (snapshot.get("market", {}) or {}).get("name", market_label)
+                market_type = "a_share" if market_label and not market_label.endswith("USDT") else "crypto"
+
+                entries = []
+                sig = snapshot.get("summary", {}).get("signal") if snapshot.get("summary") else None
+                if sig:
+                    entry = _radar_entry(sig, market_label, market_name, market_type)
+                    if entry:
+                        entries.append(entry)
+                sig_sell = snapshot.get("summary", {}).get("signal_first_sell") if snapshot.get("summary") else None
+                if sig_sell:
+                    entry = _radar_entry(sig_sell, market_label, market_name, market_type, "一卖")
+                    if entry:
+                        entries.append(entry)
+
+                payload = {
+                    "available": True,
+                    "signals": entries,
+                    "disclaimer": (
+                        "本页面为只读结构分析与学习工具，所有「信号/状态」均为缠论结构术语，"
+                        "不构成投资建议、要约或任何买卖/持仓建议。市场有风险，投资须谨慎。"
+                    ),
+                }
             elif path.path == "/api/canvas/wbt":
                 # 画布 D（R16-5）：服务端用 wbt 的 HtmlReportBuilder 渲染报告片段。
                 # 客户端必须传可视窗口（start_ms/end_ms），否则只画窗口的 A/B/C

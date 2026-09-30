@@ -31,6 +31,52 @@
   /* 默认只渲染最后 180 根：600 根平铺进约 670px 会把蜡烛压成 1px 发丝线，无法判读。 */
   const DEFAULT_VISIBLE_BARS = 180;
 
+  /* ---- Phase N0：信号「说人话」—— 状态中文映射 ---- */
+  const STATUS_LABELS = {
+    structure_ready: "结构已就绪（尚未触发）",
+    alert: "⚠️ 预警：反向K线盘中出现，随时可能消失",
+    candidate: "候选：反向K线已收盘，仍成立",
+    confirmed: "已确认：后续反向新笔成立",
+    invalidated: "已失效：结构被破坏（终态）",
+    none: "暂无信号",
+  };
+
+  const STATUS_EDUCATION = {
+    structure_ready: "结构条件已满足，等待反向K线触发预警。",
+    alert: "盘中出现反向K线，但尚未收盘确认——信号可能随时消失，不得当作已确认。",
+    candidate: "反向K线已收盘且结构仍成立，等待后续反向新笔确认。",
+    confirmed: "后续反向新笔已成立，信号由「候选」升级为「已确认」。",
+    invalidated: "后续结构被结构破坏，信号已失效（终态），不再跟踪。",
+    none: "当前无信号。",
+  };
+
+  const DIVERGENCE_LABELS = {
+    not_checked: "未检查",
+    not_detected: "未检测到背驰",
+    detected: "检测到背驰",
+  };
+
+  const SIGNAL_TYPE_LABELS = {
+    first_buy: "一买信号",
+    first_sell: "一卖信号",
+  };
+
+  function statusLabel(status) {
+    return STATUS_LABELS[status] || STATUS_LABELS.none;
+  }
+
+  function statusEducation(status) {
+    return STATUS_EDUCATION[status] || STATUS_EDUCATION.none;
+  }
+
+  function divergenceLabel(divergence) {
+    return DIVERGENCE_LABELS[divergence] || "—";
+  }
+
+  function signalTypeLabel(signalType) {
+    return SIGNAL_TYPE_LABELS[signalType] || "信号";
+  }
+
   /*
    * 本阶段不修改 dashboard.css，因此把三条最小运行时样式随脚本注入：
    * 占位纹理让位给真实图形，图形层绝对定位铺满绘制区。
@@ -634,10 +680,46 @@
   function renderSignalSection(signal) {
     const item = isObject(signal) ? signal : null;
     const status = item && typeof item.status === "string" ? item.status : "none";
-    setState(setText("[data-testid=signal-status]", status), status);
-    setText("[data-testid=signal-divergence-status]", item ? item.divergence_status : "—");
+    const statusNode = setText("[data-testid=signal-status]", statusLabel(status));
+    setState(statusNode, status);
+    setText("[data-testid=signal-status-education]", statusEducation(status));
+    setText("[data-testid=signal-divergence-status]", item ? divergenceLabel(item.divergence_status) : "—");
     setText("[data-testid=signal-source-revision]", item ? num(item.source_revision) : "—");
     setText("[data-testid=signal-structure-id]", item ? item.structure_id : "—");
+    /* Phase N0：price 正名 */
+    if (item && typeof item.price === "number") {
+      setText("[data-testid=signal-price]", formatPrice(item.price));
+    } else {
+      setText("[data-testid=signal-price]", "—");
+    }
+    /* Phase N0-4：标题动态化（一买/一卖） */
+    const titleEl = q("#structure-signal-title");
+    if (titleEl) {
+      const signalType = item && item.signal_type ? item.signal_type : "first_buy";
+      titleEl.textContent = signalTypeLabel(signalType);
+    }
+    /* Phase N0-4：一卖信号并列展示 */
+    renderSignalFirstSellSection(signal);
+  }
+
+  function renderSignalFirstSellSection(signal) {
+    const panel = q("[data-testid=structure-signal]");
+    if (!panel) return;
+    let firstSellNode = q("[data-testid=signal-first-sell]");
+    const item = isObject(signal) ? signal : null;
+    const hasFirstSell = item && item.signal_type === "first_sell";
+    if (!firstSellNode) {
+      firstSellNode = document.createElement("p");
+      firstSellNode.dataset.testid = "signal-first-sell";
+      firstSellNode.className = "signal-first-sell";
+      panel.appendChild(firstSellNode);
+    }
+    if (hasFirstSell) {
+      firstSellNode.textContent = "当前展示：一卖信号（结构卖点，非交易指令）";
+      firstSellNode.hidden = false;
+    } else {
+      firstSellNode.hidden = true;
+    }
   }
 
   function renderStructureDefaults(snapshot) {
@@ -880,7 +962,7 @@
       return;
     }
     section.hidden = false;
-    const text = `当前：${signal.status || "unknown"} · 背驰：${signal.divergence_status || "unknown"}`;
+    const text = `当前：${statusLabel(signal.status)} · 背驰：${divergenceLabel(signal.divergence_status)}`;
     const summary = document.createElement("p");
     summary.textContent = text;
     section.appendChild(summary);
@@ -967,6 +1049,124 @@
     section.appendChild(list);
   }
 
+  /* ---- Phase N1：信号雷达 ---- */
+  function freshnessLabel(ms) {
+    if (ms == null) return "—";
+    const s = Math.floor(ms / 1000);
+    if (s < 60) return `${s} 秒前`;
+    const m = Math.floor(s / 60);
+    if (m < 60) return `${m} 分钟前`;
+    const h = Math.floor(m / 60);
+    if (h < 24) return `${h} 小时前`;
+    const d = Math.floor(h / 24);
+    return `${d} 天前`;
+  }
+
+  const RADAR_STATUS_RANK = {
+    confirmed: 0,
+    candidate: 1,
+    alert: 2,
+    structure_ready: 3,
+    invalidated: 4,
+    none: 5,
+  };
+
+  function renderSignalRadar(snapshot) {
+    const panel = q("[data-testid=signal-radar]");
+    if (!panel) return;
+    const summary = snapshot && isObject(snapshot.summary) ? snapshot.summary : {};
+    const sig = summary && summary.signal ? summary.signal : null;
+    const sigSell = summary && summary.signal_first_sell ? summary.signal_first_sell : null;
+
+    const market = snapshot && isObject(snapshot.market) ? snapshot.market : {};
+    const code = market.symbol || "—";
+    const entries = [];
+    if (sig && sig.status && sig.status !== "none") {
+      entries.push({ ...sig, _code: code, _market: "crypto" });
+    }
+    if (sigSell && sigSell.status && sigSell.status !== "none") {
+      entries.push({ ...sigSell, _code: code, _market: "a_share", _source_label: "一卖" });
+    }
+
+    /* 排序：confirmed > candidate > alert > structure_ready，同级按新鲜度 */
+    entries.sort((a, b) => {
+      const ra = RADAR_STATUS_RANK[a.status] ?? 99;
+      const rb = RADAR_STATUS_RANK[b.status] ?? 99;
+      if (ra !== rb) return ra - rb;
+      const ta = a.alert_time ?? a.candidate_time ?? a.confirmed_time ?? 0;
+      const tb = b.alert_time ?? b.candidate_time ?? b.confirmed_time ?? 0;
+      return tb - ta;
+    });
+
+    panel.replaceChildren();
+    const heading = document.createElement("h3");
+    heading.textContent = "信号雷达";
+    panel.appendChild(heading);
+
+    /* 免责声明 */
+    const disclaimer = document.createElement("p");
+    disclaimer.className = "signal-radar-disclaimer";
+    disclaimer.textContent =
+      "⚠️ 所有「信号/状态」均为缠论结构术语，不构成投资建议。市场有风险，投资须谨慎。";
+    panel.appendChild(disclaimer);
+
+    if (!entries.length) {
+      const empty = document.createElement("p");
+      empty.className = "signal-radar-empty";
+      empty.textContent = "当前无信号。";
+      panel.appendChild(empty);
+      return;
+    }
+
+    const list = document.createElement("ul");
+    list.className = "signal-radar-list";
+    entries.forEach((entry) => {
+      const li = document.createElement("li");
+      li.className = `signal-radar-item signal-status-${entry.status}`;
+
+      const main = document.createElement("div");
+      main.className = "signal-radar-main";
+      const codeSpan = document.createElement("span");
+      codeSpan.className = "signal-radar-code";
+      codeSpan.textContent = entry._code || entry.code || "—";
+      main.appendChild(codeSpan);
+      const typeSpan = document.createElement("span");
+      typeSpan.className = "signal-radar-type";
+      typeSpan.textContent = signalTypeLabel(entry.signal_type);
+      main.appendChild(typeSpan);
+      if (entry._source_label) {
+        const srcSpan = document.createElement("span");
+        srcSpan.className = "signal-radar-source";
+        srcSpan.textContent = entry._source_label;
+        main.appendChild(srcSpan);
+      }
+      li.appendChild(main);
+
+      const statusDiv = document.createElement("div");
+      statusDiv.className = "signal-radar-status-row";
+      const statusSpan = document.createElement("span");
+      statusSpan.className = "signal-radar-status";
+      statusSpan.textContent = statusLabel(entry.status);
+      statusDiv.appendChild(statusSpan);
+      const freshSpan = document.createElement("span");
+      freshSpan.className = "signal-radar-freshness";
+      const lastTime = entry.confirmed_time ?? entry.candidate_time ?? entry.alert_time;
+      freshSpan.textContent = freshnessLabel(lastTime ? Date.now() - lastTime : null);
+      statusDiv.appendChild(freshSpan);
+      li.appendChild(statusDiv);
+
+      if (typeof entry.price === "number") {
+        const priceDiv = document.createElement("div");
+        priceDiv.className = "signal-radar-price";
+        priceDiv.textContent = `收盘价 ${formatPrice(entry.price)}（非买入价）`;
+        li.appendChild(priceDiv);
+      }
+
+      list.appendChild(li);
+    });
+    panel.appendChild(list);
+  }
+
   function renderSignalHistory(snapshot) {
     const panel = q("[data-testid=event-panel]");
     if (!panel) return;
@@ -987,14 +1187,14 @@
     }
     section.hidden = false;
     const row = document.createElement("p");
-    row.textContent = `${signal.signal_id || "signal"} · ${signal.status || "none"} · ${signal.divergence_status || "—"}`;
+    row.textContent = `${signal.signal_id || "signal"} · ${statusLabel(signal.status)} · ${divergenceLabel(signal.divergence_status)}`;
     section.appendChild(row);
     // 信号变化提醒（R21 Phase 4 P1）
     const changeType = snapshot && snapshot.summary && snapshot.summary.signal_change_type;
     if (snapshot && snapshot.summary && snapshot.summary.signal_changed && changeType) {
       const note = document.createElement("p");
       note.className = "signal-change-note";
-      note.textContent = `⚡ 信号状态变化: ${changeType}`;
+      note.textContent = `⚡ 信号状态变化: ${statusLabel(changeType)}`;
       section.appendChild(note);
     }
   }
@@ -2532,6 +2732,7 @@
     renderSignalHistory(state.snapshot);
     renderEventAudit(state.snapshot);
     renderSignalStats(state.snapshot);
+    renderSignalRadar(state.snapshot);
     renderReproducibility(state.snapshot);
     renderConfigCompare(state.snapshot);
     renderRuns(state.snapshot);
@@ -2685,6 +2886,38 @@
         else if (action === "seek") applyReplay(count);
       });
     });
+  }
+
+  /* ---- Phase N2：术语即点即懂 ---- */
+  function installTermGlossary() {
+    const glossary = q("[data-testid=term-glossary]");
+    if (!glossary) return;
+    glossary.querySelectorAll(".term-item").forEach((item) => {
+      const dt = item.querySelector("dt");
+      const dd = item.querySelector("dd");
+      if (!dt || !dd) return;
+      dd.hidden = true;
+      dt.style.cursor = "pointer";
+      dt.setAttribute("aria-expanded", "false");
+      dt.addEventListener("click", () => {
+        dd.hidden = !dd.hidden;
+        dt.setAttribute("aria-expanded", dd.hidden ? "false" : "true");
+      });
+    });
+    const title = glossary.querySelector(".term-glossary-title");
+    if (title) {
+      title.style.cursor = "pointer";
+      title.addEventListener("click", () => {
+        const allExpanded = [...glossary.querySelectorAll(".term-item dd")].every((dd) => !dd.hidden);
+        glossary.querySelectorAll(".term-item").forEach((item) => {
+          const dt = item.querySelector("dt");
+          const dd = item.querySelector("dd");
+          if (!dt || !dd) return;
+          dd.hidden = allExpanded;
+          dt.setAttribute("aria-expanded", allExpanded ? "false" : "true");
+        });
+      });
+    }
   }
 
   function showError(message) {
@@ -3148,6 +3381,7 @@
     installZoomControls();
     ensureSelectionSection();
     installReplayControls();
+    installTermGlossary();
 
     if (typeof window.ResizeObserver === "function") {
       const observer = new window.ResizeObserver(() => scheduleDraw());
