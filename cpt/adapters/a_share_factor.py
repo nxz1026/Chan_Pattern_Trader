@@ -40,6 +40,7 @@ from cpt.adapters.a_share_public import (
 __all__ = [
     "DEFAULT_COOLDOWN_SECONDS",
     "DEFAULT_FACTOR_DAYS",
+    "MAX_FACTOR_RATIO_JUMP",
     "FactorEnsureResult",
     "FactorRow",
     "FactorUnavailableError",
@@ -68,6 +69,20 @@ _LOG = logging.getLogger("cpt.adapters.a_share_factor")
 SOURCE_TX: Final[str] = "tx:fqkline"
 #: 腾讯单次上限 801 根，取 800 留边界（与 scripts/factor_backfill.py 一致）。
 DEFAULT_FACTOR_DAYS: Final[int] = 800
+#: 因子判脏的**容差带**（不是"跳变阈值"，见 :func:`_looks_degenerate` 的说明）。
+#:
+#: 判据是方向式的：当日 hfq 的日波动明显**盖过** raw 才判腾讯退化；真除权是
+#: 反过来的（raw 假跳空、hfq 连续），所以不会被误伤。
+#:
+#: 0.15 的来历：扫 34 只票 × 800 根，**真除权日**的 raw/hfq 日收益落差实测都在
+#: 10% 以内（002594 2025-07-29 是 raw -67% / hfq ±0，落差 67% 但**方向相反**）；
+#: 而**脏数据日**的落差是 hfq 单独崩、raw 正常（300750 hfq -47.87% / raw +1.10%）。
+#: 取 0.15 = 15% 是要卡在"A 股单日涨跌停 10/20%"之上，留出缓冲。
+#:
+#: 第一版曾用「因子比值跳变 > 15%」当判据，**已被实测证伪**：002594 真送转的
+#: 比值是 3.0355（跳 203%），比任何脏数据都狠 —— 幅度判据必然在漏脏与误伤除权
+#: 之间二选一。换成方向判据后才同时通过两组用例。
+MAX_FACTOR_RATIO_JUMP: Final[float] = 0.15
 #: 同一代码的重复拉取冷却（秒）：避免用户连点/轮询反复打腾讯。
 DEFAULT_COOLDOWN_SECONDS: Final[float] = 600.0
 
@@ -119,30 +134,107 @@ def _close_map(bars: Sequence[Any]) -> dict[str, float]:
     return {_date_of(bar.open_time): float(bar.close) for bar in bars}
 
 
+def _looks_degenerate(raw_ret: float, hfq_ret: float, tol: float) -> bool:
+    """腾讯 hfq 序列该根退化了吗（判据：谁在假跳空）。
+
+    ## 为什么不能比「因子比值跳变幅度」
+
+    第一版判据是 ``factor[i] / factor[i-1]`` 偏离 1 超过阈值。实测**直接证伪**了它：
+    002594 在 2025-07-29 真送转，因子比值 **3.0355（跳 203%）**；而脏数据里
+    幅度最大的也才 0.32（跳 68%）。真除权比脏数据跳得更狠 —— 两者在幅度上
+    **重叠**，任何单一阈值都必然在「漏脏」和「误伤除权」之间二选一。
+
+    ## 正确判据：方向
+
+    两种事件在**方向**上完全相反，这是它们唯一可靠的区分点：
+
+    - **真除权**：raw（不复权成交价）出现**假跳空**，hfq（后复权）被调成连续。
+      实测 002594 2025-07-29 就是 ``raw -67%`` 而 ``hfq ±0``。
+    - **腾讯退化**：raw 正常，hfq 那一根**退化成 raw 的值**或乱成量级错误。
+      实测 300750 ``raw +1.10%`` / ``hfq -47.87%``；000002 ``raw +3.92%`` /
+      ``hfq -62.29%``（因子从 1.0 跳到 115.08）。
+
+    所以判据是 **hfq 的日波动是否明显盖过 raw**：盖过就是腾讯坏了；反过来
+    （raw 跳得更狠，或两者同步）都是有效数据 —— 同步暴跌当天两边一起跌，
+    因子照旧正确。
+
+    Args:
+        raw_ret: 当日 raw 收盘日收益。
+        hfq_ret: 当日 hfq 收盘日收益。
+        tol: 容差带（默认 :data:`MAX_FACTOR_RATIO_JUMP`）。它不是"跳变阈值"，
+            而是"两边差多少还算是同一件事"的容忍度。
+
+    宁可漏判也不误伤：除权因子被丢掉会造成假跳空（比脏因子危害大得多，
+    用户会把它当真实行情），而脏因子只影响一天且会留告警。
+    """
+    if abs(hfq_ret) <= tol:
+        return False  # hfq 平稳 —— 典型就是真除权（raw 假跳空、hfq 连续）
+    return abs(hfq_ret) > abs(raw_ret) + tol
+
+
 def build_factor_rows(
     code: str,
     raw_bars: Sequence[Any],
     hfq_bars: Sequence[Any],
+    *,
+    max_ratio_jump: float = MAX_FACTOR_RATIO_JUMP,
 ) -> tuple[FactorRow, ...]:
     """由 raw / hfq 两个序列算出因子行（纯函数，便于测试）。
 
     只保留**两个序列都有**的交易日 —— 因子必须同源同对，缺一边就不能算。
+
+    ## 脏数据防护
+
+    腾讯的 hfq 序列会**整根退化**，而且形态不唯一（2026-09-30 实测扫 40 只票
+    15 只中招）：
+
+    - 退化 A：hfq 那根的 o/h/l/c/v 与 raw **逐字相同**（300750、688111）；
+    - 退化 B：hfq 那根既不等于 raw，比值也乱成量级错误（000002 变成 115.08、
+      600276 变成 29.46、300059 变成 32.18）。
+
+    退化 A 用「两序列逐字段比对」能抓，但抓不到 B。统一交给
+    :func:`_looks_degenerate`：只要当日 hfq 的波动明显盖过 raw 就判脏，丢该日
+    并 :func:`_LOG.warning` 告警（含代码、日期、两侧日收益）。
+
+    跳变只在**相邻交易日**之间判（按日期升序遍历重叠日期），不跨缺口回看：跳空
+    停牌复牌时，raw 与 hfq 会同步跳变，落差在容差带内，不会被误判。
     """
     raw = _close_map(raw_bars)
     hfq = _close_map(hfq_bars)
     rows: list[FactorRow] = []
+    prev_raw = 0.0
+    prev_hfq = 0.0
+    prev_date: str | None = None
     for trade_date in sorted(set(raw) & set(hfq)):
         raw_close = raw[trade_date]
         if raw_close <= 0:
             continue
+        factor = hfq[trade_date] / raw_close
+        if prev_date is not None and prev_raw > 0 and prev_hfq > 0:
+            raw_ret = raw_close / prev_raw - 1.0
+            hfq_ret = hfq[trade_date] / prev_hfq - 1.0
+            if _looks_degenerate(raw_ret, hfq_ret, max_ratio_jump):
+                _LOG.warning(
+                    "因子判脏 %s %s：raw 日收益 %+.2f%% vs hfq 日收益 %+.2f%%"
+                    "（hfq 波动盖过 raw，判腾讯该根退化；容差 %.0f%%）—— 跳过",
+                    code,
+                    trade_date,
+                    raw_ret * 100,
+                    hfq_ret * 100,
+                    max_ratio_jump * 100,
+                )
+                # 不推进锚点：脏日的比值不可信，锚点必须留在最后一个可信日，
+                # 否则下一个好日会拿脏值当基准、被连坐判脏。
+                continue
         rows.append(
             FactorRow(
                 code=code,
                 trade_date=trade_date,
-                hfq_factor=hfq[trade_date] / raw_close,
+                hfq_factor=factor,
                 source_ref=factor_source_ref(trade_date),
             )
         )
+        prev_raw, prev_hfq, prev_date = raw_close, hfq[trade_date], trade_date
     return tuple(rows)
 
 

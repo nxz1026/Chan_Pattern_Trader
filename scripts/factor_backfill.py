@@ -55,10 +55,17 @@ import sys
 import time
 import urllib.error
 import urllib.request
-from typing import Any
+from collections.abc import Sequence
+from dataclasses import dataclass, replace
+from datetime import UTC, datetime
+from typing import Any, Final
 
 from cpt.adapters._dbconfig import connection_kwargs as _shared_connection_kwargs
-from cpt.adapters.a_share_factor import FactorRow, factor_source_ref, upsert_factor_rows
+from cpt.adapters.a_share_factor import (
+    FactorRow,
+    build_factor_rows,
+    upsert_factor_rows,
+)
 from cpt.adapters.a_share_public import (
     TENCENT_KLINE_URL,
     ASharePublicError,
@@ -129,26 +136,48 @@ def fetch_tx_factor_rows(code_wind: str, *, days: int = DEFAULT_KLINE_DAYS) -> l
     ``43/83/87/88``，``830799`` 直接抛错。``normalize_code`` 在 R17 就修掉了这个顺序
     问题（注释里点名过 ``a_share_local._to_wind_code`` 同样的 bug），本脚本这第三份
     一直没跟上。删掉本地实现后，这类 bug 由构造消除。
-    """
 
+    **因子计算也一并收口**到 :func:`cpt.adapters.a_share_factor.build_factor_rows`：
+    本函数原先自带一份 ``h/r`` 循环，只有 ``r == 0`` 一个保护，**腾讯 hfq 序列退化
+    完全挡不住**（2026-09-30 实测腾讯 40 只票里 15 只的末根退化成不复权价，300750
+    的因子会从 1.93 跳到 1.00、000002 跳到 115.08）。两份实现算同一个东西、保护强度
+    还不一样，是 R20 修掉的第三个 drift。
+    """
     tx_sym = normalize_code(code_wind)
     raw, hfq = _fetch_tx_pair(tx_sym, days)
-    raw_map = {r[0]: float(r[2]) for r in raw}  # date -> raw close
-    hfq_map = {r[0]: float(r[2]) for r in hfq}
-    rows: list[FactorRow] = []
-    for date_str in sorted(set(raw_map) & set(hfq_map)):
-        r, h = raw_map[date_str], hfq_map[date_str]
-        if r == 0:
+    rows = build_factor_rows(normalize_code(code_wind)[2:], _to_bars(raw), _to_bars(hfq))
+    return [replace(row, code=code_wind) for row in rows]
+
+
+@dataclass(frozen=True, slots=True)
+class _SlimBar:
+    """``build_factor_rows`` 唯一读到的两个字段（其余一律不构造）。"""
+
+    open_time: int
+    close: float
+
+
+def _to_bars(rows: Sequence[Sequence[str]]) -> list[Any]:
+    """腾讯原始行 → 只带 ``open_time`` / ``close`` 的轻量对象。
+
+    :func:`build_factor_rows` 只读这两个字段（``_close_map`` 取
+    ``bar.open_time`` 与 ``bar.close``），而脚本拿到的是腾讯的**列表行**（字段顺序
+    依赖上游约定，见 ``a_share_public`` 模块 docstring 坑 1）。这里显式按位置取，
+    不构造 ``CanonicalBar``：本脚本不校验 K 线契约，多余字段只会让 12 个必填参数
+    的构造变成第二个失败点。
+    """
+    out: list[Any] = []
+    for row in rows:
+        if len(row) < 3:
             continue
-        rows.append(
-            FactorRow(
-                code=code_wind,
-                trade_date=date_str,
-                hfq_factor=h / r,
-                source_ref=factor_source_ref(date_str),
-            )
-        )
-    return rows
+        out.append(_SlimBar(open_time=_day_to_open_ms(row[0]), close=float(row[2])))
+    return out
+
+
+def _day_to_open_ms(day: str) -> int:
+    """腾讯的 ``YYYY-MM-DD`` → UTC 零点毫秒（与 :func:`_date_of` 严格互逆）。"""
+    parsed = datetime.strptime(day, "%Y-%m-%d")
+    return int(parsed.replace(tzinfo=UTC).timestamp() * 1000)
 
 
 # --------------------------------------------------------------------------- #
@@ -157,12 +186,22 @@ def fetch_tx_factor_rows(code_wind: str, *, days: int = DEFAULT_KLINE_DAYS) -> l
 
 
 def list_all_a_codes() -> list[str]:
-    """全市场代码（从 daily_bar_raw 去重）。"""
+    """全市场代码（从 ``public.daily_bar`` 去重）。
+
+    **表名是实测出来的**：脚本原先查 ``asel.daily_bar_raw``，而库里**没有这张表**
+    （业务表只有 ``asel.ref_adjust_factor`` / ``asel.security_master`` 与
+    ``public.*``）—— ``--mode full`` 一直在抛
+    ``psycopg.errors.UndefinedTable: relation "asel.daily_bar_raw" does not exist``，
+    即全市场 backfill 从没成功跑过。实跑日期 2026-09-30。
+
+    ``code`` 是**裸 6 位**（实测 5,222 只无一带后缀），交给
+    :func:`cpt.adapters.a_share_public.normalize_code` 推市场前缀。
+    """
     import psycopg  # noqa: PLC0415
 
     with psycopg.connect(**connection_kwargs()) as conn:
         with conn.cursor() as cur:
-            cur.execute("SELECT DISTINCT code FROM asel.daily_bar_raw")
+            cur.execute("SELECT DISTINCT code FROM public.daily_bar")
             codes = [r[0] for r in cur.fetchall() if r[0]]
     return sorted(codes)
 
@@ -213,6 +252,63 @@ def latest_factor_date(conn: Any, code: str) -> str | None:
     return d.isoformat() if d else None
 
 
+def unverifiable_dates(conn: Any, code: str) -> set[str]:
+    """该票**溯源不可考**的日期集合（``source IS NULL``）。
+
+    ## 为什么按 ``source IS NULL`` 判，而不是按因子值
+
+    2026-09-30 补列之前写入的 3,388,417 行 ``hfq_factor`` 全是列默认值 ``1.0``
+    —— 那是**占位**，不是"该票未除权"这个结论。它们没有任何一列能说明来源，
+    所以判据就是"没有 source"。
+
+    两个不能用的替代判据：
+
+    - **``hfq_factor = 1.0``**：真除权因子恰好等于 1.0 的日子是合法数据（当日未除权），
+      按值判会反复回填；更糟的是从没除过权的票（因子恒为 1.0）会被误判成"全是占位"，
+      每轮都白拉一次腾讯。
+    - **只补最近 N 天**：因子是**乘在 OHLC 上**的（``a_share_local._py:318-321``），
+      只补最近 30 天会在窗口边界造出一条 1.0 → 6.39 的假跳空 —— 茅台那种量级下，
+      比全表 1.0 危害更大。窗口边界必须在**因子序列内部**，所以宁可全量覆盖。
+
+    补过的行 ``source = 'tx:fqkline'``，下一轮 ``--mode incremental`` 就不会再取，
+    幂等性由主键 ``(code, trade_date)`` 的 upsert 保证。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT trade_date FROM asel.ref_adjust_factor WHERE code=%s AND source IS NULL",
+            (code,),
+        )
+        return {r[0].isoformat() for r in cur.fetchall()}
+
+
+#: 网络失败重试次数。腾讯按 IP 限流，返回 ``501 Not Implemented``（R20 实测：密集
+#: 抓 80+ 只票后持续 501，连 ``curl`` 换 UA/Referer 都一样；同一时刻 ``qt.gtimg.cn``
+#: 快照端点正常 200 → 限流是**按端点**的）。退避 5/10/20s 共 3 次。
+DEFAULT_RETRIES: Final[int] = 3
+RETRY_BACKOFF_SECONDS: Final[tuple[float, ...]] = (5.0, 10.0, 20.0)
+
+
+def _retry(code: str, idx: int, exc: Exception, retries: int) -> bool:
+    """网络失败退避重试；返回 ``True`` 表示**已退避并跳过本轮**（交给下一轮补）。
+
+    不在原地重试同一只票：限流是**全局**的（实测 501 期间所有代码都失败），
+    原地重试只是把退避时间浪费在同一次注定失败的请求上。改成记为待补、继续下一只，
+    让全市场跑完后由 ``--mode incremental`` 统一补齐。
+    """
+    if retries <= 0:
+        return False
+    backoff = RETRY_BACKOFF_SECONDS[min(idx, len(RETRY_BACKOFF_SECONDS) - 1)]
+    logger.warning(
+        "腾讯限流/网络失败 %s（%s），退避 %.0fs 后跳过本轮（本轮不再重试，"
+        "限流是全局的，稍后用 --mode incremental 统一补）",
+        code,
+        str(exc)[:60],
+        backoff,
+    )
+    time.sleep(backoff)
+    return True
+
+
 # --------------------------------------------------------------------------- #
 # main
 # --------------------------------------------------------------------------- #
@@ -225,6 +321,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--batch-size", type=int, default=500)
     parser.add_argument("--sleep-ms", type=int, default=100)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument(
+        "--retries",
+        type=int,
+        default=DEFAULT_RETRIES,
+        help="网络失败退避重试次数（0=不重试；限流是全局的，重试只是跳过本轮）",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -262,15 +364,18 @@ def main(argv: list[str] | None = None) -> int:
             try:
                 rows = fetch_tx_factor_rows(code)
             except (ValueError, ASharePublicError) as e:
-                # 永久错误：代码本身不认识/无法推断市场 —— 重试没有意义，直接跳过。
-                # ``normalize_code`` 抛的是 ``ASharePublicError``（基类是 ``RuntimeError``
-                # 而不是 ``ValueError``），必须显式列出；这条要在下面那条
-                # ``RuntimeError`` 之前，否则会被归类成"可重试的网络失败"。
+                # 永久错误：代码本身不认识/无法推断市场、腾讯不供该标的后复权 ——
+                # 重试没有意义，直接跳过。``normalize_code`` 抛的是 ``ASharePublicError``
+                # （基类是 ``RuntimeError`` 而不是 ``ValueError``），必须显式列出；
+                # 这条要在下面那条 ``RuntimeError`` 之前，否则会被归类成"可重试的
+                # 网络失败"。
                 logger.info("跳过 %s: %s", code, str(e)[:100])
                 fail_count += 1
                 time.sleep(args.sleep_ms / 1000)
                 continue
             except (urllib.error.URLError, RuntimeError, json.JSONDecodeError) as e:
+                if _retry(code, idx, e, args.retries):
+                    continue
                 logger.warning("腾讯因子失败 %s: %s: %s", code, type(e).__name__, str(e)[:100])
                 fail_count += 1
                 time.sleep(args.sleep_ms / 1000)
@@ -283,9 +388,12 @@ def main(argv: list[str] | None = None) -> int:
             if not rows:
                 time.sleep(args.sleep_ms / 1000)
                 continue
-            latest_existing = latest_factor_date(conn, code)
-            if latest_existing:
-                rows = [r for r in rows if r.trade_date > latest_existing]
+            # 过滤：**只**跳过已写入真实数据的行（``source IS NOT NULL``）。存量占位行
+            # （``source IS NULL``）必须放行，否则 ``max(trade_date)`` 已经是最新那天、
+            # 全部行都被过滤掉，脚本会"成功"地写入 0 行。详见 unverifiable_dates()。
+            unverifiable = unverifiable_dates(conn, code)
+            if unverifiable:
+                rows = [r for r in rows if r.trade_date in unverifiable]
                 if not rows:
                     time.sleep(args.sleep_ms / 1000)
                     continue

@@ -121,11 +121,18 @@ def test_script_reuses_shared_symbols_instead_of_copying(script: Any) -> None:
     required = {
         "FactorRow",
         "upsert_factor_rows",
-        "factor_source_ref",
         "TENCENT_KLINE_URL",
         "normalize_code",
+        # R20：因子计算收口到 build_factor_rows 后，脚本不再自己拼 FactorRow，
+        # 于是 factor_source_ref（FactorRow 的默认 source_ref 构造处）也随之内移。
+        # 这里断言的是"必须复用共享实现"，不是"必须直接调用每个符号"。
+        "build_factor_rows",
     }
     assert required <= imported, f"脚本没有从 cpt 导入：{sorted(required - imported)}"
+    assert "factor_source_ref" not in imported, (
+        "脚本又开始自己拼 source_ref 了 —— 因子计算必须整条走 build_factor_rows，"
+        "否则腾讯 hfq 序列退化（2026-09-30 实测 40 只票 15 只中招）又挡不住"
+    )
 
 
 # ------------------------------------------------------------------ 因子计算

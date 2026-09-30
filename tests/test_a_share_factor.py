@@ -10,6 +10,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -590,3 +591,106 @@ def test_build_factor_rows_carries_source_ref() -> None:
     assert all(r.source_ref == factor_source_ref(r.trade_date) for r in rows)
     assert rows[0].source_ref == "web.ifzq.gtimg.cn fqkline day/hfq 2024-01-01"
     assert all(r.source == SOURCE_TX for r in rows)
+
+
+# ------------------------------------------------------------------ 脏数据防护（R20）
+#
+# 全部 fixture 是 **2026-09-30 实测真值**（不是编的数字），腾讯当天把 hfq 序列整根
+# 退化了，扫 40 只票有 15 只中招。退化有两种形态，两种都必须挡：
+#   A. hfq 那根与 raw 逐字相同（300750：hfq 556.172→289.95，raw 286.8→289.95）
+#   B. hfq 那根既不等于 raw，比值也乱成量级错误（000002：因子变 115.08、600276：29.46）
+
+
+def test_rejects_degenerate_bar_where_hfq_collapses_onto_raw() -> None:
+    """**退化 A**：腾讯 hfq 末根退化成不复权价，因子从 1.93 突降到 1.00。
+
+    退化 A 表面上"最像正确答案"（hfq == raw 时因子恰好是 1.0，看着像没除权），
+    恰恰因此最危险：直接写库会让除权日画出一条 -48% 的假跳空。
+    """
+    raw = [_Bar(0, 291.99), _Bar(1, 286.80), _Bar(2, 289.95)]
+    hfq = [_Bar(0, 563.73), _Bar(1, 556.17), _Bar(2, 289.95)]  # 末根 == raw
+    rows = build_factor_rows("300750", raw, hfq)
+    assert [r.trade_date for r in rows] == ["2024-01-01", "2024-01-02"]
+    assert rows[-1].hfq_factor == pytest.approx(556.17 / 286.80)
+
+
+def test_rejects_degenerate_bar_with_magnitude_error() -> None:
+    """**退化 B**：hfq 末根既不等于 raw，比值也乱成量级错误（1.0 → 115.08）。"""
+    raw = [_Bar(0, 3.71), _Bar(1, 4.08), _Bar(2, 4.24)]
+    hfq = [_Bar(0, 1257.20), _Bar(1, 1293.86), _Bar(2, 487.92)]
+    rows = build_factor_rows("000002", raw, hfq)
+    assert [r.trade_date for r in rows] == ["2024-01-01", "2024-01-02"], "量级错误那根必须丢"
+    assert all(r.hfq_factor < 400 for r in rows), "不该把 115.08 这种量级错误写进库"
+
+
+def test_keeps_real_ex_right_dividend_jump() -> None:
+    """**不能误伤真除权**：002594 2025-07-29 真送转，因子从 1.0 跳到 3.0355 必须留下。
+
+    这条与上面两条成对，也是第一版判据被证伪的地方：按「因子比值跳变 203%」
+    判脏会把它丢掉，除权日于是画出一条 -67% 的假跳空 —— 比脏因子的危害大得多。
+    方向判据（hfq 波动盖过 raw 才判脏）能同时满足两侧：真除权是 raw 跳、hfq 平。
+    """
+    raw = [_Bar(0, 100.0), _Bar(1, 40.0), _Bar(2, 39.6)]  # 送转后 raw 假跳空 -60%
+    hfq = [_Bar(0, 100.0), _Bar(1, 100.0), _Bar(2, 99.0)]  # hfq 被调成连续 -1%
+    rows = build_factor_rows("002594", raw, hfq)
+    assert len(rows) == 3, "真除权那根被误判成脏数据了"
+    assert rows[-1].hfq_factor == pytest.approx(2.5, rel=0.01)
+
+
+def test_rejection_threshold_is_configurable() -> None:
+    """容差带可调 —— 0.15 是实测出来的，但不是写死的教条。
+
+    形态：raw 持平、hfq 末日 -10%。落差 10% 落在默认 15% 带内 → 全留；
+    容差收到 5% 就超了 → 末日被判脏。**头一行永远保留**（没有前一日可比），
+    所以收紧容差的结果是 2 行而不是 0 行。
+    """
+    raw = [_Bar(0, 100.0), _Bar(1, 100.0), _Bar(2, 100.0)]
+    hfq = [_Bar(0, 100.0), _Bar(1, 100.0), _Bar(2, 90.0)]  # hfq -10% vs raw 0%
+    assert len(build_factor_rows("600519", raw, hfq)) == 3
+    assert [r.trade_date for r in build_factor_rows("600519", raw, hfq, max_ratio_jump=0.05)] == [
+        "2024-01-01",
+        "2024-01-02",
+    ]
+
+
+def test_rejection_keeps_last_good_anchor_instead_of_chaining() -> None:
+    """脏日**不推进锚点**，否则下一个好日会拿脏值当基准被连坐判脏。
+
+    形态：好(100) → 脏(32，hfq 崩到三分之一) → 好(100 回归)。
+
+    这条 fixture 是**能区分两种实现**的：若脏日把锚点从 100 推到 32，末行的
+    日收益会算成 100/32-1 = +212%，盖过 raw 的 0%，末行被连坐丢掉；锚点停在
+    100 时末行收益 0%，正常保留。原先那版 fixture（脏=32、下一根=34）区分不了 ——
+    34 相对 100 仍是 -66%，两种实现都会判它脏。
+    """
+    raw = [_Bar(0, 100.0), _Bar(1, 100.0), _Bar(2, 100.0)]
+    hfq = [_Bar(0, 100.0), _Bar(1, 32.0), _Bar(2, 100.0)]
+    rows = build_factor_rows("000002", raw, hfq)
+    assert [r.trade_date for r in rows] == ["2024-01-01", "2024-01-03"]
+    assert rows[-1].hfq_factor == pytest.approx(1.0), "末根是好数据，不该被脏日连坐丢掉"
+
+
+def test_rejection_does_not_across_a_gap_in_trading_days() -> None:
+    """跳空停牌复牌：raw 与 hfq **同步**跳变，不该判脏。
+
+    两侧同步意味着因子照旧正确（后复权对停牌不做调整），落差在容差带内。
+    反向对照是上面那条「真除权」：raw 跳得比 hfq 狠，是除权的签名，同样不是退化。
+    """
+    raw = [_Bar(0, 100.0), _Bar(7, 60.0)]
+    hfq = [_Bar(0, 100.0), _Bar(7, 60.0)]  # 隔 7 天，两边同跌 -40%（真实行情）
+    rows = build_factor_rows("600519", raw, hfq)
+    assert len(rows) == 2, "同步跳变被判脏，误伤长停牌票"
+    assert rows[-1].hfq_factor == pytest.approx(1.0)
+
+
+def test_rejection_logs_the_offending_date(caplog: pytest.LogCaptureFixture) -> None:
+    """判脏必须**留下告警**——静默丢弃等于换个地方制造静默失效。
+
+    数据接上不等于信息可用：库里少了 15 只票的末日因子，如果没人知道是哪天、
+    为什么丢，回填结果无法复核。
+    """
+    raw = [_Bar(0, 100.0), _Bar(1, 100.0), _Bar(2, 100.0)]
+    hfq = [_Bar(0, 100.0), _Bar(1, 100.0), _Bar(2, 32.0)]
+    with caplog.at_level(logging.WARNING, logger="cpt.adapters.a_share_factor"):
+        build_factor_rows("000002", raw, hfq)
+    assert any("因子判脏" in r.message and "2024-01-03" in r.message for r in caplog.records)
