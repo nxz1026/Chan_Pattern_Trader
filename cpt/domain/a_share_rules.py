@@ -1,15 +1,15 @@
 """A 股规则标签（C2/C4 — R15-3）。
 
-**状态：部分接线（R19，2026-09-30）**——标签能力已接进 A 股主看板：
+**状态：部分接线（R19+R21，2026-10-01）**——标签能力已接进 A 股主看板：
 ``AShareLocalClient.fetch_daily_tags``（:mod:`cpt.adapters.a_share_local`）复用本模块
 的 SQL，``cpt.application.a_share_snapshot._apply_daily_tags`` 把标签挂到笔上并写
 ``data_quality.ashare_tags`` 审计块。守门用例见
 ``tests/test_a_share_rules.py`` 末尾「接线」一节——**入口是生产构造函数**，
 不是本模块自己的函数。
 
-**尚未接线**：:func:`t_plus_one_purchase_allowed` 仍无生产调用方。它要等
-:mod:`cpt.domain.signal` 的趋势→信号桥落地（那座桥缺 ``has_two_centers`` /
-``has_divergence_leg`` / ``has_reversal_bi`` 的生产者），所以仍留在 ``whitelist.py``。
+T+1 日历查询（:func:`check_t_plus_one_calendar`）已接进
+``cpt.application.a_share_snapshot._attach_t_plus_one``——只读 ``public.trade_calendar``，
+不涉及持仓/账户（roadmap「明确不做持仓」）。
 
 按 plan §5.3：
 - **C2 涨跌停**：涨停日的笔/中枢**端点可信度低**（涨停挂单买不到、卖单大量堆积），
@@ -157,3 +157,71 @@ def t_plus_one_purchase_allowed(previous_close_date_iso: str | None) -> bool:
     # 实际生产应查询"当前账户持仓 + 是否当日已买入同一标的"；此处只返 True 保持
     # A 股日历允许 — 持仓层面的 T+1 由仓位层负责。
     return True
+
+
+# --------------------------------------------------------------------------- #
+# T+1 日历查询（R21 接线）
+# --------------------------------------------------------------------------- #
+
+
+def check_t_plus_one_calendar(client: Any) -> dict[str, Any]:
+    """查 ``public.trade_calendar`` 判断今日是否可买（T+1 日历约束）。
+
+    只读 ``public.trade_calendar``，不涉及持仓/账户（roadmap「明确不做持仓」）。
+
+    :returns: 字典 ``{"available": bool, "reason": str, "today": str | None,
+                        "next_trade_date": str | None}``。
+    """
+    import datetime as _dt
+
+    today = _dt.date.today().isoformat()
+    try:
+        conn = client._get_conn()
+        with conn.cursor() as cur:
+            # 查今日是否开市
+            cur.execute(
+                "SELECT is_open FROM public.trade_calendar WHERE date = %s",
+                (today,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return {
+                    "available": False,
+                    "reason": "calendar_unknown",
+                    "today": today,
+                    "next_trade_date": _next_trade_date(cur, today),
+                }
+            if not row[0]:
+                return {
+                    "available": False,
+                    "reason": "not_a_trade_day",
+                    "today": today,
+                    "next_trade_date": _next_trade_date(cur, today),
+                }
+            return {
+                "available": True,
+                "reason": "trade_day",
+                "today": today,
+                "next_trade_date": None,
+            }
+    except Exception as exc:  # noqa: BLE001
+        import logging
+
+        logging.getLogger(__name__).warning("T+1 日历查询失败: %s", exc)
+        return {
+            "available": False,
+            "reason": "calendar_check_failed",
+            "today": today,
+            "next_trade_date": None,
+        }
+
+
+def _next_trade_date(cur: Any, after_date: str) -> str | None:
+    """查 ``after_date`` 之后的下一个开市日。"""
+    cur.execute(
+        "SELECT date::text FROM public.trade_calendar "
+        "WHERE is_open AND date > %s ORDER BY date LIMIT 1",
+        (after_date,),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None

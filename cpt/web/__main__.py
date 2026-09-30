@@ -35,7 +35,7 @@ from cpt.application.dashboard_config_compare import compare_configs
 from cpt.application.dashboard_inspector import inspect_bar
 from cpt.application.dashboard_market import normalize_24h
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
-from cpt.application.multi_level import build_multi_level, structures_for_level
+from cpt.application.multi_level import build_multi_level, format_multi_level, structures_for_level
 from cpt.application.replay import compute_domain_structures, replay_bars
 from cpt.domain.config import RulesConfig
 from cpt.domain.models import Bi, CanonicalBar, Fractal, TrendType, ZhongShu
@@ -171,7 +171,7 @@ def _snapshot_from_bars(
         mode="research",
         status=status,
         data_source=data_source,
-        multi_level=_format_multi_level(multi),
+        multi_level=format_multi_level(multi),
         config_compare=_compare_with_default(config),
         runtime={
             "data_source": data_source,
@@ -299,7 +299,7 @@ class _FixtureProvider:
             mode="research",
             status="confirmed",
             data_source="native_fixture",
-            multi_level=_format_multi_level(multi),
+            multi_level=format_multi_level(multi),
             config_compare=_compare_with_default(self._config),
         )
         rebuilt["market"]["symbol"] = symbol
@@ -346,7 +346,7 @@ class _FixtureProvider:
             status="confirmed",
             data_source="native_fixture",
             market_24h={"available": False, "reason": "fixture_mode_no_upstream"},
-            multi_level=_format_multi_level(multi),
+            multi_level=format_multi_level(multi),
             config_compare=_compare_with_default(config),
             runtime={
                 "data_source": "native_fixture",
@@ -409,23 +409,6 @@ def _compare_with_default(config: RulesConfig) -> dict[str, Any]:
         "available": True,
         "differences": tuple(differences),
         "baseline": "default_rules_config()",
-    }
-
-
-def _format_multi_level(
-    multi: dict[int, dict[str, tuple[Any, ...]]],
-) -> dict[str, Any]:
-    levels: dict[str, dict[str, int]] = {}
-    for level, entry in sorted(multi.items()):
-        levels[str(level)] = {
-            "fractals": len(entry["fractals"]),
-            "bis": len(entry["bis"]),
-            "zhongshus": len(entry["zhongshus"]),
-        }
-    return {
-        "available": True,
-        "levels": levels,
-        "primary_level": min(multi.keys()) if multi else None,
     }
 
 
@@ -613,7 +596,7 @@ class _RealtimeProvider:
             mode="research",
             status="confirmed",
             data_source="binance_realtime",
-            multi_level=_format_multi_level(multi),
+            multi_level=format_multi_level(multi),
             config_compare=_compare_with_default(self._config),
         )
         for key in ("market", "runtime", "reproducibility", "alerts", "market_24h"):
@@ -755,7 +738,7 @@ class _RealtimeProvider:
             status="confirmed",
             data_source="binance_realtime",
             market_24h=market_24h,
-            multi_level=_format_multi_level(multi),
+            multi_level=format_multi_level(multi),
             config_compare=_compare_with_default(self._config),
             runtime={
                 "data_source": "binance_realtime",

@@ -42,8 +42,13 @@ from cpt.adapters.reference_chanlun import ChanlunBackend
 from cpt.adapters.validators import validate_ashare_bars
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
 from cpt.application.first_buy_bridge import derive_first_buy_facts
+from cpt.application.multi_level import build_multi_level, format_multi_level
 from cpt.application.replay import compute_domain_structures
-from cpt.domain.a_share_rules import apply_ashare_tags_to_bis
+from cpt.application.signal_event_store import (
+    load_previous_signal,
+    record_signal_event,
+)
+from cpt.domain.a_share_rules import apply_ashare_tags_to_bis, check_t_plus_one_calendar
 from cpt.domain.config import RulesConfig
 from cpt.domain.models import Bi, CanonicalBar, Signal, ZhongShu
 from cpt.domain.signal import assess_first_buy
@@ -209,7 +214,16 @@ def build_ashare_snapshot(
     # 把合成 id 挂到笔的 ``source_ids`` 上，让上层知道该把这笔画虚线。
     # 只注入 id、不改数值 —— 判据见 tests/test_a_share_rules.py::test_tags_do_not_change_structure。
     bis, tags_audit = _apply_daily_tags(active_client, code, start_ms, end_ms, raw_bis)
-    signal = _derive_first_buy_signal(bis, zhongshus, validated)
+    signal = _derive_first_buy_signal(
+        bis,
+        zhongshus,
+        validated,
+        client=active_client,
+        code=code,
+    )
+    # multi_level 结构递归（R21 接线）：levels=(1,2,3) 表示日线/周线/月线结构递归。
+    # 递归失败只降级 multi_level 为 unavailable，不搞挂快照。
+    multi_level_data = _compute_multi_level_safe(validated, active_backend)
     snapshot = build_dashboard_snapshot_v2(
         config=RulesConfig(),
         bars=validated,
@@ -218,6 +232,7 @@ def build_ashare_snapshot(
         zhongshus=zhongshus,
         trend_types=(),
         signal=signal,
+        multi_level=multi_level_data,
         mode="watch",
         status="confirmed",
         data_source="db_local",
@@ -238,11 +253,17 @@ def build_ashare_snapshot(
     snapshot["market"]["board"] = security_board
     _attach_factor_fetch(snapshot, outcome)
     _attach_ashare_tags(snapshot, tags_audit)
+    _attach_t_plus_one(snapshot, active_client)
     return snapshot
 
 
 def _derive_first_buy_signal(
-    bis: Sequence[Bi], zhongshus: Sequence[ZhongShu], bars: Sequence[CanonicalBar]
+    bis: Sequence[Bi],
+    zhongshus: Sequence[ZhongShu],
+    bars: Sequence[CanonicalBar],
+    *,
+    client: Any = None,
+    code: str = "",
 ) -> Signal | None:
     """由结构对象推导一买信号（``None`` = 当前不评估）。
 
@@ -254,10 +275,11 @@ def _derive_first_buy_signal(
 
     ``source_revision`` 固定 ``0``：A 股快照每次都全量重算，没有可回溯的
     revision 序列；状态机 docstring 明确该字段「原样记录、不自增」。
-    ``previous`` 传 ``None``：本层不持久化信号历史，状态推进留给
-    :func:`transition_first_buy` 的调用方（收盘后批处理），故
-    ``assess_first_buy`` 只会产出 ``structure_ready`` / ``confirmed`` /
-    ``invalidated``，**不会产出 ``alert``**——后者需要盘中反向 K 线。
+
+    **信号历史持久化（R21）**：当 ``client`` 传入时，从
+    ``public.cpt_signal_event`` 加载同 ``signal_id`` 的最新事件作为
+    ``previous``，让状态机跨轮询推进；评估完成后若 status 变化则 append 一条
+    事件。``client=None`` 时退化为 ``previous=None``（首次评估），不写事件。
     """
     config = RulesConfig()
     level = config.levels[0] if config.levels else 0
@@ -273,9 +295,19 @@ def _derive_first_buy_signal(
     if facts is None:
         return None
     last_bar = bars[-1] if bars else None
-    return assess_first_buy(
+    structure_id = facts.structure_id or f"level{level}:empty"
+    event_time = int(last_bar.close_time) if last_bar is not None else 0
+
+    # 加载上一状态（R21 信号历史持久化）
+    previous: Signal | None = None
+    conn = client._get_conn() if client is not None else None
+    if conn is not None:
+        signal_id = f"first_buy:{level}:{structure_id}"
+        previous = load_previous_signal(conn, signal_id)
+
+    signal = assess_first_buy(
         level=level,
-        structure_id=facts.structure_id or f"level{level}:empty",
+        structure_id=structure_id,
         center_ids=facts.center_ids,
         trend_direction=level_bis[-1].direction,
         has_two_centers=facts.has_two_centers,
@@ -284,9 +316,20 @@ def _derive_first_buy_signal(
         divergence_status=facts.divergence_status,
         price=float(last_bar.close) if last_bar is not None else 0.0,
         source_revision=0,
-        event_time=int(last_bar.close_time) if last_bar is not None else 0,
-        previous=None,
+        event_time=event_time,
+        previous=previous,
     )
+
+    # 记录状态跃迁（status 变化时才 append）
+    if conn is not None and signal is not None:
+        prev_status = previous.status if previous is not None else None
+        record_signal_event(conn, signal, prev_status, code, event_time)
+        try:
+            conn.commit()
+        except Exception as exc:
+            _LOG.warning("提交信号事件失败 %s: %s", code, exc)
+
+    return signal
 
 
 def _apply_daily_tags(
@@ -336,6 +379,35 @@ def _apply_daily_tags(
 def _attach_ashare_tags(snapshot: dict[str, Any], audit: dict[str, Any]) -> None:
     """把审计块塞进 ``data_quality``（与 :func:`_attach_factor_fetch` 同款，零 schema 变更）。"""
     snapshot.setdefault("data_quality", {})["ashare_tags"] = audit
+
+
+def _attach_t_plus_one(snapshot: dict[str, Any], client: Any) -> None:
+    """查 ``public.trade_calendar`` 判断今日是否可买（T+1 日历约束）。
+
+    只读日历，不涉及持仓/账户（roadmap「明确不做持仓」）。失败只降级、不搞挂快照。
+    """
+    try:
+        calendar = check_t_plus_one_calendar(client)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.debug("T+1 日历查询失败 %s: %s", snapshot.get("market", {}).get("symbol"), exc)
+        calendar = {"available": False, "reason": "calendar_check_failed"}
+    snapshot["t_plus_one"] = calendar
+
+
+def _compute_multi_level_safe(
+    bars: Sequence[CanonicalBar],
+    backend: ChanlunBackend,
+) -> dict[str, Any] | None:
+    """安全调用 ``build_multi_level``，失败时返回 None（降级为 unavailable）。
+
+    ``levels=(1,2,3)`` 表示结构递归（非分钟语义），奎爷 R21 拍板。
+    """
+    try:
+        multi = build_multi_level(bars, RulesConfig(), backend, levels=(1, 2, 3))
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("multi_level 计算失败: %s", exc)
+        return None
+    return format_multi_level(multi)
 
 
 def _resolve_security_name(client: Any, code: str) -> Any:

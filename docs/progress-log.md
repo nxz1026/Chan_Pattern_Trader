@@ -1901,3 +1901,81 @@ hfq 被调连续（002594 `raw -67%` / `hfq ±0`）；腾讯退化 = raw 正常�
 - **全量 5,222 只因子回填未实跑**：本机 IP 已被腾讯限流（`HTTP 501`，持续中），
   迁移与防护已就位、待限流恢复后执行 `--mode full`。
 - 前端 `ashare:` 前缀渲染（虚线/降透明）—— 奎爷 2026-09-30 拍板**暂停**。
+
+---
+
+## R21 · 信号事件持久化 + 面板四项 + hot_rank 回补
+
+**时间**：2026-09-30 → 2026-10-01
+**授权**：奎爷 m01964（四件全部授权 + 反问拍板项）
+**拍板**：奎爷 m02355（A/B/C 全采纳：multi_level 接结构递归 levels=(1,2,3)、market_24h 摘兜底改文案、cpt_signal_event 按 (signal_id, status) 变化写入去重）
+
+### 一、信号事件持久化
+
+**新建 `cpt/application/signal_event_store.py`（152 行）**：
+- `load_previous_signal(conn, signal_id)` 从 `public.cpt_signal_event` 查最新事件重建 Signal（无事件降级 None，DB 报错降级 None 不搞挂快照）
+- `record_signal_event(conn, signal, prev_status, code, event_time)` 只在 status 变时 append（同 status 返回 False 不碰 DB），event_time=0 兜底墙钟 now()
+
+**迁移文件** `scripts/migrations/2026-10-01_r21_signal_event.sql`（73 行）：
+- 表 `public.cpt_signal_event` 已建（17 列，bigserial PK + CHECK 约束 + 两个索引），0 行
+
+**`cpt/application/a_share_snapshot.py` 接线**：
+- `_derive_first_buy_signal(bis, zhongshus, bars, *, client=None, code="")` 传入 `active_client` 时调 load_previous_signal 拿 previous 喂给 assess_first_buy，评估后若 status 变则 record_signal_event + conn.commit()
+
+**新建 `tests/test_signal_event_store.py`（9 条）**：
+- load 空表/有数据/DB 报错降级；record 写/跳过/首次/DB 报错/event_time=0
+- 集成 test_derive_signal_with_client_invokes_load 用 monkeypatch mock RulesConfig 让默认 level=0（否则默认 (5,30) 让 level_bis 空 → 早返 None）
+
+**实测教训**：`_derive_first_buy_signal` 内 `config.levels[0]` 默认是 5 不是 0，测试数据 level=0 会早返 None。集成测试须 monkeypatch RulesConfig.levels=(0,)
+
+### 二、面板四项
+
+**multi_level 接 A 股**：
+- `cpt/application/multi_level.py` 新增 `format_multi_level(multi)` 公共函数（输出 `{"available":True,"levels":{"1":{"fractals":N,"bis":N,"zhongshus":N},...},"primary_level":1}`）
+- `a_share_snapshot.py` 新增 `_compute_multi_level_safe(bars, backend)` 调 `build_multi_level(bars, RulesConfig(), backend, levels=(1,2,3))` 失败降级 None
+- 结果传 `build_dashboard_snapshot_v2(multi_level=...)`
+- `__main__.py` 改用共享 `format_multi_level` 删本地 `_format_multi_level`
+
+**T+1 日历**：
+- `cpt/domain/a_share_rules.py` 新增 `check_t_plus_one_calendar(client) -> dict` 读 `public.trade_calendar` 查今日是否开市，返回 `{available, reason, today, next_trade_date}`
+- 新增 `_next_trade_date(cur, after_date)` 辅助函数
+- `a_share_snapshot.py` 新增 `_attach_t_plus_one(snapshot, active_client)` 调后塞 `snapshot["t_plus_one"]`
+- 4 条测试覆盖开市/休市/未知/DB 报错
+
+**market_24h 摘兜底**：
+- 前端 `dashboard/dashboard.js:483-495` 删除 window 兜底 `(last.close-first.open)/first.open*100`，改为 `available:false` 时显示 "—" + title "上游 24h 涨跌幅不可用（A 股暂无数据源）"
+
+**ashare 虚线渲染**：
+- `drawBis` 函数增加 `hasAshareTag` 检测（`source_ids` 含 `ashare:` 前缀），有标签时 `stroke-dasharray:"5 3"` + `opacity:0.5`；`data-ashare-tag` 属性透出
+
+**修 signal-source-ids bug**：
+- `dashboard/dashboard.js:615-618` 读不存在的 `item.source_ids`（Signal 类无此字段），删除前端代码 + `index.html:329` 删对应 dt/dd
+
+### 三、hot_rank 历史回补
+
+**票池**：近一年 `cont_days>=2` ∪ `signal` = 1,296 只
+**数据源**：akshare `stock_hot_rank_detail_em`（东财个股人气排行历史），600519 实测 366 行
+**回填脚本**：`emotion-core/scripts/backfill_hot_rank_r21.py`（后台 pid 1596464 在跑）
+**进度**：已插入 466 行 / 101 只（截至 08:50），预计 ~6.5 分钟完成
+
+### 四、验收
+
+- 门禁：pytest **480 passed, 29 skipped**；ruff check / format / mypy / vulture 0 告警全绿
+- CI：待推
+
+### 五、踩坑
+
+1. **subagent 全部失败**：3 个 subagent 全部 `failed before it finished`，无一留结论 → 实证 subagent 在本机不可靠，改主 agent 自挖
+2. **CPT 写入能力实测为零**：全仓 grep `INSERT INTO|UPDATE|DELETE FROM` 仅 1 处命中 `cpt/adapters/a_share_factor.py:399`（asel.ref_adjust_factor，R20 补因子）→ 信号事件表真从零
+3. **`alert_transition` 是死路（实证）**：`cpt/application/dashboard_alerts.py:9-24` 只比较 `previous["signal"]["status"]` vs `current["signal"]["status"]`，`triggered = current_status in {"alert","candidate"} and changed`。唯一调用方 `cpt/web/__main__.py:792-794 _compute_alerts`，其所在 `:747-770 build_dashboard_snapshot_v2(...)` **没传 `signal=`** → `current.get("signal")` 恒 None → `current_status` 恒 `"none"` → `triggered` 恒 False
+4. **`_derive_first_buy_signal` 内 `config.levels[0]` 默认是 5 不是 0**：测试数据 level=0 会早返 None，集成测试须 monkeypatch RulesConfig.levels=(0,)
+5. **emotion-core DB 连接**：`utils/db.py`（非 `data/_dbconfig.py`），需 `sys.path.insert(0, os.path.join(_HERE, "..", "src"))`
+6. **`fetch_hot_history` 返回 int 非 list**：`backfill_hot_rank` 逐票容错，单票失败记录不中断
+
+### 六、仍未做
+
+- **全量 5,222 只因子回填**：后台 pid 1561177 仍卡腾讯 501（与 hot_rank 回填并行跑，互不干扰）
+- **hot_rank 回补**：后台 pid 1596464 在跑，待完成
+- **一卖 `check_first_sell`**：纯函数可直接接，待排
+- **`alert` 态**：需盘中反向 K 线，待排
+- **signal 状态推进**：需持久化信号历史（已落 `cpt_signal_event` 表，待接线）

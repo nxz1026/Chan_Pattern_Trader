@@ -483,15 +483,13 @@
       const market24h = isObject(snapshot) && isObject(snapshot.market_24h) ? snapshot.market_24h : null;
       const has24h = market24h && market24h.available === true;
       const upstreamPct = has24h ? Number(market24h.price_change_pct) : NaN;
-      const changePct = Number.isFinite(upstreamPct)
-        ? upstreamPct
-        : (first && first.open ? ((last.close - first.open) / first.open) * 100 : null);
+      const changePct = Number.isFinite(upstreamPct) ? upstreamPct : null;
       changeNode.textContent = changePct === null ? "—" : `${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
       changeNode.dataset.state = changePct === null ? "flat" : changePct >= 0 ? "up" : "down";
-      changeNode.dataset.source = has24h && Number.isFinite(upstreamPct) ? "24h" : "window";
+      changeNode.dataset.source = has24h && Number.isFinite(upstreamPct) ? "24h" : "unavailable";
       changeNode.setAttribute(
         "title",
-        has24h && Number.isFinite(upstreamPct) ? "上游 24h 涨跌幅" : "当前 snapshot 窗口涨跌幅（非 24h）",
+        has24h && Number.isFinite(upstreamPct) ? "上游 24h 涨跌幅" : "上游 24h 涨跌幅不可用（A 股暂无数据源）",
       );
     }
     const countdownNode = q("[data-testid=close-countdown]");
@@ -614,10 +612,6 @@
     setText("[data-testid=signal-divergence-status]", item ? item.divergence_status : "—");
     setText("[data-testid=signal-source-revision]", item ? num(item.source_revision) : "—");
     setText("[data-testid=signal-structure-id]", item ? item.structure_id : "—");
-    setText(
-      "[data-testid=signal-source-ids]",
-      item ? asArray(item.source_ids).join(" ") || "—" : "—",
-    );
   }
 
   function renderStructureDefaults(snapshot) {
@@ -1636,6 +1630,8 @@
       const startPrice = fractalPrice(byStart.get(startTime), up ? low : high);
       const endPrice = fractalPrice(byEnd.get(endTime), up ? high : low);
       const stateValue = structureStateOf(view, endTime);
+      // ashare: 标签（涨跌停/炸板/一字板）→ 端点可信度低，画虚线 + 降透明
+      const hasAshareTag = asArray(item.source_ids).some((id) => String(id).startsWith("ashare:"));
       const element = createSvg("path", {
         d: `M ${view.xForIndex(startIndex)} ${view.yForPrice(startPrice)} L ${view.xForIndex(endIndex)} ${view.yForPrice(endPrice)}`,
         fill: "none",
@@ -1644,12 +1640,14 @@
         "data-level": num(item.level),
         "data-state": stateValue,
         "data-source-ids": asArray(item.source_ids).join(" "),
+        "data-ashare-tag": hasAshareTag ? "true" : "false",
       });
       paint(element, {
         stroke: up ? "var(--color-up)" : "var(--color-down)",
         "stroke-width": "2",
         "stroke-linecap": "round",
-        "stroke-dasharray": stateValue === "alert" ? "5 3" : "none",
+        "stroke-dasharray": stateValue === "alert" || hasAshareTag ? "5 3" : "none",
+        opacity: hasAshareTag ? "0.5" : "1",
       });
       group.appendChild(attachHit(element, payloadFor("bi", item, view, stateValue)));
     });

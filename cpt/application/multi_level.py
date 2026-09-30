@@ -176,4 +176,26 @@ def structures_for_level(
     )
 
 
-__all__ = ["build_multi_level", "structures_for_level"]
+__all__ = ["build_multi_level", "format_multi_level", "structures_for_level"]
+
+
+def format_multi_level(
+    multi: dict[int, dict[str, tuple[Any, ...]]],
+) -> dict[str, Any]:
+    """把 ``build_multi_level`` 的结果转成前端消费的 schema。
+
+    输出格式：``{"available": True, "levels": {"1": {"fractals": N, "bis": N,
+    "zhongshus": N}, ...}, "primary_level": 1}``。
+    """
+    levels: dict[str, dict[str, int]] = {}
+    for level, entry in sorted(multi.items()):
+        levels[str(level)] = {
+            "fractals": len(entry["fractals"]),
+            "bis": len(entry["bis"]),
+            "zhongshus": len(entry["zhongshus"]),
+        }
+    return {
+        "available": True,
+        "levels": levels,
+        "primary_level": min(multi.keys()) if multi else None,
+    }

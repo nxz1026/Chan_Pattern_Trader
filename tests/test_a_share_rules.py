@@ -12,6 +12,7 @@ from cpt.application.a_share_snapshot import build_ashare_snapshot
 from cpt.domain.a_share_rules import (
     AShareDailyTag,
     apply_ashare_tags_to_bis,
+    check_t_plus_one_calendar,
     fetch_daily_tags,
     t_plus_one_purchase_allowed,
 )
@@ -225,6 +226,100 @@ def test_t_plus_one_returns_true_when_no_previous_close():
 def test_t_plus_one_returns_true_after_close():
     """前一日已收盘 → 日历允许（持仓层面由仓位模块处理）。"""
     assert t_plus_one_purchase_allowed("2026-09-23") is True
+
+
+# --------------------------------------------------------------------------- #
+# T+1 日历查询（R21 接线）
+# --------------------------------------------------------------------------- #
+
+
+@dataclass
+class _CalendarCursor:
+    """模拟 ``public.trade_calendar`` 查询的游标。"""
+
+    today_open: bool | None = True
+    next_date: str | None = None
+    explode: bool = False
+    executed: list = field(default_factory=list)
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        return False
+
+    def execute(self, sql: str, params: tuple) -> None:
+        self.executed.append((sql, params))
+        if self.explode:
+            raise RuntimeError("DB 不可达")
+
+    def fetchone(self):
+        # 第一查：SELECT is_open WHERE date = today
+        if "is_open FROM" in self.executed[-1][0]:
+            if self.today_open is None:
+                return None
+            return (self.today_open,)
+        # 第二查：SELECT date::text ... WHERE is_open AND date > today
+        return (self.next_date,) if self.next_date else None
+
+
+@dataclass
+class _CalendarConn:
+    cursor_obj: _CalendarCursor
+
+    def cursor(self):
+        return self.cursor_obj
+
+
+@dataclass
+class _CalendarClient:
+    """注入到 ``check_t_plus_one_calendar`` 的假客户端。"""
+
+    conn: _CalendarConn
+
+    def _get_conn(self):
+        return self.conn
+
+
+def _calendar_client(*, today_open=True, next_date=None, explode=False):
+    return _CalendarClient(
+        _CalendarConn(_CalendarCursor(today_open=today_open, next_date=next_date, explode=explode))
+    )
+
+
+def test_check_t_plus_one_calendar_trade_day():
+    """今日开市 → available=True。"""
+    client = _calendar_client(today_open=True)
+    result = check_t_plus_one_calendar(client)
+    assert result["available"] is True
+    assert result["reason"] == "trade_day"
+    assert result["today"] is not None
+    assert result["next_trade_date"] is None
+
+
+def test_check_t_plus_one_calendar_not_trade_day():
+    """今日休市（周末/节假日）→ available=False，带下一开市日。"""
+    client = _calendar_client(today_open=False, next_date="2026-10-08")
+    result = check_t_plus_one_calendar(client)
+    assert result["available"] is False
+    assert result["reason"] == "not_a_trade_day"
+    assert result["next_trade_date"] == "2026-10-08"
+
+
+def test_check_t_plus_one_calendar_unknown_date():
+    """日历表无今日记录 → available=False。"""
+    client = _calendar_client(today_open=None)
+    result = check_t_plus_one_calendar(client)
+    assert result["available"] is False
+    assert result["reason"] == "calendar_unknown"
+
+
+def test_check_t_plus_one_calendar_db_error():
+    """DB 报错 → 降级 available=False，不抛异常。"""
+    client = _calendar_client(explode=True)
+    result = check_t_plus_one_calendar(client)
+    assert result["available"] is False
+    assert result["reason"] == "calendar_check_failed"
 
 
 # --------------------------------------------------------------------------- #
