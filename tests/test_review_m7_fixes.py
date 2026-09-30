@@ -5,7 +5,6 @@ import urllib.error
 import urllib.request
 
 import pytest
-from cpt.application.dashboard_parity import build_parity_snapshot
 from cpt.application.replay import _infer_interval_ms
 from cpt.domain.config import RulesConfig
 from cpt.domain.models import make_canonical_bar
@@ -26,13 +25,6 @@ def test_replay_interval_infers_smallest_positive_gap() -> None:
         for index in range(3)
     )
     assert _infer_interval_ms(bars, RulesConfig(levels=(5, 30))) == 60000
-
-
-def test_parity_snapshot_uses_explicit_oracle_inputs() -> None:
-    item = {"kind": "top", "bar_index": 1}
-    result = build_parity_snapshot(fractals=(item,), oracle_fractals=(item,))
-    assert result["fractals"]["summary"]["matched"] == 1
-    assert result["fractals"]["summary"]["extra"] == 0
 
 
 def test_http_adapter_rejects_nan_and_returns_provider_error() -> None:

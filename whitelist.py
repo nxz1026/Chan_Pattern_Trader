@@ -61,7 +61,6 @@ event_audit  # dashboard_event_audit —— Phase 5 P1 事件前后状态对比
 slice_snapshot  # dashboard_export —— Phase 6 P2 时间范围切片导出
 level_tree  # dashboard_levels —— Phase 5 P1 级别递归树
 align_runs  # dashboard_multi_run —— Phase 6 P2 双数据集同步对比
-build_parity_snapshot  # dashboard_parity —— Phase 2 Oracle 对比
 quality_report  # dashboard_quality —— Phase 5 P1 数据质量报告
 realtime_update  # dashboard_realtime —— Phase 4 P1 高效实时更新
 build_run_index  # dashboard_runs —— R1 数据集/运行浏览器

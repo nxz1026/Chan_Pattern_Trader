@@ -115,7 +115,7 @@
 
 | 模块 | 行数 | 处境 | 功能 / roadmap 位置 | 前端消费 |
 |---|---:|---|---|---:|
-| `cpt/application/dashboard_parity.py` | 83 | **依赖消失** | Phase 2「Oracle 对比」 | 32 处 |
+| ~~`cpt/application/dashboard_parity.py`~~ | ~~83~~ | **已删除（R20）** | Phase 2「Oracle 对比」——oracle 参照 R13 已删，永久未启用 | 28 处（空面板保留） |
 | `dashboard_signal_history.py` | 47 | 纯未接线 | Phase 4 P1 信号历史 + Phase 6 P2 转化率/失效原因分布 | 0 |
 | `dashboard_event_audit.py` | 42 | 纯未接线 | Phase 5 P1 事件前后状态对比 | 0 |
 | `dashboard_levels.py` | 40 | 纯未接线 | Phase 5 P1 级别递归树 | 0 |
@@ -128,16 +128,24 @@
 
 ### 簇二的两条特殊条目
 
-**① `dashboard_parity` —— 依赖已消失，接不了。**
+**① `dashboard_parity` —— 依赖已消失，R20 已处置。**
 
 oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:61` 的
 `reason: "oracle_reference_unavailable"` 是**永久 false**，不是暂时缺数据。
-`build_parity_view` 在没有参照物时是无米之炊。
 
-> 待拍板：**还要不要 oracle 对比这个功能**？
-> - 要 → 先恢复一份 oracle 参照实现，再接线（成本大）
-> - 不要 → 删 `dashboard_parity.py` + 摘掉前端 `parity` 面板（`dashboard.js:975
->   renderParityCharts` 等 6 处消费点）+ 移除 `app.py:208` 路由
+> **R20 处置：删后端模块，保留前端空面板。**
+> - 已删 `cpt/application/dashboard_parity.py`（83 行）、摘掉
+>   `whitelist.py` 的 `build_parity_snapshot` 豁免、移除
+>   `tests/test_dashboard_research_services.py` 与 `tests/test_review_m7_fixes.py`
+>   里的两处自证用例。
+> - **保留** `dashboard_snapshot_v2.py:61` 的 `{"available": False, "reason":
+>   "oracle_reference_unavailable"}` 键位、`app.py:208` 路由与前端
+>   `renderParityCharts`：前端 28 处消费点依赖这个形状，摘面板要改 6 个渲染函数
+>   + 契约测试，收益仅为少显示一个恒空的 `<section>`。**代价大于收益。**
+> - 结论：Oracle 对比功能**永久未启用**。若将来要恢复，正确顺序是
+>   先恢复一份 oracle 参照实现，再谈接线；不要在没有参照物时保留投影函数。
+> - 前端契约测试 `tests/test_dashboard_parity_navigation.py` **保留**（它守的是
+>   仍然活着的空面板交互，不是被删的投影函数）。
 
 **② `dashboard_runs` —— 半接线：路由活、前端读、数据恒空。**
 
