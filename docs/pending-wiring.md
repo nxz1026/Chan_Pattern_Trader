@@ -69,7 +69,7 @@
 
 | 模块 | 行数 | 处境 | 功能 | 接线目标 |
 |---|---:|---|---|---|
-| `cpt/domain/signal.py` | 311 | 纯未接线 | **一买状态机**：`assess_first_buy` / `transition_first_buy`，管 alert→confirmed→invalidated 转移 | 接进 A 股信号链；`signal_id` 已按**稳定 upsert 主键**设计 |
+| ~~`cpt/domain/signal.py`~~ | ~~311~~ | **已接线（R20）** | **一买状态机**：`assess_first_buy` / `transition_first_buy`，管 alert→confirmed→invalidated 转移 | 已进 A 股信号链（`a_share_snapshot.py:210`） |
 | `cpt/domain/a_share_rules.py` | 152 | ✅ **R19 已接线** | **A 股交易规则标签**：涨跌停 / 停牌 / T+1。`fetch_daily_tags` / `apply_ashare_tags_to_bis` / `t_plus_one_purchase_allowed` | 标签能力已进 A 股主看板（见下）；**只剩 T+1 未接** |
 
 ### `a_share_rules` 的 R19 接线结果
@@ -100,14 +100,37 @@
 显示（`:619`），所以标签接上即自动可见；**但前端尚无 `ashare:` 前缀的专门渲染**
 （虚线/降透明）—— 属下一增量。
 
-### 剩下的唯一一块：`signal.py` 的一买状态机
+### `signal.py` 的一买状态机 —— **已接线（R20）**
 
 `a_share_rules` 的 docstring 写明「C4 T+1 … 由 `cpt.domain.signal` 在评估一买/一卖
-时读取」，即两者互锁。`signal.py` 没能一起接，根因是**缺输入的生产者**：
+时读取」，即两者互锁。R20 前它接不上的根因不是「缺输入的生产者」，而是**缺翻译层**：
+数据其实齐了，只是没人把结构对象翻译成状态机的入参。
 `assess_first_buy` 需要 `has_two_centers` / `has_divergence_leg` / `has_reversal_bi`，
-而这三个值只出现在 `signal.py` 自己和 `cpt/domain/first_buy.py:12` 的 docstring 里；
-`TrendType`（`cpt/domain/models.py:163`）没有中心数/背驰笔/反转笔字段。**这座桥
-必须新写，不是接线**，故挂起待拍板。
+这三个值只出现在 `signal.py` 自己、`cpt/domain/first_buy.py:12` 的 docstring 和本文件里；
+`TrendType`（`cpt/domain/models.py:163`）确实没有中心数/背驰笔/反转笔字段。
+
+> **R20 处置：新增 `cpt/application/first_buy_bridge.py`（翻译层），接进 A 股主看板。**
+> - 桥输出 `FirstBuyFacts`（三事实 + `center_ids` + `structure_id` + `divergence_status`），
+>   再由 `a_share_snapshot.py:243 _derive_first_buy_signal` 调 `assess_first_buy` 出
+>   `Signal`，经 `build_dashboard_snapshot_v2(..., signal=signal)` 落到
+>   `v2["signal"]`。接线点干净：v2 早有该形参，只是没人传。
+> - **保守口径四条**（全选「宁可判否」一侧）：①取本级别**最后两个**中枢，不是任意两个；
+>   ②背驰段 = 中枢二 `end_time` 之后、方向相同的**第一笔**（不含中枢连接笔）；
+>   ③反向笔**出现即算**，收盘确认交给 `transition_first_buy` 的 `reversal_closed`；
+>   ④**背驰不是硬门槛**（沿用 `_structure_ready` 现状）。
+> - **趋势方向从数据推导**：取本级别最后一笔方向，**不硬编码 `-1`**。最后一笔向上
+>   时一买无意义 → 桥返回 `None` → 不产信号。若写死 `-1`，信号栏将永远非空，
+>   失去「当下是否处于一买结构」的信息量。
+> - **两套口径并存**：`divergence_status` 用 `first_buy.check_first_buy`
+>   （czsc 笔段力度背驰），三事实用缠论 §8.2 结构条件。力度未填充时前者
+>   **响亮报错**（`first_buy.py:72`），桥捕获并降级为 `not_checked` ——
+>   **不与 `not_detected` 混用**（前者是「数据缺」，后者是「算过了，不背驰」）。
+> - **守门用 spy 而非断言 `signal is not None`**：断言成败取决于测试数据能否造出
+>   两个中枢（实测 60 组参数都造不出，`_extend` 会一路吞并），会「因为数据没结构」
+>   变红。`test_production_entry_calls_bridge` 用 monkeypatch 盯住「生产入口有没有
+>   调这个函数」，未接线时实测红（`assert []`），且不挑数据。
+> - **仍未接**：`transition_first_buy` 的状态推进（需持久化信号历史）、
+>   `alert` 状态（需盘中反向 K 线）、一卖 `check_first_sell`、T+1 读取点。
 
 ---
 

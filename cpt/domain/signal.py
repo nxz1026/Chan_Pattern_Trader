@@ -1,7 +1,14 @@
 """一买状态机（``docs/rules.md`` §8.2 / §8.6，纯 domain 计算）。
 
-**状态：待接线（pending-wiring，2026-09-25 审核 P0-2）**——生产代码零导入，尚无
-调用方；保留原因与接线计划见 ``docs/pending-wiring.md``，改动前请先读该文档。
+**状态：部分接线（R20 接线，2026-09-30）**——`assess_first_buy` 已由
+:func:`cpt.application.first_buy_bridge.derive_first_buy_facts` 补算三结构事实，
+并接进 A 股主看板（:func:`cpt.application.a_share_snapshot.build_ashare_snapshot`）。
+**仍未接**：:func:`transition_first_buy` 的状态推进（需持久化信号历史）、``alert``
+状态（需盘中反向 K 线）、一卖 :func:`cpt.domain.first_buy.check_first_sell`、
+T+1 读取点。背景与保守口径见 ``docs/pending-wiring.md``。
+
+三事实的**算**在这里之外：:mod:`cpt.application.first_buy_bridge` 负责把
+``ZhongShu`` / ``Bi`` 翻译成本模块要的入参，口径说明见该模块 docstring。
 
 位于 ``docs/architecture.md`` §3.1 的「结构序列 → ``Signal[]``」环节，是 CPT 自研
 三个核心模块之一（另两个：:mod:`cpt.domain.trend_type`、:mod:`cpt.domain.recursion`）。

@@ -1722,3 +1722,71 @@ R18 收尾后的 6 项队列，按「一件一件来」的约定推进；本轮�
   `data-source-ids` 透出，但视觉区分未做，属下一增量。
 - B1/B2/B3（roadmap Phase 3–6）、C1（`public.hot_rank` 空表）、
   C2（`ref_adjust_factor` 全 `hfq_factor=1.0`）维持原状。
+
+## R20 — pending-wiring 队列 ③④⑤⑥ + 两处数据问题 · 2026-09-30
+
+### 一、已落地三件
+
+| # | 事项 | 处置 | commit |
+|---|---|---|---|
+| ④ | `dashboard_market_fetch` | 删（真重复，生产零导入） | `1901c8b` |
+| ⑥ | `dashboard_parity` | 删后端模块，保留前端空面板 | `a5365bd` |
+| ③ | `signal.py` 一买状态机 | 新增翻译层并接进 A 股主看板 | 本节 |
+
+### 二、③ 的根因修正与做法
+
+**根因修正**：R19 记的是「缺输入的生产者」，读代码后不准确——数据齐，**缺翻译层**。
+`ZhongShu`（`cpt/domain/models.py:151`）与 `TrendType`（`:163`）都没有中枢数/背驰笔/
+反转笔字段，所以这三事实必须**从结构对象现算**。
+
+- 新增 `cpt/application/first_buy_bridge.py`：`derive_first_buy_facts(*, level,
+  trend_direction, bis, zhongshus) -> FirstBuyFacts | None`。
+- 接线点：`a_share_snapshot.py:210` 传 `signal=`，`dashboard_snapshot_v2.py:81`
+  落 `v2["signal"]`。
+- 保守口径四条：最后两个中枢 / 背驰段含不含连接笔 / 反向笔出现即算 / 背驰非门槛。
+- 趋势方向取自数据（末笔方向），**不硬编码 `-1`** —— 最后一笔向上则不产信号。
+- 两套口径并存：`divergence_status` 走 `first_buy.check_first_buy`（czsc 笔力度），
+  力度未填充时降级 `not_checked`，**不与 `not_detected` 混用**。
+
+### 三、验收（实跑）
+
+- 门禁：pytest **450 passed, 29 skipped**（447 → 450）；ruff check / format(140 files)
+  / mypy(66 source) / lint-imports(3 kept, 0 broken) / vulture 0 告警全绿。
+- 真库端到端（`build_ashare_snapshot` 直调）：
+  600519 bi=36 zs=6 → `structure_ready` + 背驰 `detected`；
+  603256 bi=34、002272 bi=42 → `signal=None`（末笔向上，一买无意义）。
+- **守门力实测**：`sed` 临时摘掉桥调用后 `test_production_entry_calls_bridge` 红
+  （`assert []`），恢复后绿。
+
+### 四、踩坑
+
+1. **测试数据也会让守门用例假红（R19 同款第二次复发）**：`_zigzag_bars(n=200)` 的
+   正弦相位使末笔向上 → 桥按保守口径返 `None` → 断言 `signal is not None` 红，
+   **根因是数据不是接线**。且实测 60 组参数（阶梯+正弦，amp 0.8~3.5，seg 20~50，
+   n 140~260）**都造不出 2 个中枢**（`zhongshu.py:113 _extend` 一路吞并重叠笔）。
+   → 改用 **spy**：monkeypatch 盯「生产入口有没有调桥」，未接线时必红且不挑数据。
+2. **表结构与脚本预期不符**（`asel.ref_adjust_factor`）：只有 3 列
+   （`code`/`trade_date`/`hfq_factor`），且 `hfq_factor` **列默认值就是 1.0**；
+   而 `scripts/factor_backfill.py:15-16` 注释声称该表由
+   `migrations/0002_p0_reference.sql:96` 定义、含 `source`/`source_url` 等列。
+   338 万行（5222 只 × 649 天）全 1.0 = 建表时灌的占位，写入必报 `UndefinedColumn`。
+3. **腾讯 fqkline 的 key 不是 `qfqday`**：`bfq` → 顶层 key `day`，
+   `hfq` → 顶层 key `hfqday`。先按 `d.get(f"qfq{adj[1:]}")` 猜 key 会得到「0 根」假象。
+4. **psycopg 3 的 SQL 字面量里 `%` 要写 `%%`**，参数值里的 `%` 才不用转义；
+   探表写 `table_name ilike '%run%'` 会报
+   `only '%s', '%b', '%t' are allowed as placeholders, got '%r'`。
+5. 删 import 后 ruff `I001 Import block is un-sorted` —— `ruff check --fix` +
+   `ruff format` 解决。
+
+### 五、仍未做
+
+- ⑤ `dashboard_runs` 数据源：**待拍板**建表落库 vs 内存环形缓冲。附带已发现的字段名
+  不一致：`dashboard_runs.py:31` 输出 `generated_at`，前端 `dashboard.js:836` 读
+  `entry.created_at` —— 接上时间戳也永远空白。
+- `public.hot_rank` 0 行：生产者在 **emotion-core**（不在 CPT），
+  `fetch_hot_snapshot`（`src/emotion_core/services/ingest.py:587`）与
+  `backfill_hot_rank`（`:633`）**全仓零调用**，而同目录 `snapshot_daily` 被
+  `orchestration/daily.py:118` 正常调用 → **每日流程漏了一步**。
+- `asel.ref_adjust_factor`：需先解表结构（补 `source`/`source_url` 列，或改脚本适配
+  现有 3 列），再定回填范围（5222 只全量 vs 部分）。
+- 前端 `ashare:` 前缀渲染（虚线/降透明）—— 奎爷 2026-09-30 拍板**暂停**。

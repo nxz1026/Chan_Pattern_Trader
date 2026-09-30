@@ -41,10 +41,12 @@ from cpt.adapters.backend_factory import DEFAULT_BACKEND, resolve_backend
 from cpt.adapters.reference_chanlun import ChanlunBackend
 from cpt.adapters.validators import validate_ashare_bars
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
+from cpt.application.first_buy_bridge import derive_first_buy_facts
 from cpt.application.replay import compute_domain_structures
 from cpt.domain.a_share_rules import apply_ashare_tags_to_bis
 from cpt.domain.config import RulesConfig
-from cpt.domain.models import Bi
+from cpt.domain.models import Bi, CanonicalBar, Signal, ZhongShu
+from cpt.domain.signal import assess_first_buy
 
 __all__ = [
     "DEFAULT_WIDTH_K",
@@ -207,6 +209,7 @@ def build_ashare_snapshot(
     # 把合成 id 挂到笔的 ``source_ids`` 上，让上层知道该把这笔画虚线。
     # 只注入 id、不改数值 —— 判据见 tests/test_a_share_rules.py::test_tags_do_not_change_structure。
     bis, tags_audit = _apply_daily_tags(active_client, code, start_ms, end_ms, raw_bis)
+    signal = _derive_first_buy_signal(bis, zhongshus, validated)
     snapshot = build_dashboard_snapshot_v2(
         config=RulesConfig(),
         bars=validated,
@@ -214,6 +217,7 @@ def build_ashare_snapshot(
         bis=bis,
         zhongshus=zhongshus,
         trend_types=(),
+        signal=signal,
         mode="watch",
         status="confirmed",
         data_source="db_local",
@@ -235,6 +239,54 @@ def build_ashare_snapshot(
     _attach_factor_fetch(snapshot, outcome)
     _attach_ashare_tags(snapshot, tags_audit)
     return snapshot
+
+
+def _derive_first_buy_signal(
+    bis: Sequence[Bi], zhongshus: Sequence[ZhongShu], bars: Sequence[CanonicalBar]
+) -> Signal | None:
+    """由结构对象推导一买信号（``None`` = 当前不评估）。
+
+    **趋势方向从数据推导，不硬编码**：取本级别**最后一笔**的方向作为「当前走势
+    方向」。最后一笔向上时一买无意义，桥返回 ``None``，本函数也就**不产信号**——
+    这比无脑传 ``-1`` 保守得多：后者会让任何时候都产出一个 ``confirmed`` 或
+    ``invalidated``，面板上的信号栏将永远非空，失去「当下是否处于一买结构」的
+    信息量。
+
+    ``source_revision`` 固定 ``0``：A 股快照每次都全量重算，没有可回溯的
+    revision 序列；状态机 docstring 明确该字段「原样记录、不自增」。
+    ``previous`` 传 ``None``：本层不持久化信号历史，状态推进留给
+    :func:`transition_first_buy` 的调用方（收盘后批处理），故
+    ``assess_first_buy`` 只会产出 ``structure_ready`` / ``confirmed`` /
+    ``invalidated``，**不会产出 ``alert``**——后者需要盘中反向 K 线。
+    """
+    config = RulesConfig()
+    level = config.levels[0] if config.levels else 0
+    level_bis = [bi for bi in bis if bi.level == level]
+    if not level_bis:
+        return None
+    facts = derive_first_buy_facts(
+        level=level,
+        trend_direction=level_bis[-1].direction,
+        bis=bis,
+        zhongshus=zhongshus,
+    )
+    if facts is None:
+        return None
+    last_bar = bars[-1] if bars else None
+    return assess_first_buy(
+        level=level,
+        structure_id=facts.structure_id or f"level{level}:empty",
+        center_ids=facts.center_ids,
+        trend_direction=level_bis[-1].direction,
+        has_two_centers=facts.has_two_centers,
+        has_divergence_leg=facts.has_divergence_leg,
+        has_reversal_bi=facts.has_reversal_bi,
+        divergence_status=facts.divergence_status,
+        price=float(last_bar.close) if last_bar is not None else 0.0,
+        source_revision=0,
+        event_time=int(last_bar.close_time) if last_bar is not None else 0,
+        previous=None,
+    )
 
 
 def _apply_daily_tags(
