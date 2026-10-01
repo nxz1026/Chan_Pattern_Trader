@@ -6,7 +6,7 @@ CPT 基于缠中说禅理论做结构分析：缠论K线 → 分型 → 新笔 �
 
 ## 设计原则
 
-1. **结构清晰**：单一职责分层，依赖方向由 import-linter 强制（3 条契约，CI 门禁之一）。
+1. **结构清晰**：单一职责分层，依赖方向由 import-linter 强制（4 条契约，CI 门禁之一）。
 2. **虚拟/物理分离**：缠论算法（domain）不知道交易所、数据库、绘图、LLM 的存在。
 3. **规则先行**：所有规则口径先冻结于 `docs/rules.md`，再写代码；配置集中在可序列化的 `RulesConfig`。
 4. **无未来函数**：实时输出只依赖当前时点之前的数据，候选/确认/失效全程可追溯。
@@ -16,20 +16,31 @@ CPT 基于缠中说禅理论做结构分析：缠论K线 → 分型 → 新笔 �
 
 ## 架构速览
 
-**4 层**（`engine/` 与 `storage/` 已于 2026-09-25 整层删除，`llm/` 从未有过代码；
-早期版本的 6 层图见 git history）：
+**5 层**（`engine/` 已于 2026-09-25 整层删除；`storage/` 于 2026-10-01 的 R24
+**恢复**；`llm/` 仍是未实现蓝图）：
 
 ```text
 web/           只读 HTTP adapter + 两个入口（加密 / A股）
-application/   用例编排（回放 / 查询 / 导出 / 快照构造）
-adapters/      外部数据接入（Binance / ccxt / Wind / 腾讯 / 新浪 / 本地 PG）+ 缠论后端（czsc / native / 契约 reference_chanlun）
+application/   用例编排（回放 / 查询 / 导出 / 快照构造）—— 不出现 SQL
+storage/       CPT 自有持久化：public.cpt_* 的读写。SQL 只许出现在这一层和 adapters
+adapters/      外部系统接入（行情源 + 共享数据源 emotion_core + 缠论后端委托）
 domain/        纯算法与领域模型（零第三方依赖，一套算法跨级别复用）
 ```
 
-依赖方向 `web → application/adapters → domain`，`domain` 不导入任何上层，
-由 `.importlinter` 的 3 条契约强制（2026-09-25 起纳入 CI）。
+依赖方向 `web → application → {storage, adapters} → domain`，`domain` 不导入任何
+上层，由 `.importlinter` 的 **4 条契约**强制（CI 门禁之一）。
 
-> 设计文档里另有一层「独立 LLM 服务层」的**未实现蓝图**（`architecture.md` §6），
+### 分层的两条硬规矩
+
+1. **SQL 只许出现在 `cpt/adapters/` 与 `cpt/storage/`**。
+   `import-linter` 查的是依赖方向，查不了职责归属 —— `conn` 只是个 `Any` 形参、
+   没有 `import psycopg`，依赖图上看不出越界。R24 实测 SQL 曾铺在四层里而 3 条
+   契约全绿。这条由 `scripts/check_sql_layering.py` 做**内容级**门禁，已进 CI。
+2. **`cpt/storage/` 只装 CPT 自有表**（`public.cpt_*`）。`emotion_core` 共 28 张表，
+   **只有 2 张是 CPT 的**，其余 26 张是跨项目共享的 A 股数据枢纽 —— 读它属于
+   「接外部数据源」，归 `adapters`，不归 storage。
+
+> 设计文档里另有一层「独立 LLM 服务层」的**未实现蓝图**（`architecture.md` §4），
 > 明确标注「`cpt/llm/` 从未有过代码」，不计入上表。
 
 详细设计见 `docs/architecture.md`。
@@ -145,11 +156,12 @@ pytest tests -rsq
 ruff check cpt tests scripts
 ruff format --check cpt tests scripts
 mypy cpt scripts
-lint-imports                                    # 3 条分层契约
+lint-imports                                    # 4 条分层契约
+python scripts/check_sql_layering.py           # SQL 只许在 adapters/storage（R24 新增）
 vulture --min-confidence 60 cpt whitelist.py    # 死代码审计
 ```
 
-三点容易记错，都是踩过的坑：
+四点容易记错，都是踩过的坑：
 
 - **`scripts/` 在门禁范围内**。2026-09-25 之前只覆盖 `cpt tests`，等于给 364 行的
   运维入口开了后门，它自带的重复实现和有顺序 bug 的函数都没人发现。
@@ -157,6 +169,8 @@ vulture --min-confidence 60 cpt whitelist.py    # 死代码审计
 - **vulture 阈值是 60 不是 80**。80 会把「未使用的函数/类」（置信度正好 60%）全滤掉，
   该步骤永远 exit 0。也不再 `--exclude 'cpt/web/app.py'`——那会连带隐藏 app.py 里对
   别处符号的真实使用；框架回调改由 `whitelist.py` 逐条登记。
+- **`check_sql_layering.py` 管的是 import-linter 管不了的那一半**。import-linter
+  查依赖方向，查不了「职责有没有放对层」。
 
 > Windows 开发机上有两个**已知且与代码无关**的基线偏差：
 > `a_share_pool.py` 顶层 `import fcntl` 导致该模块在 Windows 不可导入

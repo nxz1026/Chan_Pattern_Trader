@@ -182,16 +182,19 @@ cpt/
 │   a_share_local.py  a_share_pool.py  a_share_factor.py  strategy_signal.py
 │   validators.py  reference_chanlun.py  native_chanlun.py  czsc_chanlun.py
 │   source_registry.py  backend_factory.py  _dbconfig.py
-├── application/    用例编排（28 个模块）
+├── application/    用例编排（27 个模块；**不出现 SQL**）
 │   replay.py  export.py  dashboard.py  dashboard_snapshot_v2.py
 │   multi_level.py  a_share_snapshot.py  first_buy_bridge.py  canvas_wbt.py
-│   signal_event_store.py  dashboard_run_store.py  dashboard_runs.py
-│   dashboard_*.py（14 个面板投影）  _bar_dict.py
+│   dashboard_runs.py  dashboard_*.py（13 个面板投影）  _bar_dict.py
+├── storage/        CPT 自有持久化（R24 恢复；SQL 只许在这里和 adapters）
+│   signal_event_store.py   → public.cpt_signal_event（R21）
+│   dashboard_run_store.py  → public.cpt_dashboard_run（R23）
 └── web/            HTTP 入口（4 个模块 + __init__）
     __main__.py  app.py  a_share.py  a_share_routes.py
 
 scripts/            运维入口（不在包内，但已在 CI 门禁覆盖范围内）
     factor_backfill.py  snapshot_a_share_batch.py  fetch_references.sh
+    check_sql_layering.py   ← R24 的内容级分层门禁，已进 CI
     migrations/（R20 / R21 / R23 三份幂等 SQL）
 dashboard/          前端静态产物（Nginx 从 /var/www/cpt-dashboard 提供，非包内）
 tests/              扁平布局：72 个 test_*.py 直接放 tests/ 下，仅一个 fixtures/ 存放
@@ -203,8 +206,30 @@ deploy/             nginx/  systemd/  env/  README.md
 references/         czsc @ 701e480a（可选 extra `chan`）  wbt @ 39bb1e8a（仅可视化参考）
 ```
 
-> 三个已删除的层（`engine/` / `storage/` / `llm/`）与它们各自的规划树**不再列出** ——
-> 见 §2 的层说明与 §3.2 / §3.4。
+> `engine/` 已于 2026-09-25 整层删除（生产零导入），见 §2。
+>
+> `llm/` 是**未实现蓝图**（§4），明确标注「从未有过代码」，不计入上表。
+>
+> ### storage/ 的边界（R24，2026-10-01）
+>
+> 这一层**只装 CPT 自有表**（`public.cpt_*`）的读写。`emotion_core` 共 28 张表，
+> **只有 2 张是 CPT 的**（`cpt_signal_event` / `cpt_dashboard_run`），其余 26 张
+> （`daily_bar` 470MB、`derived_bar` 381MB、`asel.ref_adjust_factor` 515MB、
+> `trade_calendar` …）是**跨项目共享的 A 股数据枢纽** —— CPT 是它的读者不是主人，
+> 所以那些查询属于「接外部数据源」，仍归 `adapters/`，不搬进 storage。
+>
+> **store 层不 commit**：事务边界归调用方（与 R21 一致，便于多个写入共享一个事务）。
+> 这个约定有代价但必须写下来 —— R23 就因为 `app.py::_persist_run` 漏了
+> `conn.commit()` 导致数据被 `close()` 静默回滚：HTTP 全 200、日志零告警、表 0 行。
+>
+> ### 两条硬规矩
+>
+> 1. **SQL 只许出现在 `adapters/` 与 `storage/`。** import-linter 查依赖方向，
+>    查不了职责归属（`conn` 只是 `Any` 形参，没有 `import psycopg`）。R24 实测
+>    SQL 曾铺在 domain/application/adapters/web **四层**里而 3 条契约全绿。
+>    由 `scripts/check_sql_layering.py` 做内容级门禁。
+> 2. **`domain` 零 IO。** 2026-10-01 之前 `a_share_rules.py` 里有 3 处 SQL
+>    （`derived_bar` / `trade_calendar`），已下沉到 `adapters.a_share_local`。
 >
 > **关于 ccxt**：`adapters/ccxt_source.py` 存在并由 `source_registry.py` 注册为兜底
 > 行情源，但它**顶层不 import ccxt**（ccsc 自带的 `ccxt_connector.py` 才是顶层硬 import）。

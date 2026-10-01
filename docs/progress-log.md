@@ -2207,3 +2207,118 @@ fcntl 基线）。CI 连续 5 次 success。
    不在版本控制下、已积压 8 个 tgz、无清理机制。
 5. 后端 19 条路由，前端只调 8~9 条（看板是单快照 SPA）。哪些是给外部消费者的
    API 面、哪些是历史遗留，没有文档区分。
+
+---
+
+## R24 · 恢复 storage 层，SQL 只许出现在 adapters/storage · 2026-10-01
+
+> 起因是用户一句「代码搬走了，和数据操作独立一层的初衷背道而驰」。
+> 查完发现比预想严重：**SQL 铺在四层里，而 `.importlinter` 的 3 条契约全绿**。
+
+### 一、现状问题（分层失守）
+
+`import-linter` 查的是「有没有 import 上层」。它对下面这种代码**完全无感**：
+
+```python
+def fetch(conn):
+    cur.execute("SELECT ... FROM public.derived_bar")   # 这是 domain 层
+```
+
+因为 `conn` 只是个 `Any` 形参，模块没有 `import psycopg` —— 依赖图上看不出越界，
+职责却已经跑进 domain 了。实测分布：
+
+| 层 | SQL 位置 |
+|---|---|
+| `domain` | `a_share_rules.py` 3 处（`derived_bar` / `trade_calendar`） |
+| `application` | `signal_event_store`(185 行/5 处)、`dashboard_run_store`(172 行/5 处)、`a_share_snapshot` 2 处 |
+| `web` | `a_share_routes.py:123`，注释写着「就是要碰真连接」 |
+
+**R21/R23 是本轮之前做的，那两个新 store 从一开始就放错了层** —— 照
+`signal_event_store` 的既有位置抄的，没意识到那个位置本身就是坏的。
+
+### 二、storage 层的边界
+
+恢复 `cpt/storage/`，只装 **CPT 自有表**（`public.cpt_*`）的读写。
+`emotion_core` 共 28 张表、**只有 2 张是 CPT 的**，其余 26 张
+（`daily_bar` 470MB / `derived_bar` 381MB / `asel.ref_adjust_factor` 515MB …）
+是**跨项目共享的 A 股数据枢纽** —— CPT 是读者不是主人，所以那些查询属
+adapters，不搬进 storage。
+
+搬迁（`git mv`，保留历史）：
+
+- `cpt/application/signal_event_store.py` → `cpt/storage/`
+- `cpt/application/dashboard_run_store.py` → `cpt/storage/`
+- 新增 `storage/__init__.py`：写清边界 + **store 层不 commit** 的约定
+
+下沉到 adapters（查的是共享枢纽，属「接外部数据源」）：
+
+- `domain/a_share_rules.py` 的 `fetch_daily_tags` / `check_t_plus_one_calendar` /
+  `_next_trade_date` / `_DERIVED_FIELDS` → `adapters.a_share_local`
+- 新增 `adapters.a_share_local.is_trade_day` / `fetch_factor_codes`
+- `web/a_share_routes.py::_factor_codes` 改为调 adapter
+
+留在 domain 的只有纯逻辑：`AShareDailyTag` / `apply_ashare_tags_to_bis` /
+`t_plus_one_purchase_allowed` / `AShareTagsError`。
+
+### 三、顺手修掉一个活 bug
+
+`a_share_snapshot._attach_signal_change` 内联写过 `ORDER BY event_time`，
+而 **`public.cpt_signal_event` 没有 event_time 列**（真实列是
+`id` / `transition_time` / `alert_time` …）。PG 报
+`column "event_time" does not exist`，被 except 吞掉、**且只记 `_LOG.debug`**。
+
+> **后果：「信号状态跨轮询变化」这个功能自 R21 起一直是死的**，前端永远拿不到
+> `signal_changed=True`。已在 oracle 上用字面量 SQL 复现确认。
+
+修法：新增 `storage.signal_event_store.latest_status()`（1 列投影、
+`ORDER BY id DESC`）。**不用 `load_previous_signal`** —— 调用方只要 status
+一个字段，没必要在 application 层构造完整 `Signal` 再拆开；1 列投影也稳得多
+（13 列的话测试替身要伪造 13 个值，R24 中途真的因此炸过一次）。
+except 的日志级别同时从 debug 提到 warning。
+
+### 四、新增门禁：SQL 只许在 adapters/storage
+
+`scripts/check_sql_layering.py`，已进 CI。这是本轮**真正要交付的东西** ——
+没有它，半年后又会长回去。
+
+用 `ast` 精确定位 docstring 行范围 + `tokenize` 定位注释，把它们替换成空格
+（**不抹普通字符串字面量** —— SQL 本来就是字符串字面量，一起抹掉等于把要抓
+的东西擦掉，这是第一版的自伤），然后在 execute/executemany 的参数后 300 字符
+内找 SQL 起始关键字。
+
+7 个用例自测全过：单行 / 多行三引号 / f-string / executemany 都能抓到；
+docstring 提到 SELECT、行尾注释写 SQL 都不误报。
+
+### 五、验收
+
+- 门禁 7 条全绿：ruff check / ruff format / lint-imports(4 kept) / vulture(0) /
+  SQL 分层门禁 / mypy(4 条 flock Windows-only 基线) / pytest
+- pytest **563 passed / 13 failed / 31 skipped**，13 条全是
+  `test_web_a_share_routes.py` 的 fcntl 基线，**与 R24 前逐条一致，零回归**
+- `.importlinter` 加第 4 条 `storage-does-not-leak-into-domain`，
+  并把 `cpt.storage` 插进 layers 链（web > application > **storage** > adapters > domain）
+
+### 六、踩坑
+
+1. **自写的门禁自己先失手了两次**。第一版正则 `\bexecutemany?\(` 里的
+   `executemany?` 匹配的是字面量 "executeman" + 可选 y，**压根匹配不到
+   "execute"** —— 单行 SQL 全漏网。第二版更糟：用 tokenize 把**所有**字符串
+   都替换掉，连要抓的 SQL 字面量一起抹了，门禁对任何 SQL 都睁眼瞎。
+   两处都是**自测**抓出来的，不是靠读代码看出来的。
+2. **别用 node 写 CI 脚本**：`.github/workflows/ci.yml` 里没有 `setup-node`，
+   不保证 runner 上有 node。改用 Python 零依赖。
+3. **PowerShell 5.1 读无 BOM 的 `.py` 会按 GBK 解码**，中文注释里的多字节序列
+   会把后面的引号吃掉，报 `SyntaxError: invalid character`。写含中文的
+   脚本要存 UTF-8 BOM，或用 `write` 工具 + `PYTHONUTF8=1` 跑。
+
+### 七、仍未做
+
+1. **`structure_events` 仍无持久化出口** —— bi / zhongshu / trend_type 的结构
+   事件每次从 bars 重算、从不落库，「这个中枢什么时候确认的」跨重启答不了。
+   `StructureEvent` 已在 `snapshot.events` 里产出，只是没有落库路径。
+   详见 `docs/rules.md` §8.6。
+2. `a_share_snapshot.py` 的 except 分支**缺 `conn.rollback()`** —— 51 只里
+   49 只 skip。与 R23 漏 commit 是同一个「事务边界」家族的问题。
+3. `t_plus_one_purchase_allowed` 仍是零生产引用的唯一符号。
+4. `docs/audit/cpt-code-audit-20260930.md` 的 **M3（canvas iframe 信任边界）** 仍开放。
+5. LLM 层（`architecture.md` §4 蓝图）仍未实现。

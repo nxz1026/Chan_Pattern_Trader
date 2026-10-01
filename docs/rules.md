@@ -354,22 +354,34 @@ is_closed
 
 ### 8.6 结果与事件存储
 
-> **本节是设计口径，不是现状描述。** 2026-09-25 审计 P0-2 把 `cpt/storage/`
-> 整层删除，理由是「生产零导入」——`revision` / `first_seen_at` 这套可变状态模型
-> 从未真正落库。当时的替代决策见 `docs/duplication-triage.md` 与
-> `docs/architecture.md` §3.4。
+> **本节是规则口径，不是现状描述。** 2026-09-25 审计 P0-2 把 `cpt/storage/`
+> 整层删除，理由是「生产零导入」。**2026-10-01（R24）已恢复该层** —— 用户指出
+> 「代码搬走了，和数据操作独立一层的初衷背道而驰」。
 >
 > **当前实际落库的只有两张 CPT 自有表**（都在 `scripts/migrations/` 里，幂等可重跑）：
 >
 > | 表 | 轮次 | 形态 | 用途 |
 > |---|---|---|---|
-> | `public.cpt_signal_event` | R21 | append-only 事件流 | 信号状态跃迁；当前状态 = 同 `signal_id` 最新一条 |
-> | `public.cpt_dashboard_run` | R23 | append-only 快照 | 看板运行本体；`run_id` PK 天然幂等 |
+> | `public.cpt_signal_event` | R21 | append-only 事件流（17 列） | 信号状态跃迁；当前状态 = 同 `signal_id` 最新一条 |
+> | `public.cpt_dashboard_run` | R23 | append-only 快照（5 列） | 看板运行本体；`run_id` PK 天然幂等 |
+>
+> `raw_bars` **没有对应实现**、也不需要：行情在共享枢纽 `emotion_core`
+> （`daily_bar` / `derived_bar` / `asel.ref_adjust_factor`），不是 CPT 的存储。
+> `structure_states` 同理 —— 看板无状态重算，当前状态每次都能算出来。
+>
+> 仍然**开放**的是 `structure_events`：bi / zhongshu / trend_type 的结构事件
+> 每次从 bars 重算、**从不落库**，所以「这个中枢是什么时候确认的」跨重启答不了。
+> `StructureEvent` 已在 `snapshot.events` 里产出（`dashboard.py` / `replay.py` /
+> `export.py` 都在用），只是没有持久化出口。这条留给后续轮次（见
+> `docs/progress-log.md` R24「仍未做」）。
 >
 > 下面的「当前状态 + 不可变事件 + 信号」三层模型**仍是规则口径的北极星**
 > （`StructureState` 的 `id` 确定性生成、事件只追加、已确认结构绝不原地修改
 > 这三条在代码里由 domain 的 frozen dataclass 保证），但**目前没有对应的
 > 状态表**。真要落地时，先更新本节再写迁移 —— 不要让文档跑在代码前面。
+>
+> **层级归属**：`cpt/storage/` 装 CPT 自有表的读写，**SQL 只许出现在
+> `cpt/adapters/` 与 `cpt/storage/`**，由 `scripts/check_sql_layering.py` 门禁。
 
 采用"当前状态 + 不可变事件 + 信号"的三层模型。
 
