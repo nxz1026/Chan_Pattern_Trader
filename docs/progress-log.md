@@ -2322,3 +2322,107 @@ docstring 提到 SELECT、行尾注释写 SQL 都不误报。
 3. `t_plus_one_purchase_allowed` 仍是零生产引用的唯一符号。
 4. `docs/audit/cpt-code-audit-20260930.md` 的 **M3（canvas iframe 信任边界）** 仍开放。
 5. LLM 层（`architecture.md` §4 蓝图）仍未实现。
+
+---
+
+## R25 · 独立 LLM 服务层（异步 + 429 退避重入）· 2026-10-01
+
+`architecture.md` §4 那套「独立 LLM 服务层」从 2026-09-23 的空占位包
+（`4edbdc1` 删掉的一行 `cpt/llm/__init__.py`）起就一直是**未实现蓝图**。R25 落地，
+并补上蓝图没考虑的两维：**异步**与**限流**。
+
+### 一、实测驱动的设计
+
+provider = `agnes-3.0-flash`（OpenAI 兼容），实测：
+
+| 项 | 值 | 对设计的影响 |
+|---|---|---|
+| 延迟 | 320 ms – 7.4 s（冷启动） | 异步是硬需求，同步等会让看板 HTTP 卡 7 秒 |
+| 429 响应体 | **空** | 不要试图解析错误消息 |
+| `Retry-After` | **不存在** | 退避只能自己算 |
+| 限流形态 | 令牌桶，恢复后仍零星 429 | 限流是**常态**不是异常 |
+| 并发阈值 | 6 全过 / 15 并发 3 过 12 个 429 | 队列用**单 worker**串行 |
+| `cost` | 恒 0.0 | 迁移 SQL **不建 `cost_est`** |
+| 结构化输出 | **无视「只输出 JSON」指令** | 首版只做自由文本用例 |
+
+### 二、分层（R24 立的规矩当场派上用场）
+
+`cpt/llm/` 不碰 SQL（落库走 `cpt/storage/llm_call_store.py`）；`llm/` 加进
+SQL 门禁禁入名单；`.importlinter` 6 条契约，`cpt.llm` 插进 layers 链。
+
+### 三、落库：`public.cpt_llm_call`（12 列，R25 迁移）
+
+不写 `public.llm_call_log` —— 那是别的项目的（10 行真实数据，
+`purpose='stock-diagnosis'`）。按 R23 的列纪律砍掉 `cost_est`（恒 0）与
+`request_json`（模板在代码里，用 `request_hash` 代替）。
+
+### 四、真机部署抓到 4 个 bug —— 全部是本地 40 条测试放过的
+
+| # | bug | 现场表现 | 为什么测试没抓到 |
+|---|---|---|---|
+| 1 | `llm_cases` 6 个写点全漏 `commit` | 提交返回 `queued`，表 0 行 | FakeConn 没有事务语义 |
+| 2 | `mark_interrupted` 无差别清扫 | 刚入队的行 5 秒后变 `process_restarted` | 同上 |
+| 3 | `_write` 漏传 store 函数名（正则批量改的后遗症） | 状态永远停 `queued` | 上一条测试只查「有没有裸调用」，查不出「参数对不对」 |
+| 4 | 时间列直接塞 datetime | `/llm/calls` → `500 payload is not JSON-safe` | 测试没真 `json.dumps` 过一次 |
+
+**#1 是 R23 那个 bug 的第二次** —— 而 R25 这次特意把「store 层不 commit」的约定
+写进了 docstring。写规矩的人自己没守，所以后来加了 `_write` 包装器 + 一条对着
+源码断言的回归测试（防「漏掉 _write」），以及一条**真调一遍**的测试（防「_write
+用错」）。
+
+### 五、CI 抓到 1 个：我违反了自己刚立的契约
+
+R25 的 4 个 commit CI 全红、本地全绿。查出来：
+
+```
+LLM does not leak into storage  BROKEN
+  cpt.llm.queue -> cpt.storage.llm_call_store (l.47)
+```
+
+我为了消 vulture 的「未使用变量」告警把状态枚举搬进 storage，再让 `llm/queue.py`
+反过来 import 它 —— 而「llm 不许 import storage」是我**同一个 R25 里新立的**
+契约。更讽刺的是我在 storage 的注释里写过正确理由，然后从另一侧违反了它。
+
+修法：枚举回到 `llm/queue.py`，storage 保留自己一份，**用测试把 llm / storage /
+迁移 SQL 的 CHECK 三份词汇对齐**。import 被禁了，耦合不能凭空消失 —— 用测试显式化。
+
+> 附带一条自查教训：本地为什么没发现？因为我的检查命令
+> `lint-imports | Select-Object -Last 1` 取到的是**空行**（输出末尾有空行），
+> 我看到空字符串就当它通过了 —— 实际上契约早就 BROKEN 了，我"验证"了四次，
+> 每次验的都是同一个空字符串。**验门禁要看关键计数，不是看最后一行有没有输出。**
+
+### 六、验收
+
+- 门禁 7 条全绿：ruff / format / mypy / **lint-imports 6 kept 0 broken** /
+  vulture 0 / SQL 门禁（54 文件）/ pytest
+- pytest 599 passed / 13 failed / 31 skipped（13 条全是 fcntl 基线）
+- **真机真调 agnes-3.0-flash 成功**：
+  - 提交耗时 **51–186 ms** 返回 `queued`（provider 本身要 7.7 s）
+  - 5 s 内 `running` → 10 s 内 `ok`
+  - `model=agnes-3.0-flash`，`tok=409/568`（token 审计约束落地）
+  - 产出结构化的中文解释（定义 / 形成逻辑 / 当前状态 / 后续观察点）
+- oracle 上 19 条 API 全部 200（`export`/`inspect` 的 400 是缺参数，正确行为）
+- A 阶段（`cpt_signal_event` 6 行）与 B 阶段（`cpt_dashboard_run` 9 行）未受影响
+
+### 七、踩坑
+
+1. **写操作忘 commit**（两次，见 §四 #1）—— store 层不 commit 是本仓约定，
+   每个调用点都得自己提交。已用 `_write` 包装器消除这个位置。
+2. **正则批量改代码**：保证文本替换成功，不保证语义正确（§四 #3）。
+3. **PowerShell 管道传 secret 会混入 BOM**：用 `Get-Content | ssh` 把
+   `CPT_LLM_API_KEY` 写成 `Bearer \ufeff\ufeffsk-…`，报
+   `UnicodeEncodeError: 'latin-1'`。改用 bash 侧 `tr` 清洗 + 长度断言
+   （必须等于 51，长度不对就拒绝写入）。
+4. **验证脚本不要在共享生产表上 `DELETE`**（R23 已犯过一次）。这次清
+   `cpt_llm_call` 时用了 `subject_id LIKE` 过滤，把唯一那条成功记录也删了 ——
+   证据只留在本次记录与 journalctl 里。表本来就该是空的，无妨，但要知道。
+
+### 八、仍未做
+
+1. **前端没接**：`/api/dashboard/llm/calls` 与 `POST .../llm/explain` 只有 API，
+   看板 UI 上没有入口。R25 只做到「能调通、能查」。
+2. **结构化用例没做**：差异摘要 / 标注辅助。前提是先有防御式解析 ——
+   实测该模型不遵守「只输出 JSON」指令（§一）。
+3. **429 退避路径未经真机验证**：本次真调一次就成功了（`tok=409/568`），
+   没撞上限流。退避逻辑只有单测覆盖（7 个用例，含退避序列、上限、非 429 不重试）。
+4. `a_share_snapshot.py` 缺 `conn.rollback()`（49/51 skip）、R24 其余遗留项照旧。
