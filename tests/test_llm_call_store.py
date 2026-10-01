@@ -1,0 +1,266 @@
+"""R25 ``cpt.storage.llm_call_store`` 测试。
+
+**不连库** —— 用一个按列名投影的假 conn，验证 SQL 形状、参数顺序与「重复提交
+不报错」这些**契约**，而不是 PG 的行为（PG 行为由 §6 的 oracle 部署验证兜底）。
+
+为什么值得单独测：这张表是 R25 唯一的持久化出口，而
+``architecture.md`` §4.1 约束 4 要求「每次调用的模型与 token 都落盘」——
+token 列曾经建了却没人写（写路径只传了 result_text），这轮才补上。
+"""
+
+from __future__ import annotations
+
+import re
+from pathlib import Path
+from typing import Any
+
+import pytest
+from cpt.storage.llm_call_store import (
+    STATUS_ERROR,
+    STATUS_INTERRUPTED,
+    STATUS_OK,
+    STATUS_QUEUED,
+    STATUS_RATE_LIMITED,
+    STATUS_RUNNING,
+    TERMINAL_STATUSES,
+    call_row,
+    enqueue_call,
+    finish_call,
+    mark_interrupted,
+    recent_calls,
+    request_hash,
+)
+
+#: 迁移 SQL 路径。状态枚举拿它当事实源 —— 见下面那条测试的说明。
+MIGRATION_PATH = (
+    Path(__file__).resolve().parent.parent
+    / "scripts"
+    / "migrations"
+    / "2026-10-03_r25_llm_call.sql"
+)
+
+
+class FakeCursor:
+    """记录 SQL 与参数，并按脚本返回行。
+
+    ``rowcount`` 挂在 **cursor** 上（psycopg 就是这样），不是 conn。
+    """
+
+    def __init__(self, conn: FakeConn) -> None:
+        self._conn = conn
+        self.rowcount = 0
+
+    def __enter__(self) -> FakeCursor:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        pass
+
+    def execute(self, sql: str, params: tuple = ()) -> None:
+        self._conn.executed.append((sql, params))
+        if "INSERT" in sql:
+            self.rowcount = 1 if self._conn.insert_allowed else 0
+        else:
+            self.rowcount = 1
+
+    def fetchall(self) -> list[tuple]:
+        return list(self._conn.rows)
+
+    def fetchone(self) -> tuple | None:
+        return self._conn.rows[0] if self._conn.rows else None
+
+
+class FakeConn:
+    def __init__(self, rows: list[tuple] | None = None, insert_allowed: bool = True) -> None:
+        self.executed: list[tuple[str, tuple]] = []
+        self.rows = rows or []
+        self.insert_allowed = insert_allowed
+
+    def cursor(self) -> FakeCursor:
+        return FakeCursor(self)
+
+
+# --------------------------------------------------------------------------- #
+# 列与状态枚举
+# --------------------------------------------------------------------------- #
+
+
+def test_status_vocabulary_matches_migration_check_constraint() -> None:
+    """状态枚举必须与迁移 SQL 里的 CHECK 约束**逐字一致**。
+
+    枚举写错一个值，插入就被 DB 拒掉 —— 而这层是 best-effort，错误会被吞掉，
+    表现是「LLM 一直在跑但永远不出结果」。所以拿迁移 SQL 当事实源来对。
+    """
+    with open(MIGRATION_PATH, encoding="utf-8") as handle:  # noqa: PTH123
+        sql = handle.read()
+    check = re.search(r"status\s+text[^,]*CHECK\s*\(status IN \(([^)]*)\)\)", sql, re.S)
+    assert check, "迁移 SQL 里的 status CHECK 约束没找到 —— 迁移被改过？"
+    declared = set(re.findall(r"'([a-z_]+)'", check.group(1)))
+    ours = {
+        STATUS_QUEUED,
+        STATUS_RUNNING,
+        STATUS_OK,
+        STATUS_ERROR,
+        STATUS_RATE_LIMITED,
+        STATUS_INTERRUPTED,
+    }
+    assert ours == declared, f"枚举与 CHECK 不一致：多 {ours - declared} / 少 {declared - ours}"
+
+
+def test_rate_limited_is_not_terminal_but_interrupted_is_not_error() -> None:
+    """两个容易混的状态，各有各的语义：
+
+    - ``rate_limited`` **不是终态** —— 它还会退避重入，所以不能写
+      ``finished_at``（否则 UI 会以为这次调用已经结束）；
+    - ``interrupted`` **是终态**（进程重启了，它不会再变），但它**不是
+      ``error``** —— 混进 error 会让看板天天报红，而它其实是正常中断。
+    """
+    assert STATUS_RATE_LIMITED not in TERMINAL_STATUSES, "限流还在重试，不该算终态"
+    assert STATUS_INTERRUPTED in TERMINAL_STATUSES, "进程重启后它不会再变，是终态"
+    assert STATUS_INTERRUPTED != STATUS_ERROR
+    assert STATUS_RATE_LIMITED != STATUS_ERROR
+
+
+# --------------------------------------------------------------------------- #
+# request_hash
+# --------------------------------------------------------------------------- #
+
+
+def test_request_hash_is_stable_and_purpose_scoped() -> None:
+    a = request_hash("explain_structure", "sys", "user")
+    b = request_hash("explain_structure", "sys", "  user\n")
+    assert a == b, "首尾空白不该产生不同的 hash（否则同一提示词重复入队）"
+    assert request_hash("other", "sys", "user") != a, "不同 purpose 必须分开"
+
+
+# --------------------------------------------------------------------------- #
+# enqueue
+# --------------------------------------------------------------------------- #
+
+
+def test_enqueue_writes_all_twelve_columns() -> None:
+    conn = FakeConn()
+    row = call_row(purpose="explain_structure", subject_id="bi:1", request_hash_value="h")
+    assert enqueue_call(conn, row) is True
+
+    sql, params = conn.executed[0]
+    columns = sql[sql.index("(") + 1 : sql.index(")")]
+    assert len(columns.split(",")) == 12, "R25 的表是 12 列"
+    assert len(params) == 12
+    # 重复提交靠部分唯一索引 + DO NOTHING，不是靠先 SELECT
+    assert "ON CONFLICT (purpose, request_hash)" in sql
+    assert "DO NOTHING" in sql
+
+
+def test_enqueue_reports_false_when_conflict() -> None:
+    """同一提示词在途/已成功时，插入被约束挡掉 → 返回 False 而不是抛。"""
+    conn = FakeConn(insert_allowed=False)
+    row = call_row(purpose="explain_structure", subject_id="", request_hash_value="h")
+    assert enqueue_call(conn, row) is False
+
+
+def test_enqueue_swallows_db_error() -> None:
+    """落库失败不能让 HTTP 500 —— LLM 是旁路。"""
+
+    class Broken:
+        def cursor(self) -> Any:
+            raise RuntimeError("db down")
+
+    row = call_row(purpose="explain_structure", subject_id="", request_hash_value="h")
+    assert enqueue_call(Broken(), row) is False  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# finish —— token / model 必须真的写进去
+# --------------------------------------------------------------------------- #
+
+
+def test_finish_writes_model_and_tokens() -> None:
+    """**回归守卫**：token 列曾建了却没人写（写路径只传 result_text）。
+
+    `architecture.md` §4.1 约束 4 要求模型与 token 可审计，所以这里断言
+    UPDATE 语句里确实带上了这两列与对应参数。
+    """
+    conn = FakeConn()
+    finish_call(
+        conn,
+        "c1",
+        status=STATUS_OK,
+        result_text="解释",
+        model="agnes-3.0-flash",
+        prompt_tokens=120,
+        completion_tokens=88,
+    )
+    sql, params = conn.executed[0]
+    for column in ("model", "prompt_tokens", "completion_tokens", "finished_at"):
+        assert column in sql, f"UPDATE 缺 {column}"
+    assert params[0] == STATUS_OK
+    assert params[1] == "解释"
+    assert params[2] is None, "ok 时 error_text 应为 NULL"
+    assert params[3] == "agnes-3.0-flash"
+    assert params[4] == 120
+    assert params[5] == 88
+    assert params[6] is not None, "终态必须写 finished_at"
+    assert params[-1] == "c1"
+
+
+def test_finish_sets_error_text_only_for_non_ok() -> None:
+    conn = FakeConn()
+    finish_call(conn, "c1", status=STATUS_ERROR, error_text="boom")
+    _sql, params = conn.executed[0]
+    assert params[1] is None, "失败时 result_text 应为 NULL"
+    assert params[2] == "boom"
+    assert params[6] is not None
+
+
+# --------------------------------------------------------------------------- #
+# mark_interrupted
+# --------------------------------------------------------------------------- #
+
+
+def test_mark_interrupted_only_touches_in_flight() -> None:
+    conn = FakeConn()
+    assert mark_interrupted(conn) == 1
+    sql, params = conn.executed[0]
+    assert "status = 'interrupted'" in sql
+    assert "WHERE status IN ('queued', 'running')" in sql, "不能碰已终态的行"
+    assert params
+
+
+# --------------------------------------------------------------------------- #
+# recent_calls
+# --------------------------------------------------------------------------- #
+
+
+def test_recent_calls_is_newest_first_and_capped() -> None:
+    conn = FakeConn(rows=[("c1",), ("c2",)])
+    recent_calls(conn, limit=5)
+    sql, params = conn.executed[0]
+    assert "ORDER BY created_at DESC" in sql
+    assert params == (5,)
+
+
+def test_recent_calls_filters_by_subject() -> None:
+    conn = FakeConn()
+    recent_calls(conn, limit=3, subject_id="bi:1")
+    sql, params = conn.executed[0]
+    assert "WHERE subject_id = %s" in sql
+    assert params == ("bi:1", 3)
+
+
+def test_recent_calls_degrades_to_empty() -> None:
+    """表不存在（迁移没跑）时返回空元组，不抛 —— 面板显示「暂无」而不是 500。"""
+
+    class Broken:
+        def cursor(self) -> Any:
+            raise RuntimeError("relation does not exist")
+
+    assert recent_calls(Broken(), limit=5) == ()  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("limit", [0, -1, 10_000])
+def test_recent_calls_clamps_limit(limit: int) -> None:
+    conn = FakeConn()
+    recent_calls(conn, limit=limit)
+    _sql, params = conn.executed[0]
+    assert 1 <= params[0] <= 200

@@ -39,6 +39,22 @@ source_modules =
 forbidden_modules =
     cpt.storage
 
+[importlinter:contract:llm-does-not-leak-into-domain]
+name = LLM does not leak into domain
+type = forbidden
+source_modules =
+    cpt.domain
+forbidden_modules =
+    cpt.llm
+
+[importlinter:contract:llm-does-not-leak-into-storage]
+name = LLM does not leak into storage
+type = forbidden
+source_modules =
+    cpt.llm
+forbidden_modules =
+    cpt.storage
+
 [importlinter:contract:layers]
 name = Layered architecture
 type = layers
@@ -46,9 +62,12 @@ type = layers
 # 低层，反之不行。web 最高、domain 最低。
 # 2026-10-01（R24）把恢复后的 ``cpt.storage`` 放在 application 与 domain 之间：
 # application 需要它落库，domain 不该碰它。
+# 2026-10-01（R25）加入 ``cpt.llm``：它是**独立服务层**，只有 application/llm_cases
+# 可以调它，web / storage / adapters / domain 都不得依赖。
 layers =
     cpt.web
     cpt.application
+    cpt.llm
     cpt.storage
     cpt.adapters
     cpt.domain

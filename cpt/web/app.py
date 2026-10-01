@@ -787,6 +787,35 @@ def make_handler(
                         "available": True,
                         **align_runs(bodies),
                     }
+            elif path.path == "/api/dashboard/llm/calls":
+                # LLM 调用审计列表（UI 轮询用）。LLM 未启用时返回空列表而不是 500。
+                try:
+                    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+                    from cpt.application.llm_cases import list_calls  # noqa: PLC0415
+
+                    subject = (query.get("subject_id") or [""])[0].strip() or None
+                    try:
+                        limit = int((query.get("limit") or ["20"])[0])
+                    except ValueError:
+                        limit = 20
+                    client = AShareLocalClient()
+                    try:
+                        payload = list_calls(  # noqa: SLF001
+                            client._get_conn(),  # noqa: SLF001
+                            limit=limit,
+                            subject_id=subject,
+                        )
+                    finally:
+                        client.close()
+                except Exception as exc:  # noqa: BLE001 — LLM 是旁路，不可用就降级
+                    _LOG.warning("llm calls unavailable: %s", exc)
+                    payload = {
+                        "schema_version": "dashboard_llm_calls.v1",
+                        "available": False,
+                        "reason": "llm_unavailable",
+                        "count": 0,
+                        "calls": [],
+                    }
             elif path.path == "/api/dashboard/signal-stats":
                 days_raw = (query.get("days") or ["30"])[0]
                 try:
@@ -881,9 +910,12 @@ def make_handler(
             self.send_error(HTTPStatus.NOT_FOUND)
 
         def _handle_a_share_write(self, method: str) -> bool:
-            """A 股自选的写操作；返回 False 表示这不是 A 股路由。"""
+            """A 股自选与 LLM 解释的写操作；返回 False 表示这不是 A 股路由。"""
             path = urlsplit(self.path)
-            if path.path != "/api/dashboard/a-share/watchlist":
+            if path.path not in (
+                "/api/dashboard/a-share/watchlist",
+                "/api/dashboard/a-share/llm/explain",
+            ):
                 return False
             # 审计 M1：写接口无鉴权（单用户看板经 nginx 暴露）。至少要求
             # ``Content-Type: application/json``——HTML 表单 / 简单请求只能发
@@ -906,6 +938,25 @@ def make_handler(
             if not code:
                 self._write_json_error(HTTPStatus.BAD_REQUEST, "code_required", "缺少 code 参数")
                 return True
+
+            if path.path == "/api/dashboard/a-share/llm/explain":
+                # LLM 解释：入队即返回，不等模型（实测 provider 延迟 0.3–7.4s）。
+                if method != "POST":
+                    self._write_json_error(
+                        HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed", "仅支持 POST"
+                    )
+                    return True
+                structure = self._read_json_body() or {}
+                if not isinstance(structure, dict) or not structure:
+                    self._write_json_error(
+                        HTTPStatus.BAD_REQUEST, "structure_required", "structure 不能为空"
+                    )
+                    return True
+                self._write_json(
+                    a_share_routes.submit_llm_explain(code, structure)  # noqa: SLF001
+                )
+                return True
+
             try:
                 if method == "POST":
                     payload = a_share_routes.watchlist_add(code)
@@ -916,6 +967,30 @@ def make_handler(
                 return True
             self._write_json(payload)
             return True
+
+        #: 读 body 的上限。LLM 解释请求带的是**一个结构对象**（几 KB），
+        #: 32MB 足够宽松，同时挡住「把整个 snapshot 塞进来」这种误用 ——
+        #: candles 有几十万根，塞进来既慢又烧 token。
+        _MAX_BODY_BYTES: int = 32 * 1024 * 1024
+
+        def _read_json_body(self) -> Any:
+            """读 JSON 请求体；**读不到或解析失败返回 ``None``**（不抛）。
+
+            调用方据此回自己的 400。刻意不抛：body 畸形是客户端问题，
+            不该在 handler 里冒一个未捕获异常变成 500。
+            """
+            try:
+                length = int(self.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                return None
+            if length <= 0 or length > self._MAX_BODY_BYTES:
+                return None
+            try:
+                raw = self.rfile.read(length)
+                return json.loads(raw.decode("utf-8"))
+            except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+                _LOG.warning("读取 JSON body 失败: %s", exc)
+                return None
 
         def _write_json(self, payload: dict[str, Any]) -> None:
             self._write_json_status(HTTPStatus.OK, payload)

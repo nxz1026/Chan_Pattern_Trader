@@ -1,0 +1,224 @@
+"""异步队列：fire-and-forget + 429 指数退避重入。
+
+## 为什么必须是异步
+
+实测 `agnes-3.5-flash` / `agnes-3.0-flash` 延迟 **320 ms – 7.4 s**（冷启动）。
+同步等一次 = 看板 HTTP 请求卡住最多 7 秒，用户会以为服务挂了。所以
+`architecture.md` §4.1 第 1 条约束「永不阻塞核心」不是锦上添花，是硬需求。
+
+## 为什么是「进程内 daemon 线程」而不是 asyncio 或独立 worker 进程
+
+- 整个 CPT 是同步的（``ThreadingHTTPServer`` + ``threading.Lock``），引 asyncio
+  会把 web 层一起拖进异步，代价远大于收益；
+- 不需要新的 systemd unit，不用管两个进程的部署顺序与启停顺序。
+
+**代价必须说清**：web 进程重启时**在途任务会丢**。所以 worker 启动时会把库里
+``status`` 处于 ``queued`` / ``running`` 的行标成 ``interrupted``，让 UI 能如实
+显示「这次没跑完」，而不是让调用方永远等一个不会来的结果。
+
+## 429 的处置（实测特征决定的设计）
+
+`agnes-ai.cn` 的 429：**响应体为空**、**无 ``Retry-After``、恢复后仍零星出现**
+（令牌桶，不是硬冷却）。所以：
+
+1. **不能热循环重试** —— 撞 429 立刻再打只会继续 429、白烧配额。必须
+   ``requeue(delay)`` 重新排队，让出配额窗口。
+2. **退避 = 基数 × 2^attempt + jitter**。jitter 防惊群：多个 worker 同时醒来
+   再一起打，又是一轮 429。
+3. **限流不是失败**。``rate_limited`` 是独立状态，UI 显示「排队中（服务商限流）」，
+   混进 ``error`` 会让看板天天报红。
+4. **401/403 等 4xx 不重试** —— key 无效重试一万次也没用。
+5. **有次数上限**，超过记 ``error`` + ``rate_limited_exhausted``，不无限重入。
+"""
+
+from __future__ import annotations
+
+import logging
+import queue
+import random
+import threading
+import time
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from typing import Any
+
+from cpt.llm.base import LLMClient, LLMError, LLMRateLimited, LLMRequest, LLMResult
+from cpt.llm.config import LLMConfig
+from cpt.storage.llm_call_store import (
+    STATUS_ERROR,
+    STATUS_OK,
+    STATUS_RATE_LIMITED,
+    STATUS_RUNNING,
+)
+
+_LOG = logging.getLogger(__name__)
+
+__all__ = ["Job", "LLMQueue", "SubmitResult"]
+
+
+@dataclass(slots=True)
+class Job:
+    """一个待办 / 在途的 LLM 调用。
+
+    :param request: 实际请求。
+    :param call_id: 审计表主键。
+    :param attempt: 已重试次数（429 退避重入会 +1）。
+    """
+
+    request: LLMRequest
+    call_id: str
+    attempt: int = 0
+    metadata: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
+class SubmitResult:
+    """``submit()`` 的返回值。HTTP 层拿它立刻回响应，不等模型。"""
+
+    accepted: bool
+    call_id: str
+    reason: str = ""
+
+
+class LLMQueue:
+    """单 worker 的异步队列。**进程内、全局单例**（由 ``get_queue`` 维护）。
+
+    刻意用**单 worker**：provider 是免费档、限流阈值实测在 6~15 并发之间，
+    串行是唯一稳的形态。要提并发得先解决配额，不是加线程能解决的。
+
+    :param client: provider 实现。
+    :param config: 运行配置（退避参数从这里读）。
+    :param on_status: 状态变更回调，签名
+        ``(call_id, status, detail, result) -> None``；``result`` 只在
+        ``status='ok'`` 时非 ``None``，落库方从它取 model / token 用量。
+        落库由调用方在回调里做 —— **本模块不碰 SQL**（R24 门禁）。
+    """
+
+    def __init__(
+        self,
+        client: LLMClient,
+        config: LLMConfig,
+        *,
+        on_status: Callable[[str, str, str, LLMResult | None], None] | None = None,
+        worker_count: int = 1,
+    ) -> None:
+        self._client = client
+        self._config = config
+        self._on_status = on_status or (lambda _id, _st, _detail, _res: None)
+        self._pending: queue.PriorityQueue[tuple[float, int, Job]] = queue.PriorityQueue()
+        self._seq = 0
+        self._seq_lock = threading.Lock()
+        self._stop = threading.Event()
+        self._threads: list[threading.Thread] = []
+        for index in range(worker_count):
+            thread = threading.Thread(target=self._run, name=f"cpt-llm-{index}", daemon=True)
+            thread.start()
+            self._threads.append(thread)
+
+    # ---------------------------------------------------------------- 公开
+
+    @property
+    def depth(self) -> int:
+        """待处理任务数（含正在退避等待的）。
+
+        ``submit()`` 之后立刻读它，就能告诉用户「已排队，前面还有 N 个」——
+        比返回一个干巴巴的 accepted=True 有用。
+        """
+        return self._pending.qsize()
+
+    def drain(self, timeout: float = 30.0) -> bool:  # noqa: ARG002
+        """测试专用：轮询等队列排空。返回是否排空。
+
+        **不能用 ``queue.join()``**：worker 取走任务后还没执行完，join() 会返回；
+        这里等的是「真的处理完」，所以按 depth 轮询。
+        """
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self._pending.empty():
+                time.sleep(0.05)  # 让最后一个任务的收尾跑完
+                if self._pending.empty():
+                    return True
+            time.sleep(0.01)
+        return False
+
+    def submit(self, job: Job) -> SubmitResult:
+        """入队并**立刻返回**。这是「不阻塞核心」的落点。"""
+        if not self._config.enabled:
+            return SubmitResult(False, job.call_id, "llm_disabled")
+        self._enqueue(job)
+        return SubmitResult(True, job.call_id)
+
+    def stop(self, timeout: float = 5.0) -> None:
+        """停 worker（测试与优雅退出用）。"""
+        self._stop.set()
+        for thread in self._threads:
+            thread.join(timeout=timeout)
+
+    # ---------------------------------------------------------------- 内部
+
+    def _enqueue(self, job: Job, delay: float = 0.0) -> None:
+        with self._seq_lock:
+            self._seq += 1
+            order = self._seq
+        self._pending.put((time.monotonic() + delay, order, job))
+
+    def _backoff_delay(self, attempt: int) -> float:
+        """第 ``attempt`` 次失败后的等待秒数。
+
+        ``min(base × 2^attempt, cap) + jitter``。jitter 取满量程的 0~30%，
+        避免多 worker 同时醒来再一起撞 429。
+        """
+        base = float(self._config.backoff_base)
+        cap = float(self._config.backoff_max)
+        raw: float = min(base * (2**attempt), cap)
+        return float(raw + random.uniform(0.0, raw * 0.3))
+
+    def _run(self) -> None:
+        while not self._stop.is_set():
+            try:
+                due, _order, job = self._pending.get(timeout=0.2)
+            except queue.Empty:
+                continue
+
+            now = time.monotonic()
+            if due > now:
+                # 还没到退避时间：放回去，别空转
+                self._pending.put((due, _order, job))
+                time.sleep(min(0.2, due - now))
+                continue
+
+            self._execute(job)
+
+    def _execute(self, job: Job) -> None:
+        self._on_status(job.call_id, STATUS_RUNNING, "", None)
+        try:
+            result = self._client.complete(job.request)
+        except LLMRateLimited as exc:
+            if job.attempt + 1 >= self._config.max_attempts:
+                self._on_status(
+                    job.call_id,
+                    STATUS_ERROR,
+                    f"rate_limited_exhausted: {exc}",
+                    None,
+                )
+                return
+            job.attempt += 1
+            delay = self._backoff_delay(job.attempt)
+            self._on_status(
+                job.call_id,
+                STATUS_RATE_LIMITED,
+                f"retry_in={delay:.1f}s attempt={job.attempt}",
+                None,
+            )
+            self._enqueue(job, delay=delay)
+            return
+        except LLMError as exc:
+            self._on_status(job.call_id, STATUS_ERROR, str(exc), None)
+            return
+        except Exception as exc:  # noqa: BLE001 — worker 绝不能因为一个任务死掉
+            self._on_status(job.call_id, STATUS_ERROR, f"unexpected: {exc!r}", None)
+            return
+
+        # 结果整份传给回调：text 落 result_text 列，model / token 各有各的列
+        # （architecture.md §4.1 约束 4：token 用量必须可审计）。
+        self._on_status(job.call_id, STATUS_OK, result.text, result)

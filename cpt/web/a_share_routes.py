@@ -33,6 +33,7 @@ __all__ = [
     "pool_payload",
     "recent_closes",
     "snapshot_payload",
+    "submit_llm_explain",
     "watchlist_add",
     "watchlist_payload",
     "watchlist_remove",
@@ -375,3 +376,40 @@ def watchlist_remove(code: str) -> dict[str, Any]:
     payload = watchlist_payload()
     payload["removed"] = removed
     return payload
+
+
+def submit_llm_explain(code: str, structure: dict[str, Any]) -> dict[str, Any]:
+    """提交一次「规则解释」请求，**立刻返回**（不等模型）。
+
+    R25。LLM 是旁路增强：未启用 / 缺 key / 表不存在都只是 ``available=False``，
+    **不抛异常** —— 主看板照常出图。UI 拿 ``call_id`` 去轮询
+    ``/api/dashboard/llm/calls?call_id=...``。
+    """
+    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+    from cpt.application.llm_cases import explain_structure  # noqa: PLC0415
+
+    normalized = _normalize(code)
+    try:
+        names = _names([normalized])
+    except Exception:  # noqa: BLE001 — 名字是装饰，取不到就用代码
+        names = {}
+    client = AShareLocalClient()
+    try:
+        return explain_structure(  # noqa: SLF001
+            client._get_conn(),  # noqa: SLF001
+            code=normalized,
+            name=names.get(normalized, ""),
+            market="a_share",
+            structure=structure,
+            subject_id=str(structure.get("id", "")),
+        )
+    except Exception as exc:  # noqa: BLE001 — 旁路失败不拖垮写接口
+        _LOG.warning("提交 LLM 解释失败 %s: %s", normalized, exc)
+        return {
+            "available": False,
+            "call_id": "",
+            "status": "error",
+            "reason": f"llm_submit_failed:{type(exc).__name__}",
+        }
+    finally:
+        client.close()

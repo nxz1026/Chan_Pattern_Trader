@@ -1,6 +1,12 @@
 #!/usr/bin/env python3
 """CPT 分层门禁：**SQL 只允许出现在 ``cpt/adapters/`` 与 ``cpt/storage/``**。
 
+禁入名单：``cpt/domain``、``cpt/application``、``cpt/web``、``cpt/llm``。
+
+> ``cpt/llm`` 在 2026-10-01（R25）加进名单：LLM 层只调 provider、只拼提示词，
+> 结果落库必须走 ``cpt/storage/llm_call_store``。它自己碰 SQL 就等于绕过
+> 事务边界约定（store 层不 commit，边界归调用方）。
+
 ## 为什么需要它（import-linter 抓不到）
 
 ``.importlinter`` 的 3 条契约查的是「有没有 import 上层」。它对下面这种代码
@@ -49,7 +55,7 @@ import tokenize
 from pathlib import Path
 
 ALLOWED_DIRS = frozenset({"adapters", "storage"})
-FORBIDDEN_DIRS = ("domain", "application", "web")
+FORBIDDEN_DIRS = ("domain", "application", "web", "llm")
 
 #: execute / executemany 的调用点
 #:
@@ -169,7 +175,7 @@ def main(argv: list[str]) -> int:
         allowed = "/".join(sorted(ALLOWED_DIRS))
         print(f"\n✗ SQL 越层：SQL 只允许出现在 cpt/{allowed}", file=sys.stderr)
         print(
-            "  （cpt/domain、cpt/application、cpt/web 都不该直接写 SQL）\n",
+            "  （cpt/domain、cpt/application、cpt/web、cpt/llm 都不该直接写 SQL）\n",
             file=sys.stderr,
         )
         for rel, line_no, text in violations:
