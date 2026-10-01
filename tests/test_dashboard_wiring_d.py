@@ -272,7 +272,7 @@ class _StubLocalClient:
 
 def test_signal_stats_route_reports_basis_and_stats(monkeypatch: pytest.MonkeyPatch) -> None:
     import cpt.adapters.a_share_local as local
-    import cpt.application.signal_event_store as store
+    import cpt.storage.signal_event_store as store
 
     calls: list[dict[str, Any]] = []
 

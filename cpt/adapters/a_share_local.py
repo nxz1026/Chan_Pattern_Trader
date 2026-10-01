@@ -21,6 +21,7 @@ OHLC，转为 :class:`~cpt.domain.models.CanonicalBar`。
 
 from __future__ import annotations
 
+import logging
 import pathlib
 import re
 from collections.abc import Callable, Sequence
@@ -29,9 +30,11 @@ from datetime import UTC, datetime
 from typing import Any, Final
 
 from cpt.adapters._dbconfig import connection_kwargs as _shared_connection_kwargs
-from cpt.domain.a_share_rules import AShareDailyTag, fetch_daily_tags
+from cpt.domain.a_share_rules import AShareDailyTag
 from cpt.domain.models import CanonicalBar
 from cpt.domain.types import BarLike
+
+_LOG = logging.getLogger(__name__)
 
 __all__ = [
     "AShareFetchResult",
@@ -40,11 +43,164 @@ __all__ = [
     "AShareNoDataError",
     "AShareNoFactorError",
     "SecurityName",
+    "check_t_plus_one_calendar",
+    "fetch_daily_tags",
+    "fetch_factor_codes",
     "fetch_security_names",
+    "is_trade_day",
 ]
 
 #: ``public.daily_bar`` 实际列名（与 DB schema 对齐）
 _DATE_COL: Final[str] = "date"
+
+# 涨跌停标签——一旦某日触发，整根 bar 都受影响（开盘涨停 / 收盘涨停 / 一字板）。
+# R24：从 domain.a_share_rules 搬来（那是 SQL，不该待在纯领域层）。
+_DERIVED_FIELDS = (
+    "is_limit_up",  # 收盘涨停
+    "is_limit_down",  # 收盘跌停（用于对称展示）
+    "is_bomb",  # 炸板（封板后开板）
+    "is_one_word",  # 一字板（开/收/高/低全相等）
+)
+
+
+def fetch_daily_tags(conn: Any, code: str, start_ms: int, end_ms: int) -> dict[str, AShareDailyTag]:
+    """从 ``public.derived_bar`` 拉取区间内的衍生标签。
+
+    :param conn: psycopg 连接（测试中可注入 mock）
+    :returns: ``{iso_date: AShareDailyTag}``；缺失日期不出现在 dict 中
+    """
+    start_d = datetime.fromtimestamp(start_ms / 1000, tz=UTC).date()
+    end_d = datetime.fromtimestamp(end_ms / 1000, tz=UTC).date()
+    bare_code = code.split(".", 1)[0]
+
+    fields_sql = ", ".join(_DERIVED_FIELDS)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"""SELECT date, {fields_sql}
+                FROM public.derived_bar
+                WHERE code = %s AND date BETWEEN %s AND %s""",
+            (bare_code, start_d, end_d),
+        )
+        out: dict[str, AShareDailyTag] = {}
+        for row in cur.fetchall():
+            d = row[0]
+            d_iso = d.isoformat() if hasattr(d, "isoformat") else str(d)
+            tag = AShareDailyTag(
+                code=bare_code,
+                trade_date=d_iso,
+                is_limit_up=bool(row[1]),
+                is_limit_down=bool(row[2]),
+                is_bomb=bool(row[3]),
+                is_one_word=bool(row[4]),
+            )
+            out[tag.trade_date] = tag
+    return out
+
+
+def fetch_factor_codes() -> set[str]:
+    """查 ``asel.ref_adjust_factor`` 里所有已有复权因子的代码。
+
+    R24 新增：原先这段 SQL 直接写在 ``cpt/web/a_share_routes.py::_factor_codes``
+    里（注释还写着「就是要碰真连接」）。web 层不碰 IO 是分层底线 ——
+    SQL 归 adapters。
+
+    这条查的是**共享数据枢纽**的表，不是 CPT 自有表，所以属于 adapters 而非 storage。
+    """
+    client = AShareLocalClient()
+    try:
+        with client._get_conn().cursor() as cur:  # noqa: SLF001
+            cur.execute("SELECT DISTINCT code FROM asel.ref_adjust_factor")
+            return {str(row[0]) for row in cur.fetchall()}
+    finally:
+        client.close()
+
+
+def is_trade_day(conn: Any, date_iso: str) -> bool | None:
+    """查 ``public.trade_calendar``：该日是否开市。
+
+    :returns: ``True``/``False``；**表里没这一天返回 ``None``**（区别于「当天休市」，
+        两者在 UI 上要显示不同的 reason：``not_a_trade_day`` vs ``calendar_unknown``）。
+
+    R24 新增：原先这段 SQL 内联在 ``cpt/application/a_share_snapshot.py``
+    的 ``_attach_close_countdown`` 里。application 不该出现 SQL。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT is_open FROM public.trade_calendar WHERE date = %s",
+            (date_iso,),
+        )
+        row = cur.fetchone()
+    if row is None:
+        return None
+    return bool(row[0])
+
+
+# --------------------------------------------------------------------------- #
+# T+1 日历查询（R21 接线；R24 从 domain 搬来）
+# --------------------------------------------------------------------------- #
+
+
+def check_t_plus_one_calendar(client: Any) -> dict[str, Any]:
+    """查 ``public.trade_calendar`` 判断今日是否可买（T+1 日历约束）。
+
+    只读 ``public.trade_calendar``，不涉及持仓/账户（roadmap「明确不做持仓」）。
+
+    :returns: 字典 ``{"available": bool, "reason": str, "today": str | None,
+                        "next_trade_date": str | None}``。
+    """
+    import datetime as _dt
+
+    today = _dt.date.today().isoformat()
+    try:
+        conn = client._get_conn()
+        with conn.cursor() as cur:
+            # 查今日是否开市
+            cur.execute(
+                "SELECT is_open FROM public.trade_calendar WHERE date = %s",
+                (today,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return {
+                    "available": False,
+                    "reason": "calendar_unknown",
+                    "today": today,
+                    "next_trade_date": _next_trade_date(cur, today),
+                }
+            if not row[0]:
+                return {
+                    "available": False,
+                    "reason": "not_a_trade_day",
+                    "today": today,
+                    "next_trade_date": _next_trade_date(cur, today),
+                }
+            return {
+                "available": True,
+                "reason": "trade_day",
+                "today": today,
+                "next_trade_date": None,
+            }
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("T+1 日历查询失败: %s", exc)
+        return {
+            "available": False,
+            "reason": "calendar_check_failed",
+            "today": today,
+            "next_trade_date": None,
+        }
+
+
+def _next_trade_date(cur: Any, after_date: str) -> str | None:
+    """查 ``after_date`` 之后的下一个开市日。"""
+    cur.execute(
+        "SELECT date::text FROM public.trade_calendar "
+        "WHERE is_open AND date > %s ORDER BY date LIMIT 1",
+        (after_date,),
+    )
+    row = cur.fetchone()
+    return row[0] if row else None
+
+
 _CODE_COL: Final[str] = "code"
 _OHLC_COLS: Final[tuple[str, ...]] = ("open", "high", "low", "close")
 _VOL_COL: Final[str] = "volume"

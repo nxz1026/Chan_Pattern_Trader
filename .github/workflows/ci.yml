@@ -50,6 +50,9 @@ jobs:
           # —— 也就是说层级可以被打破而 CI 依然全绿（2026-09-25 排查 P0-2）。
           # 依赖早已在 requirements-dev.txt 里（import-linter==2.15 + grimp==3.17）。
           lint-imports
+          # 分层的**内容级**门禁：import-linter 查依赖方向，查不了「职责有没有放对层」。
+          # 2026-10-01 实测 SQL 铺在 domain/application/adapters/web 四层里而 3 条契约全绿。
+          python scripts/check_sql_layering.py
       - name: Dead-code audit (vulture)
         run: |
           # vulture==2.14 自 2026-09-25 起已在 requirements-dev.txt 锁文件里，

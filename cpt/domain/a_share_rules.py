@@ -1,15 +1,21 @@
 """A 股规则标签（C2/C4 — R15-3）。
 
-**状态：部分接线（R19+R21，2026-10-01）**——标签能力已接进 A 股主看板：
-``AShareLocalClient.fetch_daily_tags``（:mod:`cpt.adapters.a_share_local`）复用本模块
-的 SQL，``cpt.application.a_share_snapshot._apply_daily_tags`` 把标签挂到笔上并写
-``data_quality.ashare_tags`` 审计块。守门用例见
-``tests/test_a_share_rules.py`` 末尾「接线」一节——**入口是生产构造函数**，
-不是本模块自己的函数。
+**本模块是纯领域逻辑：零 IO、零 SQL。**（R24 分层恢复，2026-10-01）
 
-T+1 日历查询（:func:`check_t_plus_one_calendar`）已接进
-``cpt.application.a_share_snapshot._attach_t_plus_one``——只读 ``public.trade_calendar``，
-不涉及持仓/账户（roadmap「明确不做持仓」）。
+原本混在这里的三处数据库查询已按职责下沉到 :mod:`cpt.adapters.a_share_local`：
+
+======================  ==================================  ============
+搬走的                  去处                                查的表
+======================  ==================================  ============
+``fetch_daily_tags``    ``adapters.a_share_local``          ``public.derived_bar``
+``check_t_plus_one_calendar``  ``adapters.a_share_local``    ``public.trade_calendar``
+``_next_trade_date``    ``adapters.a_share_local``          ``public.trade_calendar``
+======================  ==================================  ============
+
+留在本模块的是**不碰 IO 的部分**：值对象 ``AShareDailyTag``、纯函数
+``apply_ashare_tags_to_bis`` 与 ``t_plus_one_purchase_allowed``、错误类
+``AShareTagsError``。domain 不 import 任何上层，也不该出现 SQL 字符串 ——
+这条由 CI 门禁「SQL 只许出现在 ``adapters/`` 与 ``storage/``」强制。
 
 按 plan §5.3：
 - **C2 涨跌停**：涨停日的笔/中枢**端点可信度低**（涨停挂单买不到、卖单大量堆积），
@@ -18,14 +24,14 @@ T+1 日历查询（:func:`check_t_plus_one_calendar`）已接进
 - **C3 停牌**：``public.daily_bar`` 是交易日表，停牌日本来就没行——已在
   :mod:`cpt.adapters.a_share_local` 隐含处理。
 - **C4 T+1**：在 ``Signal`` 上打 ``t_plus_one: bool``，由 :mod:`cpt.domain.signal`
-  在评估一买/一卖时读取。**本模块提供查询工具**，不直接改 ``Signal`` schema
-  （避免污染跨市场语义——加密没有 T+1）。
+  在评估一买/一卖时读取。**本模块提供纯谓词**，不直接改 ``Signal`` schema
+  （避免污染跨市场语义——加密没有 T+1）；日历查询在 adapters 层。
 - **C5 非交易日**：`public.daily_bar` 天然不画图，不需额外处理。
 
 ## 决定
 ``public.derived_bar`` 已有 ``is_limit_up / is_bomb / is_one_word / touched_limit``
-等列（plan §5.2 表列）。本模块不重新计算涨跌停（避免出错路径），直接查
-``derived_bar`` 把标签挂到 ``CanonicalBar`` 上。
+等列（plan §5.2 表列）。CPT **不重新计算涨跌停**（避免出错路径），由 adapters
+层直接查 ``derived_bar`` 并把标签挂到 ``CanonicalBar`` 上。
 """
 
 from __future__ import annotations
@@ -33,7 +39,6 @@ from __future__ import annotations
 from collections.abc import Iterable
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
-from typing import Any
 
 from cpt.domain.models import Bi
 
@@ -41,15 +46,8 @@ __all__ = [
     "AShareDailyTag",
     "apply_ashare_tags_to_bis",
     "AShareTagsError",
+    "t_plus_one_purchase_allowed",
 ]
-
-# 涨跌停标签——一旦某日触发，整根 bar 都受影响（开盘涨停 / 收盘涨停 / 一字板）
-_DERIVED_FIELDS = (
-    "is_limit_up",  # 收盘涨停
-    "is_limit_down",  # 收盘跌停（用于对称展示）
-    "is_bomb",  # 炸板（封板后开板）
-    "is_one_word",  # 一字板（开/收/高/低全相等）
-)
 
 
 class AShareTagsError(RuntimeError):
@@ -71,40 +69,6 @@ class AShareDailyTag:
     def has_any_extreme(self) -> bool:  # noqa: D401
         """任意极端形态标签 — 用于决定"该日 K 线画虚线 / 降透明"。"""
         return any((self.is_limit_up, self.is_limit_down, self.is_bomb, self.is_one_word))
-
-
-def fetch_daily_tags(conn: Any, code: str, start_ms: int, end_ms: int) -> dict[str, AShareDailyTag]:
-    """从 ``public.derived_bar`` 拉取区间内的衍生标签。
-
-    :param conn: psycopg 连接（测试中可注入 mock）
-    :returns: ``{iso_date: AShareDailyTag}``；缺失日期不出现在 dict 中
-    """
-    start_d = datetime.fromtimestamp(start_ms / 1000, tz=UTC).date()
-    end_d = datetime.fromtimestamp(end_ms / 1000, tz=UTC).date()
-    bare_code = code.split(".", 1)[0]
-
-    fields_sql = ", ".join(_DERIVED_FIELDS)
-    with conn.cursor() as cur:
-        cur.execute(
-            f"""SELECT date, {fields_sql}
-                FROM public.derived_bar
-                WHERE code = %s AND date BETWEEN %s AND %s""",
-            (bare_code, start_d, end_d),
-        )
-        out: dict[str, AShareDailyTag] = {}
-        for row in cur.fetchall():
-            d = row[0]
-            d_iso = d.isoformat() if hasattr(d, "isoformat") else str(d)
-            tag = AShareDailyTag(
-                code=bare_code,
-                trade_date=d_iso,
-                is_limit_up=bool(row[1]),
-                is_limit_down=bool(row[2]),
-                is_bomb=bool(row[3]),
-                is_one_word=bool(row[4]),
-            )
-            out[tag.trade_date] = tag
-    return out
 
 
 def apply_ashare_tags_to_bis(
@@ -157,71 +121,3 @@ def t_plus_one_purchase_allowed(previous_close_date_iso: str | None) -> bool:
     # 实际生产应查询"当前账户持仓 + 是否当日已买入同一标的"；此处只返 True 保持
     # A 股日历允许 — 持仓层面的 T+1 由仓位层负责。
     return True
-
-
-# --------------------------------------------------------------------------- #
-# T+1 日历查询（R21 接线）
-# --------------------------------------------------------------------------- #
-
-
-def check_t_plus_one_calendar(client: Any) -> dict[str, Any]:
-    """查 ``public.trade_calendar`` 判断今日是否可买（T+1 日历约束）。
-
-    只读 ``public.trade_calendar``，不涉及持仓/账户（roadmap「明确不做持仓」）。
-
-    :returns: 字典 ``{"available": bool, "reason": str, "today": str | None,
-                        "next_trade_date": str | None}``。
-    """
-    import datetime as _dt
-
-    today = _dt.date.today().isoformat()
-    try:
-        conn = client._get_conn()
-        with conn.cursor() as cur:
-            # 查今日是否开市
-            cur.execute(
-                "SELECT is_open FROM public.trade_calendar WHERE date = %s",
-                (today,),
-            )
-            row = cur.fetchone()
-            if row is None:
-                return {
-                    "available": False,
-                    "reason": "calendar_unknown",
-                    "today": today,
-                    "next_trade_date": _next_trade_date(cur, today),
-                }
-            if not row[0]:
-                return {
-                    "available": False,
-                    "reason": "not_a_trade_day",
-                    "today": today,
-                    "next_trade_date": _next_trade_date(cur, today),
-                }
-            return {
-                "available": True,
-                "reason": "trade_day",
-                "today": today,
-                "next_trade_date": None,
-            }
-    except Exception as exc:  # noqa: BLE001
-        import logging
-
-        logging.getLogger(__name__).warning("T+1 日历查询失败: %s", exc)
-        return {
-            "available": False,
-            "reason": "calendar_check_failed",
-            "today": today,
-            "next_trade_date": None,
-        }
-
-
-def _next_trade_date(cur: Any, after_date: str) -> str | None:
-    """查 ``after_date`` 之后的下一个开市日。"""
-    cur.execute(
-        "SELECT date::text FROM public.trade_calendar "
-        "WHERE is_open AND date > %s ORDER BY date LIMIT 1",
-        (after_date,),
-    )
-    row = cur.fetchone()
-    return row[0] if row else None

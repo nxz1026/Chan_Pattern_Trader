@@ -1,7 +1,7 @@
 """Read-only research statistics projections.
 
 **状态：已接线（R22，2026-09-30）**——`GET /api/dashboard/signal-stats?days=&code=`
-（`cpt/web/app.py`）的唯一实现，事件来自 `signal_event_store.load_signal_events`；
+（`cpt/web/app.py`）的唯一实现，事件来自 `cpt.storage.signal_event_store.load_signal_events`；
 对应 `docs/dashboard-product-roadmap.md` Phase 6 P2「一买统计」。响应必须自报
 `basis: "signal_event_transitions"`：这是**状态跃迁事件**分布，不是「当前若干只票
 的状态」。

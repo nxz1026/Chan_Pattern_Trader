@@ -115,16 +115,14 @@ def snapshot_payload(code: str, *, width_k: int = DEFAULT_WIDTH_K) -> dict[str, 
 
 
 def _factor_codes() -> set[str]:
-    """带复权因子的代码集合（A 股能否画出来的前提）。"""
-    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+    """带复权因子的代码集合（A 股能否画出来的前提）。
 
-    client = AShareLocalClient()
-    try:
-        with client._get_conn().cursor() as cur:  # noqa: SLF001 — 就是要碰真连接
-            cur.execute("SELECT DISTINCT code FROM asel.ref_adjust_factor")
-            return {str(row[0]) for row in cur.fetchall()}
-    finally:
-        client.close()
+    R24：SQL 已下沉到 ``adapters.a_share_local.fetch_factor_codes``。
+    web 层不再直接碰连接 —— 它只调函数。
+    """
+    from cpt.adapters.a_share_local import fetch_factor_codes  # noqa: PLC0415
+
+    return fetch_factor_codes()
 
 
 def _names(codes: list[str]) -> dict[str, Any]:

@@ -9,12 +9,14 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
 import pytest
+from cpt.adapters.a_share_local import (
+    check_t_plus_one_calendar,
+    fetch_daily_tags,
+)
 from cpt.application.a_share_snapshot import build_ashare_snapshot
 from cpt.domain.a_share_rules import (
     AShareDailyTag,
     apply_ashare_tags_to_bis,
-    check_t_plus_one_calendar,
-    fetch_daily_tags,
     t_plus_one_purchase_allowed,
 )
 from cpt.domain.models import Bi

@@ -35,6 +35,7 @@ from cpt.adapters.a_share_local import (
     AShareLocalClient,
     AShareNoDataError,
     AShareNoFactorError,
+    check_t_plus_one_calendar,
 )
 from cpt.adapters.a_share_public import TENCENT_KLINE_URL
 from cpt.adapters.backend_factory import DEFAULT_BACKEND, resolve_backend
@@ -44,14 +45,15 @@ from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
 from cpt.application.first_buy_bridge import derive_first_buy_facts, detect_structural_break
 from cpt.application.multi_level import build_multi_level, format_multi_level
 from cpt.application.replay import compute_domain_structures
-from cpt.application.signal_event_store import (
-    load_previous_signal,
-    record_signal_event,
-)
-from cpt.domain.a_share_rules import apply_ashare_tags_to_bis, check_t_plus_one_calendar
+from cpt.domain.a_share_rules import apply_ashare_tags_to_bis
 from cpt.domain.config import RulesConfig
 from cpt.domain.models import Bi, CanonicalBar, Signal, ZhongShu
 from cpt.domain.signal import assess_first_buy, transition_first_buy, transition_first_sell
+from cpt.storage.signal_event_store import (
+    latest_status,
+    load_previous_signal,
+    record_signal_event,
+)
 
 __all__ = [
     "DEFAULT_WIDTH_K",
@@ -489,22 +491,20 @@ def _attach_close_countdown(snapshot: dict[str, Any], client: Any) -> None:
     """
     import datetime as _dt
 
+    from cpt.adapters.a_share_local import is_trade_day
+
     today = _dt.date.today()
     try:
         getter = getattr(client, "_get_conn", None)
         conn = getter() if callable(getter) else None
         if conn is None:
             raise RuntimeError("no db conn")
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT is_open FROM public.trade_calendar WHERE date = %s",
-                (today.isoformat(),),
-            )
-            row = cur.fetchone()
-        if row is None or not row[0]:
+        # R24：SQL 下沉到 adapters.is_trade_day
+        is_open = is_trade_day(conn, today.isoformat())
+        if not is_open:
             snapshot["close_countdown"] = {
                 "available": False,
-                "reason": "not_a_trade_day" if row is not None else "calendar_unknown",
+                "reason": "not_a_trade_day" if is_open is not None else "calendar_unknown",
             }
             return
         now = _dt.datetime.now()
@@ -539,17 +539,14 @@ def _attach_signal_change(snapshot: dict[str, Any], client: Any) -> None:
         conn = getter() if callable(getter) else None
         if conn is None:
             raise RuntimeError("no db conn")
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT status FROM public.cpt_signal_event
-                WHERE signal_id = %s
-                ORDER BY event_time DESC LIMIT 1
-                """,
-                (signal.get("signal_id", ""),),
-            )
-            row = cur.fetchone()
-        prev_status = row[0] if row else None
+        # R24：SQL 下沉到 storage 层。同时**修掉一个活 bug** ——
+        # 原实现在这里内联 `ORDER BY event_time`，而 public.cpt_signal_event
+        # **没有 event_time 列**（真实列是 id / transition_time / created_time …），
+        # PG 报 `column "event_time" does not exist`，被 except 吞掉且只记 debug。
+        # 后果：「信号状态跨轮询变化」这个功能自 R21 起一直是死的，
+        # 前端永远拿不到 signal_changed=True。
+        # 现在走 storage 的 latest_status（1 列投影，ORDER BY id DESC）。
+        prev_status = latest_status(conn, str(signal.get("signal_id", "")))
         cur_status = signal.get("status")
         changed = prev_status is not None and prev_status != cur_status
         snapshot["summary"]["signal_changed"] = changed
@@ -560,7 +557,9 @@ def _attach_signal_change(snapshot: dict[str, Any], client: Any) -> None:
         else:
             snapshot["summary"]["signal_change_type"] = None
     except Exception as exc:  # noqa: BLE001
-        _LOG.debug("信号变化检测失败 %s: %s", snapshot.get("market", {}).get("symbol"), exc)
+        # 记 warning 而不是 debug：这条失败意味着「信号变化检测」整个失效，
+        # 前端会一直显示"没变化"。debug 级在生产 journalctl 里等于不存在。
+        _LOG.warning("信号变化检测失败 %s: %s", snapshot.get("market", {}).get("symbol"), exc)
         snapshot["summary"]["signal_changed"] = False
         snapshot["summary"]["signal_change_type"] = None
 

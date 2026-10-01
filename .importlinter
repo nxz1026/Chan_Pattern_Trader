@@ -23,19 +23,33 @@ source_modules =
 forbidden_modules =
     cpt.adapters
 
-# 2026-09-25 审核 P0-2：`cpt/engine/` 与 `cpt/storage/` 两层已整层移除，故原
-# `storage-isolated-from-application` 与 `engine-orchestrates-domain-and-storage-only`
-# 两条契约随之删除（它们唯一的作用域就是这两个已不存在的包）。见
-# docs/architecture.md §2 的层说明与 docs/audit/cpt-code-audit-20260925.md §3.4。
+# 2026-09-25 审核 P0-2：`cpt/engine/` 整层移除，故原
+# `engine-orchestrates-domain-and-storage-only` 契约随之删除（它唯一的作用域就是
+# 这个已不存在的包）。`cpt/storage/` 于 2026-10-01（R24）**恢复** —— 见下方 layers
+# 契约与 docs/architecture.md §2。
+#
+# 2026-10-01 补的 `storage-does-not-leak-into-domain`：storage 是「CPT 自有表的读写」，
+# 不该被 domain 依赖（domain 只认领域模型，不认表）。
+
+[importlinter:contract:storage-does-not-leak-into-domain]
+name = Storage does not leak into domain
+type = forbidden
+source_modules =
+    cpt.domain
+forbidden_modules =
+    cpt.storage
 
 [importlinter:contract:layers]
 name = Layered architecture
 type = layers
 # ⚠️ import-linter 的 ``layers`` 是**自上而下**写的：第一条是**最高**层，高层可以导入
-# 低层，反之不行。这里 web 最高、domain 最低。
+# 低层，反之不行。web 最高、domain 最低。
+# 2026-10-01（R24）把恢复后的 ``cpt.storage`` 放在 application 与 domain 之间：
+# application 需要它落库，domain 不该碰它。
 layers =
     cpt.web
     cpt.application
+    cpt.storage
     cpt.adapters
     cpt.domain
 

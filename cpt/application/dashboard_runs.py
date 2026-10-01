@@ -19,7 +19,7 @@
 - **ring 留 hot-path**：30s 内同 ``(run_id, dataset_hash)`` 命中同一份缓存
   snapshot 时走快路径，**连 DB 都不碰**（见 :func:`record_run` 的 ``on_recorded``）。
 - **表留 cold-path**：``public.cpt_dashboard_run``（R23 建表）记跨重启历史，
-  由 ``cpt/application/dashboard_run_store.py`` 负责读写。
+  由 ``cpt/storage/dashboard_run_store.py`` 负责读写。
 
 **落库量并没有变少**：fast path 命中根本不写库，30s 一轮只落 1 行而非「十几次
 请求 × 每请求一行」——这正是 R20 当时担心的放大问题，而它并不存在。
@@ -137,7 +137,7 @@ def record_run(
 
     :param on_recorded: R23 新增。**只在真正 append 之后**回调
         ``(row, body)``，供调用方把这次命中同步双写进
-        ``public.cpt_dashboard_run``（见 ``cpt.application.dashboard_run_store``）。
+        ``public.cpt_dashboard_run``（见 ``cpt.storage.dashboard_run_store``）。
         去重命中路径**不回调**——realtime 30s 一轮里可能有十几次请求命中同一份
         缓存 snapshot，快路径每次都打一次 DB 是纯浪费（去重语义见上）。
         本模块保持零 DB 依赖：回调由调用方（``cpt/web/app.py``）注入，

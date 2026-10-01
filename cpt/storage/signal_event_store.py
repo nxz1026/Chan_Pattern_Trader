@@ -23,6 +23,7 @@ from cpt.domain.models import Signal
 _LOG = logging.getLogger(__name__)
 
 __all__ = [
+    "latest_status",
     "load_previous_signal",
     "load_signal_events",
     "record_signal_event",
@@ -71,6 +72,35 @@ def _row_to_signal(row: tuple[Any, ...]) -> Signal:
         price=row[11],
         source_revision=row[12],
     )
+
+
+def latest_status(conn: Any, signal_id: str) -> str | None:
+    """只取 ``signal_id`` 最新事件的 ``status``；无事件 → ``None``。
+
+    R24 新增。为什么不直接用 :func:`load_previous_signal`：调用方
+    （``a_share_snapshot._attach_signal_change``）只需要 status 这一个字段，
+    没必要在 application 层为它构造一个完整 ``Signal`` 再拆开看。
+
+    投影只有 **1 列**，比 ``load_previous_signal`` 的 13 列稳得多 —— 表加列 /
+    改列都不会波及这里，测试替身也只需给一个元组。
+
+    排序列是 ``id DESC``（bigserial 追加顺序）。**注意**：本表没有 ``event_time``
+    这一列，时间语义对应的是 ``transition_time``；R24 之前 application 层曾内联
+    写过 ``ORDER BY event_time``，PG 报 ``column "event_time" does not exist``，
+    被 except 吞掉只记 debug —— 后果是「信号状态变化检测」自 R21 起一直是死的。
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT status FROM public.cpt_signal_event "
+                "WHERE signal_id = %s ORDER BY id DESC LIMIT 1",
+                (signal_id,),
+            )
+            row = cur.fetchone()
+    except Exception as exc:
+        _LOG.warning("读取信号最新状态失败 %s: %s", signal_id, exc)
+        raise SignalEventError(f"读取信号最新状态失败: {exc}") from exc
+    return row[0] if row else None
 
 
 def load_previous_signal(conn: Any, signal_id: str) -> Signal | None:

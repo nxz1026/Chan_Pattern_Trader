@@ -1,4 +1,4 @@
-"""``cpt.application.dashboard_run_store`` + ``cpt/web/app.py`` 接线测试（R23）。
+"""``cpt.storage.dashboard_run_store`` + ``cpt/web/app.py`` 接线测试（R23）。
 
 不依赖 psycopg —— 用一个**内存假库**（:class:`FakeConn`）顶替，它按 ``run_id``
 存行、认 ``ON CONFLICT DO NOTHING``、认 ``rowcount``，行为对齐 PG 那一侧。
@@ -18,13 +18,13 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from cpt.application.dashboard_run_store import (
+from cpt.application.dashboard_runs import clear_runs, record_run
+from cpt.storage.dashboard_run_store import (
     DashboardRunError,
     get_snapshots,
     recent_runs,
     upsert_run,
 )
-from cpt.application.dashboard_runs import clear_runs, record_run
 
 # --------------------------------------------------------------------------- #
 # Mock DB：一个够用的内存假库

@@ -102,7 +102,7 @@ def _persist_run(row: dict[str, Any], body: dict[str, Any] | None) -> None:
     ``dashboard_runs`` 的 ring 是完全独立的两条路径。
     """
     try:
-        from cpt.application.dashboard_run_store import upsert_run  # noqa: PLC0415
+        from cpt.storage.dashboard_run_store import upsert_run  # noqa: PLC0415
 
         with _run_store_conn() as conn:
             upsert_run(conn, row, body)
@@ -125,13 +125,13 @@ def _load_run_bodies(run_ids: list[str], conn: Any = None) -> dict[str, dict[str
     """从表里批量取运行本体；表不可用时返回 ``{}``（调用方回落 ring）。
 
     返回值的「key 在 / key 不在」语义见
-    :func:`cpt.application.dashboard_run_store.get_snapshots`：key 在但值是
+    :func:`cpt.storage.dashboard_run_store.get_snapshots`：key 在但值是
     ``None`` 表示**库里明确记了没有本体**（4MB 闸门），不能回落 ring 把它掩盖掉。
     """
     if not run_ids:
         return {}
     try:
-        from cpt.application.dashboard_run_store import get_snapshots  # noqa: PLC0415
+        from cpt.storage.dashboard_run_store import get_snapshots  # noqa: PLC0415
 
         with _run_store_conn(conn) as opened:
             return get_snapshots(opened, run_ids)
@@ -199,7 +199,7 @@ def _run_index_rows(limit: int = _RUN_INDEX_LIMIT, conn: Any = None) -> list[dic
     try:
         # 别名导入：裸 ``recent_runs`` 会遮蔽模块级那个（in-process ring 版），
         # 兜底分支就会把 ring 的 limit 参数当 conn 传进去。
-        from cpt.application.dashboard_run_store import (  # noqa: PLC0415
+        from cpt.storage.dashboard_run_store import (  # noqa: PLC0415
             recent_runs as store_recent_runs,
         )
 
@@ -300,7 +300,7 @@ def _signal_stats_payload(days: int, code: str | None) -> dict[str, Any]:
     try:
         # CI 只跑 ``pip install -e .``（不带 [db]），故连接层必须惰性导入。
         from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
-        from cpt.application.signal_event_store import load_signal_events  # noqa: PLC0415
+        from cpt.storage.signal_event_store import load_signal_events  # noqa: PLC0415
 
         client = AShareLocalClient()
         try:
@@ -325,7 +325,7 @@ def _latest_signal_statuses() -> dict[str, str]:
     """
     try:
         from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
-        from cpt.application.signal_event_store import load_signal_events  # noqa: PLC0415
+        from cpt.storage.signal_event_store import load_signal_events  # noqa: PLC0415
 
         client = AShareLocalClient()
         try:

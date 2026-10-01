@@ -1,4 +1,4 @@
-"""``cpt.application.signal_event_store`` 测试。
+"""``cpt.storage.signal_event_store`` 测试。
 
 不依赖 psycopg — mock conn 即可。验证：
 1. ``load_previous_signal``：空表返回 None；有数据返回最新 Signal。
@@ -13,12 +13,12 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from cpt.application.signal_event_store import (
+from cpt.domain.models import Signal
+from cpt.storage.signal_event_store import (
     SignalEventError,
     load_previous_signal,
     record_signal_event,
 )
-from cpt.domain.models import Signal
 
 # --------------------------------------------------------------------------- #
 # Mock DB
