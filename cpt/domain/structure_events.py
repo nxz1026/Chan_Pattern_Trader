@@ -17,8 +17,9 @@
 ## 幂等的前提
 
 ``StructureState.id`` 必须**确定性生成** —— 同一份 bars 重算必得同一个 id。
-本模块用 ``f"{kind}:{level}:{start_time}"``：
+本模块用 ``f"{market}:{kind}:{level}:{start_time}"``：
 
+- ``market`` 是市场名（``cn`` / ``crypto``），**必填**；
 - ``kind`` 来自结构类型（fractal/bi/zhongshu/trend_type）；
 - ``level`` 来自级别；
 - ``start_time`` 是**结构的起始时刻**，不随行情推进而变（变的会另起一个 id，
@@ -26,12 +27,27 @@
 
 domain 已验证零时钟零随机（``git grep 'datetime\\.now|random\\.' cpt/domain`` 零命中），
 所以「同输入必同输出 → 同 id → 幂等重放」这条链是真的，不是口号。
+
+## 为什么 market 是必填而不是带默认值（R27-4）
+
+R26 建表时 id 格式是 ``f"{kind}:{level}:{start_time}"``，**不含市场**，
+而 ``cpt_structure_event`` 也不存 market 列。于是两个市场只要在同 level 上撞上
+同一个 ``start_time``，就会**静默合并**成同一个结构 —— 而且不会有任何报错，
+因为 id 确实「相同输入必相同输出」，只是这个「相同」跨了市场。
+
+上线后实测：A 股 101 个 id 与加密 485 个 id 交集为 **0**，没出事。但那是
+日线（``start_time`` 恒在 UTC 0 点）与小时线（对齐整点）时间轴**恰好错开**，
+属运气不是设计。历史 672 行里有 90 个 id 无法靠集合归属判定归属市场，
+最后靠「时间戳是否命中 ``daily_bar`` 的交易日」才全部分完（R27-4 台账 §九）。
+
+所以 market 进 id，且**不给默认值**：默认值等于留一个后门给下一个调用方。
 """
 
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
 from dataclasses import replace
+from typing import Literal
 
 from cpt.domain.models import (
     Bi,
@@ -45,8 +61,17 @@ from cpt.domain.models import (
     ZhongShu,
 )
 
+#: 市场键。R27-4 起 ``structure_id`` 的第一段。
+#:
+#: 只收两个字面量而不是 ``str``：拼错的市场名会写出永远匹配不上的 id
+#: （每轮都在写新 ``created``，看起来一切正常），类型系统挡住比运行时兜底强。
+MarketKey = Literal["cn", "crypto"]
+
 __all__ = [
     "EVENT_FOR_STATUS",
+    "MARKET_CRYPTO",
+    "MARKET_CN",
+    "MarketKey",
     "diff_states",
     "state_from_event",
     "state_to_payload",
@@ -54,10 +79,31 @@ __all__ = [
     "structure_id_of",
 ]
 
+#: A 股（``cn``）。日线，``start_time`` 落在 UTC 0 点。
+MARKET_CN: MarketKey = "cn"
 
-def structure_id_of(kind: StructureKind, level: int, start_time: int) -> str:
-    """结构业务主键。**确定性**是幂等重放的全部前提，见模块 docstring。"""
-    return f"{kind}:{level}:{start_time}"
+#: 加密（``crypto``）。分钟/小时级，``start_time`` 对齐整点。
+MARKET_CRYPTO: MarketKey = "crypto"
+
+#: 全部合法市场键。新增市场必须登记在这里 —— ``structure_id_of`` 会拒绝别的值。
+MARKETS: tuple[MarketKey, ...] = (MARKET_CN, MARKET_CRYPTO)
+
+
+def structure_id_of(market: MarketKey, kind: StructureKind, level: int, start_time: int) -> str:
+    """结构业务主键。**确定性**是幂等重放的全部前提，见模块 docstring。
+
+    ``market`` 是**必填**的，不给默认值 —— 这正是 R27-4 加它的原因。
+    旧格式 ``f"{kind}:{level}:{start_time}"`` 不含市场，两个市场只要在同 level 上
+    撞上同一个 ``start_time`` 就会**静默合并**成一个结构。实测当时 A 股 101 个 id
+    与加密 485 个 id 交集为 0，但那是日线（UTC 0 点）与小时线（整点）时间轴
+    恰好错开 —— 属运气，不是设计。
+
+    非法 market 直接抛，不做静默兜底：一个拼错的市场键会写出**永远匹配不上**的
+    id（看起来一切正常，实际每轮都在写新 ``created``），比报错难查得多。
+    """
+    if market not in MARKETS:
+        raise ValueError(f"未知 market: {market!r}，合法值 {MARKETS}")
+    return f"{market}:{kind}:{level}:{start_time}"
 
 
 #: 状态跃迁 → 事件类型。
@@ -151,6 +197,7 @@ def diff_states(
 
 def states_from_structures(
     *,
+    market: MarketKey,
     fractals: Sequence[Fractal] = (),
     bis: Sequence[Bi] = (),
     zhongshus: Sequence[ZhongShu] = (),
@@ -180,7 +227,7 @@ def states_from_structures(
     for f in fractals:
         states.append(
             StructureState(
-                id=structure_id_of("fractal", f.level, f.start_time),
+                id=structure_id_of(market, "fractal", f.level, f.start_time),
                 level=f.level,
                 kind="fractal",
                 direction=1 if f.kind == "top" else -1,
@@ -203,7 +250,7 @@ def states_from_structures(
         forming = index == len(bis) - 1
         states.append(
             StructureState(
-                id=structure_id_of("bi", b.level, b.start_time),
+                id=structure_id_of(market, "bi", b.level, b.start_time),
                 level=b.level,
                 kind="bi",
                 direction=b.direction,
@@ -222,7 +269,7 @@ def states_from_structures(
         forming = index == len(zhongshus) - 1
         states.append(
             StructureState(
-                id=structure_id_of("zhongshu", z.level, z.start_time),
+                id=structure_id_of(market, "zhongshu", z.level, z.start_time),
                 level=z.level,
                 kind="zhongshu",
                 # 中枢是**连续三笔的重叠区间**（见 zhongshu.build_zhongshus），
@@ -244,7 +291,7 @@ def states_from_structures(
         forming = t.kind in ("forming", "open_end")
         states.append(
             StructureState(
-                id=structure_id_of("trend_type", t.level, t.start_time),
+                id=structure_id_of(market, "trend_type", t.level, t.start_time),
                 level=t.level,
                 kind="trend_type",
                 direction=t.direction,

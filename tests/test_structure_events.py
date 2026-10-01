@@ -10,17 +10,19 @@
 from __future__ import annotations
 
 import pytest
-from cpt.domain.models import StructureEvent, StructureState
+from cpt.domain.models import Bi, StructureEvent, StructureState
 from cpt.domain.structure_events import (
     diff_states,
     state_from_event,
     state_to_payload,
+    states_from_structures,
     structure_id_of,
 )
 
 
 def _state(
     *,
+    market: str = "cn",
     kind: str = "bi",
     level: int = 5,
     start_time: int = 1_700_000_000_000,
@@ -30,7 +32,7 @@ def _state(
     sid: str | None = None,
 ) -> StructureState:
     return StructureState(
-        id=sid or structure_id_of(kind, level, start_time),  # type: ignore[arg-type]
+        id=sid or structure_id_of(market, kind, level, start_time),  # type: ignore[arg-type]
         level=level,
         kind=kind,  # type: ignore[arg-type]
         direction=1,
@@ -52,15 +54,83 @@ def _state(
 
 def test_structure_id_is_deterministic() -> None:
     """幂等重放的全部前提：同输入必同 id。"""
-    assert structure_id_of("bi", 5, 1000) == structure_id_of("bi", 5, 1000)
-    assert structure_id_of("bi", 5, 1000) == "bi:5:1000"
+    assert structure_id_of("cn", "bi", 5, 1000) == structure_id_of("cn", "bi", 5, 1000)
+    assert structure_id_of("cn", "bi", 5, 1000) == "cn:bi:5:1000"
 
 
 def test_structure_id_distinguishes_kind_and_level_and_start() -> None:
     """不同的 kind / level / 起点 = 不同的结构。"""
-    assert structure_id_of("bi", 5, 1000) != structure_id_of("zhongshu", 5, 1000)
-    assert structure_id_of("bi", 5, 1000) != structure_id_of("bi", 30, 1000)
-    assert structure_id_of("bi", 5, 1000) != structure_id_of("bi", 5, 2000)
+    assert structure_id_of("cn", "bi", 5, 1000) != structure_id_of("cn", "zhongshu", 5, 1000)
+    assert structure_id_of("cn", "bi", 5, 1000) != structure_id_of("cn", "bi", 30, 1000)
+    assert structure_id_of("cn", "bi", 5, 1000) != structure_id_of("cn", "bi", 5, 2000)
+
+
+def test_structure_id_distinguishes_markets() -> None:
+    """R27-4 的核心：**同 kind / 同 level / 同起点，不同市场 = 不同结构**。
+
+    没有这一条，两个市场只要在时间轴上撞上就会静默合并 —— 而且不会报错，
+    因为 id「确实」同输入同输出，只是这个「同」跨了市场。
+    """
+    assert structure_id_of("cn", "bi", 5, 1000) != structure_id_of("crypto", "bi", 5, 1000)
+    assert structure_id_of("crypto", "bi", 5, 1000) == "crypto:bi:5:1000"
+
+
+def test_structure_id_rejects_unknown_market() -> None:
+    """拼错的市场键必须**报错**，不能静默兜底。
+
+    静默兜底会写出永远匹配不上的 id：每轮都在写新 ``created``，页面看起来一切
+    正常，实际状态机从来没推进过 —— 比直接报错难查得多。
+    """
+    with pytest.raises(ValueError, match="未知 market"):
+        structure_id_of("bond", "bi", 5, 1000)  # type: ignore[arg-type]
+
+
+# --------------------------------------------------------------------------- #
+# states_from_structures：market 真的进了 id
+# --------------------------------------------------------------------------- #
+
+
+def _one_bi() -> Bi:
+    return Bi(
+        level=5,
+        direction=1,
+        start_time=1_700_000_000_000,
+        end_time=1_700_003_600_000,
+        high=10.0,
+        low=9.0,
+        source_ids=("a",),
+        power_price=1.0,
+        power_volume=1.0,
+        length=5,
+    )
+
+
+def test_states_carry_market_prefix() -> None:
+    """同一批结构，两个市场必须算出**不同**的 id。"""
+    cn = states_from_structures(market="cn", bis=[_one_bi()])
+    crypto = states_from_structures(market="crypto", bis=[_one_bi()])
+    assert cn[0].id == "cn:bi:5:1700000000000"
+    assert crypto[0].id == "crypto:bi:5:1700000000000"
+    # 除 id 以外内容完全相同 —— 证明前缀只影响身份，不影响结构本身
+    assert cn[0].kind == crypto[0].kind
+    assert cn[0].start_time == crypto[0].start_time
+
+
+def test_states_market_is_required() -> None:
+    """``market`` 必须**必填**。
+
+    给默认值等于留一个后门给下一个调用方 —— 而这个后门一旦有人踩，症状是
+    「每轮都在写新 created」，看板上完全正常，要到事件流涨到离谱才可能被察觉。
+    """
+    with pytest.raises(TypeError):
+        states_from_structures(bis=[_one_bi()])  # type: ignore[call-arg]
+
+
+def test_states_are_still_deterministic_per_market() -> None:
+    """加了前缀**不能**破坏幂等：同市场同输入必同 id。"""
+    a = states_from_structures(market="crypto", bis=[_one_bi()])
+    b = states_from_structures(market="crypto", bis=[_one_bi()])
+    assert [s.id for s in a] == [s.id for s in b]
 
 
 # --------------------------------------------------------------------------- #

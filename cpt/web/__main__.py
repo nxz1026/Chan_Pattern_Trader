@@ -799,7 +799,11 @@ class _RealtimeProvider:
         # `snapshot_for_level` 算的是**同一批结构的不同视图**，接了会往事件流
         # 重复计数。demo 模式无 bars，本来就没有结构可记。
         structure_events = record_structure_events(
-            fractals=fractals, bis=bis, zhongshus=zhongshus, trend_types=trend_types
+            market="crypto",
+            fractals=fractals,
+            bis=bis,
+            zhongshus=zhongshus,
+            trend_types=trend_types,
         )
         snapshot = build_dashboard_snapshot_v2(
             self._config,

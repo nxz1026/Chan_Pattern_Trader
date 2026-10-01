@@ -284,9 +284,13 @@ def build_ashare_snapshot(
     # 此前 `snapshot.events` 在生产里**恒为 []**（没有生产者），这一段是它的
     # 第一个真实出口。best-effort：事件流失败只降级，不影响快照本体。
     structure_events = record_structure_events(
+        market="cn",
         fractals=fractals,
         bis=bis,
         zhongshus=zhongshus,
+        # 与下面的 build_dashboard_snapshot_v2 对齐：A 股刻意不算走势类型
+        # （见上方注释），事件流与快照必须记同一批结构，否则两边会漂。
+        trend_types=(),
         conn=_active_client_conn(active_client),
     )
     snapshot = build_dashboard_snapshot_v2(

@@ -63,7 +63,7 @@ class FakeConn:
 def _state(
     kind: str = "bi", *, status: str = "forming", start: int = 1_700_000_000_000
 ) -> StructureState:
-    sid = structure_id_of(kind, 5, start)  # type: ignore[arg-type]
+    sid = structure_id_of("cn", kind, 5, start)  # type: ignore[arg-type]
     return StructureState(
         id=sid,
         level=5,
@@ -174,7 +174,7 @@ def test_append_swallows_db_error() -> None:
 
 def test_latest_events_uses_distinct_on() -> None:
     """一次查询拿完，不要拉全表再在 Python 里挑。"""
-    sid = structure_id_of("bi", 5, 1_700_000_000_000)
+    sid = structure_id_of("cn", "bi", 5, 1_700_000_000_000)
     conn = FakeConn(next_rows=[_row(sid)])
     out = store.latest_events(conn, [sid])
     assert "DISTINCT ON (structure_id)" in conn.executed[0][0]

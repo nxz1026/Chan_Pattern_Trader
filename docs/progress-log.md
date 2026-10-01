@@ -2741,6 +2741,9 @@ ecent_events 的 	ry/except 临时加回去，两条立刻红，
 #### 门禁
 
 - 7 条全绿（mypy 4 条仍是 cntl Windows-only 基线）
+- **pytest 权威计数（--junit-xml）**：732 tests / 13 failures / 0 errors /
+  31 skipped → **688 passed**。13 条全在 	est_web_a_share_routes（cntl 基线），
+  **零新增失败**。
 - **pytest 权威计数（--junit-xml）**：716 tests / 13 failures / 0 errors /
   31 skipped → **672 passed**。13 条全在 	est_web_a_share_routes
   （cntl 基线），**零新增失败**。
@@ -2881,3 +2884,91 @@ StructureEvent」是 R26 之前的说法，现在是「本轮无结构变化（�
 于是 	est_dashboard_chromium_smoke.py 在 Windows 上恒 skip。CI 跑 Linux 所以
 那边是真跑的。补 Windows 路径是顺手的事，但**本轮没做** —— 它不掩盖任何失败
 （skip 不会变 pass），记在这里免得下次误判成「冒烟测试在 Windows 上是绿的」。
+
+### 九、R27-4：structure_id 加市场前缀（破坏性变更，owner 已拍板）
+
+owner 选定方案：**加前缀 + 迁移历史行**（不是只改新数据、也不是加 market 列）。
+
+#### 缺陷
+
+R26 建表时 id 是 "{kind}:{level}:{start_time}"，**不含市场**，表里也**不存
+market 列**。两个市场只要在同 level 上撞上同一个 start_time，就会**静默合并**成
+同一个结构 —— 而且不会报任何错，因为 id「确实」同输入同输出，只是这个「同」跨了
+市场。届时 A 股的笔会继承加密笔的 revision，状态机从错误的前态继续推进。
+
+上线后实测 A 股 101 个 id 与加密 485 个 id 交集为 **0**，没出事。但那是日线
+（start_time 恒在 UTC 0 点）与小时线（对齐整点）时间轴**恰好错开** —— 属运气不是设计。
+
+#### 迁移前必须先回答的问题：672 行历史 id 怎么判归属
+
+表里没有 market 列，所以只能反推。**这一段是本轮最花功夫的地方**，因为判错方向
+决定了这次迁移是「补元数据」还是「制造串味」。
+
+三步收敛：
+
+1. **集合归属**（最直接）：当前窗口的 crypto id 483 个、A 股 id 101 个都能对上，
+   覆盖 582 个 distinct id；剩下 **90 个**判不了。
+2. **日内时刻**（第二个独立信号）：实测 A 股 **101/101 都在 UTC 0 点**（日线开盘），
+   加密 1h 铺满 24 小时（0 点仅 15/483 ≈ 3%）。90 个里 **4 个在 16 点** ——
+   这个小时 A 股从不出现，**判定为加密**。剩 86 个仍在 0 点，两边都可能。
+3. **A 股日线表**（决定性）：查 public.daily_bar（表里是 date 列，open_time
+   由它在 UTC 0 点派生）。时间戳命中交易日 → A 股，否则加密。**86 判 A 股、
+   4 判加密、0 未判定。**
+
+第 3 步做了两道自校验，结论可用：
+
+- 已确认的 101 个 a-share id **全部**命中日线表（**0 漏**）→ 判据可靠；
+- 已确认的 483 个 crypto id 只有 **7** 个也命中（**1.4%**）→ 判据方向保守。
+
+参照系完整性也查了：daily_bar 覆盖 2024-01-02 起、5223 只代码，而事件时间
+范围是 2026-04-09 ~ 2026-10-01，**完全落在参照系内**。
+
+#### 7 行的已知代价（方向是安全的）
+
+SQL 规则分类出 cn: 192 / crypto: 480，而独立验证是 185 / 487 —— **差额正好
+是那 7 个**：落在 A 股交易日 UTC 0 点的加密结构被误标成 cn:。
+
+后果：加密侧继续用 crypto: 写新事件，与这 7 行匹配不上 → 各记一次 created
+（**重复**，不是合并）。且这 7 个基础 id 在 A 股集合里不存在（实测交集 0），
+cn: 侧永远不会有东西认领它们 → 孤儿行，不影响任何状态派生。
+
+**方向说明写进迁移脚本注释**：误标只会造成**重复**，不会造成**合并**。合并才是
+危险方向（状态机从错误前态推进）。宁可重复不可合并。
+
+#### 代码改动
+
+- MarketKey = Literal["cn", "crypto"]；structure_id_of(market, kind, level, start_time)
+- states_from_structures(*, market, ...) —— **必填，不给默认值**
+- 
+ecord_structure_events(*, market, ...) 透传
+- 调用点：A 股 market="cn"、加密 market="crypto"
+
+**market 不给默认值是刻意的**：默认值等于留一个后门给下一个调用方，而踩中后门的
+症状是「每轮都在写新 created」、看板完全正常，要到事件流涨到离谱才可能察觉。
+非法 market 直接抛 ValueError，同样理由 —— 静默兜底会写出永远匹配不上的 id。
+
+顺带发现并修掉一处隐患：_share_snapshot 原先调 
+ecord_structure_events 时
+**没传 	rend_types**（该处还没定义），已改为 () 与下面
+uild_dashboard_snapshot_v2 对齐 —— 事件流与快照必须记同一批结构，否则两边会漂。
+
+#### 迁移
+
+- scripts/migrations/2026-10-06_r27_market_prefix.sql
+  - 前置守卫：已有带前缀的行直接 RAISE EXCEPTION（重复执行会变成 cn:cn:...）
+  - 先把「旧 id → 新 id」映射落备份表 cpt_structure_event_id_backup_20261001
+  - 事务内校验：改写行数 == 总行数、且不再有不带前缀的行
+- scripts/migrations/2026-10-06_r27_market_prefix_rollback.sql（配套回滚）
+
+**部署顺序是硬要求：停服 → 跑迁移 → 起服**。中间任何时刻新旧格式并存都会导致
+同 id 匹配不上：每轮 diff 把全部结构当新结构，重复写 created，revision 从 1 重来。
+
+#### 测试
+
+states_from_structures 此前**完全没有直接测试**（只有 recorder 间接覆盖），而它
+现在有个决定 id 的必填参数 —— 补了 4 条：前缀进 id、market 必填（缺参数抛
+TypeError）、非法 market 抛 ValueError、同市场同输入仍同 id（幂等没被破坏）。
+
+#### 门禁
+
+- 7 条全绿（mypy 4 条仍是 cntl Windows-only 基线）

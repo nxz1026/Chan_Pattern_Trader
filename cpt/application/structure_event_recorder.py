@@ -26,6 +26,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from cpt.domain.models import Bi, Fractal, StructureEvent, TrendType, ZhongShu
+from cpt.domain.structure_events import MarketKey
 
 _LOG = logging.getLogger(__name__)
 
@@ -57,6 +58,7 @@ def _connection(conn: Any | None) -> Iterator[Any]:
 
 def record_structure_events(
     *,
+    market: MarketKey,
     fractals: Sequence[Fractal] = (),
     bis: Sequence[Bi] = (),
     zhongshus: Sequence[ZhongShu] = (),
@@ -65,6 +67,8 @@ def record_structure_events(
 ) -> tuple[StructureEvent, ...]:
     """diff 出本轮结构变化 → append 到事件流 → 返回事件。
 
+    :param market: 写进 ``structure_id`` 的市场前缀（``cn`` / ``crypto``）。**必填**：
+        不带市场前缀的 id 会让两个市场在同 level 上撞同一 ``start_time`` 时静默合并。
     :param conn: 复用的连接；``None`` 表示自己开一条（加密路径）。
     :returns: 本轮产生的事件；无变化 / 计算失败时返回空元组。
 
@@ -89,7 +93,11 @@ def record_structure_events(
 
     try:
         states = states_from_structures(
-            fractals=fractals, bis=bis, zhongshus=zhongshus, trend_types=trend_types
+            market=market,
+            fractals=fractals,
+            bis=bis,
+            zhongshus=zhongshus,
+            trend_types=trend_types,
         )
         if not states:
             return ()

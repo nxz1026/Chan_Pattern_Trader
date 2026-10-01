@@ -99,7 +99,9 @@ class NoTable(FakeConn):
 def test_records_created_events_and_commits() -> None:
     """首次跑 → 全部 created，且**必须 commit**（store 层不提交）。"""
     conn = FakeConn()
-    events = rec.record_structure_events(fractals=[_fractal()], bis=[_bi()], conn=conn)
+    events = rec.record_structure_events(
+        market="crypto", fractals=[_fractal()], bis=[_bi()], conn=conn
+    )
     assert len(events) > 0
     assert {e.event_type for e in events} == {"created"}
     assert conn.commits == 1, "没 commit = 这次写入会被 close() 回滚（R23/R25 栽过两次）"
@@ -112,7 +114,7 @@ def test_second_run_with_no_change_writes_nothing() -> None:
     查到完全一致的历史行。
     """
     seed = FakeConn()
-    first = rec.record_structure_events(bis=[_bi()], conn=seed)
+    first = rec.record_structure_events(market="crypto", bis=[_bi()], conn=seed)
     assert first
     rows = [
         (
@@ -149,7 +151,7 @@ def test_second_run_with_no_change_writes_nothing() -> None:
 
     conn = SeededConn()
     conn._rows = rows  # noqa: SLF001
-    again = rec.record_structure_events(bis=[_bi()], conn=conn)
+    again = rec.record_structure_events(market="crypto", bis=[_bi()], conn=conn)
     assert again == (), "结构没变却产生了事件"
     assert conn.commits == 0, "无变化时不该 commit"
     assert not any("INSERT" in q for q in conn.queries)
@@ -162,7 +164,7 @@ def test_second_run_with_no_change_writes_nothing() -> None:
 
 def test_no_structures_is_noop() -> None:
     conn = FakeConn()
-    assert rec.record_structure_events(conn=conn) == ()
+    assert rec.record_structure_events(market="crypto", conn=conn) == ()
     assert conn.queries == [] and conn.commits == 0
 
 
@@ -173,7 +175,7 @@ def test_db_failure_never_raises() -> None:
         def cursor(self) -> Any:
             raise RuntimeError("db down")
 
-    assert rec.record_structure_events(bis=[_bi()], conn=Broken()) == ()
+    assert rec.record_structure_events(market="crypto", bis=[_bi()], conn=Broken()) == ()
 
 
 def test_insert_failure_still_returns_events() -> None:
@@ -183,7 +185,7 @@ def test_insert_failure_still_returns_events() -> None:
     与「能不能落库」是两件事。DB 故障不该把一个真实的数据字段清空。
     代价是这批事件**没进事件流**，跨重启追溯里查不到。
     """
-    events = rec.record_structure_events(bis=[_bi()], conn=NoTable())
+    events = rec.record_structure_events(market="crypto", bis=[_bi()], conn=NoTable())
     assert events, "写库失败不该吞掉已经算出来的事件"
     assert {e.event_type for e in events} == {"created"}
 
@@ -193,7 +195,7 @@ def test_commit_failure_never_raises() -> None:
         def commit(self) -> None:
             raise RuntimeError("commit failed")
 
-    assert rec.record_structure_events(bis=[_bi()], conn=BadCommit()) == ()
+    assert rec.record_structure_events(market="crypto", bis=[_bi()], conn=BadCommit()) == ()
 
 
 # --------------------------------------------------------------------------- #
@@ -213,7 +215,7 @@ def test_passes_connection_through(monkeypatch: pytest.MonkeyPatch) -> None:
         yield conn
 
     monkeypatch.setattr(rec, "_connection", _spy)
-    rec.record_structure_events(bis=[_bi()], conn=conn)
+    rec.record_structure_events(market="crypto", bis=[_bi()], conn=conn)
     assert conn.commits == 1
     assert opened == [], "给了 conn 就不该走自开分支"
 
@@ -227,6 +229,6 @@ def test_opens_own_connection_when_none(monkeypatch: pytest.MonkeyPatch) -> None
         yield conn
 
     monkeypatch.setattr(rec, "_connection", _self_open)
-    events = rec.record_structure_events(bis=[_bi()], conn=None)
+    events = rec.record_structure_events(market="crypto", bis=[_bi()], conn=None)
     assert events
     assert conn.commits == 1
