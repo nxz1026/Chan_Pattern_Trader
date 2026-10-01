@@ -1,10 +1,13 @@
-"""``cpt.web.a_share`` 测试 — 注入 mock client，不依赖 psycopg。"""
+"""``cpt.web.a_share`` 测试 — 注入 mock client，不依赖 psycopg，**也不发外网请求**。"""
 
 from __future__ import annotations
 
+import json as _json
+import urllib.request
 from datetime import UTC, datetime
 from typing import Any
 
+import pytest
 from cpt.application.a_share_snapshot import (
     DEFAULT_WIDTH_K,
     build_ashare_snapshot,
@@ -63,6 +66,71 @@ def _bars_for(code: str, *, n: int, start_price: float = 10.0) -> list[Any]:
     return bars
 
 
+#: 钉死的东财响应：价格 100.00 元。字段口径见
+#: ``a_share_snapshot._attach_dual_compare``（f43 现价 / f60 昨收，单位分）。
+_EASTMONEY_OK = _json.dumps(
+    {
+        "data": {
+            "f43": 10000,
+            "f44": 10500,
+            "f45": 9500,
+            "f46": 9800,
+            "f47": "1000000",
+            "f48": "100000000",
+            "f60": 9900,
+            "f170": 100,
+            "f57": "600519",
+            "f58": "贵州茅台",
+        }
+    }
+).encode()
+
+
+class _FakeResponse:
+    """``urlopen`` 返回值的 duck type（只需 read + 上下文管理器）。"""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def read(self) -> bytes:
+        return self._payload
+
+    def __enter__(self) -> _FakeResponse:
+        return self
+
+    def __exit__(self, *_: object) -> bool:
+        return False
+
+
+@pytest.fixture(autouse=True)
+def _stub_eastmoney_realtime(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把东财实时行情钉成固定响应，让本模块**完全不发外网请求**。
+
+    为什么必须 stub：``cpt.application.a_share_snapshot._attach_dual_compare``
+    在**每次** ``build_ashare_snapshot`` 里都直连
+    ``https://push2.eastmoney.com/api/qt/stock/get``（5s 超时、URL 带毫秒级
+    cache-buster、结果里嵌**实时价**）。而
+    ``test_provider_caches_snapshot_within_ttl`` 连调两次并断言两次快照相等
+    ——只要这两次里东财的可达性不一致（GitHub runner 上超时/限流很常见），
+    断言就炸成::
+
+        {'dual_compare': {'available': True,  'realtime_price': 1258.62, ...}}
+        !=
+        {'dual_compare': {'available': False, 'reason': 'realtime_unavailable'}}
+
+    这条测试的名字虽然带 ``caches``，但它**并没有测任何 TTL 或缓存**：它用
+    假 DB client 调两次 ``build_ashare_snapshot`` 比相等，而那条**没被缓存的
+    外网调用**每次都重打一次。
+
+    已在 commit ``f2932e6``（R23 之前）上用「第 2 次调用起失败」的注入复现过
+    同形状失败，确认是**既有 flaky**、不是某次改动引入的。
+    ``tests/test_ashare_snapshot_extras.py`` 里 ``_attach_dual_compare`` 的四个
+    用例本来就各自 patch 了 urlopen（含网络失败与空响应两个降级分支），
+    这里只是把同一处置补到「经 ``build_ashare_snapshot`` 间接调用」的路径上。
+    """
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeResponse(_EASTMONEY_OK))
+
+
 def test_build_ashare_snapshot_returns_v2_schema():
     fake = _FakeClient(_bars_for("600519", n=40))
     snap = build_ashare_snapshot("600519", client=fake)
@@ -112,6 +180,22 @@ def test_provider_caches_snapshot_within_ttl():
     s1 = {**snap1, "runtime": {k: v for k, v in snap1["runtime"].items() if k != "as_of_ms"}}
     s2 = {**snap2, "runtime": {k: v for k, v in snap2["runtime"].items() if k != "as_of_ms"}}
     assert s1 == s2
+
+
+def test_dual_compare_uses_stubbed_realtime_not_live_network():
+    """守卫：确认 ``_stub_eastmoney_realtime`` 真的在生效。
+
+    没有这条，某天有人删掉那个 autouse fixture，flaky 会**静默**回来：
+    ``test_provider_caches_snapshot_within_ttl`` 又开始依赖东财的实时可达性，
+    而它自己不会给出任何提示。这里把「实时价被钉成固定值」变成显式断言。
+
+    顺带也是本模块不发外网请求的证据：``realtime_price`` 恰好等于 fixture 里
+    写的 100.0，而不是任何真实行情。
+    """
+    snap = build_ashare_snapshot("600519", client=_FakeClient(_bars_for("600519", n=5)))
+    dc = snap["dual_compare"]
+    assert dc["available"] is True
+    assert dc["realtime_price"] == 100.0
 
 
 def test_provider_default_width_k_matches_plan():
