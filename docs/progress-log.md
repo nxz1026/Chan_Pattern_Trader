@@ -2557,3 +2557,53 @@ snapshot.events    长度 21     ← 此前恒为 []
 2. **`a_share_snapshot.py` 仍缺 `conn.rollback()`**（49/51 skip 的根因，R24 起挂账）。
 3. 审计 **M3（canvas iframe 信任边界）** 仍开放。
 4. R25 其余遗留：前端未接 LLM、结构化 LLM 用例需先做防御式解析、429 退避未经真机验证。
+5. **`structure_id` 没有市场命名空间**（见下节实测）。目前两个市场实测交集为 0，
+   但表里不存 market，一旦两边在同 level 上撞上 `start_time` 就会**静默合并**。
+   修法是 id 前缀市场（`cn:` / `crypto:`），属破坏性变更，未在 R26 做。
+
+### 十三、加密侧上线复验（2026-10-01 晚）
+
+`a9987a1` 部署到 oracle 后的实测记录。
+
+**接线真的通了**：重启前 `cpt_structure_event` = 242 行 → 第一轮 realtime 轮询后
+725 行（**+483**），kind 分布 bi 370 / fractal 317 / zhongshu 31 / trend_type 7。
+结构数对得上：线上 `summary.structure_counts` = fractals 230 / bis 229 /
+zhongshus 19 / trend_types 7 = **485 个结构**，与 483 条新增事件同量级（差额来自
+K 线窗口在两次测量之间漂移）。
+
+**幂等成立**：再等一轮轮询，725 → **725**，没有重复计数。
+
+**一次假警报，以及它教会我的事**
+
+部署脚本第 5 步查「`snapshot.events` 长度」，读到 **0**，一度以为是接线断了。
+逐层查下来不是：`app.py` 每请求重调 `provider.snapshot_payload()`，不是启动时的陈旧
+闭包；`dashboard.py:220` 也确实 `[asdict(e) for e in events]`。真正的原因是
+**稳态空批次** —— recorder 每轮都 diff，而同一根 K 线上的结构大多不变，于是
+第二轮起 `record_structure_events` 合法地返回 `()`。
+
+决定性证据（同进程、同 K 线重跑）：
+
+| 判据 | 结果 | 说明 |
+|---|---|---|
+| `diff_states({}, states)` | **485** 个事件 | diff 逻辑没坏，数据源有东西 |
+| `record_structure_events(...)` | **0** 个事件 | 与库同步 ⇒ 稳态无变化 |
+
+所以 `snapshot.events` 的语义是「**本轮**算出了什么变化」，不是「历史上发生过什么」。
+空是对的。这条口径 A 股侧同样成立，R26 之前之所以「恒为 `[]`」是因为压根没有
+生产者。现在有了生产者，它在稳态下依然多为空 —— 这两件事不能混为一谈。
+
+**跨市场撞车：查了，没撞**
+
+算术上有个说不通的地方：485 个加密 id 全部命中库，却只新增 483 行。两个市场
+共用 `f"{kind}:{level}:{start_time}"` 当 id，而表里不存 market，所以必须验证。
+直接求交集：**A 股 101 个 id ∩ 加密 485 个 id = 0 个**。差额是 K 线窗口漂移，
+不是串味。
+
+但这暴露一个**潜在**隐患：id 里没有市场命名空间。撞不撞取决于两个市场是否在同一
+level 上出现相同的 `start_time` —— 目前 A 股 122 根日线、加密 600 根小时线，
+时间轴对不上，所以碰不到。这属于运气，不是设计。要根治得给 id 加市场前缀
+（破坏性变更：历史 670 行 id 全变），留到 R27 决策。
+
+**其余回归**：6 个接口全 200；`cpt_signal_event` 6 / `cpt_dashboard_run` 10 /
+`cpt_structure_event` 725；新启动周期内 ERROR / Traceback 为空；10 分钟内
+「结构事件记录失败」告警 **0** 条（recorder 的 best-effort 分支一次都没走到）。
