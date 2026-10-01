@@ -459,12 +459,118 @@ def test_app_run_index_rows_prefers_table() -> None:
 
 
 def test_app_run_index_rows_falls_back_to_ring() -> None:
-    """表不可用时退化成 R20 行为（只显示本进程历史），而不是 500。"""
+    """表**完全不可用**时退化成 R20 行为（只显示本进程历史），而不是 500。"""
     from cpt.web import app
 
     record_run(_snapshot(run_id="ring-run"), on_recorded=lambda row, body: None)
     rows = app._run_index_rows(50, conn=BrokenConn())
     assert [r["run_id"] for r in rows] == ["ring-run"]
+
+
+def test_app_run_index_rows_falls_back_when_table_is_empty() -> None:
+    """**本次修的缺口**：表能查但 0 行时也必须回落 ring。
+
+    双写是 best-effort（``_persist_run`` 吞异常），所以「表建好了、连得上、
+    但一行都没写进去」是完全可能的（权限、连接被拒、迁移没跑）。
+    那种情况下纯读表会显示**空列表** —— 比 R20 还差，R20 至少显示 ring。
+    """
+    from cpt.web import app
+
+    record_run(_snapshot(run_id="ring-only"), on_recorded=lambda row, body: None)
+    conn = FakeConn()  # 健康的假库，但一行都没有
+    rows = app._run_index_rows(50, conn=conn)
+    assert [r["run_id"] for r in rows] == ["ring-only"]
+
+
+def test_app_run_index_rows_merges_table_and_ring_without_duplicates() -> None:
+    """**部分写失败**这一档：表里有旧 run、ring 里有新 run，两个都要看见。
+
+    这是合并策略存在的理由——「表优先 → ring 兜底」的二选一在这里会丢掉
+    ring 里那几条最新的。
+    """
+    from cpt.web import app
+
+    conn = FakeConn()
+    upsert_run(conn, _row(run_id="old-in-db", generated_at=1_000), {"v": 1})
+    record_run(_snapshot(run_id="new-in-ring"), on_recorded=lambda row, body: None)
+
+    rows = app._run_index_rows(50, conn=conn)
+    ids = [r["run_id"] for r in rows]
+    assert set(ids) == {"old-in-db", "new-in-ring"}
+    # ring 那条更新，排前面
+    assert ids[0] == "new-in-ring"
+
+
+def test_app_run_index_rows_dedups_same_run_in_both_sources() -> None:
+    """同一个 run 两边都有时**只出现一次**，且用表里那份（多带 body_recorded）。"""
+    from cpt.web import app
+
+    conn = FakeConn()
+    record_run(_snapshot(run_id="shared"), on_recorded=lambda row, body: None)
+    upsert_run(conn, _row(run_id="shared", generated_at=1_700_000_000_000), {"v": 1})
+
+    rows = app._run_index_rows(50, conn=conn)
+    assert [r["run_id"] for r in rows] == ["shared"]
+    assert rows[0]["body_recorded"] is True  # 表侧独有的字段
+
+
+def test_app_run_index_rows_sorts_mixed_and_dirty_timestamps() -> None:
+    """表侧 int 毫秒、ring 侧 float/None 混在一起也不能把整页打成 500。"""
+    from cpt.web import app
+
+    class MixedCursor(FakeCursor):
+        def execute(self, sql: str, params: tuple = ()) -> None:
+            self.executed.append((sql, params))
+            self._result = [
+                # generated_at 分别是 datetime / None / ISO 串 / 脏值
+                (
+                    "from-table-int",
+                    "ds",
+                    datetime(2026, 9, 30, tzinfo=UTC),
+                    True,
+                    "X",
+                    "1",
+                    "1",
+                    "c",
+                    "s",
+                    "ok",
+                ),
+                ("from-table-none", "ds", None, True, "X", "1", "1", "c", "s", "ok"),
+                (
+                    "from-table-iso",
+                    "ds",
+                    "2026-09-29T00:00:00+00:00",
+                    True,
+                    "X",
+                    "1",
+                    "1",
+                    "c",
+                    "s",
+                    "ok",
+                ),
+            ]
+
+    conn = FakeConn()
+    conn.cursor = lambda: MixedCursor(conn=conn)  # type: ignore[method-assign]
+
+    rows = app._run_index_rows(50, conn=conn)
+    # 只有 datetime 那条被 _row_to_run_index 转成了 int 毫秒，排在最前；
+    # None 与 ISO 串都 float() 失败 → -inf 沉底（稳定排序保留相对次序）。
+    assert rows[0]["run_id"] == "from-table-int"
+    assert {r["run_id"] for r in rows[1:]} == {"from-table-none", "from-table-iso"}
+    assert len(rows) == 3
+
+
+def test_app_run_sort_key_tolerates_dirty_values() -> None:
+    from cpt.web import app
+
+    assert app._run_sort_key({"generated_at": 5}) == 5.0
+    assert app._run_sort_key({"generated_at": 5.5}) == 5.5
+    assert app._run_sort_key({}) == float("-inf")
+    assert app._run_sort_key({"generated_at": None}) == float("-inf")
+    assert app._run_sort_key({"generated_at": "not-a-number"}) == float("-inf")
+    # bool 是 int 的子类，不当数字用（否则 True 会排到最前）
+    assert app._run_sort_key({"generated_at": True}) == float("-inf")
 
 
 def test_app_persist_run_commits(monkeypatch: pytest.MonkeyPatch) -> None:

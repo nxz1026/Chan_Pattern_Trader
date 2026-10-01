@@ -21,12 +21,25 @@ R17-3 的按需补因子会在本地因子缺失时**联网拉腾讯并写生产
 
 **不改各测试的既有假设**：仍然绑 ``127.0.0.1``、仍然 ``port=0``（由内核分配，
 避免固定端口冲突）、``join`` 超时仍是 2s。
+
+## ``stub_eastmoney``：按文件 opt-in 的东财外网 stub
+
+``_attach_dual_compare`` 在**每次** ``build_ashare_snapshot`` 里都直连
+``push2.eastmoney.com`` 并把**实时价**写进快照，所以「断言两次快照相等」的用例会
+随机红（实测在 CI 上红过，已在修复前的 commit 上复现过同形状失败）。
+``stub_eastmoney`` 把这个响应钉成固定值。
+
+与上面那条 autouse 不同，它**故意不做成 autouse** —— ``served()`` 起的真 server
+要靠 ``urllib.request.urlopen`` 打 ``127.0.0.1``，全局替换会把那些真调用一起打死。
+需要它的文件自己声明 ``pytestmark = pytest.mark.usefixtures("stub_eastmoney")``。
 """
 
 from __future__ import annotations
 
+import json
 import shutil
 import threading
+import urllib.request
 from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
@@ -99,6 +112,78 @@ def chromium_path() -> str | None:
 def _disable_ondemand_factor_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
     """整个测试会话禁止按需补因子：不联网、不写库。"""
     monkeypatch.setenv(_ONDEMAND_ENV, "0")
+
+
+#: 钉死的东财响应：现价 100.00 元。字段口径见
+#: ``cpt.application.a_share_snapshot._attach_dual_compare``（f43 现价 / f60 昨收，单位分）。
+_EASTMONEY_OK: bytes = json.dumps(
+    {
+        "data": {
+            "f43": 10000,
+            "f44": 10500,
+            "f45": 9500,
+            "f46": 9800,
+            "f47": "1000000",
+            "f48": "100000000",
+            "f60": 9900,
+            "f170": 100,
+            "f57": "600519",
+            "f58": "贵州茅台",
+        }
+    }
+).encode()
+
+
+class _FakeHttpResponse:
+    """``urlopen`` 返回值的 duck type（只需 ``read`` + 上下文管理器）。"""
+
+    def __init__(self, payload: bytes) -> None:
+        self._payload = payload
+
+    def read(self) -> bytes:
+        return self._payload
+
+    def __enter__(self) -> _FakeHttpResponse:
+        return self
+
+    def __exit__(self, *_: object) -> bool:
+        return False
+
+
+@pytest.fixture
+def stub_eastmoney(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把东财实时行情钉成固定响应，让用例**不发外网请求**。
+
+    ## 为什么需要
+
+    ``cpt.application.a_share_snapshot._attach_dual_compare`` 在**每次**
+    ``build_ashare_snapshot`` 里都直连
+    ``https://push2.eastmoney.com/api/qt/stock/get``（5s 超时、URL 带毫秒级
+    cache-buster、结果里嵌**实时价**），而它是快照路径里**唯一**的外网调用。
+    于是任何调 ``build_ashare_snapshot`` 的用例都在打真实外网。
+
+    代价有两层：一是套件变慢且受外网抖动影响；二是**断言两次快照相等**的用例会
+    随机红 —— 两次调用里只要东财可达性不一致就炸。实测在 CI 上就是这样红的::
+
+        {'dual_compare': {'available': True,  'realtime_price': 1258.62, ...}}
+        !=
+        {'dual_compare': {'available': False, 'reason': 'realtime_unavailable'}}
+
+    该 flaky 已在 commit ``f2932e6``（修复之前）上用「第 2 次 urlopen 调用起失败」
+    的注入复现过同形状失败，确认是既有问题、不是某次改动引入的。
+
+    ## 为什么是 opt-in 而不是 autouse
+
+    **不能全局 autouse**：``served()`` 起的是真 HTTP server，用例靠
+    ``urllib.request.urlopen`` 打 ``127.0.0.1``，全局替换会把那些真调用一起打死。
+    所以由各测试文件用 ``pytestmark = pytest.mark.usefixtures("stub_eastmoney")``
+    显式声明 —— 需要哪个文件就开哪个。
+
+    用法::
+
+        pytestmark = pytest.mark.usefixtures("stub_eastmoney")
+    """
+    monkeypatch.setattr(urllib.request, "urlopen", lambda *a, **k: _FakeHttpResponse(_EASTMONEY_OK))
 
 
 @contextmanager

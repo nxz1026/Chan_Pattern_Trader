@@ -160,12 +160,42 @@ def _index_row_from_body(run_id: str, body: dict[str, Any] | None) -> dict[str, 
     return row
 
 
-def _run_index_rows(limit: int = _RUN_INDEX_LIMIT, conn: Any = None) -> list[dict[str, Any]]:
-    """``/api/dashboard/runs`` 的数据源：**表优先 → ring 兜底**。
+def _run_sort_key(row: dict[str, Any]) -> float:
+    """运行索引的排序键：``generated_at`` 降序，缺失/脏值沉底。
 
-    表优先才能看到重启前的历史（这正是 R23 的目的）。表不可用时回落 ring，
-    此时面板退化成 R20 的行为——只显示本进程的历史，而不是 500。
+    表侧出的是 int 毫秒（``_row_to_run_index`` 统一转过），ring 侧是
+    ``build_run_index`` 透传的原始值，可能是 float、ISO 串甚至 ``None``。
+    混在一起直接比较会 ``TypeError`` 把整页打成 500，所以这里**全部降成
+    float**，转不动的给 ``-inf`` 沉到最后。
     """
+    value = row.get("generated_at")
+    if isinstance(value, bool) or value is None:
+        return float("-inf")
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return float("-inf")
+
+
+def _run_index_rows(limit: int = _RUN_INDEX_LIMIT, conn: Any = None) -> list[dict[str, Any]]:
+    """``/api/dashboard/runs`` 的数据源：**表 + ring 合并**，按 ``run_id`` 去重。
+
+    为什么不是「表优先 → ring 兜底」那种二选一：二选一在**部分写失败**时会
+    丢数据。双写是 best-effort 的（``_persist_run`` 吞异常），所以完全可能出
+    现「表里有昨天重启前写的 3 行，本进程这轮新写的 5 行因为权限/连接问题
+    一行没进去」—— 此时纯读表会**看不见最新的 5 行**，比 R20 还差。
+
+    合并规则：
+
+    1. **表优先**：同一个 ``run_id`` 两边都有时用表里那份（它是已提交的
+       持久态，还多带一个 ``body_recorded``）。
+    2. **ring 补缺**：只把表里没有的 ``run_id`` 加进来。
+    3. 合并后按 ``generated_at`` 降序，截 ``limit``。
+
+    表**完全不可用**（连不上/表不存在）时退化成纯 ring —— 即 R20 行为。
+    """
+    rows: list[dict[str, Any]] = []
+    seen: set[str] = set()
     try:
         # 别名导入：裸 ``recent_runs`` 会遮蔽模块级那个（in-process ring 版），
         # 兜底分支就会把 ring 的 limit 参数当 conn 传进去。
@@ -174,10 +204,21 @@ def _run_index_rows(limit: int = _RUN_INDEX_LIMIT, conn: Any = None) -> list[dic
         )
 
         with _run_store_conn(conn) as opened:
-            return [dict(row) for row in store_recent_runs(opened, limit)]
+            for row in store_recent_runs(opened, limit):
+                rows.append(dict(row))
+                if row.get("run_id"):
+                    seen.add(str(row["run_id"]))
     except Exception as exc:  # noqa: BLE001
-        _LOG.warning("运行索引表不可用，回落 in-process ring: %s", exc)
-        return [dict(row) for row in recent_runs(limit)]
+        _LOG.warning("运行索引表不可用，退化为 in-process ring: %s", exc)
+
+    for row in recent_runs(limit):
+        run_id = str(row.get("run_id") or "")
+        if run_id and run_id in seen:
+            continue
+        rows.append(dict(row))
+
+    rows.sort(key=_run_sort_key, reverse=True)
+    return rows[:limit]
 
 
 def _with_run_index(payload: dict[str, Any]) -> dict[str, Any]:

@@ -23,6 +23,10 @@ from cpt.domain.models import Bi, ZhongShu
 
 from tests.test_web_a_share import _FakeClient, _make_canonical, _zigzag_bars
 
+#: ``build_ashare_snapshot`` 内部每次都会直连东财拿实时价（见 conftest 说明）。
+#: 本文件的入口纪律用例要从生产构造函数进，所以必须钉死外网。
+pytestmark = pytest.mark.usefixtures("stub_eastmoney")
+
 _VALID_STATUS = {"structure_ready", "alert", "candidate", "confirmed", "invalidated"}
 
 
