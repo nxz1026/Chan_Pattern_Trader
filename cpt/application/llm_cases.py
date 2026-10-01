@@ -30,7 +30,6 @@ from cpt.storage.llm_call_store import (
     STATUS_OK,
     call_row,
     enqueue_call,
-    finish_call,
     mark_interrupted,
     recent_calls,
     request_hash,
@@ -46,6 +45,27 @@ __all__ = [
 ]
 
 
+def _write(conn: Any, fn: Any, *args: Any, **kwargs: Any) -> Any:
+    """跑一个 store 写操作**并 commit**。
+
+    **为什么需要这个包装器**：``cpt/storage/*`` 一律**不 commit**（事务边界归调用方，
+    与 R21 ``signal_event_store`` 同一约定）。好处是多个写入能共享一个事务；
+    代价是**每个调用点都必须自己 commit**，漏了就是静默回滚。
+
+    R23 漏过一次（``_persist_run`` 少一行 ``conn.commit()``，HTTP 全 200、日志零
+    告警、表 0 行）；**R25 又漏了一次** —— 第一次是 ``explain_structure`` 没提交
+    入队行，第二次是 ``on_llm_status`` 没提交状态更新。两次都是「函数返回了、
+    数据却不在」。
+
+    所以这里把 commit 收进包装器：application 层**只调 ``_write``**，不给「忘记
+    提交」留位置。``tests/test_llm_layer.py::test_app_layer_always_commits``
+    钉住它。
+    """
+    result = fn(conn, *args, **kwargs)
+    conn.commit()
+    return result
+
+
 def on_llm_status(call_id: str, status: str, detail: str, result: LLMResult | None = None) -> None:
     """``LLMQueue`` 的状态回调 —— worker 线程调它，落库在这里。
 
@@ -59,7 +79,7 @@ def on_llm_status(call_id: str, status: str, detail: str, result: LLMResult | No
 
     client = AShareLocalClient()
     try:
-        finish_call(
+        _write(
             client._get_conn(),  # noqa: SLF001
             call_id,
             status=status,
@@ -81,7 +101,7 @@ def _bootstrap() -> Any:
 
     client = AShareLocalClient()
     try:
-        marked = mark_interrupted(client._get_conn())  # noqa: SLF001
+        marked = _write(client._get_conn(), mark_interrupted)  # noqa: SLF001
         if marked:
             _LOG.info("已把 %s 条中断的 LLM 调用标记为 interrupted", marked)
     except Exception as exc:  # noqa: BLE001 — 表可能还没建，不该挡住启动
@@ -120,7 +140,7 @@ def explain_structure(
         subject_id=subject_id,
         request_hash_value=digest,
     )
-    if not enqueue_call(conn, row):
+    if not _write(conn, enqueue_call, row):
         return {
             "available": False,
             "call_id": row["call_id"],
@@ -130,7 +150,7 @@ def explain_structure(
 
     queue = _bootstrap()
     if queue is None:
-        finish_call(
+        _write(
             conn,
             row["call_id"],
             status="error",
@@ -149,7 +169,7 @@ def explain_structure(
         Job(request=request, call_id=row["call_id"], metadata={"digest": digest})
     )
     if not submitted.accepted:
-        finish_call(
+        _write(
             conn,
             row["call_id"],
             status="error",
@@ -202,7 +222,7 @@ def recover_interrupted() -> int:
 
     client = AShareLocalClient()
     try:
-        return mark_interrupted(client._get_conn())  # noqa: SLF001
+        return int(_write(client._get_conn(), mark_interrupted))  # noqa: SLF001
     except Exception as exc:  # noqa: BLE001
         _LOG.info("跳过 interrupted 标记: %s", exc)
         return 0

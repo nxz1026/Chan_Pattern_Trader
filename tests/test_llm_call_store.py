@@ -228,8 +228,70 @@ def test_mark_interrupted_only_touches_in_flight() -> None:
 
 
 # --------------------------------------------------------------------------- #
-# recent_calls
+# 事务边界：application 层必须 commit
 # --------------------------------------------------------------------------- #
+
+
+class CommitCountingConn(FakeConn):
+    """记录 commit 次数的假连接。"""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.commits = 0
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
+def test_store_never_commits_itself() -> None:
+    """store 层**故意不 commit** —— 多个写入要能共享一个事务。
+
+    所以「有没有提交」的责任全在调用方，这就是下面那条测试存在的意义。
+    """
+    conn = CommitCountingConn()
+    enqueue_call(conn, call_row(purpose="p", subject_id="", request_hash_value="h"))
+    finish_call(conn, "c1", status=STATUS_OK, result_text="x")
+    mark_interrupted(conn)
+    assert conn.commits == 0, "store 层提交了就等于替调用方做了事务决策"
+
+
+def test_app_layer_always_commits() -> None:
+    """**回归守卫（R23 与 R25 各漏过一次的那种 bug）**。
+
+    两次事故长得一模一样：函数正常返回、HTTP 200、日志零告警，**但数据不在** ——
+    因为 ``cpt/storage/*`` 刻意不 commit，而 application 层忘了提交，连接一关
+    就回滚：
+
+    - R23：``app.py::_persist_run`` 少一行 commit → ``cpt_dashboard_run`` 0 行
+    - R25：``llm_cases.explain_structure`` 少一次 → 提交返回 queued 但表里没行；
+      ``llm_cases.on_llm_status`` 又少一次 → 状态更新也回滚
+
+    所以 application 层的每个写调用点都必须经过 ``llm_cases._write``。这里
+    直接对着源码断言「不存在裸的写调用」——比逐个 mock 更有意义，因为它防的是
+    **将来新加的**写调用点。
+    """
+    import inspect
+
+    from cpt.application import llm_cases
+
+    source = inspect.getsource(llm_cases)
+    bare_calls = [
+        name
+        for name in ("enqueue_call(conn", "finish_call(\n", "mark_interrupted(client")
+        if name in source and f"_write(conn, {name.split('(')[0]}" not in source
+    ]
+    assert not bare_calls, f"这些写调用没走 _write（会静默回滚）: {bare_calls}"
+
+    # 并且 _write 本身确实会 commit
+    conn = CommitCountingConn()
+    llm_cases._write(
+        conn,
+        enqueue_call,
+        call_row(  # noqa: SLF001
+            purpose="p", subject_id="", request_hash_value="h"
+        ),
+    )
+    assert conn.commits == 1
 
 
 def test_recent_calls_is_newest_first_and_capped() -> None:
