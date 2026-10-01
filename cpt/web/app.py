@@ -106,6 +106,17 @@ def _persist_run(row: dict[str, Any], body: dict[str, Any] | None) -> None:
 
         with _run_store_conn() as conn:
             upsert_run(conn, row, body)
+            # 事务边界归调用方——与 ``a_share_snapshot.py:352`` 调完
+            # ``record_signal_event`` 紧接着 ``conn.commit()`` 同一套路。
+            #
+            # **这一行漏了会静默丢数据**：``AShareLocalClient`` 走的是裸
+            # ``psycopg.connect()``（无 autocommit），退出 with 时
+            # ``client.close()`` 会把未提交的 INSERT **回滚**。实测踩过：
+            # oracle 上 HTTP 全部 200、journalctl 里一条告警都没有、
+            # ``cpt_dashboard_run`` 却是 0 行——因为 ``upsert_run`` 正常返回、
+            # 不抛异常，异常分支根本没被触发。store 层不 commit 是**故意**的
+            # （与 R21 一致，便于多个写入共享一个事务），所以提交义务在这里。
+            conn.commit()
     except Exception as exc:  # noqa: BLE001 — 旁路记账，绝不允许反噬主流程
         _LOG.warning("运行持久化双写失败（不影响本次响应）: %s", exc)
 

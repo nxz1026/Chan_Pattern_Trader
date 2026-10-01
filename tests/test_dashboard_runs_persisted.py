@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import Any
@@ -466,13 +467,31 @@ def test_app_run_index_rows_falls_back_to_ring() -> None:
     assert [r["run_id"] for r in rows] == ["ring-run"]
 
 
+def test_app_persist_run_commits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**回归守卫**：``_persist_run`` 必须 commit，否则数据被静默回滚。
+
+    这条对应一次真实上线事故：store 层按设计不 commit（事务边界归调用方），
+    而 ``_persist_run`` 最初也漏了 commit。``AShareLocalClient`` 走裸
+    ``psycopg.connect()``（无 autocommit），退出 with 时 ``client.close()``
+    把未提交的 INSERT 回滚——**且不抛任何异常**。现场表现是：HTTP 全 200、
+    journalctl 一条告警都没有、表里 0 行，极难定位。
+
+    所以这里断言的不是「没抛异常」，而是**确实调了 commit**。
+    """
+    from cpt.web import app
+
+    conn = FakeConn()
+    monkeypatch.setattr(app, "_run_store_conn", lambda c=None: _passthrough(conn))
+    app._persist_run(_row(), {"v": 1})
+    assert conn.commits == 1, "没有 commit = 这一行 INSERT 会在 close() 时被回滚"
+    assert conn.rows["run-1"]["snapshot"] == {"v": 1}
+
+
 def test_app_persist_run_swallows_db_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     """**最关键的一条**：DB 挂了绝不能让用户的 HTTP 响应 500。
 
     记账是旁路，失败的真实后果只是「这次运行重启后查不到」——日志里留痕即可。
     """
-    from contextlib import contextmanager
-
     from cpt.web import app
 
     @contextmanager
@@ -482,3 +501,9 @@ def test_app_persist_run_swallows_db_failure(monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(app, "_run_store_conn", lambda conn=None: _down())
     app._persist_run(_row(), {"v": 1})  # 不抛即通过
+
+
+@contextmanager
+def _passthrough(conn: Any) -> Any:
+    """把已有连接直接交出去（不负责关闭），对齐 ``_run_store_conn(conn=...)``。"""
+    yield conn
