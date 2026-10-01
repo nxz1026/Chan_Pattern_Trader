@@ -85,6 +85,28 @@ UPDATE public.cpt_llm_call
 """
 
 
+#: 这些列在库里是 ``timestamptz``，出参统一转 Unix 毫秒。
+#:
+#: 不转的话 ``cpt/web/app.py`` 的 ``_write_json`` 会在 ``json.dumps(datetime)``
+#: 上炸掉，整页回 ``500 payload is not JSON-safe``（真机部署踩过）。口径与
+#: R21 ``signal_event_store`` 一致，前端时间轴也都是毫秒。
+_TIME_COLUMNS = frozenset({"created_at", "finished_at"})
+
+
+def _to_ms(value: Any) -> Any:
+    """``datetime`` → Unix 毫秒；``None`` 与非 datetime 原样返回。"""
+    if isinstance(value, datetime):
+        return int(value.timestamp() * 1000)
+    return value
+
+
+def _row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
+    return {
+        name: _to_ms(value) if name in _TIME_COLUMNS else value
+        for name, value in zip(_COLUMNS, row, strict=False)
+    }
+
+
 def request_hash(purpose: str, system: str, user: str) -> str:
     """提示词规范化后的 sha256。
 
@@ -186,7 +208,7 @@ def find_by_id(conn: Any, call_id: str) -> dict[str, Any] | None:
     except Exception as exc:
         _LOG.warning("读取 LLM 调用记录失败 %s: %s", call_id, exc)
         return None
-    return dict(zip(_COLUMNS, row, strict=False)) if row else None
+    return _row_to_dict(row) if row else None
 
 
 def recent_calls(
@@ -208,7 +230,7 @@ def recent_calls(
     except Exception as exc:
         _LOG.warning("读取 LLM 调用列表失败: %s", exc)
         return ()
-    return tuple(dict(zip(_COLUMNS, row, strict=False)) for row in rows)
+    return tuple(_row_to_dict(row) for row in rows)
 
 
 def mark_interrupted(conn: Any, before: datetime | None = None) -> int:

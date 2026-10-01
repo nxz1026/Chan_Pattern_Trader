@@ -365,6 +365,37 @@ def test_recent_calls_degrades_to_empty() -> None:
     assert recent_calls(Broken(), limit=5) == ()  # type: ignore[arg-type]
 
 
+def test_time_columns_come_back_as_epoch_ms() -> None:
+    """**回归守卫（真机部署抓到的第四个 bug）**。
+
+    PG 的 ``timestamptz`` 直接进 ``json.dumps`` 会炸，路由回
+    ``500 payload is not JSON-safe``。口径与 R21 ``signal_event_store`` 一致：
+    出参统一 Unix 毫秒。
+
+    所以这条断言**真的 json.dumps 一次** —— 只断言「是 int」不够，
+    漏掉别的不可序列化对象照样会 500。
+    """
+    import json
+    from datetime import UTC, datetime
+
+    from cpt.storage.llm_call_store import _COLUMNS
+
+    row = tuple(
+        datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+        if name in ("created_at", "finished_at")
+        else f"v{i}"
+        for i, name in enumerate(_COLUMNS)
+    )
+    conn = FakeConn(rows=[row])
+    calls = recent_calls(conn, limit=5)
+    assert calls, "应该投影出一行"
+    payload = calls[0]
+    assert isinstance(payload["created_at"], int)
+    assert isinstance(payload["finished_at"], int)
+    # 真正序列化一次 —— 这才是当初 500 的地方
+    assert json.dumps(payload, ensure_ascii=False)
+
+
 @pytest.mark.parametrize("limit", [0, -1, 10_000])
 def test_recent_calls_clamps_limit(limit: int) -> None:
     conn = FakeConn()
