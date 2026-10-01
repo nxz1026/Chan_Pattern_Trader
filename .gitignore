@@ -14,6 +14,11 @@ __pycache__/
 *$py.class
 *.so
 .pytest_cache/
+# pytest 的 JUnit 报告是**本地产物**，取权威测试计数时 `--junit-xml` 生成。
+# 名字每次自定（pytest-r27.xml / junit.xml …），按前缀整类挡掉，别指望
+# 逐个补（2026-10-01 实测：没这条规则，`git status` 每次都挂一个测试报告）。
+pytest-*.xml
+junit*.xml
 .mypy_cache/
 .ruff_cache/
 .coverage

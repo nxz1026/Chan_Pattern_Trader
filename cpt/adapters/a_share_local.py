@@ -151,6 +151,7 @@ def check_t_plus_one_calendar(client: Any) -> dict[str, Any]:
     import datetime as _dt
 
     today = _dt.date.today().isoformat()
+    conn: Any = None
     try:
         conn = client._get_conn()
         with conn.cursor() as cur:
@@ -182,6 +183,15 @@ def check_t_plus_one_calendar(client: Any) -> dict[str, Any]:
             }
     except Exception as exc:  # noqa: BLE001
         _LOG.warning("T+1 日历查询失败: %s", exc)
+        # 本函数**自己吞掉**异常并返回降级字典，所以调用方
+        # （a_share_snapshot._attach_t_plus_one）的 except 永远不会触发 ——
+        # 回滚义务只能落在这里。少了这一步，连接会留在 aborted 态，
+        # 同一客户端后续所有 SQL 全废（与 R23 漏 commit 同族的坑）。
+        try:
+            if conn is not None:
+                conn.rollback()
+        except Exception as rb_exc:  # noqa: BLE001 — 回滚失败也不能因此抛出
+            _LOG.debug("T+1 日历查询后回滚失败: %s", rb_exc)
         return {
             "available": False,
             "reason": "calendar_check_failed",

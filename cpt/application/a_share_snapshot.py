@@ -107,6 +107,33 @@ def _active_client_conn(client: Any) -> Any | None:
         return None
 
 
+def _rollback_quietly(client: Any, context: str) -> None:
+    """出错后把连接从 **aborted 态**拉回来，否则同一条连接后续 SQL 全废。
+
+    psycopg 的事务语义：一条语句在事务内报错，整条事务立刻进 aborted 态，
+    此后**任何**语句都抛 ``InFailedSqlTransaction``，直到 rollback/rollback-to-
+    savepoint 解除。而 ``AShareLocalClient`` 全程复用**同一条**连接（``_get_conn``
+    只在首次调用时建连），于是一条 SQL 失败会连锁毒掉后面所有查询 ——
+    实测表现为「一只查失败，后面几十只全部降级/skip」。
+
+    这与 R23 漏 ``commit``、R25 漏 ``commit`` 是同一个「事务边界」家族的坑：
+    提交/回滚义务在**调用方**，store 层一律不碰。这里就是那个调用方。
+
+    全程 best-effort：回滚本身再失败也只记 debug，绝不让降级路径抛出 ——
+    它的存在目的就是**别让异常处理本身制造新异常**。
+
+    :param context: 记进 debug 日志的场景名，便于定位是哪条路径 poisoned 连接。
+    """
+    conn = _active_client_conn(client)
+    rollback = getattr(conn, "rollback", None)
+    if not callable(rollback):
+        return
+    try:
+        rollback()
+    except Exception as exc:  # noqa: BLE001 — 回滚失败无能为力，但不能因此抛出
+        _LOG.debug("回滚失败 %s: %s", context, exc)
+
+
 def build_ashare_snapshot(
     code: str,
     *,
@@ -343,12 +370,20 @@ def _derive_first_buy_signal(
     event_time = int(last_bar.close_time) if last_bar is not None else 0
 
     # 加载上一状态（R21 信号历史持久化）
+    #
+    # 读失败**不能**冒出去：上一状态缺失只意味着「本轮当成首次评估」，
+    # 信号照常产出；而冒出去会让整个快照 500，并且把连接留在 aborted 态
+    # 连累后面所有查询（见 _rollback_quietly）。
     previous: Signal | None = None
     getter = getattr(client, "_get_conn", None)
     conn = getter() if callable(getter) else None
     if conn is not None:
         signal_id = f"first_buy:{level}:{structure_id}"
-        previous = load_previous_signal(conn, signal_id)
+        try:
+            previous = load_previous_signal(conn, signal_id)
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("加载一买历史失败 %s: %s", code, exc)
+            _rollback_quietly(client, f"load_previous:first_buy:{code}")
 
     signal = assess_first_buy(
         level=level,
@@ -377,11 +412,12 @@ def _derive_first_buy_signal(
     # 记录状态跃迁（status 变化时才 append）
     if conn is not None and signal is not None:
         prev_status = previous.status if previous is not None else None
-        record_signal_event(conn, signal, prev_status, code, event_time)
         try:
-            conn.commit()
+            record_signal_event(conn, signal, prev_status, code, event_time)
+            conn.commit()  # ← store 层不 commit，边界在这里
         except Exception as exc:
             _LOG.warning("提交信号事件失败 %s: %s", code, exc)
+            _rollback_quietly(client, f"first_buy:{code}")
 
     return signal
 
@@ -425,7 +461,11 @@ def _derive_first_sell_signal(
     conn = getter() if callable(getter) else None
     if conn is not None:
         signal_id = f"first_sell:{level}:{structure_id}"
-        previous = load_previous_signal(conn, signal_id)
+        try:
+            previous = load_previous_signal(conn, signal_id)
+        except Exception as exc:  # noqa: BLE001 — 同 first_buy：读失败只丢历史，不冒泡
+            _LOG.warning("加载一卖历史失败 %s: %s", code, exc)
+            _rollback_quietly(client, f"load_previous:first_sell:{code}")
 
     signal = assess_first_sell(
         level=level,
@@ -454,11 +494,12 @@ def _derive_first_sell_signal(
     # 记录状态跃迁
     if conn is not None and signal is not None:
         prev_status = previous.status if previous is not None else None
-        record_signal_event(conn, signal, prev_status, code, event_time)
         try:
-            conn.commit()
+            record_signal_event(conn, signal, prev_status, code, event_time)
+            conn.commit()  # ← store 层不 commit，边界在这里
         except Exception as exc:
             _LOG.warning("提交信号事件失败 %s: %s", code, exc)
+            _rollback_quietly(client, f"first_sell:{code}")
 
     return signal
 
@@ -494,6 +535,7 @@ def _apply_daily_tags(
         tags = getter(code, start_ms, end_ms)
     except Exception as exc:  # noqa: BLE001
         _LOG.info("A 股规则标签查询失败 %s: %s", code, exc)
+        _rollback_quietly(client, f"daily_tags:{code}")
         return bis, {**audit, "reason": "tag_fetch_failed"}
     if not tags:
         return bis, {**audit, "available": True, "tagged_bis": 0, "source": _TAG_SOURCE}
@@ -546,6 +588,7 @@ def _attach_close_countdown(snapshot: dict[str, Any], client: Any) -> None:
         }
     except Exception as exc:  # noqa: BLE001
         _LOG.debug("收盘倒计时查询失败 %s: %s", snapshot.get("market", {}).get("symbol"), exc)
+        _rollback_quietly(client, "close_countdown")
         snapshot["close_countdown"] = {
             "available": False,
             "reason": "countdown_check_failed",
@@ -588,6 +631,7 @@ def _attach_signal_change(snapshot: dict[str, Any], client: Any) -> None:
         # 记 warning 而不是 debug：这条失败意味着「信号变化检测」整个失效，
         # 前端会一直显示"没变化"。debug 级在生产 journalctl 里等于不存在。
         _LOG.warning("信号变化检测失败 %s: %s", snapshot.get("market", {}).get("symbol"), exc)
+        _rollback_quietly(client, "signal_change")
         snapshot["summary"]["signal_changed"] = False
         snapshot["summary"]["signal_change_type"] = None
 
@@ -671,6 +715,7 @@ def _attach_t_plus_one(snapshot: dict[str, Any], client: Any) -> None:
         calendar = check_t_plus_one_calendar(client)
     except Exception as exc:  # noqa: BLE001
         _LOG.debug("T+1 日历查询失败 %s: %s", snapshot.get("market", {}).get("symbol"), exc)
+        _rollback_quietly(client, "t_plus_one")
         calendar = {"available": False, "reason": "calendar_check_failed"}
     snapshot["t_plus_one"] = calendar
 
@@ -704,6 +749,7 @@ def _resolve_security_name(client: Any, code: str) -> Any:
         return getter(code)
     except Exception as exc:  # noqa: BLE001
         _LOG.debug("证券名称查询失败 %s: %s", code, exc)
+        _rollback_quietly(client, f"security_name:{code}")
         return None
 
 

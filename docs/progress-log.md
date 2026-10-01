@@ -2607,3 +2607,79 @@ level 上出现相同的 `start_time` —— 目前 A 股 122 根日线、加密
 **其余回归**：6 个接口全 200；`cpt_signal_event` 6 / `cpt_dashboard_run` 10 /
 `cpt_structure_event` 725；新启动周期内 ERROR / Traceback 为空；10 分钟内
 「结构事件记录失败」告警 **0** 条（recorder 的 best-effort 分支一次都没走到）。
+
+---
+
+## R27 · 事务边界收口 + R26 收尾 · 2026-10-01
+
+R23/R25 各栽过一次「store 层不 commit、边界归调用方」，R24 起重核又发现第三处：
+_share_snapshot.py 的**所有 except 分支都没有 rollback**。本轮把它补上。
+
+### 一、缺陷确认（R24 挂账项，不是新发现）
+
+AShareLocalClient 全程复用**同一条**连接（_get_conn 只在首次调用时建连），
+而 psycopg 的语义是：一条语句在事务内报错 → 整条事务进 **aborted** 态 → 此后
+**任何**语句都抛 InFailedSqlTransaction，直到 rollback 解除。
+
+于是一条 SQL 失败会**连锁毒掉后面所有查询**。这与 R23 漏 commit 是同一个
+「事务边界」家族的坑 —— 方向相反（那次是写进去不提交，这次是写崩了不撤销），
+后果同构：**后续全废**。
+
+### 二、补了 8 处回滚
+
+新增 _rollback_quietly(client, context)，全程 best-effort（回滚本身再失败也只记
+debug，降级路径绝不允许制造新异常）。挂在这些出错路径上：
+
+| 路径 | 触发条件 |
+|---|---|
+| _apply_daily_tags | 查 derived_bar 失败 |
+| _attach_close_countdown | 查 	rade_calendar 失败 |
+| _attach_signal_change | 读信号最新状态失败 |
+| _attach_t_plus_one | 查日历失败（见下方「修完仍然不够」） |
+| _resolve_security_name | 查证券名失败 |
+| _derive_first_buy_signal | 写信号事件 / commit 失败 |
+| _derive_first_sell_signal | 同上（一卖） |
+| _share_local.check_t_plus_one_calendar | 适配器层，见下 |
+
+**顺带修掉一个更隐蔽的问题**：load_previous_signal 原本是**裸调**。它一抛，
+异常直接冒到路由变成 500，而「上一状态缺失」本该只等于「本轮按首次评估」，
+信号照常产出。现在两处都护住：读失败只丢历史，信号照产。
+
+### 三、修完 8 处仍然不够 —— 真正的坑在下一层
+
+check_t_plus_one_calendar（adapters 层）**自己吞掉了异常**并返回降级字典。
+这意味着调用方 _attach_t_plus_one 的 except **永远不会触发**，挂在调用方的
+回滚等于没挂 —— 第一版修复在这条路径上是完全无效的，而且测试立刻抓到了。
+
+教训写下来：**降级必须发生在真正 xcept 异常的那一层**。中间层提前吞掉异常，
+上层挂什么补救措施都是摆设。回滚最终补在 check_t_plus_one_calendar 的
+except 分支里（conn 提前声明为 None，避免 _get_conn() 自身抛时 unbound）。
+
+对照：is_trade_day 没有自己的 except，异常正常冒泡，所以调用方的回滚有效。
+
+### 四、测试怎么写才算数
+
+这组测试的核心是**假连接如实模拟 psycopg 的 aborted 事务语义**：命中指定 SQL
+关键字 → 置 aborted 并抛错；aborted 态下**任何** SQL 都抛 InFailedSqlTransaction；
+只有 
+ollback() 能解除。
+
+于是判据是**行为**而非调用记录：故意让中间某条 SQL 失败，然后断言**后续查询
+仍能成功**。这样才复现了生产故障形态（一只查失败，后面几十只全部降级）。
+
+裸断言「某函数被调用了 rollback」是同义反复 —— 证明不了任何事。
+
+**红绿对照已验证**：把两处源码改动 git stash 掉后，10 条**全部失败**；
+恢复后 10 条**全部通过**。中间还借这次红把测试自己的两个 bug 揪了出来
+（levels=(5, 30) 我写了 level=0；T+1 那条正因为第三节的发现才红）。
+
+### 五、门禁
+
+- 7 条全绿：ruff check / ruff format / mypy（4 条 cntl Windows-only 基线）
+  / lint-imports 6 kept / vulture 0 findings / SQL 分层（56 文件）/ pytest
+- **pytest 权威计数（--junit-xml）**：698 tests / 13 failures / 0 errors /
+  31 skipped → **654 passed**。比 R26 的 688 正好多 10 条（本次新增），
+  失败数仍是 13 且全在 	est_web_a_share_routes（cntl 基线 +
+  RemoteDisconnected），**本次改动零新增失败**。
+- 本机两个门禁需要 PYTHONUTF8=1 才不噎：check_sql_layering.py（✓ 字符触发
+  GBK UnicodeEncodeError）与 lint-imports（配置文件中文按 GBK 解码失败）。
