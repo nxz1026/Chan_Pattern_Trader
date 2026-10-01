@@ -1,6 +1,12 @@
 # Local reference checkouts are kept on disk but not tracked by CPT.
 /references/czsc/
 /references/wbt/
+# 缠论三方实现：2026-09-24 G1 决议移除（与缠论定义冲突，见 architecture.md §7.3）。
+# 决议只改了文档、没删盘上的副本，这里补上忽略规则并已于 2026-10-01 清理掉
+# 残留的 255 MB；`scripts/fetch_references.sh` 若再次拉取也不会污染 git status。
+/references/chanlun-pro/
+/references/chanlun.py/
+/references/chanlun_pine/
 
 # Python caches and local environments.
 __pycache__/
