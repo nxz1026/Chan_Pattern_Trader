@@ -272,7 +272,30 @@ def test_latest_events_degrades_to_empty() -> None:
             raise RuntimeError("relation does not exist")
 
     assert store.latest_events(Broken(), ["bi:5:1"]) == {}  # type: ignore[arg-type]
-    assert store.timeline(Broken(), "bi:5:1") == ()  # type: ignore[arg-type]
+
+
+def test_timeline_raises_instead_of_lying() -> None:
+    """R27-2 改契约：``timeline`` 从「降级为空」改成「原样抛出」。
+
+    这条断言原本和 ``latest_events`` 捆在一起。改契约的理由是**调用方变了**：
+
+    - ``latest_events`` 的唯一消费者是 ``current_states`` → recorder，而 recorder
+      自带 try/except，降级在那里；
+    - ``timeline`` 的唯一消费者是 ``/api/dashboard/structure-events/timeline``，
+      一个**读接口**。它若降级成空元组，HTTP 层就只能报
+      ``available=true, count=0`` —— 把「DB 挂了」谎报成「没有事件」。前端无法
+      区分这两者，而处置完全不同（前者该重试/告警）。
+
+    降级义务上移到 HTTP 层（回 ``available=false`` + reason），这才是前端能据以
+    决策的形状。见 ``tests/test_structure_event_routes.py``。
+    """
+
+    class Broken:
+        def cursor(self) -> Any:
+            raise RuntimeError("relation does not exist")
+
+    with pytest.raises(RuntimeError, match="relation does not exist"):
+        store.timeline(Broken(), "bi:5:1")  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize("limit", [0, -5, 10_000])

@@ -2683,3 +2683,64 @@ ollback() 能解除。
   RemoteDisconnected），**本次改动零新增失败**。
 - 本机两个门禁需要 PYTHONUTF8=1 才不噎：check_sql_layering.py（✓ 字符触发
   GBK UnicodeEncodeError）与 lint-imports（配置文件中文按 GBK 解码失败）。
+
+### 六、R27-2：结构事件 HTTP 出口（本轮第二项）
+
+R26 把事件流接进了生产表，但**没有任何 HTTP 出口** —— 历史事件只有库里有、
+接口读不到，看板上更看不到。本轮补上。
+
+#### 新增两条路由
+
+- GET /api/dashboard/structure-events?limit=&event_type=&kind= ——
+  最近结构事件，**occurred_at 倒序**（列表页）
+- GET /api/dashboard/structure-events/timeline?structure_id=&limit= ——
+  单结构时间线，**revision 升序**（详情页，storage 层 R26 就绪但一直没接）
+
+store 层补 
+ecent_events(conn, limit, event_type, kind)（	imeline 原本就有）。
+SQL 仍只在 cpt/storage/，SQL 分层门禁照旧通过。
+
+#### 排序键加了个 id，不是随手加的
+
+倒序键用 (occurred_at, id) 而不是裸 occurred_at：同一批结构事件是
+xecutemany 一次写进去的，occurred_at **会并列**。只按它排序时并列行的
+相对顺序是不确定的，翻页可能漏行或重复行。id 是 bigserial 单调，加它就稳了。
+测试里专门造了两条同毫秒的行来钉住这条。
+
+#### kind 过滤不加索引（理由写进 docstring）
+
+kind 走 payload->>'kind'，无索引。**不加**是因为表只在结构真变了才追加一行，
+增长极慢（部署首日 725 行，绝大多数轮次零写入），而加一列就破坏了 R26
+定下的「表不存 kind / 不存 market」口径 —— kind 本来就能现抽。
+真慢了再说，届时加 ((payload->>'kind')) 表达式索引，不需要新增列。
+
+#### 改了 	imeline 的异常契约（本轮最要紧的一处）
+
+原本 	imeline 读库失败**吞掉异常返回空元组**。接上路由后立刻暴露问题：
+HTTP 层拿到空元组，只能报 vailable=true, count=0 —— **把「DB 挂了」谎报成
+「没有事件」**。前端无从区分这两者，而处置完全相反（前者该重试/告警）。
+
+改成**原样抛出**，降级上移到 HTTP 层（回 vailable=false + reason）。
+
+判据一句话：**吞掉异常会改变答案**时就得抛。写侧吞掉只影响「有没有落库」，
+读侧吞掉会让「查不到」变成「没有」。同一个模块里两套策略是刻意的，已写进
+模块 docstring 的对照表，免得后人当手滑改回去。
+
+这**破了既有测试** 	est_latest_events_degrades_to_empty（它把 	imeline
+的降级断言和 latest_events 捆在一起）。那条断言是 R26 写下 	imeline 时
+定的，而那时它**零调用方** —— 契约是凭空定的。现在有了唯一调用方，且调用方
+要求抛，所以拆成两条测试并写明改动理由。改契约这件事不藏。
+
+#### 红绿对照
+
+	est_route_degrades_when_table_missing 与 	est_recent_events_raises_on_db_error
+专门钉上面那条契约：把 
+ecent_events 的 	ry/except 临时加回去，两条立刻红，
+报出的正是「vailable 断言 True is False」这个症状。
+
+#### 门禁
+
+- 7 条全绿（mypy 4 条仍是 cntl Windows-only 基线）
+- **pytest 权威计数（--junit-xml）**：716 tests / 13 failures / 0 errors /
+  31 skipped → **672 passed**。13 条全在 	est_web_a_share_routes
+  （cntl 基线），**零新增失败**。

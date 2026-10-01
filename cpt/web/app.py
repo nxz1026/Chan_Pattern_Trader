@@ -317,6 +317,87 @@ def _signal_stats_payload(days: int, code: str | None) -> dict[str, Any]:
     return payload
 
 
+def _structure_events_payload(
+    *,
+    limit: int,
+    event_type: str | None,
+    kind: str | None,
+) -> dict[str, Any]:
+    """R27：最近结构事件流。**降级不抛**，与 :func:`_signal_stats_payload` 同纪律。
+
+    ``basis`` 刻意自报口径：这批是 ``cpt_structure_event`` 里**发生过的事件**
+    （append-only 累积），不是「当前有多少个结构」。前端若拿它当状态快照用就会
+    得出「结构有 725 个」这种结论 —— 真实含义是「累计发生过 725 次变化」。
+    """
+    payload: dict[str, Any] = {
+        "schema_version": "dashboard_structure_events.v1",
+        "basis": "structure_event_stream",
+        "limit": limit,
+        "event_type": event_type,
+        "kind": kind,
+    }
+    try:
+        # CI 只跑 ``pip install -e .``（不带 [db]），故连接层必须惰性导入。
+        from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+        from cpt.storage.structure_event_store import recent_events  # noqa: PLC0415
+
+        client = AShareLocalClient()
+        try:
+            events = recent_events(
+                client._get_conn(),  # noqa: SLF001
+                limit=limit,
+                event_type=event_type,
+                kind=kind,
+            )
+        finally:
+            client.close()
+    except Exception as exc:  # noqa: BLE001 — 只读旁路，DB 抖动不该让主视图 500
+        _LOG.warning("structure events unavailable: %s", exc)
+        payload["available"] = False
+        payload["reason"] = "structure_event_stream_unavailable"
+        payload["count"] = 0
+        payload["events"] = []
+        return payload
+    payload["available"] = True
+    payload["count"] = len(events)
+    payload["events"] = [dict(event) for event in events]
+    return payload
+
+
+def _structure_timeline_payload(structure_id: str, *, limit: int) -> dict[str, Any]:
+    """R27：单个结构的事件时间线（revision 升序）。**降级不抛**。"""
+    payload: dict[str, Any] = {
+        "schema_version": "dashboard_structure_timeline.v1",
+        "basis": "structure_event_stream",
+        "structure_id": structure_id,
+        "limit": limit,
+    }
+    try:
+        from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+        from cpt.storage.structure_event_store import timeline  # noqa: PLC0415
+
+        client = AShareLocalClient()
+        try:
+            events = timeline(
+                client._get_conn(),  # noqa: SLF001
+                structure_id,
+                limit=limit,
+            )
+        finally:
+            client.close()
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("structure timeline unavailable: %s", exc)
+        payload["available"] = False
+        payload["reason"] = "structure_event_stream_unavailable"
+        payload["count"] = 0
+        payload["events"] = []
+        return payload
+    payload["available"] = True
+    payload["count"] = len(events)
+    payload["events"] = [dict(event) for event in events]
+    return payload
+
+
 def _latest_signal_statuses() -> dict[str, str]:
     """各 code 的最新信号状态；事件流不可用 → 空表（调用方补 ``"none"``）。
 
@@ -816,6 +897,32 @@ def make_handler(
                         "count": 0,
                         "calls": [],
                     }
+            elif path.path == "/api/dashboard/structure-events":
+                # R27：结构事件流列表页（「最近发生了什么」）。与
+                # /signal-stats 同一个降级纪律：只读旁路，DB 抖动不 500。
+                try:
+                    limit = int((query.get("limit") or ["50"])[0])
+                except ValueError:
+                    limit = 50
+                event_type = (query.get("event_type") or [""])[0].strip() or None
+                kind = (query.get("kind") or [""])[0].strip() or None
+                payload = _structure_events_payload(limit=limit, event_type=event_type, kind=kind)
+            elif path.path == "/api/dashboard/structure-events/timeline":
+                # 单结构时间线。缺 structure_id 是**调用错误**不是降级，回 400 ——
+                # 没有 id 只能返回全表，那不是这个路由的语义。
+                structure_id = (query.get("structure_id") or [""])[0].strip()
+                if not structure_id:
+                    self._write_json_error(
+                        HTTPStatus.BAD_REQUEST,
+                        "invalid_structure_id",
+                        "structure_id 必填",
+                    )
+                    return
+                try:
+                    limit = int((query.get("limit") or ["100"])[0])
+                except ValueError:
+                    limit = 100
+                payload = _structure_timeline_payload(structure_id, limit=limit)
             elif path.path == "/api/dashboard/signal-stats":
                 days_raw = (query.get("days") or ["30"])[0]
                 try:
