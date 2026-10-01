@@ -31,6 +31,7 @@ from cpt.storage.llm_call_store import (
     STATUS_OK,
     call_row,
     enqueue_call,
+    finish_call,
     mark_interrupted,
     recent_calls,
     request_hash,
@@ -87,6 +88,7 @@ def on_llm_status(call_id: str, status: str, detail: str, result: LLMResult | No
     try:
         _write(
             client._get_conn(),  # noqa: SLF001
+            finish_call,
             call_id,
             status=status,
             result_text=detail or None,
@@ -158,6 +160,7 @@ def explain_structure(
     if queue is None:
         _write(
             conn,
+            finish_call,
             row["call_id"],
             status="error",
             error_text="llm_unavailable",
@@ -177,6 +180,7 @@ def explain_structure(
     if not submitted.accepted:
         _write(
             conn,
+            finish_call,
             row["call_id"],
             status="error",
             error_text=submitted.reason or "submit_rejected",

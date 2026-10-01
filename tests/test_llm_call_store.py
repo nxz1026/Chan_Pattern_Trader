@@ -313,6 +313,32 @@ def test_app_layer_always_commits() -> None:
     assert conn.commits == 1
 
 
+def test_write_passes_the_store_function_through_as_first_arg() -> None:
+    """**回归守卫（真机部署抓到的第二个 R25 bug）**。
+
+    上一版把 ``finish_call(conn, ...)`` 机械替换成 ``_write(conn, ...)``，**忘了把
+    ``finish_call`` 作为参数加回去** —— 于是 ``_write`` 把 ``call_id``（一个 str）
+    当函数调用，抛 ``'str' object is not callable``。
+
+    现场表现极隐蔽：提交返回 ``queued``（入队那步是对的），但状态永远停在
+    ``queued``，因为 worker 的每一次 ``on_status`` 落库都失败。只有 journalctl
+    里的 ``LLM 状态落库失败 ... 'str' object is not callable`` 能看出问题。
+
+    所以这里**真的调一遍** ``_write`` —— 上一条测试只查「有没有裸调用」，
+    查不出「参数对不对」。
+    """
+    from cpt.application import llm_cases
+
+    conn = CommitCountingConn()
+    llm_cases._write(  # noqa: SLF001
+        conn, finish_call, "c1", status=STATUS_OK, result_text="x"
+    )
+    sql, params = conn.executed[0]
+    assert "UPDATE public.cpt_llm_call" in sql
+    assert params[-1] == "c1"
+    assert conn.commits == 1
+
+
 def test_recent_calls_is_newest_first_and_capped() -> None:
     conn = FakeConn(rows=[("c1",), ("c2",)])
     recent_calls(conn, limit=5)
