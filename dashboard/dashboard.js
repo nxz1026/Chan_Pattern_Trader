@@ -971,9 +971,19 @@
 
   // fetch 结果不在 snapshot 里（C5/C6/C3/C4 是独立路由），存这里供重渲染；
   // 只由 boot() 与手动刷新按钮触发，**不进 30s 轮询**（避免每轮多打几个请求）。
-  const remoteOps = { signalStats: null, watchlist: null, compare: null, multiRun: null, days: "30" };
+  const remoteOps = { signalStats: null, watchlist: null, compare: null, multiRun: null, structureEvents: null, structureTimeline: null, days: "30" };
 
   const SIGNAL_STATS_REASON_LABELS = { signal_history_unavailable: "信号历史不可用" };
+  const STRUCTURE_EVENTS_REASON_LABELS = { structure_event_stream_unavailable: "结构事件流不可用（数据库未就绪）" };
+  const STRUCTURE_KIND_LABELS = { bi: "笔", fractal: "分型", zhongshu: "中枢", trend_type: "走势类型" };
+  const STRUCTURE_EVENT_TYPE_LABELS = {
+    created: "新建",
+    updated: "更新",
+    confirmed: "确认",
+    reclassified: "重分类",
+    invalidated: "失效",
+    closed: "闭合",
+  };
   const WATCHLIST_REASON_LABELS = { pool_unavailable: "上游股票池不可用" };
   const COMPARE_REASON_LABELS = { run_body_unavailable: "运行正文不可用（该 run 未保存数据集）" };
   const MULTI_RUN_REASON_LABELS = { run_body_unavailable: "运行正文不可用（所选 run 未保存数据集）" };
@@ -1267,6 +1277,160 @@
     const { body } = await requestJson(`${DASHBOARD_BASE()}/signal-stats?${params.toString()}`);
     remoteOps.signalStats = isObject(body) ? body : null;
     renderSignalStats(state.snapshot);
+  }
+
+  /* ---------------- R27 结构事件流 ---------------- */
+
+  // 与上面 snapshot.events 是**两个不同的东西**，标题必须分开写：
+  //
+  // - `[data-testid=event-timeline]`（HTML 里的「结构事件」）渲染的是
+  //   `snapshot.events` = **本轮** diff 出来的变化。它接了 replay 的时间轴过滤
+  //   （见 replayPrefix），所以不能改。
+  // - 本函数渲染的是 `cpt_structure_event` 的**累计事件流**，跨重启可比。
+  //
+  // 为什么必须有后者：R26 实测确认 `snapshot.events` 在**稳态下恒为空** ——
+  // 每轮都 diff，而绝大多数轮次结构没变。这不是 bug，是它的口径（「本次算出什么
+  // 变化」）。所以光靠它，时间线面板在绝大多数时候只会显示「暂无事件」，而库里
+  // 其实已经攒了 700+ 条。
+  async function loadStructureEvents() {
+    const params = new URLSearchParams({ limit: "60" });
+    const { body } = await requestJson(`${DASHBOARD_BASE()}/structure-events?${params.toString()}`);
+    remoteOps.structureEvents = isObject(body) ? body : null;
+    renderStructureEvents();
+  }
+
+  async function loadStructureTimeline(structureId) {
+    const params = new URLSearchParams({ structure_id: structureId, limit: "100" });
+    const { body } = await requestJson(
+      `${DASHBOARD_BASE()}/structure-events/timeline?${params.toString()}`,
+    );
+    remoteOps.structureTimeline = isObject(body) ? body : null;
+    renderStructureEvents();
+  }
+
+  function buildStructureEventRows(events) {
+    const list = document.createElement("ol");
+    list.className = "event-timeline";
+    list.dataset.testid = "structure-event-rows";
+    events.forEach((event) => {
+      const item = document.createElement("li");
+      item.dataset.state = String(event.status || "");
+      const payload = isObject(event.payload) ? event.payload : {};
+      const kind = String(payload.kind || "—");
+      const title = document.createElement("strong");
+      title.textContent =
+        `${STRUCTURE_EVENT_TYPE_LABELS[event.event_type] || event.event_type || "事件"}` +
+        ` · ${STRUCTURE_KIND_LABELS[kind] || kind}`;
+      const detail = document.createElement("span");
+      detail.textContent = `rev ${event.revision ?? "—"} · ${formatDateTime(num(event.occurred_at))}`;
+      const id = document.createElement("button");
+      id.type = "button";
+      id.className = "cpt-structure-event-id";
+      id.textContent = String(event.structure_id || "—");
+      id.title = "查看该结构的完整时间线";
+      id.addEventListener("click", () => {
+        loadStructureTimeline(String(event.structure_id || ""));
+      });
+      item.append(id, title, detail);
+      list.appendChild(item);
+    });
+    return list;
+  }
+
+  function renderStructureEvents() {
+    const panel = q("[data-testid=event-panel]");
+    if (!panel) return;
+    let section = q("[data-testid=structure-events]");
+    if (!section) {
+      section = document.createElement("section");
+      section.dataset.testid = "structure-events";
+      const heading = document.createElement("h3");
+      heading.textContent = "结构事件流（累计）";
+      const note = document.createElement("p");
+      note.className = "cpt-structure-events-note";
+      // 自报口径：这是「发生过多少次变化」，不是「现在有多少个结构」。
+      note.textContent = "跨重启累积的事件流；与上方「本轮变化」不是同一个口径。点结构 id 看完整时间线。";
+      section.append(heading, note);
+      panel.appendChild(section);
+    }
+    while (section.children.length > 2) section.removeChild(section.lastChild);
+
+    const data = remoteOps.structureEvents;
+    if (!isObject(data)) {
+      // 从未拉取成功：不占版面。与 signal-stats 的折叠纪律一致。
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+    if (data.available !== true) {
+      const p = document.createElement("p");
+      p.dataset.testid = "structure-events-unavailable";
+      p.textContent = reasonText(
+        STRUCTURE_EVENTS_REASON_LABELS,
+        data.reason,
+        NETWORK_FALLBACK,
+      );
+      section.appendChild(p);
+      return;
+    }
+    const events = asArray(data.events);
+    if (!events.length) {
+      const p = document.createElement("p");
+      p.dataset.testid = "structure-events-empty";
+      p.textContent = "暂无结构事件（事件只在结构真的变化时产生）";
+      section.appendChild(p);
+      return;
+    }
+    section.appendChild(buildStructureEventRows(events));
+    section.appendChild(renderStructureTimelineDetail());
+  }
+
+  function renderStructureTimelineDetail() {
+    const wrap = document.createElement("div");
+    wrap.className = "cpt-structure-timeline";
+    const data = remoteOps.structureTimeline;
+    if (!isObject(data)) return wrap;
+    const title = document.createElement("h4");
+    title.textContent = `时间线 · ${data.structure_id || "—"}`;
+    wrap.appendChild(title);
+    if (data.available !== true) {
+      const p = document.createElement("p");
+      p.textContent = reasonText(
+        STRUCTURE_EVENTS_REASON_LABELS,
+        data.reason,
+        NETWORK_FALLBACK,
+      );
+      wrap.appendChild(p);
+      return wrap;
+    }
+    const events = asArray(data.events);
+    if (!events.length) {
+      const p = document.createElement("p");
+      p.textContent = "该结构暂无事件记录";
+      wrap.appendChild(p);
+      return wrap;
+    }
+    // revision 升序：最早在前 —— 这是「时间线」的读法。
+    const list = document.createElement("ol");
+    list.className = "event-timeline";
+    list.dataset.testid = "structure-timeline-rows";
+    events.forEach((event) => {
+      const item = document.createElement("li");
+      item.dataset.state = String(event.status || "");
+      const payload = isObject(event.payload) ? event.payload : {};
+      const kind = String(payload.kind || "—");
+      const label = document.createElement("strong");
+      label.textContent =
+        `rev ${event.revision ?? "—"} · ` +
+        `${STRUCTURE_EVENT_TYPE_LABELS[event.event_type] || event.event_type || "事件"}` +
+        ` · ${STRUCTURE_KIND_LABELS[kind] || kind}`;
+      const detail = document.createElement("span");
+      detail.textContent = formatDateTime(num(event.occurred_at));
+      item.append(label, detail);
+      list.appendChild(item);
+    });
+    wrap.appendChild(list);
+    return wrap;
   }
 
   /* ---------------- C6 自选盯盘列表 ---------------- */
@@ -1588,6 +1752,9 @@
     }
     loadWatchlist();
     loadSignalStats();
+    // R27：结构事件流。同样**不进 30s 轮询** —— 这张表只在结构真变了才追加，
+    // 30s 轮一次几乎永远是同一批数据，纯浪费。
+    loadStructureEvents();
   }
 
   function renderReproducibility(snapshot) {

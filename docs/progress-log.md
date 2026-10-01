@@ -2744,3 +2744,70 @@ ecent_events 的 	ry/except 临时加回去，两条立刻红，
 - **pytest 权威计数（--junit-xml）**：716 tests / 13 failures / 0 errors /
   31 skipped → **672 passed**。13 条全在 	est_web_a_share_routes
   （cntl 基线），**零新增失败**。
+
+### 七、R27-3：结构事件 UI 入口（本轮第三项）
+
+**先纠正一个前提：不是「没有 UI」，是「UI 拿错了数据源」。**
+
+勘察发现 dashboard/index.html 里早就有 vent-panel / vent-timeline，
+dashboard.js:3602 也有 
+enderEvents(snapshot) 在渲染 snapshot.events，
+dashboard.css 连 data-state 的配色都齐了。问题在 R26 已经查明的那条：
+**snapshot.events 在稳态下恒为空**。所以那个时间线面板在绝大多数时候
+只会显示「暂无事件」，而库里其实已经攒了 700+ 条。
+
+于是本轮做的是**换数据源**，不是搭 UI。
+
+#### 为什么不能直接把 
+enderEvents 改指向新路由
+
+
+eplayPrefix（dashboard.js 回放入口）会按当前 K 线时间过滤
+
+ext.events：
+
+    next.events = asArray(snapshot.events).filter(
+      (event) => Number(event.occurred_at) <= Number(candles[...].open_time))
+
+所以 vent-timeline 不是「多余的旧实现」，它是**回放功能的一部分** ——
+回放时事件要跟着时间轴走。统一到累计流会直接破坏回放。
+
+处理：两个来源**并存**，标题写死区别：
+- 原有「结构事件」= snapshot.events = **本轮**变化（接回放时间轴过滤）
+- 新增「结构事件流（累计）」= cpt_structure_event，跨重启可比
+
+#### 接了什么
+
+- loadStructureEvents() → GET /structure-events?limit=60，列最近事件
+- 点任一行的结构 id → loadStructureTimeline(id) → GET /structure-events/timeline，
+  展开该结构的完整 revision 升序时间线
+- 接入 boot()，**不进 30s 轮询**（这张表只在结构真变了才追加，30s 轮一次几乎
+  永远是同一批数据）
+- 降级分三态渲染：vailable=false（DB 未就绪）/ 有响应但空 / 从未拉取成功（整块隐藏），
+  与 signal-stats 的折叠纪律一致
+- 新增 CSS：结构 id 做成「可点击文本」而非按钮 —— 满屏按钮会让时间线读不下去
+
+#### 测试
+
+	ests/test_dashboard_chromium_smoke.py 用 --dump-dom 跑 ile://，够不到
+etch，而新面板是拉到数据才渲染的，静态 dump 看不见。所以用**源码契约**钉住
+接线（9 条），重点是两条「不许混为一谈」：
+
+- 累计流不许从 snapshot 取数（那正是它在稳态下为空的原因）
+- 原有时间线必须继续渲染 snapshot.events（回放依赖它）
+
+外加一条容易踩的：降级文案不能和「空」渲染成同一句话 —— 后端已刻意改成
+「读失败就抛」就是为了让接口能如实说不可用，前端若把两者抹平，这次改动白做。
+
+渲染效果另在真服务器上用浏览器验（部署后实测，见下）。
+
+#### 门禁
+
+- 7 条全绿（mypy 4 条仍是 cntl Windows-only 基线）
+- 
+ode --check dashboard/dashboard.js 通过
+- CSS 变量全核对：本次用到的 5 个都已定义（--space-6 引用但未定义是**改动前
+  就存在**的既有问题，非本轮引入，已 stash 对照确认）
+- **pytest 权威计数（--junit-xml）**：725 tests / 13 failures / 0 errors /
+  31 skipped → **681 passed**。13 条全在 	est_web_a_share_routes（cntl 基线），
+  **零新增失败**。

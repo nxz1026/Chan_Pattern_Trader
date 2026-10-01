@@ -1349,6 +1349,48 @@ body[data-runtime-mode="offline"] .chart-canvas::after {
   color: var(--color-text-faint);
 }
 
+/* ------------------------------------------- R27 结构事件流（累计） */
+
+.cpt-structure-events-note {
+  color: var(--color-text-faint);
+  font-size: var(--font-size-sm);
+  margin: 0;
+}
+
+.cpt-structure-event-id {
+  /* 结构 id 本身可点（查该结构的完整时间线），但它长得必须像文本而不是
+     按钮 —— 满屏按钮会让时间线读不下去。用「可点击文本」的视觉惯例：
+     下划线 + 与正文同色，hover 才显出交互性。 */
+  padding: 0;
+  border: 0;
+  background: none;
+  font: inherit;
+  color: var(--color-text);
+  cursor: pointer;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  text-decoration-style: dotted;
+}
+
+.cpt-structure-event-id:hover,
+.cpt-structure-event-id:focus-visible {
+  color: var(--color-loading);
+  text-decoration-style: solid;
+}
+
+.cpt-structure-timeline {
+  margin-top: var(--space-3);
+  padding-top: var(--space-3);
+  border-top: var(--border-width) solid var(--color-border);
+}
+
+.cpt-structure-timeline h4 {
+  margin: 0 0 var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  font-weight: 600;
+}
+
 .replay-controls {
   display: flex;
   flex-wrap: wrap;
