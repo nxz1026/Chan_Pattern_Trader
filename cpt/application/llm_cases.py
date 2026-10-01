@@ -21,6 +21,7 @@ LLM 不可用时**优雅降级**：``submit()`` 返回 ``accepted=False`` 或队
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Any
 
 from cpt.llm import get_queue
@@ -36,6 +37,11 @@ from cpt.storage.llm_call_store import (
 )
 
 _LOG = logging.getLogger(__name__)
+
+#: 本进程的启动水位线。`mark_interrupted` 只清**早于它**的行 —— 不设水位线的话，
+#: `_bootstrap()` 恰好发生在 `enqueue_call` 之后，一清扫就会把本进程刚入队的
+#: 行标成 interrupted（实测踩过：提交返回 queued，5 秒后变 process_restarted）。
+_PROCESS_START = datetime.now(UTC)
 
 __all__ = [
     "explain_structure",
@@ -101,7 +107,7 @@ def _bootstrap() -> Any:
 
     client = AShareLocalClient()
     try:
-        marked = _write(client._get_conn(), mark_interrupted)  # noqa: SLF001
+        marked = _write(client._get_conn(), mark_interrupted, _PROCESS_START)  # noqa: SLF001
         if marked:
             _LOG.info("已把 %s 条中断的 LLM 调用标记为 interrupted", marked)
     except Exception as exc:  # noqa: BLE001 — 表可能还没建，不该挡住启动
@@ -222,7 +228,7 @@ def recover_interrupted() -> int:
 
     client = AShareLocalClient()
     try:
-        return int(_write(client._get_conn(), mark_interrupted))  # noqa: SLF001
+        return int(_write(client._get_conn(), mark_interrupted, _PROCESS_START))  # noqa: SLF001
     except Exception as exc:  # noqa: BLE001
         _LOG.info("跳过 interrupted 标记: %s", exc)
         return 0

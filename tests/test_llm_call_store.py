@@ -227,6 +227,25 @@ def test_mark_interrupted_only_touches_in_flight() -> None:
     assert params
 
 
+def test_mark_interrupted_respects_watermark() -> None:
+    """**回归守卫**：带水位线时**不能误伤本进程刚入队的行**。
+
+    实测事故：`_bootstrap()`（里面调 ``mark_interrupted``）恰好发生在
+    ``enqueue_call`` **之后** —— 无差别清扫把刚写的行标成了 interrupted，
+    现象是「提交返回 queued，5 秒后变 process_restarted / result_text 为空」。
+
+    水位线 = 本进程启动时间，早于它的才是上一进程留下的孤儿。
+    """
+    from datetime import UTC, datetime, timedelta
+
+    conn = FakeConn()
+    mark_interrupted(conn, before=datetime.now(UTC) - timedelta(seconds=1))
+    sql, params = conn.executed[0]
+    assert "created_at < %s" in sql, "没带水位线条件 = 会清掉自己的行"
+    assert isinstance(params[-1], datetime)
+    assert params[0].tzinfo is not None, "时间戳必须是带时区的（timestamptz）"
+
+
 # --------------------------------------------------------------------------- #
 # 事务边界：application 层必须 commit
 # --------------------------------------------------------------------------- #

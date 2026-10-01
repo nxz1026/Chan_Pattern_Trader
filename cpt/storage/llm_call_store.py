@@ -211,12 +211,25 @@ def recent_calls(
     return tuple(dict(zip(_COLUMNS, row, strict=False)) for row in rows)
 
 
-def mark_interrupted(conn: Any) -> int:
-    """把 ``queued`` / ``running`` 的行标成 ``interrupted``。
+def mark_interrupted(conn: Any, before: datetime | None = None) -> int:
+    """把 ``queued`` / ``running`` 且**早于 ``before``** 的行标成 ``interrupted``。
 
     **进程重启时调用** —— 在途任务随进程一起没了，不标的话调用方会永远等一个
-    不会来的结果。返回被标记的行数。
+    不会来的结果。
+
+    :param before: 截止时刻，**只清更早的**。必须是「本进程启动时间」这类水位线：
+        不带这个条件就会**误伤本进程刚入队的行** —— 首次调用 ``_bootstrap()`` 恰好
+        发生在 ``enqueue_call`` 之后，一清扫就把自己刚写的行标成中断了
+        （实测踩过：提交返回 queued，5 秒后变 ``interrupted / process_restarted``）。
+        传 ``None`` 表示不设水位线（只应在测试与手工排查时用）。
+
+    :returns: 被标记的行数。
     """
+    params: list[Any] = []
+    where = "status IN ('queued', 'running')"
+    if before is not None:
+        where += " AND created_at < %s"
+        params.append(before)
     try:
         with conn.cursor() as cur:
             cur.execute(
@@ -224,8 +237,8 @@ def mark_interrupted(conn: Any) -> int:
                 "   SET status = 'interrupted', "
                 "       error_text = COALESCE(error_text, 'process_restarted'), "
                 "       finished_at = %s "
-                " WHERE status IN ('queued', 'running')",
-                (datetime.now(UTC),),
+                f" WHERE {where}",
+                (datetime.now(UTC), *params),
             )
             return int(cur.rowcount or 0)
     except Exception as exc:
