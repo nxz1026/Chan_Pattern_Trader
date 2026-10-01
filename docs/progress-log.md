@@ -2811,3 +2811,73 @@ ode --check dashboard/dashboard.js 通过
 - **pytest 权威计数（--junit-xml）**：725 tests / 13 failures / 0 errors /
   31 skipped → **681 passed**。13 条全在 	est_web_a_share_routes（cntl 基线），
   **零新增失败**。
+
+### 八、真机渲染验证（R27-3 的收尾）
+
+内置浏览器打不开 https://140.83.62.161/cpt/ —— 自签证书在 Electron 主进程
+层就被拒（open_tab / 
+avigate / 带 Basic Auth 的 URL 全部 rowser_action_failed，
+落到 chrome-error://chromewebdata/）。**不在 Host 控制的浏览器上改证书策略**，
+改用本地 headless Chrome 加 --ignore-certificate-errors 直连同一 URL，
+--dump-dom 拿渲染后的真实 DOM。
+
+（中途试过「SSH 隧道 + 本地反代静态服务」的路子，是把简单事搞复杂了，已撤掉。
+纯命令行一个 flag 就能解决的事，不该搭一整套 nginx 复刻。）
+
+#### 验证结果：新面板真的渲染了
+
+DOM 436,392 字符，实测：
+
+- data-testid="structure-events" 容器 ×1、标题「结构事件流（累计）」×1
+- 口径说明「跨重启累积的事件流」×1
+- **事件行 60 条**（对应 limit=60），data-state 分布 confirmed 57 / forming 3
+  —— 正是 CSS 里那套配色在起作用
+- 每行结构：可点击结构 id 按钮 + 中文标签（新建 · 分型）+ 
+ev 1 + 时间戳
+- 降级态 / 空态均**未误报**（structure-events-unavailable ×0、
+  structure-events-empty ×0）
+
+样例：
+<li data-state="confirmed"><button class="cpt-structure-event-id">fractal:5:1790859600000</button><strong>新建 · 分型</strong><span>rev 1 · 2026-10-01 13:00:00</span></li>
+
+#### 顺带逮到一个真 bug（DOM 一看就露）
+
+原有时间线里 **0 个 <li>** —— 面板是个什么解释都没有的空白框。原因：
+
+    // 原实现
+    while (timeline.firstChild) timeline.removeChild(timeline.firstChild);
+    setHidden("[data-testid=event-timeline-empty]", events.length > 0);
+
+先清空整个 <ol>（把 index.html 里的静态占位 <li> 一起删了），再对那个
+**已脱离文档**的节点调 setHidden —— 第一次空渲染之后占位就永久消失。
+而 R26 实测 snapshot.events 稳态恒为空，所以**这不是边角情况，是每次打开
+看板的默认画面**。
+
+修法：空态由 
+enderEvents 运行时画出来，index.html 里的静态占位删掉
+（否则就成了「两处真相」）。文案一并更正 —— 原来的「离线 demo 未提供
+StructureEvent」是 R26 之前的说法，现在是「本轮无结构变化（这是正常状态）」。
+
+两个面板标题也改成能一眼分清：「结构事件（**本轮变化**）」vs「结构事件流
+（**累计**）」，前者下面加一句指向后者。
+
+#### 一个测试的自嘲
+
+钉这个 bug 的断言本来是「<ol> 里必须是空的」，结果**被我写在 <ol> 里的说明
+注释顶掉了** —— 注释为了描述旧 bug 提到了 <li> 字样，而断言查的正是 <li。
+修法是先剥 HTML 注释再查。同一份注释、同一行断言，写完自己先红一次。
+
+#### 门禁
+
+- **pytest 权威计数（--junit-xml）**：727 tests / 13 failures / 0 errors /
+  31 skipped → **683 passed**。13 条全在 	est_web_a_share_routes（cntl 基线），
+  **零新增失败**。
+- 红绿对照：stash 掉 index.html 的修复后，新增的 2 条契约测试立刻红。
+
+#### 一个环境事实（本轮发现，不影响 CI）
+
+	ests/conftest.py::chromium_path() 只枚举 Linux 路径（/usr/bin/chromium、
+~/.cache/ms-playwright/...），本机装了 Windows 版 Chrome 也返回 None，
+于是 	est_dashboard_chromium_smoke.py 在 Windows 上恒 skip。CI 跑 Linux 所以
+那边是真跑的。补 Windows 路径是顺手的事，但**本轮没做** —— 它不掩盖任何失败
+（skip 不会变 pass），记在这里免得下次误判成「冒烟测试在 Windows 上是绿的」。

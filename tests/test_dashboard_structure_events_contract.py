@@ -21,6 +21,7 @@ R26 实测确认 ``snapshot.events`` 在稳态下**恒为空**（每轮 diff，�
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -100,3 +101,39 @@ def test_existing_event_panel_anchor_still_present() -> None:
     html = INDEX_HTML.read_text(encoding="utf-8")
     assert 'data-testid="event-timeline"' in html
     assert 'data-testid="event-panel"' in html
+
+
+def test_empty_state_is_redrawn_not_a_static_placeholder(js: str) -> None:
+    """空态必须由 JS 画出，不能靠 index.html 里的静态占位。
+
+    **这是一个真 bug 的钉子**：原实现先 ``removeChild`` 清空整个 ``<ol>``
+    （把静态占位 ``<li>`` 一起删掉），再对那个**已脱离文档**的占位调
+    ``setHidden`` —— 于是第一次空渲染之后占位就永久消失，面板变成一个没有任何
+    解释的空白框。
+
+    R26 实测 ``snapshot.events`` 稳态恒为空，所以这不是边角情况而是**常态**，
+    那个空白框是每次打开看板都会看到的默认画面。
+    """
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    # 静态占位必须已经不存在（否则又会回到「两处真相」）
+    assert 'data-testid="event-timeline-empty"' not in html
+    # 空的 <ol>：里面不许有任何真实 <li>，空态由 renderEvents 运行时插入。
+    # 先剥掉 HTML 注释 —— 注释里为了说明旧 bug 提到了 "<li>" 字样，
+    # 不剥掉的话这段说明会把自己判失败。
+    ol = re.search(r'<ol[^>]*data-testid="event-timeline"[^>]*>(.*?)</ol>', html, re.S)
+    assert ol is not None, "event-timeline 的 <ol> 不见了"
+    inner = re.sub(r"<!--.*?-->", "", ol.group(1), flags=re.S)
+    assert "<li" not in inner, f"<ol> 里仍留着静态 <li> 占位: {inner[:120]}"
+    # renderEvents 自己画空态
+    assert "本轮无结构变化" in js
+    # 旧的错误路径不能再出现
+    assert "event-timeline-empty" not in js
+
+
+def test_two_event_panels_are_labelled_differently(js: str) -> None:
+    """两个来源的标题必须能让人一眼分清，否则用户不知道该看哪个。"""
+    html = INDEX_HTML.read_text(encoding="utf-8")
+    assert "结构事件（本轮变化）" in html
+    assert "结构事件流（累计）" in js
+    # 本轮时间线加一句指向累计流
+    assert "event-timeline-hint" in html

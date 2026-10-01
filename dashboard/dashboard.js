@@ -3771,7 +3771,21 @@
     if (!timeline) return;
     while (timeline.firstChild) timeline.removeChild(timeline.firstChild);
     const events = snapshot ? asArray(snapshot.events) : [];
-    setHidden("[data-testid=event-timeline-empty]", events.length > 0);
+    if (!events.length) {
+      // 空态必须**重新画出来**，不能靠 index.html 里那个占位 <li>。
+      // 原实现是「清空 <ol>（连占位一起删）→ 再对已被摘出文档的占位调
+      // setHidden」—— 于是第一次空渲染之后占位就永久消失，面板变成一个
+      // 什么解释都没有的空白框。R26 实测 snapshot.events 稳态恒为空，
+      // 所以这不是边角情况，而是**常态**。
+      //
+      // 文案也一并更正：「离线 demo 未提供」是 R26 之前的说法，现在
+      // snapshot.events 是「本轮 diff 出的变化」，空是正常的。
+      const empty = document.createElement("li");
+      empty.dataset.state = "empty";
+      empty.textContent = "本轮无结构变化（这是正常状态：结构没变就不会产生新事件）";
+      timeline.appendChild(empty);
+      return;
+    }
     events.forEach((event) => {
       const item = document.createElement("li");
       item.className = "event-item";

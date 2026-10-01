@@ -512,12 +512,16 @@
 
       <div class="event-panel-body">
         <section data-testid="event-timeline-region" aria-labelledby="event-timeline-title">
-          <h3 id="event-timeline-title">结构事件</h3>
+          <h3 id="event-timeline-title">结构事件（本轮变化）</h3>
           <ol data-testid="event-timeline" class="event-timeline">
-            <li data-testid="event-timeline-empty" data-state="empty">
-              暂无事件（离线 demo 未提供 StructureEvent）
-            </li>
+            <!-- 空态由 renderEvents 绘制，不放静态占位：
+                 原实现在这里留了一个占位 <li>，而 renderEvents 每次先清空
+                 整个 <ol>（占位一起没了），再对已脱离文档的它调 setHidden，
+                 于是第一次空渲染后占位就永久消失。这里留空是对的。 -->
           </ol>
+          <p data-testid="event-timeline-hint" class="cpt-structure-events-note">
+            只显示本轮 diff 出的变化；跨重启累积的历史见下方「结构事件流（累计）」。
+          </p>
         </section>
 
         <section data-testid="replay-panel" aria-labelledby="replay-panel-title">
