@@ -2426,3 +2426,134 @@ LLM does not leak into storage  BROKEN
 3. **429 退避路径未经真机验证**：本次真调一次就成功了（`tok=409/568`），
    没撞上限流。退避逻辑只有单测覆盖（7 个用例，含退避序列、上限、非 429 不重试）。
 4. `a_share_snapshot.py` 缺 `conn.rollback()`（49/51 skip）、R24 其余遗留项照旧。
+
+---
+
+## R26 · 结构事件流接线 —— StructureState 终于有出口了 · 2026-10-01
+
+R24 勘察发现 StructureState 是**死类型**：12 个字段、定义在 models.py、在
+__all__ 里，但全仓**零生产者零消费者**，tests 里一次都没出现。vulture 看不见
+（在 __all__ 里），
+ules.md §8.6 却还把它当「三层模型的北极星」。
+
+进一步查更糟：**StructureEvent 也没有生产者** —— 全仓零处 StructureEvent(...)，
+所有 vents= 传的都是 []，_share_snapshot.py 的 "events": [] 是**硬编码**。
+所以 R26 不是「加持久化」，是**先让它开始产出**。
+
+### 一、三层补齐
+
+rules.md §8.6 的「当前状态 + 不可变事件 + 信号」：
+
+- **信号**层：R21 已有 cpt_signal_event
+- **结构**层：**本轮**（此前整层缺失）
+- **当前状态**：**不建表**，由事件流派生（同 id 最新一条）
+
+### 二、分层
+
+- cpt/domain/structure_events.py（新，纯函数）：跃迁判定是**规则**，归 domain。
+  diff_states / states_from_structures（**这一步此前全仓不存在**）/
+  state_from_event（StructureState 的派生入口）/ structure_id_of
+- cpt/storage/structure_event_store.py（新）：public.cpt_structure_event 的
+  append / latest / current_states / timeline。SQL 只在这里
+- cpt/application/structure_event_recorder.py（新，跨市场共享的接线）
+- scripts/migrations/2026-10-05_r26_structure_event.sql（8 列，幂等）
+
+### 三、三个设计决定
+
+1. **id 确定性生成** "{kind}:{level}:{start_time}"。domain 已验证零时钟零随机，
+   「同输入必同输出 → 同 id → 幂等重放成立」这条链是真的。整条线的地基。
+2. **不建状态表**。两张表必然出现「状态表说 A、事件表说 B」，事件流是唯一真相。
+   R21 的 cpt_signal_event 已是这个形态。
+3. **消失的结构不记事件**。「曾经有、这次没有」的原因太多（级别切换、递归参数
+   变了、bars 重算），没把握一律记 invalidated 会污染事件流。宁可少记。
+
+### 八、加密侧接线（同轮补完）
+
+A 股侧先接（L805 真机验证过），加密侧本轮补上。**只接 `_RealtimeProvider._poll_once`
+（`cpt/web/__main__.py:794` 附近）这一条** —— 它是真正上服务的快照。
+
+**另外 5 个 `build_dashboard_snapshot_v2` 调用点刻意不接**：
+
+| 行 | 所属 | 不接的理由 |
+|---|---|---|
+| L53 | `demo_snapshot` | 无 bars，demo 模式没有结构可记 |
+| L166 | `_snapshot_from_bars` | **多级别研究视图**，算的是同一批结构 |
+| L297 / L342 | `_FixtureProvider` | fixture 模式，非生产 |
+| L654 | `_RealtimeProvider.snapshot_for_level` | **inspect 的单级别视图** |
+
+接了 166 / 654 会把**同一批结构**按不同视图重复写进事件流 —— 视图不是状态，
+一个结构在一个时刻只有一个状态。
+
+**连接从哪来**：加密侧没有 PG 客户端，走
+`cpt/application/structure_event_recorder.py` 内部的 `_connection(None)` →
+`cpt.adapters._dbconfig.connection_kwargs()`（全仓 PG 连接的**唯一权威实现**，
+且不依赖 `asel` 包）。`application -> adapters` 本来就是允许的依赖方向，
+recorder 里**不写任何 SQL**（SQL 只在 `cpt/storage/`）。
+
+为此把 A 股侧内联的实现抽成了共享的
+`cpt/application/structure_event_recorder.py`，两个市场共用一条路径 ——
+免得两处漂移（R25 的 `_write` 漏参数就是两处实现的代价）。
+
+### 九、四个设计取舍
+
+1. **id 确定性生成** `f"{kind}:{level}:{start_time}"`。domain 零时钟零随机已验证，
+   「同输入必同输出 → 同 id → 幂等重放成立」这条链是真的。地基。
+
+2. **不建状态表**。事件流是唯一真相；当前状态从事件流派生。两张表必然出现
+   「状态表说 A、事件表说 B」。
+
+3. **写库失败仍返回事件**（`structure_event_recorder` 的刻意行为）。
+   `snapshot.events` 回答的是「本次算出了什么变化」，这与**能不能落库是两件事**。
+   DB 抖动就把一个真实的数据字段清空，比「没落库」更难解释。代价是这批事件
+   **不在事件流里**，跨重启追溯查不到 —— 已在函数 docstring 写明并有测试钉住。
+
+4. **消失的结构不记事件**。「曾经有、这次没有」的原因太多（级别切换、递归参数
+   变了、bars 重算），没把握一律记 invalidated 会污染事件流。
+
+### 十、验收
+
+门禁 7 条全绿；pytest **644 passed / 13 failed / 31 skipped**（688 例，junit 权威计数）（13 条全是
+`test_web_a_share_routes.py` 的 fcntl 基线）。
+
+真机（oracle）：
+
+```
+cpt_structure_event  8 列
+  221 行 / 188 个结构 / 2 类事件
+  created 188 | updated 33
+  bi: confirmed 118, forming 2
+  zhongshu: confirmed 9, forming 3
+  fractal: confirmed 89
+
+snapshot.events    长度 21     ← 此前恒为 []
+  updated bi:5:1776211200000 rev=3
+
+幂等：重复请求 3 次  242 → 242   不暴涨 ✓
+派生：StructureState 5 个（kind/status/revision 都对）✓
+时间线：bi:5:1775692800000 → 1 条 ✓
+```
+
+**`StructureState` 与 `StructureEvent` 这两个此前「零生产者零消费者」的死类型，
+现在都接上了。** R24 勘察发现 `StructureState` 只有定义没有出口，本轮补上；
+`StructureEvent` 更糟 —— 全仓零处构造、所有 `events=` 传的都是 `[]`、
+`a_share_snapshot.py` 的 `"events": []` 是硬编码，本轮是它的第一个真实出口。
+
+### 十一、实现期抓到的四个自己的问题
+
+1. **一段不可达的死代码**：`_event_type_for` 里写了「kind 变了 → reclassified」，
+   但 `structure_id_of` 把 kind 算进 id 了，同 id 必然同 kind，这条分支永远走不到。
+   测试抓到后删掉，并把测试改成断言真实行为（同起点不同 kind = 两个结构，
+   各自 `created`）。`reclassified` 的真实含义是「被 invalidated 的结构重新 forming」。
+2. **异构循环骗过 mypy**：`for group, kind in ((bis,"bi"),(zhongshus,"zhongshu"))`
+   把 `group` 推成 `object`，只能靠 10 条 `type: ignore` 盖住。拆成两个显式块。
+3. **payload 里的 revision 是旧值**：事件行 `revision=7` 而 payload 里还是 1，
+   从 payload 派生的状态自带过期 revision。改为 `replace(state, revision=...)`。
+4. **中枢的 direction 填 0 而非 ±1**：中枢是连续三笔的重叠区间，本身没有方向。
+
+### 十二、仍未做
+
+1. **UI 没有入口**：`snapshot.events` 有数据了，但看板上看不到，也没有查时间线的
+   HTTP 接口（`structure_event_store.timeline` 已在存储层就绪，路由未接）。
+2. **`a_share_snapshot.py` 仍缺 `conn.rollback()`**（49/51 skip 的根因，R24 起挂账）。
+3. 审计 **M3（canvas iframe 信任边界）** 仍开放。
+4. R25 其余遗留：前端未接 LLM、结构化 LLM 用例需先做防御式解析、429 退避未经真机验证。

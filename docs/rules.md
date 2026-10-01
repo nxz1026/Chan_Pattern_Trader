@@ -354,34 +354,39 @@ is_closed
 
 ### 8.6 结果与事件存储
 
-> **本节是规则口径，不是现状描述。** 2026-09-25 审计 P0-2 把 `cpt/storage/`
-> 整层删除，理由是「生产零导入」。**2026-10-01（R24）已恢复该层** —— 用户指出
-> 「代码搬走了，和数据操作独立一层的初衷背道而驰」。
+> **三层已全部落地（R21 / R26）**：
 >
-> **当前实际落库的只有两张 CPT 自有表**（都在 `scripts/migrations/` 里，幂等可重跑）：
->
-> | 表 | 轮次 | 形态 | 用途 |
+> | 层 | 表 | 轮次 | 存储模块 |
 > |---|---|---|---|
-> | `public.cpt_signal_event` | R21 | append-only 事件流（17 列） | 信号状态跃迁；当前状态 = 同 `signal_id` 最新一条 |
-> | `public.cpt_dashboard_run` | R23 | append-only 快照（5 列） | 看板运行本体；`run_id` PK 天然幂等 |
+> | **信号** | `public.cpt_signal_event` | R21 | `cpt/application/…` → `cpt/storage/signal_event_store.py` |
+> | **结构** | `public.cpt_structure_event` | R26 | `cpt/storage/structure_event_store.py` |
+> | **当前状态** | *不建表* | — | 从事件流派生 |
 >
-> `raw_bars` **没有对应实现**、也不需要：行情在共享枢纽 `emotion_core`
+> **为什么没有状态表**：两张表必然出现「状态表说 A、事件表说 B」的不一致，
+> 而事件流是唯一真相。当前状态 = 同 id 的最新一条
+> （`structure_event_store.current_states` / `signal_event_store.latest_status`）。
+>
+> `raw_bars` **没有对应实现、也不需要**：行情在共享枢纽 `emotion_core`
 > （`daily_bar` / `derived_bar` / `asel.ref_adjust_factor`），不是 CPT 的存储。
-> `structure_states` 同理 —— 看板无状态重算，当前状态每次都能算出来。
->
-> 仍然**开放**的是 `structure_events`：bi / zhongshu / trend_type 的结构事件
-> 每次从 bars 重算、**从不落库**，所以「这个中枢是什么时候确认的」跨重启答不了。
-> `StructureEvent` 已在 `snapshot.events` 里产出（`dashboard.py` / `replay.py` /
-> `export.py` 都在用），只是没有持久化出口。这条留给后续轮次（见
-> `docs/progress-log.md` R24「仍未做」）。
->
-> 下面的「当前状态 + 不可变事件 + 信号」三层模型**仍是规则口径的北极星**
-> （`StructureState` 的 `id` 确定性生成、事件只追加、已确认结构绝不原地修改
-> 这三条在代码里由 domain 的 frozen dataclass 保证），但**目前没有对应的
-> 状态表**。真要落地时，先更新本节再写迁移 —— 不要让文档跑在代码前面。
->
-> **层级归属**：`cpt/storage/` 装 CPT 自有表的读写，**SQL 只许出现在
-> `cpt/adapters/` 与 `cpt/storage/`**，由 `scripts/check_sql_layering.py` 门禁。
+
+**结构事件流（R26）补充约定**：
+
+- **id 确定性生成**：`f"{kind}:{level}:{start_time}"`。domain 已验证零时钟零随机
+  （`git grep 'datetime\.now|random\.' cpt/domain` 零命中），所以
+  「同输入必同输出 → 同 id → 幂等重放成立」是真的。这是整条线的地基。
+- **`status` 词表**：`forming` / `confirmed` / `invalidated` / `open_end`。
+  分型恒 `confirmed`；笔与中枢的**最后一个**记 `forming`（后续 K 线可能让它延伸）；
+  走势类型按 `TrendKind` 判。
+- **`event_type` 词表**：`created` / `updated` / `confirmed` / `reclassified` /
+  `invalidated` / `closed`。`reclassified` 的含义是「被 invalidated 的结构重新
+  forming」——**不是**「类型变了」：`kind` 算在 id 里，同 id 必然同 kind，
+  换个 kind 意味着那是**另一个结构**（各记 `created`）。
+- **revision 只在真的产生事件时 +1**。无变化的轮次不占号，否则
+  「同一结构 100 次重算 = revision 100」，revision 就失去了「改了多少次」的意义。
+- **消失的结构不记事件**。「曾经有、这次没有」的原因太多（级别切换、递归参数
+  变了、bars 被重算），没把握一律记 `invalidated` 会污染事件流。
+- **`direction` 对中枢填 0**。中枢是连续三笔的**重叠区间**，本身没有方向，
+  方向属于构成它的笔；`BarLike.direction` 词表里 0 就是「中性/未定」。
 
 采用"当前状态 + 不可变事件 + 信号"的三层模型。
 

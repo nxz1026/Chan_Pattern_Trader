@@ -39,6 +39,7 @@ from cpt.application.dashboard_realtime import realtime_update
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
 from cpt.application.multi_level import build_multi_level, format_multi_level, structures_for_level
 from cpt.application.replay import compute_domain_structures, replay_bars
+from cpt.application.structure_event_recorder import record_structure_events
 from cpt.domain.config import RulesConfig
 from cpt.domain.models import Bi, CanonicalBar, Fractal, TrendType, ZhongShu
 from cpt.domain.trend_type import classify_trend
@@ -791,13 +792,23 @@ class _RealtimeProvider:
         except Exception as exc:  # noqa: BLE001 — 多级别失败只降级多级别，不阻断已算好的主结构
             _LOG.warning("multi-level build failed in realtime mode: %s", exc)
             multi = _fallback_multi_level(self._config, fractals, bis, zhongshus)
+        trend_types = _compute_trend_types(bis, zhongshus, self._config)
+        # 结构事件流（R26 接线）：diff → `cpt_structure_event`。
+        # 加密侧没有 PG 客户端，recorder 走 `cpt.adapters._dbconfig` 现开一条。
+        # **只接这一条**（真正上服务的快照）：`_snapshot_from_bars` / 各
+        # `snapshot_for_level` 算的是**同一批结构的不同视图**，接了会往事件流
+        # 重复计数。demo 模式无 bars，本来就没有结构可记。
+        structure_events = record_structure_events(
+            fractals=fractals, bis=bis, zhongshus=zhongshus, trend_types=trend_types
+        )
         snapshot = build_dashboard_snapshot_v2(
             self._config,
             bars,
             fractals=fractals,
             bis=bis,
             zhongshus=zhongshus,
-            trend_types=_compute_trend_types(bis, zhongshus, self._config),
+            trend_types=trend_types,
+            events=structure_events,
             mode="watch",
             status="confirmed",
             data_source="binance_realtime",

@@ -45,16 +45,10 @@ from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
 from cpt.application.first_buy_bridge import derive_first_buy_facts, detect_structural_break
 from cpt.application.multi_level import build_multi_level, format_multi_level
 from cpt.application.replay import compute_domain_structures
+from cpt.application.structure_event_recorder import record_structure_events
 from cpt.domain.a_share_rules import apply_ashare_tags_to_bis
 from cpt.domain.config import RulesConfig
-from cpt.domain.models import (
-    Bi,
-    CanonicalBar,
-    Fractal,
-    Signal,
-    StructureEvent,
-    ZhongShu,
-)
+from cpt.domain.models import Bi, CanonicalBar, Signal, ZhongShu
 from cpt.domain.signal import assess_first_buy, transition_first_buy, transition_first_sell
 from cpt.storage.signal_event_store import (
     latest_status,
@@ -97,51 +91,20 @@ _TAG_PREFIX = "ashare:"
 _TAG_SOURCE = "public.derived_bar"
 
 
-def _record_structure_events(
-    client: Any,
-    *,
-    fractals: Sequence[Fractal],
-    bis: Sequence[Bi],
-    zhongshus: Sequence[ZhongShu],
-) -> tuple[StructureEvent, ...]:
-    """R26：diff 出本轮结构变化 -> append 到事件流 -> 返回事件供 snapshot 消费。
+def _active_client_conn(client: Any) -> Any | None:
+    """拿 A 股客户端的连接；拿不到就返回 None（recorder 会自己开/跳过）。
 
-    **best-effort，任何一步失败都只降级、不抛出** —— 事件流是旁路增强，
-    看板必须照常出图（与 _attach_signal_change / _attach_dual_compare 同一纪律）。
-
-    ## 事务边界
-
-    `cpt/storage/*` 一律**不 commit**（本仓约定），所以这里**必须自己提交**。
-    R23 在 `app.py::_persist_run` 漏过一次、R25 在 `llm_cases` 又漏了两次，
-    两次都是「函数正常返回、HTTP 200、日志零告警、表 0 行」。
+    刻意不抛：A 股客户端是**这个市场的数据源**，事件流是旁路，源出问题不该
+    由这里放大。
     """
-    from cpt.domain.structure_events import diff_states, states_from_structures
-    from cpt.storage.structure_event_store import append_events, current_states
-
+    getter = getattr(client, "_get_conn", None)
+    if not callable(getter):
+        return None
     try:
-        conn = client._get_conn()  # noqa: SLF001
-    except Exception as exc:  # noqa: BLE001 — 没连接就只是没有事件
-        _LOG.debug("结构事件：无连接 %s", exc)
-        return ()
-
-    try:
-        states = states_from_structures(fractals=fractals, bis=bis, zhongshus=zhongshus)
-        if not states:
-            return ()
-        previous = current_states(conn, [s.id for s in states])
-        events = diff_states(previous, states)
-        if not events:
-            return ()  # 热路径常态：不产生事件，也就不写库
-        append_events(conn, events)
-        conn.commit()  # <- store 层不 commit，事务边界在这里
-        return events
-    except Exception as exc:  # noqa: BLE001 — 旁路失败不影响快照
-        _LOG.warning("结构事件记录失败（不影响快照）: %s", exc)
-        try:
-            conn.rollback()  # 别把半截事务留给下一个调用点
-        except Exception:  # noqa: BLE001, S110 — rollback 自身失败就算了
-            pass
-        return ()
+        return getter()
+    except Exception as exc:  # noqa: BLE001
+        _LOG.debug("结构事件：取 A 股连接失败 %s", exc)
+        return None
 
 
 def build_ashare_snapshot(
@@ -293,8 +256,11 @@ def build_ashare_snapshot(
     # `public.cpt_structure_event`，同时把事件喂进 snapshot.events。
     # 此前 `snapshot.events` 在生产里**恒为 []**（没有生产者），这一段是它的
     # 第一个真实出口。best-effort：事件流失败只降级，不影响快照本体。
-    structure_events = _record_structure_events(
-        active_client, fractals=fractals, bis=bis, zhongshus=zhongshus
+    structure_events = record_structure_events(
+        fractals=fractals,
+        bis=bis,
+        zhongshus=zhongshus,
+        conn=_active_client_conn(active_client),
     )
     snapshot = build_dashboard_snapshot_v2(
         config=RulesConfig(),
