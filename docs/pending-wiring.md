@@ -195,7 +195,7 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:61` 的
 > - 前端契约测试 `tests/test_dashboard_parity_navigation.py` **保留**（它守的是
 >   仍然活着的空面板交互，不是被删的投影函数）。
 
-**② `dashboard_runs` —— 已接线（R20 路由 + R22 本体）。**
+**② `dashboard_runs` —— 已接线（R20 路由 + R22 本体 + R23 落库）。**
 
 `cpt/web/app.py:210` 路由活着，`dashboard.js:827` 真的在读 `snapshot.runs`，
 R20 补了索引行数据源，但 `dashboard_snapshot_v2.py:62` 的硬编码 `v2["runs"] = []`
@@ -204,8 +204,23 @@ R20 补了索引行数据源，但 `dashboard_snapshot_v2.py:62` 的硬编码 `v
 `RUN_BODY_MAX_BYTES = 4_000_000`（超限**仍收索引行、只是不存本体**）、
 `run_body(run_id)`(:158，返回深拷) 与 `find_run(run_id)`(:173)。C3/C4 由此才有入参。
 
-> 遗留口径：run 本体存在**进程内 deque**，重启即失效——`/compare`、`/multi-run`
-> 因此只对**本进程活过的 run** 可比。要跨重启必须落库（见 roadmap 的持久化前置）。
+**R23 把「只对本进程活过的 run 可比」这个遗留口径消掉了**：新增
+`cpt/application/dashboard_run_store.py` + 表 `public.cpt_dashboard_run`（5 列：
+`run_id` PK / `dataset_hash` / `generated_at` / `body_recorded` / `snapshot` jsonb），
+`record_run(..., on_recorded=...)` 在**真正 append 之后**同步双写（best-effort，
+写失败不反噬 HTTP），`/compare`、`/multi-run`、`/runs` 三条路由改成
+**表优先 → 进程内 deque 兜底**。
+
+> R20 当初的结论是「不建表」——理由是「落库即 2,880 行/天的低价值流水」。
+> **这个推理有个错误**：realtime 30s 一轮里十几次 HTTP 请求命中的是**同一份
+> 缓存 snapshot**，`record_run` 的去重会让它们**全部走快路径、连 DB 都不碰**，
+> 实际只落 1 行/轮（≈2,880 行/天，且每行是独立的一次运行，删了就没了）。
+> 重复请求的放大问题从来就不存在，所以「不建表」的理由不成立。
+> 真正让这个决策被推翻的是用户诉求：**跨重启可比**（2026-09-30）。
+>
+> 表是 append-only 且不自动 GC，运维按需
+> `DELETE WHERE generated_at < now() - interval '7 days'`。
+> 迁移与部署见 `deploy/README.md`「数据库迁移」小节。
 
 ---
 

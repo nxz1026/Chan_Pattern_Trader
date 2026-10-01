@@ -8,9 +8,22 @@
 语义（实测红），也会让 ``dashboard_compare`` 的字段级 diff 永远有一处差异。
 **这是接线时实测踩到的，不是推演。**
 
-处置取舍见 ``docs/pending-wiring.md``：不建表，因为 6 处生产调用点里 realtime
-模式每 30s 一轮，落库即 2,880 行/天的低价值流水；realtime 进程由 systemd 常驻，
-环形缓冲在真实运行周期内有效。
+**ring 与 PG 的分工（R20 → R23 修订）**：R20 当时的结论是「不建表」——6 处生产
+调用点里 realtime 模式每 30s 一轮，落库即 2,880 行/天的低价值流水，且 realtime
+进程由 systemd 常驻、环形缓冲在真实运行周期内有效。**这个结论在 R23 被推翻**：
+用户诉求是「跨重启可比」（2026-09-30），而 ring 是进程级的，重启即空，
+``/compare`` 与 ``/multi-run`` 只能返回 ``run_body_unavailable``。
+
+现在的处置是**两套并存**，不是替代：
+
+- **ring 留 hot-path**：30s 内同 ``(run_id, dataset_hash)`` 命中同一份缓存
+  snapshot 时走快路径，**连 DB 都不碰**（见 :func:`record_run` 的 ``on_recorded``）。
+- **表留 cold-path**：``public.cpt_dashboard_run``（R23 建表）记跨重启历史，
+  由 ``cpt/application/dashboard_run_store.py`` 负责读写。
+
+**落库量并没有变少**：fast path 命中根本不写库，30s 一轮只落 1 行而非「十几次
+请求 × 每请求一行」——这正是 R20 当时担心的放大问题，而它并不存在。
+处置记录见 ``docs/pending-wiring.md``。
 
 字段口径以 ``generated_at`` 为准（与 ``reproducibility.generated_at`` 一致）。
 ``record_run`` 额外写一份同值的 ``created_at``：前端曾读的是 ``created_at``，
@@ -24,7 +37,7 @@ import json
 import logging
 import time
 from collections import deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 _LOG = logging.getLogger(__name__)
@@ -102,7 +115,11 @@ def build_run_index(snapshots: Iterable[dict[str, Any]]) -> tuple[dict[str, Any]
     )
 
 
-def record_run(snapshot: Mapping[str, Any]) -> dict[str, Any]:
+def record_run(
+    snapshot: Mapping[str, Any],
+    *,
+    on_recorded: Callable[[dict[str, Any], dict[str, Any] | None], None] | None = None,
+) -> dict[str, Any]:
     """把一次 snapshot 记进进程内环形缓冲，返回最新（或本次）那一条。
 
     **去重**：``(run_id, dataset_hash)`` 与最后一条相同就**不追加**。调用点在 HTTP
@@ -117,6 +134,14 @@ def record_run(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     ``runtime.generated_at``，而 A 股主看板的 runtime 不传该键（只有 ``as_of_ms``）
     → 不兜底的话运行索引里 A 股那条永远空白，而 A 股恰恰是用户主要看的面板。
     兜底顺序：``runtime.generated_at`` → ``runtime.as_of_ms`` → 当前时间。
+
+    :param on_recorded: R23 新增。**只在真正 append 之后**回调
+        ``(row, body)``，供调用方把这次命中同步双写进
+        ``public.cpt_dashboard_run``（见 ``cpt.application.dashboard_run_store``）。
+        去重命中路径**不回调**——realtime 30s 一轮里可能有十几次请求命中同一份
+        缓存 snapshot，快路径每次都打一次 DB 是纯浪费（去重语义见上）。
+        本模块保持零 DB 依赖：回调由调用方（``cpt/web/app.py``）注入，
+        这里不 import psycopg、也不吞异常——异常交给调用方 best-effort。
     """
     (entry,) = build_run_index([dict(snapshot)])
     row = dict(entry)
@@ -128,11 +153,16 @@ def record_run(snapshot: Mapping[str, Any]) -> dict[str, Any]:
     if _RUN_RING and _same_run(_RUN_RING[-1], row):
         # 去重命中：**本体也不动**。命中意味着这是同一份快照被重复请求，
         # 已存的本体就是它，绝不能用新的一份去覆盖（可能是不同的 runtime 包装）。
+        # 同样**不触发 on_recorded**——见参数说明。
         return dict(_RUN_RING[-1])
     # 两个 deque 必须**同步 append**：这里是唯一的写入点，顺序不可调换、
     # 中间不能有任何会抛的语句，否则索引行与本体就错位了。
+    body = _snapshot_body(snapshot)
     _RUN_RING.append(row)
-    _RUN_BODIES.append(_snapshot_body(snapshot))
+    _RUN_BODIES.append(body)
+    if on_recorded is not None:
+        # 放在两个 append **之后**：ring 是主路径，必须先落住；DB 双写是旁路。
+        on_recorded(row, body)
     return row
 
 

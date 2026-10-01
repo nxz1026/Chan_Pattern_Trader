@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Protocol, runtime_checkable
@@ -66,8 +67,110 @@ class SelectableSource(Protocol):
     def force_refresh(self) -> None: ...
 
 
+#: ``/api/dashboard/runs`` 面板一次拉多少行。ring 是 50，表侧同量级。
+_RUN_INDEX_LIMIT = 50
+
+
+@contextmanager
+def _run_store_conn(conn: Any = None) -> Iterator[Any]:
+    """借一条 psycopg 连接给运行持久化表用。
+
+    :param conn: 已有的连接（测试注入）。给了就直接用，**不负责关闭**。
+
+    没给就现开一条并在退出时关掉——复用 ``_signal_stats_payload`` 那套
+    ``AShareLocalClient`` 借连接的写法。psycopg 与 ``dashboard_run_store``
+    都**惰性导入**：CI 只跑 ``pip install -e .``（不带 ``[db]``），顶层拖进来
+    会让整包测试在 collection 阶段就炸。
+    """
+    if conn is not None:
+        yield conn
+        return
+    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+
+    client = AShareLocalClient()
+    try:
+        yield client._get_conn()  # noqa: SLF001
+    finally:
+        client.close()
+
+
+def _persist_run(row: dict[str, Any], body: dict[str, Any] | None) -> None:
+    """``record_run`` 的 PG 双写旁路（R23）。
+
+    **best-effort，异常一律吞掉**：记一次账失败不该让用户的 HTTP 响应 500。
+    失败的真实后果只是「这次运行重启后查不到」，日志里留痕即可——这与
+    ``dashboard_runs`` 的 ring 是完全独立的两条路径。
+    """
+    try:
+        from cpt.application.dashboard_run_store import upsert_run  # noqa: PLC0415
+
+        with _run_store_conn() as conn:
+            upsert_run(conn, row, body)
+    except Exception as exc:  # noqa: BLE001 — 旁路记账，绝不允许反噬主流程
+        _LOG.warning("运行持久化双写失败（不影响本次响应）: %s", exc)
+
+
+def _load_run_bodies(run_ids: list[str], conn: Any = None) -> dict[str, dict[str, Any] | None]:
+    """从表里批量取运行本体；表不可用时返回 ``{}``（调用方回落 ring）。
+
+    返回值的「key 在 / key 不在」语义见
+    :func:`cpt.application.dashboard_run_store.get_snapshots`：key 在但值是
+    ``None`` 表示**库里明确记了没有本体**（4MB 闸门），不能回落 ring 把它掩盖掉。
+    """
+    if not run_ids:
+        return {}
+    try:
+        from cpt.application.dashboard_run_store import get_snapshots  # noqa: PLC0415
+
+        with _run_store_conn(conn) as opened:
+            return get_snapshots(opened, run_ids)
+    except Exception as exc:  # noqa: BLE001 — 表是增强，回落 ring 即可
+        _LOG.warning("运行本体表不可用，回落 in-process ring: %s", exc)
+        return {}
+
+
+def _index_row_from_body(run_id: str, body: dict[str, Any] | None) -> dict[str, Any]:
+    """从快照本体反推一条最小索引行（``run_id`` + ``dataset_hash``）。
+
+    跨重启比较时 ring 是空的，``find_run`` 必然返回 ``None``，``dataset_hash``
+    就回填不上——而它是 ``dashboard_compare`` 差异摘要里的口径字段。正好本体
+    就是完整的 snapshot，``reproducibility.dataset_hash`` 直接可取，**不额外
+    打一次 DB**。
+    """
+    if not isinstance(body, dict):
+        return {"run_id": run_id}
+    reproducibility = body.get("reproducibility")
+    dataset_hash = (
+        reproducibility.get("dataset_hash") if isinstance(reproducibility, dict) else None
+    )
+    row: dict[str, Any] = {"run_id": run_id}
+    if dataset_hash is not None:
+        row["dataset_hash"] = dataset_hash
+    return row
+
+
+def _run_index_rows(limit: int = _RUN_INDEX_LIMIT, conn: Any = None) -> list[dict[str, Any]]:
+    """``/api/dashboard/runs`` 的数据源：**表优先 → ring 兜底**。
+
+    表优先才能看到重启前的历史（这正是 R23 的目的）。表不可用时回落 ring，
+    此时面板退化成 R20 的行为——只显示本进程的历史，而不是 500。
+    """
+    try:
+        # 别名导入：裸 ``recent_runs`` 会遮蔽模块级那个（in-process ring 版），
+        # 兜底分支就会把 ring 的 limit 参数当 conn 传进去。
+        from cpt.application.dashboard_run_store import (  # noqa: PLC0415
+            recent_runs as store_recent_runs,
+        )
+
+        with _run_store_conn(conn) as opened:
+            return [dict(row) for row in store_recent_runs(opened, limit)]
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("运行索引表不可用，回落 in-process ring: %s", exc)
+        return [dict(row) for row in recent_runs(limit)]
+
+
 def _with_run_index(payload: dict[str, Any]) -> dict[str, Any]:
-    """在 **HTTP 响应层** 注入运行索引（R20 接线）。
+    """在 **HTTP 响应层** 注入运行索引（R20 接线，R23 追加 PG 双写）。
 
     为什么不在 ``build_dashboard_snapshot_v2`` 里接：运行历史是**进程级状态**，
     放进去会让 snapshot 变成非确定性的 —— 同参数两次调用返回不等，直接打破
@@ -79,11 +182,12 @@ def _with_run_index(payload: dict[str, Any]) -> dict[str, Any]:
     这类子字段响应保持原样。
 
     ``record_run`` 自带去重：realtime 模式 30s 内可能有十几次请求命中同一份
-    缓存 snapshot，不去重会把「一次运行」记成十几条。
+    缓存 snapshot，不去重会把「一次运行」记成十几条。去重命中时 ``record_run``
+    **不触发** ``on_recorded``，所以那十几次请求也不会打十几次 DB。
     """
     if "market" not in payload:
         return payload
-    record_run(payload)
+    record_run(payload, on_recorded=_persist_run)
     enriched = dict(payload)
     enriched["runs"] = list(recent_runs())
     return enriched
@@ -386,8 +490,10 @@ def make_handler(
                 payload = snapshot.get("parity", {})
             elif path.path == "/api/dashboard/runs":
                 # R20：snapshot 本体的 ``runs`` 恒为 []（领域层必须保持「同输入同
-                # 输出」），运行历史走进程内环形缓冲。理由见 _with_run_index。
-                payload = {"runs": list(recent_runs())}
+                # 输出」），运行历史走 HTTP 响应层。理由见 _with_run_index。
+                # R23：优先读 PG 表，所以面板能看到**重启前**的历史；表不可用时
+                # _run_index_rows 自己回落到 ring（退化成 R20 行为，不 500）。
+                payload = {"runs": _run_index_rows()}
             elif path.path == "/api/dashboard/market-24h":
                 payload = snapshot.get("market_24h", {"available": False, "reason": "unavailable"})
             elif path.path == "/api/dashboard/engine-state":
@@ -562,8 +668,12 @@ def make_handler(
                         "必须同时提供 left 与 right 两个 run_id",
                     )
                     return
-                left_body = run_body(left_id)
-                right_body = run_body(right_id)
+                # R23：**表优先 → ring 兜底**。跨重启时 ring 必然是空的，
+                # 表才是活路。注意 ``stored`` 里 key 存在但值为 None 表示
+                # 「库里记了没有本体」（4MB 闸门），那种情况**不回落**。
+                stored = _load_run_bodies([left_id, right_id])
+                left_body = stored[left_id] if left_id in stored else run_body(left_id)
+                right_body = stored[right_id] if right_id in stored else run_body(right_id)
                 if left_body is None or right_body is None:
                     payload = {
                         "schema_version": "dashboard_compare.v1",
@@ -578,8 +688,15 @@ def make_handler(
                     # 索引行里的 dataset_hash/run_id 比本体里的更权威：本体可能被摘要/
                     # 裁剪过，而 fixture 模式的 runtime 根本不带 run_id（索引行由
                     # `runtime.run_id or dataset_hash` 推导出来），不回填就会是 null。
-                    for side, run_id in (("left", left_id), ("right", right_id)):
-                        index_row = find_run(run_id) or {}
+                    for side, run_id, body in (
+                        ("left", left_id, left_body),
+                        ("right", right_id, right_body),
+                    ):
+                        # 索引行里的 dataset_hash/run_id 比本体里的更权威：本体可能
+                        # 被摘要/裁剪过，而 fixture 模式的 runtime 根本不带 run_id
+                        # （索引行由 `runtime.run_id or dataset_hash` 推导出来），
+                        # 不回填就会是 null。R23 追加：跨重启时 ring 空，从本体反推。
+                        index_row = find_run(run_id) or _index_row_from_body(run_id, body)
                         compared[f"{side}_run_id"] = index_row.get("run_id") or run_id
                         if index_row.get("dataset_hash") is not None:
                             compared[f"{side}_dataset_hash"] = index_row["dataset_hash"]
@@ -598,9 +715,14 @@ def make_handler(
                         "run_ids 需为 2..5 个逗号分隔的 run_id",
                     )
                     return
-                bodies = [
-                    body for body in (run_body(run_id) for run_id in run_ids) if body is not None
-                ]
+                # R23：同 /compare，**表优先 → ring 兜底**。逐个 id 独立判断，
+                # 哪边能查到算哪边；全查不到才降级。
+                stored = _load_run_bodies(run_ids)
+                bodies: list[dict[str, Any]] = []
+                for run_id in run_ids:
+                    found = stored[run_id] if run_id in stored else run_body(run_id)
+                    if found is not None:
+                        bodies.append(found)
                 if not bodies:
                     payload = {
                         "schema_version": "dashboard_multi_run.v1",

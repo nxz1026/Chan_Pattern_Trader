@@ -150,6 +150,68 @@ PGPASSWORD=$(grep '^\$DB_PW' ~/.dbconfig | cut -d= -f2-) \
 > 2026-09-30 状态：单元已写入 `deploy/systemd/cpt-dashboard-ashare.{service,timer}`
 > 并随仓推送；首次安装命令见上方。
 
+## 数据库迁移（R20 / R21 / R23）
+
+三份迁移都在 `scripts/migrations/`，都是 `CREATE TABLE / INDEX IF NOT EXISTS`
+的**幂等**脚本，可重复跑。
+
+| 文件 | 表 | 用途 |
+|---|---|---|
+| `2026-09-30_r20_factor_columns.sql` | `asel.ref_adjust_factor` | 补因子列 |
+| `2026-10-01_r21_signal_event.sql` | `public.cpt_signal_event` | 信号事件流（A 阶段） |
+| `2026-10-02_r23_dashboard_run.sql` | `public.cpt_dashboard_run` | 运行持久化，跨重启可比（B 阶段） |
+
+在 oracle 上安装：
+
+```bash
+# 1) 推到 /tmp
+scp ./scripts/migrations/2026-10-02_r23_dashboard_run.sql oracle:/tmp/
+
+# 2) 跑（幂等，可重跑）
+ssh oracle 'PGPASSWORD=$(grep "^\$DB_PW" ~/.dbconfig | cut -d= -f2-) \
+  psql -h 127.0.0.1 -U postgres -d emotion_core -v ON_ERROR_STOP=1 \
+  -f /tmp/2026-10-02_r23_dashboard_run.sql'
+
+# 3) 验表建好（应为 5 列 + 2 索引）
+ssh oracle 'PGPASSWORD=$(grep "^\$DB_PW" ~/.dbconfig | cut -d= -f2-) \
+  psql -h 127.0.0.1 -U postgres -d emotion_core -At -c \
+  "SELECT column_name FROM information_schema.columns \
+   WHERE table_name='"'"'cpt_dashboard_run'"'"' ORDER BY ordinal_position;"'
+```
+
+⚠️ **dbname 不是默认的 `longkonglong`**：`cpt/adapters/_dbconfig.py` 里的
+`dbname="longkonglong"` 只是 fallback，权威是 `~/.dbconfig` 的 `$DBNAME`
+（线上 = `emotion_core`）。启动前先 `cat ~/.dbconfig | grep DBNAME` 确认。
+
+⚠️ **psql 必须显式 `-h 127.0.0.1 -U postgres`**：peer auth 不接 `ubuntu`
+用户，直连会报 `FATAL: role "ubuntu" does not exist`。
+
+### R23 装完必须重启主服务
+
+`cpt-dashboard` 是 Python 进程，**启动时一次性 import**，改 `cpt/web/app.py`
+加新路由**必须**重启进程才生效——CI 通过 ≠ oracle 上生效：
+
+```bash
+ssh oracle 'sudo -n systemctl restart cpt-dashboard && sleep 3 && \
+  sudo -n journalctl -u cpt-dashboard -n 20 --no-pager'
+# 期望日志出现：CPT Dashboard API listening on http://127.0.0.1:8010 (mode=realtime)
+```
+
+装完 R23 后 `/api/dashboard/runs`、`/compare`、`/multi-run` 会**优先读表**；
+表不可用时自动回落到进程内环形缓冲（退化成 R20 行为，不会 500）。
+
+表是 **append-only 且不自动 GC**。realtime 30s 一轮 ≈ 2,880 行/天、jsonb
+平均 30KB，1 月约 2.5 GB（PG vacuum 后稳定）。运维想清理就手动：
+
+```sql
+DELETE FROM public.cpt_dashboard_run
+  WHERE generated_at < now() - interval '7 days';
+```
+
+> 本仓刻意不在 HTTP 请求路径上跑大 SQL 做自动 GC。
+> 回滚就是 `DROP TABLE IF EXISTS public.cpt_dashboard_run CASCADE;`——表无 FK，
+> 代价是 0。**不要 DROP `public.cpt_signal_event`**，那是 R21 的真数据。
+
 ## 安全边界
 
 - API 只读，不提供下单、撤单、账户、持仓或订单簿接口。
