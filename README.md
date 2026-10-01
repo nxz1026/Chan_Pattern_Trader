@@ -6,8 +6,8 @@ CPT 基于缠中说禅理论做结构分析：缠论K线 → 分型 → 新笔 �
 
 ## 设计原则
 
-1. **结构清晰**：单一职责分层，依赖方向由 import-linter 强制（4 条契约）。
-2. **虚拟/物理分离**：缠论算法（domain/engine）不知道交易所、数据库、绘图、LLM 的存在。
+1. **结构清晰**：单一职责分层，依赖方向由 import-linter 强制（3 条契约，CI 门禁之一）。
+2. **虚拟/物理分离**：缠论算法（domain）不知道交易所、数据库、绘图、LLM 的存在。
 3. **规则先行**：所有规则口径先冻结于 `docs/rules.md`，再写代码；配置集中在可序列化的 `RulesConfig`。
 4. **无未来函数**：实时输出只依赖当前时点之前的数据，候选/确认/失效全程可追溯。
 5. **可复现**：同一份输入数据 + 同一份配置，必须得到同一份结构结果。
@@ -16,15 +16,21 @@ CPT 基于缠中说禅理论做结构分析：缠论K线 → 分型 → 新笔 �
 
 ## 架构速览
 
+**4 层**（`engine/` 与 `storage/` 已于 2026-09-25 整层删除，`llm/` 从未有过代码；
+早期版本的 6 层图见 git history）：
+
 ```text
-application/   用例编排（回放 / 查询 / 导出 / 快照构造 / LLM 用例）
-engine/        有状态编排（历史模式 / 实时模式 / 重构 / 事件）
-domain/        纯算法与领域模型（零第三方依赖，一套算法跨级别复用）
-adapters/      外部数据接入（Binance / ccxt / Wind / 腾讯 / 新浪 / 本地 PG）+ 缠论后端（czsc / native / 契约 reference_chanlun）
-storage/       当前状态 + 不可变事件 + 信号（SQLite + JSON）
 web/           只读 HTTP adapter + 两个入口（加密 / A股）
-llm/           独立 LLM 服务层（可关闭、可审计、永不回写结构）
+application/   用例编排（回放 / 查询 / 导出 / 快照构造）
+adapters/      外部数据接入（Binance / ccxt / Wind / 腾讯 / 新浪 / 本地 PG）+ 缠论后端（czsc / native / 契约 reference_chanlun）
+domain/        纯算法与领域模型（零第三方依赖，一套算法跨级别复用）
 ```
+
+依赖方向 `web → application/adapters → domain`，`domain` 不导入任何上层，
+由 `.importlinter` 的 3 条契约强制（2026-09-25 起纳入 CI）。
+
+> 设计文档里另有一层「独立 LLM 服务层」的**未实现蓝图**（`architecture.md` §6），
+> 明确标注「`cpt/llm/` 从未有过代码」，不计入上表。
 
 详细设计见 `docs/architecture.md`。
 
@@ -131,22 +137,32 @@ Dashboard 静态文件位于 `dashboard/`，Nginx/systemd 模板见 `deploy/READ
 
 ## 质量门
 
-CI（`.github/workflows/ci.yml`）逐条执行：
+CI（`.github/workflows/ci.yml`）在 **Python 3.12 与 3.14 两个版本**上各跑一遍以下 6 条，
+逐条执行、任一失败即红：
 
 ```bash
 pytest tests -rsq
-ruff check cpt tests
-ruff format --check cpt tests
-mypy cpt
-vulture cpt --min-confidence 80 --exclude 'cpt/web/app.py'
+ruff check cpt tests scripts
+ruff format --check cpt tests scripts
+mypy cpt scripts
+lint-imports                                    # 3 条分层契约
+vulture --min-confidence 60 cpt whitelist.py    # 死代码审计
 ```
 
-本地另跑两条（CI 未覆盖，但同样视为门禁）：
+三点容易记错，都是踩过的坑：
 
-```bash
-ruff format --check cpt tests scripts      # 比 CI 多覆盖 scripts/
-import-linter lint --config .importlinter  # 4 条分层契约（pre-commit 里也会跑）
-```
+- **`scripts/` 在门禁范围内**。2026-09-25 之前只覆盖 `cpt tests`，等于给 364 行的
+  运维入口开了后门，它自带的重复实现和有顺序 bug 的函数都没人发现。
+- **`lint-imports` 现在也在 CI 里**。此前只本地/pre-commit 跑，层级可以被打破而 CI 全绿。
+- **vulture 阈值是 60 不是 80**。80 会把「未使用的函数/类」（置信度正好 60%）全滤掉，
+  该步骤永远 exit 0。也不再 `--exclude 'cpt/web/app.py'`——那会连带隐藏 app.py 里对
+  别处符号的真实使用；框架回调改由 `whitelist.py` 逐条登记。
+
+> Windows 开发机上有两个**已知且与代码无关**的基线偏差：
+> `a_share_pool.py` 顶层 `import fcntl` 导致该模块在 Windows 不可导入
+> （跑全量需 `--ignore=tests/test_a_share_pool.py`），以及由此产生的
+> `test_web_a_share_routes.py` 13 条 failed 与 mypy 4 条 `flock` 报错。
+> CI 跑在 ubuntu 上不受影响。
 
 CI 只装 `requirements-dev.txt`，因此 czsc/ccxt/psycopg/pandas/plotly/wbt 均不在
 CI 环境里 —— 依赖它们的测试一律走 `pytest.importorskip`，**不允许**用 mock 假装

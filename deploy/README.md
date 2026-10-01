@@ -212,8 +212,47 @@ DELETE FROM public.cpt_dashboard_run
 > 回滚就是 `DROP TABLE IF EXISTS public.cpt_dashboard_run CASCADE;`——表无 FK，
 > 代价是 0。**不要 DROP `public.cpt_signal_event`**，那是 R21 的真数据。
 
+## `_pkg/` — ⚠️ 混进来的另一个项目，不属于 CPT
+
+`/var/www/cpt-dashboard/_pkg/` 里放的是 **`collector-cn` 采集机**的发布产物
+（`collector-cn-*.tgz` + `run5.sh`），**不是 CPT 的东西**。`run5.sh` 的用途是在
+远端采集机上执行：
+
+```bash
+curl -sSk https://<host>/cpt/_pkg/run5.sh | bash
+```
+
+即「一条命令装采集机」。所以这个目录是**故意的发布通道**，不是垃圾 —— 但它有三个
+问题，2026-10-01 记录在此：
+
+1. **不在版本控制下**。这些 `.tgz` 只存在于那台机器，仓里没有、CPT 的
+   `deploy/` 也没有对应脚本或说明。
+2. **已积压 8 个版本**（`collector-cn-dd2b9b8.tgz` + `linux1` ~ `linux7`），
+   合计 516 KB，**没有任何清理机制**。
+3. **CPT 的部署文档此前对它只字未提**，导致每次看 `/var/www/cpt-dashboard/`
+   都会以为「线上有仓里没有的文件」。
+
+**建议**（需 owner 拍板，因为采集机那条链路不在本仓）：
+
+- 至少把本节留档，让下次的人知道它是什么；
+- 更干净的做法是给 `collector-cn` 单独一个 nginx `location` 或独立静态根，
+  别把另一个项目的发布通道寄居在 CPT 的看板目录里；
+- 加一条清理规矩：只保留 `run5.sh` 里 `PKG=` 指定的那一个 tgz。
+
+> 检查线上是否漂移：
+> `md5sum dashboard/* 与 sudo md5sum /var/www/cpt-dashboard/*` 逐个比对。
+> 2026-10-01 实测 8 个文件全部一致。
+
 ## 安全边界
 
-- API 只读，不提供下单、撤单、账户、持仓或订单簿接口。
+- **行情与结构数据只读** —— 不提供下单、撤单、账户、持仓或订单簿接口。
+- ⚠️ **但自选列表可写**：`POST/DELETE /api/dashboard/a-share/watchlist`。
+  处置是要求 `Content-Type: application/json`（否则 415）以抬高跨站触发门槛，
+  **不引入鉴权系统**（`app.py:888` 有注释说明这是刻意取舍）。所以「只读」这句话
+  只对行情/结构成立，别对外笼统承诺。
+- **不要把生产库口令写进任何版本化文档**。2026-09-30 的交接文档曾明文写出
+  `$DB_PW`，2026-10-01 已删除，但**口令已进 git 历史，需要轮换**
+  （待办见该交接文档 §3.3）。
 - 不把交易所密钥放入前端、Nginx 配置或 Git。
 - 本地上线前确认 Nginx 不暴露 `.git`、`.venv`、`references`。
+  （`_pkg/` 是有意暴露的发布通道，见上一节。）

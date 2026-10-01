@@ -173,34 +173,44 @@ class LLMClient(Protocol):
 
 ```text
 cpt/
-├── domain/         纯算法与领域模型（14 个模块，零第三方依赖）
-│   types.py  models.py  config.py  chan_bar.py  contain.py
-│   fractal.py  bi.py  zhongshu.py  trend_type.py  recursion.py
-│   signal.py  ...
-├── adapters/       外部接入（16 个模块）
+├── domain/         纯算法与领域模型（13 个模块，零第三方依赖）
+│   types.py  models.py  config.py  bi.py  fractal.py  contain.py
+│   zhongshu.py  trend_type.py  recursion.py  signal.py  first_buy.py
+│   a_share_rules.py  containment_trace.py
+├── adapters/       外部接入（15 个模块）
 │   binance_futures.py  ccxt_source.py  wind_source.py  a_share_public.py
 │   a_share_local.py  a_share_pool.py  a_share_factor.py  strategy_signal.py
 │   validators.py  reference_chanlun.py  native_chanlun.py  czsc_chanlun.py
-│   _dbconfig.py  ...
+│   source_registry.py  backend_factory.py  _dbconfig.py
 ├── application/    用例编排（28 个模块）
-│   replay.py  inspect.py  export.py  dashboard.py  multi_level.py
-│   a_share_snapshot.py  a_share_rules.py  canvas_*.py  ...
-└── web/            HTTP 入口（5 个模块）
-    __main__.py  app.py  a_share.py  a_share_routes.py  __init__.py
+│   replay.py  export.py  dashboard.py  dashboard_snapshot_v2.py
+│   multi_level.py  a_share_snapshot.py  first_buy_bridge.py  canvas_wbt.py
+│   signal_event_store.py  dashboard_run_store.py  dashboard_runs.py
+│   dashboard_*.py（14 个面板投影）  _bar_dict.py
+└── web/            HTTP 入口（4 个模块 + __init__）
+    __main__.py  app.py  a_share.py  a_share_routes.py
 
 scripts/            运维入口（不在包内，但已在 CI 门禁覆盖范围内）
-    factor_backfill.py
+    factor_backfill.py  snapshot_a_share_batch.py  fetch_references.sh
+    migrations/（R20 / R21 / R23 三份幂等 SQL）
 dashboard/          前端静态产物（Nginx 从 /var/www/cpt-dashboard 提供，非包内）
-tests/              扁平布局：test_*.py 直接放 tests/ 下（71 个）
-    fixtures/oracle/
+tests/              扁平布局：72 个 test_*.py 直接放 tests/ 下，仅一个 fixtures/ 存放
+                    人工构造案例；**没有** unit/ oracle/ e2e 子目录（见 §11）
 docs/               rules.md  architecture.md  implementation-plan.md  progress-log.md
-                    pending-wiring.md  duplication-triage.md  export-schema-v1.md  audit/
+                    pending-wiring.md  duplication-triage.md  export-schema-v1.md
+                    known-traps.md  audit/  archive/
 deploy/             nginx/  systemd/  env/  README.md
 references/         czsc @ 701e480a（可选 extra `chan`）  wbt @ 39bb1e8a（仅可视化参考）
 ```
 
 > 三个已删除的层（`engine/` / `storage/` / `llm/`）与它们各自的规划树**不再列出** ——
 > 见 §2 的层说明与 §3.2 / §3.4。
+>
+> **关于 ccxt**：`adapters/ccxt_source.py` 存在并由 `source_registry.py` 注册为兜底
+> 行情源，但它**顶层不 import ccxt**（ccsc 自带的 `ccxt_connector.py` 才是顶层硬 import）。
+> 所以「不用 ccxt」与「有 ccxt 兜底源」两句话都成立 —— 准确说法是：**ccxt 是可选
+> 依赖，CI 环境不装，测试走 `importorskip`**。§10 把「多交易所 / ccxt」列为非目标，
+> 指的是不做多交易所聚合与选股，不是否掉这个兜底源。
 
 ## 6. 数据模型（不可变）
 
@@ -304,11 +314,22 @@ Web UI / 前端图表组件      LLM 参与结构判断或信号生成
 
 ## 11. 测试策略
 
+**实际布局（2026-10-01 实况）**：`tests/` 是**扁平**的，72 个 `test_*.py` 直接放在
+`tests/` 下，唯一子目录是 `fixtures/`（11 个文件，人工构造案例）。
+
 ```text
-tests/fixtures/   人工构造案例（JSON，含预期结构序列与事件）
-tests/unit/       domain 各 stage 纯函数 + engine 状态机
-tests/oracle/     czsc 对照：同输入 diff 分型/新笔/力度度量/一买谓词
-tests/e2e/        同输入必同输出的哈希校验（复现性）
+tests/
+├── fixtures/            人工构造案例（JSON，含预期结构序列与事件）
+└── test_*.py            72 个，按被测对象命名（test_signal.py / test_dashboard_*.py …）
 ```
 
-测试金字塔：人工构造 fixture 先行（实施计划 M0 交付物直接 fixture 化）→ 引擎回放集成测 → oracle 对照测 → 端到端复现性校验。与 czsc 的差异必须可解释并记录。
+> **本节早期版本列的 `tests/unit` / `tests/oracle` / `tests/e2e` 四个子目录从未建立**，
+> 那是 v0.1 的规划树。查模块归属请直接看文件名，不要按那四个目录去找。
+
+测试金字塔：人工构造 fixture 先行 → 领域层纯函数 → 应用层快照契约 → HTTP 路由
+（`tests/conftest.py::served()` 提供共用的真 server 样板）→ 死代码与层级门禁。
+
+与 czsc 的差异必须可解释并记录；czsc 不在 CI 环境，相关测试走 `importorskip`，
+**不允许**用 mock 假装它在位。
+
+**门禁**见 `README.md`「质量门」—— 6 条全部在 CI（3.12 + 3.14 双版本）执行。

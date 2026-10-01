@@ -298,7 +298,7 @@ mypy（55 files）/ vulture / import-linter 全绿。
 | R14-4 | `cpt/domain/first_buy.py` + 力度度量 | 与 czsc 信号模板逐 n 交叉验证 **6/6**，含正例 |
 | R14-5 | 5 个活文档 + 3 个代码文件同步 | 残留终检只剩有意保留的历史记录 |
 
-## R15 — A股接入（进行中）
+## R15 — A股接入（已完成 2026-09-24）
 
 ### R15-1 复权因子工具 ✅
 
@@ -433,7 +433,7 @@ R15 当前交付了 **完整的"读数据 + 计算结构"的 cpt/ 侧能力**；
 
 ---
 
-## R16 — 四画布 + flag 切换（进行中）
+## R16 — 四画布 + flag 切换（已完成 2026-09-25）
 
 **目标**：看板能看到 A 股日线缠论结构，四个画布并存、flag 切换，最后选一个。
 
@@ -2124,3 +2124,86 @@ hfq 被调连续（002594 `raw -67%` / `hfq ±0`）；腾讯退化 = raw 正常�
 6. **omp 的 `edit` 模糊匹配会误删**：d2 一次大段编辑误删了 `renderReproducibility` 的函数头 3 行（含
    `const panel = …`），当场修回。omp 退出码为 1 时**不是失败**（stderr 有 `Working...` 就会被 PowerShell
    当 `NativeCommandError`），要看 stdout 正文 + 落盘文件。
+
+---
+
+## R23 · 运行持久化落表，/compare 与 /multi-run 跨重启可比 · 2026-10-01
+
+> **本节是 2026-10-01 回填的。** R23 的实际工作当天已完成并部署到 oracle，
+> 但台账一直停在 R22 —— 断了一轮。现按 git 记录补齐，**代码与本文的证据链
+> 都可复核**。
+
+### 一、动机
+
+R22 补了运行本体缓冲（`dashboard_runs._RUN_BODIES`，`deque(maxlen=50)`），
+C3 `/compare` 与 C4 `/multi-run` 才有入参。但它是**进程级**的：重启即空，
+用户重启后只能看到 `{"available": false, "reason": "run_body_unavailable"}`。
+用户诉求原文（2026-09-30）：**「跨重启可比」**。
+
+### 二、一~N 分项
+
+1. **建表 R23** — `scripts/migrations/2026-10-02_r23_dashboard_run.sql`。
+   **5 列**：`run_id` PK / `dataset_hash` / `generated_at` / `body_recorded` / `snapshot` jsonb。
+   12 列方案被明确叫停（`symbol`/`interval_ms`/`bar_count`/`config_hash`/`source`/`created_at`
+   全部能从 jsonb 现抽，冗余列带来一致性问题）。
+2. **存储层** — `cpt/application/dashboard_run_store.py`：`upsert_run` / `get_snapshots` /
+   `recent_runs` + `DashboardRunError`。按 R21 `signal_event_store` 的套路：
+   零 psycopg 依赖、连接由调用方传入、**不 commit**（事务边界归调用方）。
+3. **接线** — `cpt/web/app.py`：
+   - `record_run(..., on_recorded=_persist_run)` —— 只在真正 append 之后双写，
+     去重命中**不碰 DB**（§5.2 的要求）；
+   - `/compare`、`/multi-run` 改成**表优先 → ring 兜底**；
+   - `/runs` 走 `dashboard_run_store.recent_runs`，面板因此能看到重启前的历史。
+4. **测试** — `tests/test_dashboard_runs_persisted.py`，30 条，核心是跨重启闭环
+   （写表 → `clear_runs()` → 查表仍命中）。
+
+### 三、本轮自己制造并修掉的三个问题
+
+| # | 问题 | 发现方式 | commit |
+|---|---|---|---|
+| 1 | **CI 随机红**：`test_provider_caches_snapshot_within_ttl` 挂在 `dual_compare` 上。根因是 `_attach_dual_compare` 每次 `build_ashare_snapshot` 都直连东财并嵌实时价，而该测试连调两次比相等。**是既有问题不是本轮引入** —— 在 `f2932e6` 的隔离 worktree 上用「第 2 次 urlopen 起失败」的注入复现出同形状失败才敢下结论 | CI attempt 1 | `a69feba` |
+| 2 | **`_persist_run` 漏 `conn.commit()`**，数据静默丢失。store 层按设计不 commit，连接 close() 回滚。现场表现极具迷惑性：HTTP 全 200、journalctl **零告警**、表 **0 行**。定位靠直接在 venv 里单调 `upsert_run` 做对照 | **§6 部署手册真机跑** | `947ed47` |
+| 3 | **`/runs` 降级缺口**：表能查但返回 0 行时不回落 ring。双写是 best-effort 的，那种情况下会显示空列表，**比 R20 还差**。改为表 + ring 合并去重 | 自查（用户提出） | `66be3bd` |
+
+**教训（值得单列）**：本地 29 条测试全绿的情况下 #2 依然存在，因为测试只验了
+「`_persist_run` 吞掉 DB 异常」，**没验「`_persist_run` 确实提交了」**。
+写入路径的测试如果只看「不抛异常」，是抓不到静默回滚的。
+
+### 四、验收
+
+`docs/handoff-20260930-snapshot-batch-and-run-table.md` §6 的 7 步在 oracle 全走完：
+
+| 步 | 结果 |
+|---|---|
+| 1 同步 | `git pull --ff-only`，HEAD 对齐 |
+| 2 迁移 | md5 与仓内一致，**正好 5 列**，3 索引 |
+| 3 重启 | `listening on http://127.0.0.1:8010` |
+| 4 触发 | 3~4 行真实 run，`body_recorded=t` |
+| 5 验 API | **重启清空 ring 后**：`/runs` 3~4 行、`/compare` `available=True`(12 diffs)、`/multi-run` `available=True`(122 points) |
+| 6 回归 | `/signal-stats total=4` 未受影响；三条降级形状全对；零双写失败日志 |
+| 7 回滚自检 | `cpt_dashboard_run` 外键数 = 0 → `DROP TABLE` 不牵连他表；`cpt_signal_event` 4 行未动 |
+
+门禁：ruff / format / lint-imports / vulture 全绿；mypy 4 条 `flock` 为 Windows-only
+基线；pytest 563 passed / 13 failed（13 条全是 `test_web_a_share_routes.py` 的
+fcntl 基线）。CI 连续 5 次 success。
+
+### 六、踩坑
+
+1. **`_persist_run` 的事务边界**：见 §三 #2。
+2. **`grep -q` + `set -o pipefail`**：`journalctl | grep -q "x"` 在命中后 grep 立刻
+   关闭管道，journalctl 收 SIGPIPE 返 141，pipefail 把整条管道判成失败 ——
+   服务其实是好的，脚本却报「没有 listening 行」。**先落文件再 grep**。
+3. **验证脚本不要在共享生产表上 `DELETE`**：档位测试要制造「表空」时用
+   `ALTER TABLE ... RENAME`（不可用性档位已经这么做了），别删真数据。
+
+### 七、仍未做
+
+1. `a_share_snapshot.py` 的 except 分支**缺 `conn.rollback()`** —— 一条 SQL 抛错后
+   整条连接进 aborted 态，后续 SQL 全失败，51 只里 49 只 skip。**本轮复核确认缺陷
+   仍在**（全文无 `rollback`）。根因是同一个「事务边界」家族的问题。
+2. `t_plus_one_purchase_allowed` 仍是零生产引用的唯一符号。
+3. `docs/audit/cpt-code-audit-20260930.md` 的 **M3（canvas iframe 信任边界）** 仍开放。
+4. `_pkg` 目录（`collector-cn` 的发布通道）住在 `/var/www/cpt-dashboard/` 里，
+   不在版本控制下、已积压 8 个 tgz、无清理机制。
+5. 后端 19 条路由，前端只调 8~9 条（看板是单快照 SPA）。哪些是给外部消费者的
+   API 面、哪些是历史遗留，没有文档区分。

@@ -1,7 +1,22 @@
 # CPT Dashboard 最终阶段验收报告
 
-日期：2026-10-23
-状态：审计报告全部整改项已闭合，逐项有代码+测试+文档证据。
+日期：2026-09-25
+状态：**历史快照** —— 下列能力清单与验收数字均为当时实况，保留仅为溯源。
+
+> ## ⚠️ 不要再把本文当现状
+>
+> 1. **原文件头写的日期是 2026-10-23，比它自己最后被修改的时间还晚三周**，
+>    且内容是 511 passed（R21 的数）—— 属明显笔误，已按文件真实 mtime 更正。
+> 2. **「审计报告全部整改项已闭合」这句话不准确**，已在
+>    [`audit/cpt-code-audit-20260930.md` §0.0](./audit/cpt-code-audit-20260930.md)
+>    回填真实销账表：**M3（canvas iframe 信任边界）至今仍开放**。
+> 3. **「Dashboard 始终只读」已不成立** —— R20 之后加了 A 股自选写接口
+>    `POST/DELETE /api/dashboard/a-share/watchlist`（需 `Content-Type: application/json`，
+>    否则 415）。`README.md`「当前状态」一节也有同样的过时说法。
+> 4. 验收数字、路由条数均已过时。**现行门禁见 `README.md`「质量门」**。
+> 5. 24h 数据的说法与 `docs/dashboard-product-roadmap.md` 冲突 —— 本文说
+>    「已接入」，roadmap 说「仍是硬编码」。以 `cpt/web/__main__.py:844 _safe_24h_for`
+>    为准：realtime 模式有真实 `fetch_24h_ticker`，fixture/demo 模式没有。
 
 ## 已交付能力
 
@@ -48,12 +63,18 @@
 
 ## 安全与边界
 
-- Dashboard 始终只读；
-- 不提供下单、撤单、账户、持仓、盘口或结构写入；
+- Dashboard 的**行情与结构数据只读** —— 不提供下单、撤单、账户、持仓、盘口或结构写入；
+- ⚠️ **但自选列表可写**：`POST/DELETE /api/dashboard/a-share/watchlist`。
+  处置是要求 `Content-Type: application/json`（否则 415），用来抬高跨站触发门槛，
+  **不引入鉴权系统**。单用户看板经 nginx 暴露的前提下这是刻意取舍，
+  不是遗漏 —— 但也别把「只读」写进对外承诺里；
 - 不在浏览器复制 Binance HTTP 逻辑；
 - 本地研究注释不改变原始 snapshot、dataset hash 或结构数据。
 
 ## 自动化验收
+
+> 以下命令为 2026-09-25 当时的门禁。**现行门禁以 `README.md`「质量门」为准**
+> （6 条，3.12 + 3.14 双版本，vulture 阈值 60，`scripts/` 已纳入）。
 
 ```text
 pytest tests -q -rs
@@ -66,7 +87,7 @@ git diff --check
 vulture cpt --min-confidence 60 whitelist.py
 ```
 
-验收结果：全部通过；当前测试总数 **511 passed, 29 skipped**，vulture 0 告警（whitelist.py 逐条登记）。
+验收结果（2026-09-25 当时）：全部通过；测试总数 **511 passed, 29 skipped**，vulture 0 告警（whitelist.py 逐条登记）。此数字已过时，勿引用。
 
 ## 已知边界
 

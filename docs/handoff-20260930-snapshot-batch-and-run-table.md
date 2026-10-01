@@ -1,7 +1,25 @@
 # 交接文档：A 股快照批量入库 + 跨重启比较路由（2026-09-30）
 
-> **给下一个 AI 的一句话起手**：仓库 `cryptocurrency-trading`（branch `main`，
-> HEAD `f2932e6`，**已 push**）已经把 oracle 上 `public.cpt_signal_event` 表
+> ## ✅ 本交接已完成（2026-10-01 回填）
+>
+> **A、B 两阶段都已上线 oracle 并验证通过。** 本文 §5 的 B 阶段任务清单**已全部完成**，
+> §6 的 7 步执行手册**已实跑一遍**（含一次真机抓 bug）。当前 HEAD `ec7ce42`。
+>
+> - A 阶段（`cpt_signal_event` 数据链路）：见 §2.3
+> - B 阶段（`cpt_dashboard_run` 跨重启可比）：commit `764533f` + 三个修复
+>   （`a69feba` / `947ed47` / `66be3bd`），oracle 上 `cpt_dashboard_run` 5 列已建、
+>   4 行真实 run、重启后 `/compare` 与 `/multi-run` 均 `available=True`
+> - 轮次记录见 `docs/progress-log.md` 的 **R23** 一节（含本轮踩坑与仍未做）
+>
+> **本文以下内容作为「当时怎么想的」保留**，§5 的任务清单与 §6 的执行步骤
+> **不要再照做一遍**（迁移是幂等的，重跑无害，但没必要）。
+>
+> ⚠️ §3.3 原本明文写着生产库口令，已删除并留下轮换待办 —— 详见该节。
+
+---
+
+> **给下一个 AI 的一句话起手（2026-09-30 原文，保留溯源）**：仓库 `cryptocurrency-trading`
+> （branch `main`，HEAD `f2932e6`，**已 push**）已经把 oracle 上 `public.cpt_signal_event` 表
 > 写满数据链路打通（commit `f2932e6 feat(snapshot-batch)`），新 systemd
 > service+timer 已经在 oracle 装上、首次手工触发 exit 0、表里 2 行真实数据、
 > `/api/dashboard/signal-stats` 已能返回 `total:2`；**下一步**是给
@@ -139,9 +157,23 @@ CPT 看板在 oracle 上是**两处部署**，只重启服务**不会更新浏�
 
 ```ini
 $RDSHOST=127.0.0.1
-$DB_PW=2f700aa93def994325d4e72962fc8891
+$DB_PW=<见文件，勿外传>
 $DBNAME=emotion_core
 ```
+
+> 🔴 **2026-10-01 已删除本文原先明文写出的 `$DB_PW` 值。**
+> 那是本仓历史里第二次把生产库口令写进版本库（第一次也是本文）。口令进了 git
+> 历史就等于公开了 —— **仅从文件里删掉是不够的**。
+>
+> **待办（需要 owner 执行，我无权限也不该代办）**：
+> 1. 轮换 `emotion_core` 的 postgres 口令；
+> 2. 更新 oracle 的 `~/.dbconfig`；
+> 3. 评估是否需要清理 git 历史（`git filter-repo` 之类），或至少确认该仓为私有仓
+>    且该口令的影响面可接受。
+>
+> 取值方法（不要把结果贴进任何文档或聊天）：
+> `ssh oracle "awk -F= '/^\$DB_PW/{print \$2}' ~/.dbconfig"`
+
 - **dbname 不是默认的 `longkonglong`**，memory 里的默认错（`cpt/adapters/_dbconfig.py`
   默认 `dbname="longkonglong"` 是 **fallback**，权威是 `.dbconfig` 的 `$DBNAME`）。
 - psql 必须 `-h 127.0.0.1 -U postgres + PGPASSWORD`（peer auth 不接 ubuntu）。

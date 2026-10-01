@@ -127,6 +127,13 @@ parity
 - reconnect/stale（✅ R22：`dashboard_watch.py::watch_metrics` 接进 `dashboard_snapshot_v2.py:29`
   → `snapshot.watch_metrics`，前端 `renderWatchMetrics()` 显示最新价/涨跌幅/窗口高低/窗口量；
   **注意 `"24h": None` 仍是硬编码**——窗口统计来自 bars，不是 24h 聚合）；
+  > 📌 **范围说明（2026-10-01 补）**：上面这句说的是 **A 股**路径。A 股没有 24h
+  > 行情源，前端按 `available:false` 显示「—」（`progress-log.md` R21 摘掉窗口兜底
+  > 就是为这个）。**加密 realtime 路径有真实 24h**：
+  > `__main__.py:844 _safe_24h_for()` → `fetch_24h_ticker()` → `normalize_24h()`，
+  > 上游不可达时降级为 `{"available": false, "reason": "upstream_ticker_unavailable"}`。
+  > 另有 `docs/dashboard-final-acceptance.md` 第 40 行说「24h 真实数据已接入」——
+  > 那句对加密成立、对 A 股不成立。三处并非矛盾，是**没标范围**。
 - SSE 或高效实时更新（✅ R22：`dashboard_realtime.py::realtime_update` 接进
   `cpt/web/__main__.py:572` 的 `_RealtimeProvider._cached_snapshot`，容量 8 的 `(symbol, interval_ms)` LRU；
   仍是 HTTP 轮询 + 缓存命中，**不是真的 SSE 推流**）。

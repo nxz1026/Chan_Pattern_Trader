@@ -86,11 +86,15 @@
 | `taker_buy_base_volume` | `float` | 主动买基础量 |
 | `taker_buy_quote_volume` | `float` | 主动买报价量 |
 | `is_closed` | `bool` | 该 bar 是否已收盘 |
-| `direction` | `int` | **派生**（涨跌方向），由 `_bar_to_dict` 显式补上，排在最后 |
+| `direction` | `int` | **派生**（涨跌方向），由 `bar_to_dict` 显式补上，排在最后 |
 
 > `direction` 不在 `CanonicalBar` 的 dataclass 字段里，`asdict()` 不会带它 ——
-> 它是 `_bar_to_dict()` 手工补的（`export.py:51-59`）。消费方若自己用
-> `asdict(bar)` 重建会**少这个键**。
+> 它是 `bar_to_dict()` 手工补的。消费方若自己用 `asdict(bar)` 重建会**少这个键**。
+>
+> ⚠️ **本节早期版本写的是 `_bar_to_dict`（`export.py:51-59`），该函数已于 2026-09-25
+> 的去重 F3-② 抽到 `cpt/application/_bar_dict.py` 并去掉前导下划线**，
+> `export.py` 现在只是 `from cpt.application._bar_dict import bar_to_dict`。
+> 符号名与行号都已失效，请以函数名为准，不要按旧行号去 `export.py` 里找。
 
 ### 3.2 `fractals[]` — 8 字段
 

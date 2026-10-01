@@ -2,6 +2,21 @@
 
 日期：2026-09-23
 
+> ## ⚠️ 历史快照 —— 其中命令与数字均已失效
+>
+> 本文是 2026-09-23 的 M6 阶段验收记录，**保留仅为溯源**，不要照着跑。
+>
+> - `scripts/compare_oracle.py` 已于 2026-09-24（G1）`git rm`，下面所有引用它的
+>   ruff 命令都会直接报文件不存在。
+> - `import-linter` 当时是 **5 contracts**，现在是 **3 条**（随 `engine/` /
+>   `storage/` 整层删除而删）。
+> - `pytest` 107 passed 是 R12 前后的数。当前基线见 `docs/progress-log.md`
+>   末轮记录与 `README.md`「质量门」。
+> - czsc 对照（oracle parity）已随 G1 决议取消，`docs/pending-wiring.md` 记为
+>   「永久未启用」。
+>
+> 现行门禁以 `README.md`「质量门」+ `.github/workflows/ci.yml` 为准。
+
 ## 1. 自动化验收
 
 | 检查 | 结果 |
