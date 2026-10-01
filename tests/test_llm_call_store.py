@@ -107,6 +107,34 @@ def test_status_vocabulary_matches_migration_check_constraint() -> None:
     assert ours == declared, f"枚举与 CHECK 不一致：多 {ours - declared} / 少 {declared - ours}"
 
 
+def test_status_vocabularies_agree() -> None:
+    """**llm 层 / storage 层 / 迁移 SQL 三份状态词汇必须一致。**
+
+    为什么不是让 llm 直接 import storage：`.importlinter` 的
+    ``llm-does-not-leak-into-storage`` 禁止 llm → storage（低层）。这条契约
+    立完的当天就因为「从 storage 导入 STATUS_* 来消 vulture 告警」被违反过，
+    CI 报 ``BROKEN``。所以跨层共享走**测试**而不是 import。
+
+    这条测试就是那个「耦合机制」：谁改了枚举、忘了同步另外两份，这里会红。
+    """
+    from cpt.llm import queue as llm_queue
+    from cpt.storage import llm_call_store as store_mod
+
+    pairs = [
+        ("QUEUED", llm_queue.STATUS_QUEUED, store_mod.STATUS_QUEUED),
+        ("RUNNING", llm_queue.STATUS_RUNNING, store_mod.STATUS_RUNNING),
+        ("OK", llm_queue.STATUS_OK, store_mod.STATUS_OK),
+        ("ERROR", llm_queue.STATUS_ERROR, store_mod.STATUS_ERROR),
+        ("RATE_LIMITED", llm_queue.STATUS_RATE_LIMITED, store_mod.STATUS_RATE_LIMITED),
+        ("INTERRUPTED", llm_queue.STATUS_INTERRUPTED, store_mod.STATUS_INTERRUPTED),
+    ]
+    for name, from_llm, from_store in pairs:
+        assert from_llm == from_store, f"{name} 两层不一致：llm={from_llm!r} storage={from_store!r}"
+
+    # 而且 storage 的 TERMINAL_STATUSES 不能把 rate_limited 算进去
+    assert llm_queue.STATUS_RATE_LIMITED not in store_mod.TERMINAL_STATUSES
+
+
 def test_rate_limited_is_not_terminal_but_interrupted_is_not_error() -> None:
     """两个容易混的状态，各有各的语义：
 

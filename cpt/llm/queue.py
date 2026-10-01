@@ -44,14 +44,26 @@ from typing import Any
 
 from cpt.llm.base import LLMClient, LLMError, LLMRateLimited, LLMRequest, LLMResult
 from cpt.llm.config import LLMConfig
-from cpt.storage.llm_call_store import (
-    STATUS_ERROR,
-    STATUS_OK,
-    STATUS_RATE_LIMITED,
-    STATUS_RUNNING,
-)
 
 _LOG = logging.getLogger(__name__)
+
+#: 本层会**发射**的状态。
+#:
+#: **刻意不从 ``cpt.storage`` 导入** —— ``.importlinter`` 的
+#: ``llm-does-not-leak-into-storage`` 禁止 llm → storage（storage 是低层）。
+#: 跨层共享同一份词汇靠**测试**而不是 import：
+#: ``tests/test_llm_call_store.py::test_status_vocabularies_agree``
+#: 把这里、``storage.llm_call_store``、以及迁移 SQL 的 CHECK 约束三者对齐。
+#:
+#: （这正是那条契约第一次派上用场的地方 —— 写完契约的同一天就违反了它。）
+STATUS_QUEUED = "queued"
+STATUS_RUNNING = "running"
+STATUS_OK = "ok"
+STATUS_ERROR = "error"
+#: 限流。**不是 error** —— 混进去会让看板天天报红，而它其实在正常退避重试。
+STATUS_RATE_LIMITED = "rate_limited"
+#: 进程重启时在途任务的终态。也不是 error。
+STATUS_INTERRUPTED = "interrupted"
 
 __all__ = ["Job", "LLMQueue", "SubmitResult"]
 
