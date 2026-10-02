@@ -3850,3 +3850,88 @@ R28-9 修的是**消费端**（`domain/levels.py` + 提示词），但**权威�
 - **pytest 权威计数（`--junit-xml`）**：829 tests / 13 failures / 0 errors /
   29 skipped → **787 passed**。13 条全在 `test_web_a_share_routes`（`fcntl` 基线），
   **零新增失败**。
+
+### 十一、R30 收尾：nginx 认证 + 画布 D 诊断（画布 D 结论待你确认）
+
+#### 1. 我的失误：诊断时误删了自选数据
+
+跑 M1 暴露面诊断时，我发了一条 `DELETE /api/dashboard/a-share/watchlist?code=600519`
+—— **没抓 body 就发了**。事后查 `~/.cache/cpt/watchlist.json` 的 mtime 是
+`02:31:51`（正是那条 DELETE 的时刻），而 `WatchlistStore.remove` 只在
+`removed == True` 时才写文件 —— 所以 **600519 确实原本在自选里，被我删了**。
+已恢复（`added_at` 变成恢复时刻，原始值无从得知）。
+
+**在一个「写接口无鉴权」的讨论里，我用没鉴权的接口误删了数据** —— 这本身就是
+最直接的论证。
+
+#### 2. `/cpt/` 补上 Basic Auth（M1 拍板方案 A）
+
+勘察发现：同一个 nginx 站点上，`/emotion/` `/dashboard/` `/resume` 三个项目都有
+`auth_basic`，**唯独 `/cpt/` 没有**。静态看板与 `/cpt/api/` 全部匿名可读可写地
+挂在公网上（端口 8010 本身不可达，nginx 是唯一入口，而那条 location 没挂认证）。
+
+**踩了个坑值得记**：`/cpt/api/` 是**独立 location 且比 `/cpt/` 更具体**，nginx
+按最长前缀匹配。第一版我只给静态块加认证，结果 ——
+
+    /cpt/          无凭据=401   ← 看起来做了
+    /cpt/api/...   无凭据=200   ← 其实没做
+
+静态 401 了、API 照样匿名可读可写。**看起来做了、其实没做**，这比完全没做更
+危险。补上 API 块后三个块全部 401，内网直连 8010 不受影响（部署脚本走那条）。
+
+#### 3. 画布 D「有数据没画图」：没修好，但把「查不出来」变成了「一读就知」
+
+**没有修好。** 做的是让这个故障**自带诊断**。
+
+iframe 换成不透明 origin 之后父页读不到里面，于是「图没画出来」表现为**一片
+空白 + 零线索** —— 和 R28/R29 反复吃的是同一个亏：优雅降级掩盖功能缺失。
+（画布 D 一直「不可用」两周没人发现、chromium 测试恒 skip，同一形状。）
+
+做法：iframe 里的诊断脚本用 `postMessage` 跨 origin 上报失败原因，父页在画布
+左下角显示红框。**不是**「让父页看进去」—— 那等于把刚收掉的同源逃逸面重新打开。
+
+**三个自纠，每一个都是「修好了却仍然没信号」**：
+
+1. **靠 `load` 事件判断 vendor 是否就绪，恰好在最需要时失效。** `load` 要等全部
+   子资源（含 1.17MB plotly）完成；而 headless 的 `--virtual-time-budget` 不为
+   嵌套 browsing context 的子资源等那么久，plotly 被 401 挡住时 load 同样不触发。
+   改成给每个 vendor `<script>`/`<link>` 挂 `onload`/`onerror`。
+2. **`DIAG_SCRIPT` 里残留一句 `window.__cptPhase=null`**（编辑时留下的残渣），
+   把 `shell()` 刚设好的 phase 抹成 null，父页的 `phase !== "report"` 过滤把消息
+   **全丢了** —— 看起来像 iframe 根本没上报。
+3. **诊断消息被 token 守卫吃掉。** 守卫本意是不把上一次重绘的 load 当本次的，但
+   vendor 的 onload 往往在**下一次重绘之后**才到达（1.17MB 要几秒，而画布 30s
+   轮询 + 任何缩放都换 token）。诊断刻意不做 token 守卫：晚到一点没关系。
+
+**修好之后的真机结果**（本地代理，**不经 nginx、无 Basic Auth**）：
+
+    ★ OK plotly | OK bootstrap.bundle
+    data-canvas-ready = true    data-canvas-renders = 1
+
+**这排除��一个假设**：不透明 origin 并没有挡住 vendor 脚本，R28-11 那次改动**不是**
+画布 D 不出图的原因。
+
+剩下最可能的解释转向 **Basic Auth**：iframe 自己的子资源请求不带凭据 → 401。
+用户截图也支持 —— 表格与按钮的样式是 wbt 自带的 13KB **内联 CSS** 给的（不走
+网络），而 plotly / bootstrap 走网络。**待用户在真浏览器刷新后读诊断框确认。**
+
+顺带发现一件本来就该知道的事：**每次 draw 都新建 iframe + 重拉 1.17MB vendor**。
+现在有 `data-canvas-renders` 计数了，重绘有多快可以直接读。
+
+#### 4. 一个操作提醒（写进 deploy/README）
+
+`/cpt/` 的 Basic Auth **不能**用 URL 内嵌凭据（`https://user:pwd@host/`）去驱动
+这个页面：相对 `fetch` 会继承凭据，浏览器直接抛
+
+    Failed to execute 'fetch' on 'Window': Request cannot be constructed from a
+    URL that includes credentials
+
+所以**浏览器自动化验这个看板必须让代理在服务端加 `Authorization` 头**，
+不能在 URL 里塞账密。headless Chrome 的 `--ignore-certificate-errors` 可以过自签
+证书这一关，但过不了这一关。
+
+#### 5. 门禁
+
+- **pytest 权威计数（`--junit-xml`）**：829 tests / 13 failures / 0 errors /
+  29 skipped → **787 passed**。13 条全在 `test_web_a_share_routes`（`fcntl` 基线），
+  **零新增失败**（本节只动前端与 nginx）。

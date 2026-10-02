@@ -212,6 +212,38 @@ DELETE FROM public.cpt_dashboard_run
 > 回滚就是 `DROP TABLE IF EXISTS public.cpt_dashboard_run CASCADE;`——表无 FK，
 > 代价是 0。**不要 DROP `public.cpt_signal_event`**，那是 R21 的真数据。
 
+## `/cpt/` 的 Basic Auth（R30 补上）与一个操作坑
+
+2026-10-02 补：`/cpt/` 此前是同一个 nginx 站点上**唯一没有 `auth_basic` 的项目**
+（`/emotion/` `/dashboard/` `/resume` 三个都有），静态看板与 `/cpt/api/` 全部匿名
+可读可写地挂在公网上。现在三处都挂了 `auth_basic "Restricted"` + `/etc/nginx/.htpasswd`。
+
+### 坑一：三个 location 都要加，漏一个等于没做
+
+    location /cpt/api/     ← 独立块，且比 /cpt/ 更具体，nginx 按最长前缀匹配
+    location = /cpt/       ← 静态首页
+    location /cpt/         ← 静态资源
+
+只给静态两块加认证时，实测是 `/cpt/` → 401 而 `/cpt/api/...` → **200 无凭据可读
+可写**。看起来做了、其实没做 —— 比完全没做更危险。
+
+### 坑二：不能用 URL 内嵌凭据驱动这个页面
+
+`https://admin:xxx@host/cpt/` 这种写法会让页面里的相对 `fetch` **继承凭据**，
+浏览器直接抛：
+
+    Failed to execute 'fetch' on 'Window': Request cannot be constructed from a
+    URL that includes credentials
+
+也就是说**浏览器自动化验这个看板不能靠 URL 带账密**。可行的做法是让一个本地
+代理在服务端补 `Authorization: Basic ...` 头，浏览器侧完全看不到凭据。
+（headless Chrome 的 `--ignore-certificate-errors` 能过自签证书那关，过不了这关。）
+
+### 内部直连不受影响
+
+部署与健康检查脚本走 `http://127.0.0.1:8010/...`（不经 nginx），所以加认证
+**不会**影响自动化验证 —— 只需注意别改成走公网 URL。
+
 ## `_pkg/` — ⚠️ 混进来的另一个项目，不属于 CPT
 
 `/var/www/cpt-dashboard/_pkg/` 里放的是 **`collector-cn` 采集机**的发布产物
