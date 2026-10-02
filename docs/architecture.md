@@ -18,7 +18,14 @@
 │ web/              HTTP 入口：handler / 路由 / CLI（--mode）    │
 ├─────────────────────────────────────────────────────────────┤
 │ application/      用例编排：replay / inspect / export /       │
-│                   dashboard / a_share_snapshot               │
+│                   dashboard / a_share_snapshot / llm_cases   │
+├─────────────────────────────────────────────────────────────┤
+│ llm/              独立 LLM 服务层：config / queue / provider / │
+│                   prompts / structured（不碰 SQL）            │
+├─────────────────────────────────────────────────────────────┤
+│ storage/          持久化：**SQL 只许出现在这一层与 adapters/**  │
+│                   signal_event / structure_event / llm_call / │
+│                   dashboard_run                               │
 ├─────────────────────────────────────────────────────────────┤
 │ adapters/         外部接入：Binance / ccxt / Wind / 腾讯 /     │
 │                   本地 A 股库 / 三种缠论实现                    │
@@ -27,34 +34,58 @@
 └─────────────────────────────────────────────────────────────┘
 ```
 
-> **这张图在 2026-09-25 重画过。** 原图多画了 `engine/`、`storage/`、`llm/` 三层：
-> 前两层实际只落地过 `engine/realtime.py`、`engine/rebuild.py`、`storage/models.py`、
-> `storage/repository.py` 四个文件且**生产代码零导入**（生产实时路径由
-> `web/__main__.py` 的 `_RealtimeProvider` 自包含承担，历史回放走
-> `application/replay.py`，全程无本地持久化），已按审核 P0-2 整层删除；`llm/`
-> 则从未有过代码（空的 `cpt/llm/` 占位包更早按审计 A1 删除）。
-> 当时的处置是**只在图下加"这是预留蓝图"的说明、没有重画图** —— 于是文档继续画着
-> 不存在的层，读者（和后来的审核）会以为它们还在。历史记录见 §3.2 / §3.4。
+> **这张图在 2026-10-01（R24 / R25）又改过两次。** 2026-09-25 那次重画把
+> `engine/` 与 `storage/` 标成「整层删除」，理由是它们只有四个文件且生产代码零导入。
+> 半年后 R24 发现 **SQL 其实一直散落在 `domain` / `application` / `web` 里**，
+> 于是**恢复了** `storage/` 作为唯一的持久化层，并加了 CI 门禁
+> （`scripts/check_sql_layering.py`，7 条门禁之首）强制「SQL 只许出现在
+> `storage/` 与 `adapters/`」。R25 又补上了 `llm/`。
 >
-> 若未来确实需要持久化（如信号落库），按 `domain/signal.py` 中 `signal_id` 作为
-> **稳定 upsert 主键**的设计重新实现，不要照搬旧的 SQLite 三层模型。若未来落地
-> LLM 用例（规则解释 / 差异摘要 / 标注辅助），在 `application/` 里编排，LLM 服务层
-> 只放无业务规则的独立实现，且不得被 `domain` / `adapters` 导入。
+> **教训值得留着**：那次「整层删除」是对的（四个孤儿文件该删），但它**顺手把一张
+> 描述现状的图当成了描述设计的图** —— 于是文档画着不存在的层，读者与后来的审核
+> 都以为现状就是设计。删层和改图是两件事，删层时必须同时改图。
 
-依赖方向（`.importlinter` 的 `layers` 契约强制）：
+### 2.1 各层复盘状态（2026-10-02 实测）
+
+「复盘」指**以该层为单位**做过的勘察 + 重做（补边界、加门禁、真机验证、修 bug），
+不是被单点改动顺手碰过。
+
+| 层 | 文件 | 行数 | 复盘状态 |
+|---|---:|---:|---|
+| `storage/` | 5 | 1,070 | ✅ **已做**（R24 恢复 + 划边界 + CI 门禁） |
+| `llm/` | 7 | 1,092 | ✅ **已做**（R25 从零建 + R28 真机验 + 修 3 个真问题） |
+| `adapters/` | 16 | 4,519 | ⚠️ 只被 R28-1 修 rollback 碰过；**7 个 `dashboard_*` 疑似孤儿**（09-25 审计提出，两轮未动） |
+| `application/` | 29 | 4,182 | ⚠️ 只被 R26 / R27-1 碰过；`a_share_snapshot.py` 950 行 / 26 个 except |
+| `domain/` | 16 | 2,894 | ⚠️ 只被 R26 / R28-9 碰过；结构上最干净（纯函数零 IO）但没系统看过 |
+| `web/` | 5 | 2,680 | ❌ **没做过**；`app.py` 1,151 行 / 22 个路由分支（09-25 审计报 CC 94 未处理），且压着中危 M1（watchlist 写接口无鉴权） |
+| `dashboard/`（前端） | 7 | ~1.6 MB | ⚠️ 只被画布 D 与几个面板碰过 |
+| `engine/` | — | — | 🚫 2026-09-25 整层删除（四个孤儿文件，R24 未恢复） |
+
+**下一层建议做 `web/`**：它不是最破的，却是唯一「外面看不见里面」的层 ——
+改动全经 HTTP 暴露、出问题直接打到用户，而它既没复盘、也压着一条开放的中危项。
+`adapters/` 的孤儿代码是纯清理，不紧急。
+
+依赖方向（`.importlinter` 的 `layers` 契约强制，实测依赖图见下）：
+
 
 ```text
-web         → application / adapters / domain
-application → adapters / domain
+web         → application / llm / storage / adapters / domain
+application → llm / storage / adapters / domain
+llm         → （不导入任何上层；自己不碰 SQL）
+storage     → domain
 adapters    → domain
 domain      → （不导入任何上层）
 domain 不导入 pandas / httpx / ccxt / fastapi / sqlalchemy / torch / openai / 绘图库
 ```
 
 > 契约是**自上而下**写的（`layers` 第一条是**最高**层），高层可以导入**任意**低层
-> （`web` 直接用 `domain` 是允许的），反向不行。实测依赖图：
-> `domain → []`、`adapters → [domain]`、`application → [adapters, domain]`、
-> `web → [adapters, application, domain]`。
+> （`web` 直接用 `domain` 是允许的），反向不行。`.importlinter` 共 6 条，全部
+> `KEPT`（`lint-imports` 是 7 条门禁之一）：
+> 「Domain 无第三方依赖」「Adapters 不漏进 domain」「Storage 不漏进 domain」
+> 「LLM 不漏进 domain」「LLM 不漏进 storage」「Layered architecture」。
+>
+> 后两条是 R25 专门为 `llm/` 加的 —— 它是**独立服务层**，只有 `application/llm_cases`
+> 可以调它，`web` / `storage` / `adapters` / `domain` 都不得依赖。
 
 ## 3. 各层职责
 
