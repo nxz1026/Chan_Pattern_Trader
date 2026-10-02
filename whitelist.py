@@ -90,3 +90,13 @@ drain  # llm/queue —— 等异步队列排空（测试同步用；vulture 只�
 # 而 vulture 只扫 cpt/，所以它们在门禁眼里是死的（实际不是）。
 fetch_corporate_actions  # adapters/wind_source 供 scripts/factor_recompute.py 取公司行动
 hot_pool_codes  # adapters/a_share_factor 供 scripts/factor_recompute.py 排优先级
+
+# --------------------------------------------------------------------------- #
+# 6. R39：同样因为「vulture 只扫 cpt/，不扫 scripts/」而被误判为死代码
+# --------------------------------------------------------------------------- #
+# 真实调用方 scripts/factor_recompute.py（已接成 --source eastmoney 默认源）
+fetch_actions  # adapters/eastmoney_actions �� scripts/factor_recompute.py 取东财公司行动
+# 公开常量（在 __all__ 里）：它声明「四种原因的全集」，
+# 不是死代码。vulture 把它当未知变量，是工具的盲区。
+CAUSES  # application/run_metric �� __all__ 里的公开枚举（data/config/backend/code）
+

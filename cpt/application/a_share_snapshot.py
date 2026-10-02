@@ -21,7 +21,8 @@ from __future__ import annotations
 import logging
 import os
 from collections.abc import Callable, Sequence
-from datetime import UTC, datetime
+from dataclasses import asdict
+from datetime import UTC, date, datetime
 from typing import Any
 
 from cpt.adapters.a_share_factor import (
@@ -284,16 +285,6 @@ def build_ashare_snapshot(
     # `public.cpt_structure_event`，同时把事件喂进 snapshot.events。
     # 此前 `snapshot.events` 在生产里**恒为 []**（没有生产者），这一段是它的
     # 第一个真实出口。best-effort：事件流失败只降级，不影响快照本体。
-    structure_events = record_structure_events(
-        market="cn",
-        fractals=fractals,
-        bis=bis,
-        zhongshus=zhongshus,
-        # 与下面的 build_dashboard_snapshot_v2 对齐：A 股刻意不算走势类型
-        # （见上方注释），事件流与快照必须记同一批结构，否则两边会漂。
-        trend_types=(),
-        conn=_active_client_conn(active_client),
-    )
     snapshot = build_dashboard_snapshot_v2(
         config=RulesConfig(),
         bars=validated,
@@ -303,7 +294,7 @@ def build_ashare_snapshot(
         trend_types=(),
         signal=signal,
         signal_first_sell=signal_first_sell,
-        events=structure_events,
+        events=(),  # R39：事件在建快照**之后**才算（为了拿指纹归因），下面回填
         multi_level=multi_level_data,
         mode="watch",
         status="confirmed",
@@ -317,6 +308,34 @@ def build_ashare_snapshot(
             "as_of_ms": int(datetime.now(UTC).timestamp() * 1000),
         },
     )
+    # 结构事件流（R26 接线）：diff 出本轮的变化并 append 到
+    # `public.cpt_structure_event`，同时把事件喂进 snapshot.events。
+    # 此前 `snapshot.events` 在生产里**恒为 []**（没有生产者），这一段是它的
+    # 第一个真实出口。best-effort：事件流失败只降级，不影响快照本体。
+    #
+    # ⚠️ R39：这里**在建快照之后**才调用，而 R26 时是在之前。原因是「变化原因」
+    # 归因（`payload["cause"]`）要比对本轮的算法指纹，而指纹由
+    # `build_dashboard_snapshot_v2` 写进 `snapshot["reproducibility"]` —— 快照
+    # 还不存在时拿不到它。
+    #
+    # 为什么回填是安全的：`build_dashboard_snapshot_v2` 对 `events` 只做
+    # `[asdict(e) for e in events]`（`cpt/application/dashboard.py:220`），
+    # 它是**纯输出**，不参与 `reproducibility`/`data_quality`/任何计算 ——
+    # 所以先传空、后回填，最终快照里的 events 与原来完全一致。
+    structure_events = record_structure_events(
+        market="cn",
+        fractals=fractals,
+        bis=bis,
+        zhongshus=zhongshus,
+        # 与上面的 build_dashboard_snapshot_v2 对齐：A 股刻意不算走势类型
+        # （见上方注释），事件流与快照必须记同一批结构，否则两边会漂。
+        trend_types=(),
+        conn=_active_client_conn(active_client),
+        symbol=code,
+        fingerprint=_fingerprint_for(snapshot, backend=active_backend),
+    )
+    if structure_events:
+        snapshot["events"] = [asdict(event) for event in structure_events]
     # R35：parity 的**参照侧**（czsc 优先，回落腾讯）。此前这个块从上线起就恒为
     # ``{"available": false, "reason": "oracle_reference_unavailable"}`` —— 6 个
     # build_dashboard_snapshot_v2 调用点没有一个传 parity=，即**压根没有生产者**。
@@ -352,6 +371,33 @@ def build_ashare_snapshot(
     _attach_close_countdown(snapshot, active_client)
     _attach_signal_change(snapshot, active_client)
     _attach_dual_compare(snapshot, code, active_client)
+    _attach_calendar_gaps(snapshot, active_client)
+    # R38：A 股侧也落「运行水位 + 算法指纹」。加密侧那行在"只有走到这里才算成功
+    # 发布的快照"之后；这里同理 —— 上面几条 except 分支返回的是**降级/空**快照
+    # （``empty_ashare_snapshot``），记进去就等于把降级记成正常水位。
+    # 复用 ``active_client`` 的连接、**不 commit**：事务边界归调用方（路由）。
+    conn = _active_client_conn(active_client)
+    if conn is None:
+        # 拿不到连接就**不记** —— 记不进去的水位比没有水位更坏：
+        # 巡检会以为「A 股侧在跑」，而其实一行都没落。
+        _LOG.warning("A 股运行水位跳过：%s 拿不到数据库连接", code)
+    else:
+        try:
+            from cpt.application.run_metric import MetricRecorder  # noqa: PLC0415
+
+            MetricRecorder(conn).record(
+                snapshot,
+                market="cn",
+                symbol=code,
+                backend=type(active_backend).__name__,
+                fractal_count=len(fractals),
+                bi_count=len(raw_bis),
+                zhongshu_count=len(zhongshus),
+                # A 股刻意不算走势类型（见上面 build_dashboard_snapshot_v2 的注释）
+                trend_type_count=0,
+            )
+        except Exception as exc:  # noqa: BLE001
+            _LOG.warning("A 股运行水位记录失败 %s：%s: %s", code, type(exc).__name__, exc)
     return snapshot
 
 
@@ -579,6 +625,87 @@ def _apply_daily_tags(
 def _attach_ashare_tags(snapshot: dict[str, Any], audit: dict[str, Any]) -> None:
     """把审计块塞进 ``data_quality``（与 :func:`_attach_factor_fetch` 同款，零 schema 变更）。"""
     snapshot.setdefault("data_quality", {})["ashare_tags"] = audit
+
+
+def _fingerprint_for(snapshot: dict[str, Any], *, backend: Any) -> dict[str, str]:
+    """本轮的算法指纹四件套（快照已存在时才有意义）。
+
+    薄薄一层包装：真正的口径在 :func:`cpt.application.run_metric.fingerprint_from_snapshot`，
+    加密侧与 A 股侧共用同一份，避免两边算出不同的 ``dataset_hash`` 却互相比对。
+    """
+    from cpt.application.run_metric import fingerprint_from_snapshot  # noqa: PLC0415
+
+    return fingerprint_from_snapshot(snapshot, backend=type(backend).__name__)
+
+
+def _attach_calendar_gaps(snapshot: dict[str, Any], client: Any) -> None:
+    """按 **A 股交易日历** 重算 ``data_quality.gap_count``。
+
+    ## 为什么必须覆盖
+
+    ``dashboard_quality.quality_report`` 的缺口判据是「下一根的间隔 == 上一根自身
+    的周期」。那是**加密口径**：7×24 连续交易，任何跳空都是真丢数据。
+    但日线 A 股跨周末/法定休市（国庆、春节、清明…一年约 25 天）天然就不满足，
+    于是每轮都被记成 ``gap_count=25``。
+
+    实测后果（R39 真机跑出来）：cn 侧落的 3 行水位 **全部** ``health=failing``，
+    而 crypto 侧 73 行全部 ``ok``。照这样，``run_inspection`` 每天都会为 A 股发一条
+    假告警 —— 那等于没有告警。
+
+    ## 正确口径
+
+    仓里已经有对的实现：``cpt.adapters.source_registry`` 用
+    ``open_days_between`` 列出区间内**全部开市日**，再与实际 bar 日期求差集。
+    这里复用同一套，不另造轮子。
+
+    只在**已覆盖区间内**比对（``first_bar_date..last_bar_date``），所以「今天的
+    bar 还没出来」不会被误判成缺口。
+
+    取不到日历时**不动**原值 —— 宁可保留一个可疑数字，也不把「查不到」写成「没有」。
+    """
+    from cpt.adapters.a_share_local import open_days_between
+
+    quality = snapshot.get("data_quality")
+    if not isinstance(quality, dict):
+        return
+    candles = snapshot.get("candles") or []
+    if len(candles) < 2:
+        return
+
+    def _bar_date(c: Any) -> str:
+        return datetime.fromtimestamp(c["open_time"] / 1000, tz=UTC).date().isoformat()
+
+    try:
+        getter = getattr(client, "_get_conn", None)
+        conn = getter() if callable(getter) else None
+        if conn is None:
+            return
+        dates = sorted(
+            {_bar_date(c) for c in candles if isinstance(c, dict) and c.get("open_time")}
+        )
+        if len(dates) < 2:
+            return
+        expected = open_days_between(
+            conn, date.fromisoformat(dates[0]), date.fromisoformat(dates[-1])
+        )
+        if not expected:
+            _LOG.debug("交易日历为空，保留原 gap_count（%s）", dates[-1])
+            return
+        missing = sorted(d for d in expected if d.isoformat() not in set(dates))
+        quality["gap_count"] = len(missing)
+        quality["gaps"] = [{"date": d} for d in missing]
+        quality["gap_basis"] = "trade_calendar"
+        quality["expected_trade_days"] = len(expected)
+        quality["severity"] = (
+            "stale"
+            if quality.get("stale")
+            else "gap"
+            if missing or quality.get("out_of_order_count")
+            else "ok"
+        )
+    except Exception as exc:  # noqa: BLE001
+        _LOG.debug("按交易日历重算缺口失败：%s: %s", type(exc).__name__, exc)
+        _rollback_quietly(client, "calendar_gaps")
 
 
 def _attach_close_countdown(snapshot: dict[str, Any], client: Any) -> None:

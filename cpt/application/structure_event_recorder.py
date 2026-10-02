@@ -23,6 +23,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
+from dataclasses import replace
 from typing import Any
 
 from cpt.domain.models import Bi, Fractal, StructureEvent, TrendType, ZhongShu
@@ -64,12 +65,21 @@ def record_structure_events(
     zhongshus: Sequence[ZhongShu] = (),
     trend_types: Sequence[TrendType] = (),
     conn: Any | None = None,
+    symbol: str = "",
+    fingerprint: dict[str, str] | None = None,
 ) -> tuple[StructureEvent, ...]:
     """diff 出本轮结构变化 → append 到事件流 → 返回事件。
 
     :param market: 写进 ``structure_id`` 的市场前缀（``cn`` / ``crypto``）。**必填**：
         不带市场前缀的 id 会让两个市场在同 level 上撞同一 ``start_time`` 时静默合并。
     :param conn: 复用的连接；``None`` 表示自己开一条（加密路径）。
+    :param symbol: 标的代码。**归因必需**（``cpt_run_metric`` 按 market+symbol 存
+        指纹，而 ``structure_id`` 本身**不含代码** —— 它是
+        ``{market}:{kind}:{level}:{start_time}``）。留空则不归因。
+    :param fingerprint: **本轮**的算法指纹四件套（``config_hash`` /
+        ``dataset_hash`` / ``rules_version`` / ``backend``）。给了且 ``symbol``
+        非空就归因「这次结构变化是什么原因」，写进每条事件的 ``payload["cause"]``；
+        否则**不归因**（payload 里没有 ``cause`` 这个键），而不是归一个假原因。
     :returns: 本轮产生的事件；无变化 / 计算失败时返回空元组。
 
     **空批次是常态**：每轮快照都 diff，而同一根 K 线上的结构大多不变。
@@ -111,9 +121,61 @@ def record_structure_events(
             events = diff_states(previous, states)
             if not events:
                 return ()  # 热路径常态：不写库
+            if fingerprint is not None and symbol:
+                events = _with_cause(
+                    db, events, market=market, symbol=symbol, fingerprint=fingerprint
+                )
             append_events(db, events)
             db.commit()  # ← store 层不 commit，边界在这里
             return events
     except Exception as exc:  # noqa: BLE001 — 旁路失败不影响快照
         _LOG.warning("结构事件记录失败（不影响快照）: %s", exc)
         return ()
+
+
+def _with_cause(
+    conn: Any,
+    events: Sequence[StructureEvent],
+    *,
+    market: str,
+    symbol: str,
+    fingerprint: dict[str, str],
+) -> tuple[StructureEvent, ...]:
+    """给每条事件标上「这次结构变化是什么原因」，返回**新**事件元组。
+
+    ## 为什么要这一项
+
+    ``cpt_structure_event`` 记了「**什么**结构变了」，却没说「**为什么**」。
+    而这四种原因对 Loop/LLM 的价值天差地别：「输入数据换了（K 线/因子）」该去查
+    数据源，「算法自己变了」该怀疑代码 —— 混在一起就等于没归因。
+
+    ## 判据从哪来
+
+    拿**上一轮**运行落的指纹（``cpt_run_metric`` 最近一条 ``kind='run'``）与本轮
+    指纹逐项比。判定顺序按「确定性」从高到低，见
+    :func:`cpt.application.run_metric.explain_cause`：后端 → 配置 → 数据 → 残差。
+
+    ## 为什么返回新元组而不是原地改
+
+    ``StructureEvent`` 是 ``frozen=True``（``cpt/domain/models.py``）。所以只能
+    :func:`dataclasses.replace` 造新的 —— 顺手保证了「归因失败就原样返回」很容易写。
+
+    ## 两处刻意的留白
+
+    - **归不出就不加这个键**（而不是加 ``""``）。首次运行没有前值可比；写个空串
+      会让前端必须区分「原因不明」和「原因算出来是空」—— 后者不该存在。缺键本身
+      就是信号。
+    - **本函数不抛**。归因是增强，标不上就原样返回事件。
+    """
+    from cpt.application.run_metric import explain_cause
+    from cpt.storage.run_metric_store import latest_run_fingerprint
+
+    try:
+        previous = latest_run_fingerprint(conn, market=market, symbol=symbol)
+        cause = explain_cause(previous, fingerprint) if previous else ""
+    except Exception as exc:  # noqa: BLE001
+        _LOG.debug("结构变化归因失败 %s/%s: %s", market, symbol, exc)
+        return tuple(events)
+    if not cause:
+        return tuple(events)
+    return tuple(replace(event, payload={**event.payload, "cause": cause}) for event in events)

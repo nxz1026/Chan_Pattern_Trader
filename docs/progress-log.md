@@ -5159,13 +5159,214 @@ body 删掉，随后在 undefined 上炸 `replaceChildren`。
    别的服务，保留策略要单独看。
 3. A 股侧也接落水位（现在只接了加密侧）。
 
+---
 
+## R39 — 免费真值源落地 + A 股也落水位 + 结构变化带原因 + golden set
 
+日期：2026-10-02。起点 `e27a87a`。
 
+### 0. 先收尾：oracle 的 git 分叉（不是本轮任务，是本轮的前置）
 
+进场第一件事就发现 oracle 的仓库**状态是脏的**：`git log` 停在 `abf1524`（R36），
+而工作区里堆着 R37/R38 两轮 scp 上去、**从未提交**的 11 个文件。也就是说
+「R37/R38 已上线」这件事在服务器上是靠一堆未提交文件维持的 —— 任何人一次
+`git checkout` 就会把线上打回 R36。
 
+处置（`/tmp/r39_sync_oracle.sh`）：
 
+1. 把 12 个脏文件 `tar` 备份到 `/home/ubuntu/cpt-oracle-dirty-<ts>.tar.gz`；
+2. **核对备份条数 == 脏文件条数**（12 == 12）才继续；
+3. `git checkout -- .` + `git clean -fd`（**不带 `-x`**，被 gitignore 挡着的
+   `deploy/env/cpt-dashboard.env` 里的飞书 webhook 因此得以保全，已验 `env OK`）；
+4. `git merge --ff-only origin/main` → 对齐 `e27a87a`。
 
+事后核对了一件容易被忽略的事：重置**换了线上正在跑的代码**，所以比对了备份的
+`run_metric.py` 与提交版 —— `IDENTICAL`，重置对线上行为零影响。
+`cpt-dashboard.service` 仍 active，`/api/dashboard/inspection` 200。
 
+> 顺带更正一条自己记错的数：服务单元名是 `cpt-dashboard`，不是 `cpt-web`
+> （我第一次查 `cpt-web` 拿到 `inactive`，是查错了单元，不是服务挂了）。
 
+### 1. 免费真值源：东财分红送配（绕开 Wind 积分）
 
+R37 的重算把 Wind 当唯一真值，结果 24/2197 只就撞上
+`WindQuotaError: backend_error 账户积分余额不足`。真值不必花钱 ——
+`datacenter-web.eastmoney.com` 的 `RPT_SHAREBONUS_DET` 从大阪**直连 200**。
+
+新增两个模块：
+
+- `cpt/adapters/corporate_actions.py` — 共享模型（`CorporateAction`）+
+  `ex_div_ratio`（每 10 股 → 每股）+ `filter_implemented`（只用已实施的）；
+- `cpt/adapters/eastmoney_actions.py` — 东财 HTTP 客户端。
+
+**单位陷阱**（实测钉死，非推断）：`PRETAX_BONUS_RMB` 是**每 10 股**，
+茅台 2024-12-31 报告期 276.73 ⇒ 每股 27.673 元。忘了除 10，因子差一个数量级。
+
+#### 真机对账（这是「验证」而不是「读代码觉得对」）
+
+拿东财算出的**单次除权台阶倍数**去对库里 `asel.ref_adjust_factor` 的**跳变**：
+
+| 标的 | 东财台阶（窗口内） | 匹配 | 最大偏差 |
+|---|---|---|---|
+| 600519 | 5 | 5/5 | 0.28% |
+| 000001 | 6 | 6/6 | 0.84% |
+| 600036 | 4 | 4/4 | 0.30% |
+| 600000 | 3 | 3/3 | 0.22% |
+| 601398 | 5 | 0/5 | 库里全 1.0，见下 |
+| 000002 | 0（2023-08-25 后未再分红，真实情况） | — | — |
+
+**总计 18/23，偏差全在 ±0.9% 内且正负交替** —— 正负交替正是「段内漂移」的特征
+（R37 已记录：库里因子每根 bar 有 ~0.1% 漂移），若是单位错会是 10 倍量级的
+单向偏差。**每 10 股的换算由此钉死。**
+
+### 2. 顺手逮到的两个数据事实（比源本身更值钱）
+
+**(a) 因子表 58% 是占位值。** `asel.ref_adjust_factor` 5222 只票里
+**3028 只（58%）的 `hfq_factor` 全程等于 1.0**（`count(distinct)=1`），
+即从未计算过。且缺失**偏向沪市**：真算过的 2194 只里 002/300/000 有 630/592/324
+只，而 601 只有 3 只、688 只有 2 只、603 只有 6 只。
+工行 601398 就是其中之一（665 行全 1.0）。
+
+**(b) 000002（万科）是脏数据。** 因子在 800 行里跳了 **92 次**超过 2%，
+区间 152.69 ~ 400.64，单日 -6.4%/+3.9%。后复权因子不可能长这样。
+这两条都还没动生产表（R37 的纪律：重算只写暂存表，看报告后人工决定）。
+
+### 3. A 股侧也落水位 —— 附带修掉一个「每天必然误报」的 bug
+
+`cpt_run_metric` 此前只有加密侧在写（`crypto` 76 行 / `cn` 0 行）。
+在 `build_ashare_snapshot` 末尾接上 `MetricRecorder`（复用 client 连接、
+**不 commit**，事务边界归路由），并补了一个 `conn is None` 的护栏 ——
+拿不到连接就跳过并告警，而不是让异常被吞成一行都不落。
+
+真跑第一批（5 只）后查表逮到不对味：
+
+```
+('crypto', 'ok', 76)   ('cn', 'failing', 3)
+```
+
+**A 股侧 3/3 全 failing，加密侧 76/76 全 ok。** 顺着 `gap_count=25` 查到
+`cpt/application/dashboard_quality.py::quality_report`：
+
+```python
+if interval != previous.close_time - previous.open_time + 1:   # ← 加密口径
+    gaps.append(...)
+```
+
+这是**7×24 连续交易**的判据。日线 A 股跨周末/法定休市（国庆、春节、清明…
+一年约 25 天）天然不满足，于是每轮都被记成 25 个缺口 ⇒ 每轮 `failing`。
+照这样 `run_inspection` 每天都会为 A 股发一条假告警 —— **那等于没有告警**。
+
+仓里早就有正确实现：`cpt/adapters/source_registry` 用 `open_days_between`
+列出区间内全部**开市日**再求差集。新增 `_attach_calendar_gaps` 复用同一套
+（按本文件既有的 `_attach_*` 写法，不动加密路径），并在 `data_quality` 上标注
+`gap_basis: "trade_calendar"`，让这个数字的来源可审计。取不到日历时**不动**
+原值 —— 宁可保留一个可疑数字，也不把「查不到」写成「没有」。
+
+修复后实测：`gap_count 25 → 0`，`health failing → ok`，
+且 `expected_trade_days=122` 对上 122 根 bar，**零缺失**。
+
+### 4. `structure_event.cause`：这次结构变化**为什么**
+
+`cpt_structure_event` 记了 2575 次变化，却只有「变了什么」。四种原因对
+Loop/LLM 的价值天差地别：
+
+- `data` — 输入数据变了（K 线/因子），**不是算法问题**
+- `config` — 规则参数变了
+- `backend` — 结构后端换了（R36「装个 czsc 就静默切生产」就属这类）
+- `code` — 以上指纹都没变却仍变 ⇒ **只能**归到算法自己
+
+⚠️ `code` 是**残差归因**，不是检测到的：「代码变了」没法从数据里读出来。
+把它和真正检测到的三种混在一列会误导，所以判据与依据都写进了模块 docstring。
+
+落地：
+
+- `cpt/application/run_metric.py` — `CAUSES` / `explain_cause`（纯函数，好测）
+  / `fingerprint_from_snapshot`；
+- `cpt/storage/run_metric_store.py` — `latest_run_fingerprint`；
+- `cpt/application/structure_event_recorder.py` — 新增 `symbol` / `fingerprint`
+  两个参数，写事件前给每条事件 `payload["cause"]`。
+
+三个时序/形态上的坑（都是读代码时想到、真机时才发现的）：
+
+1. **事件表建快照在前**。指纹写在 `snapshot["reproducibility"]` 里，
+   快照不存在就拿不到 ⇒ 把 A 股的 `record_structure_events` 挪到
+   `build_dashboard_snapshot_v2` **之后**，再回填 `snapshot["events"]`。
+   这么改是安全的：`build_dashboard_snapshot_v2` 对 `events` 只做
+   `[asdict(e) for e in events]`（`dashboard.py:220`），是**纯输出**，
+   不参与 `reproducibility`/`data_quality`/任何计算。
+2. **`structure_id` 不含标的代码**。它的真实形状是
+   `{market}:{kind}:{level}:{start_time}`。我一开始想从 id 里反解代码，
+   那是**永远不可能成立**的死代码 —— 改成显式传 `symbol`。
+3. **`StructureEvent` 是 `frozen=True`**，不能原地改 payload ⇒
+   `dataclasses.replace` 造新事件元组。
+
+**真机验四条分支**（先真跑一次快照产生「上一轮指纹」，再用四个不同指纹各触发
+一次结构事件）：
+
+```
+原样指纹            => cause='code'
+改 dataset_hash     => cause='data'
+改 config_hash      => cause='config'
+改 backend          => cause='backend'
+不传 fingerprint    => payload 里没有 cause 这个键
+```
+
+#### 这里又逮到一个真 bug
+
+第一遍跑出来**四个分支全是 `backend`**。原因是
+`latest_run_fingerprint` 用 `getattr(row, name)` 取值，而
+`recent_metrics` 返回的是 **`_row_to_dict` 的返回值 —— 是 dict，不是
+`RunMetric` 实例**。`getattr(dict, 'config_hash', '')` 永远拿到 `''` ⇒
+「上一轮指纹四项全空」⇒ 每一轮都被判成 backend 变了。
+
+这是**静默失败**：库里那行四个字段明明有值，读出来却是空的，日志零告警。
+改成 dict/对象双形态兼容后，四条分支全部正确。
+
+同类陷阱全仓扫过一遍（`run_inspection.py` / `cpt/application/*` / `cpt/web/*`），
+只有这一处。
+
+### 5. golden set：自选 + 热门池 + 600519
+
+新增 `scripts/golden_set.py` + 基线 `deploy/golden/ashare.json`。
+
+集合 = `锚标的 ∪ 热门池 ∪ 服务端自选`，去重保序，共 14 只
+（600519 + 12 只热门池 + 002614 自选）。指纹只存**结构形状**
+（`fractal_ids` / `bi_ids` / `zhongshu_ids` / `bar_count` / `dataset_hash`），
+**不存价格** —— 价格天天在动，存了只会天天报差异。
+
+`dataset_hash` 是有意放进去的：它让「结构没变但输入变了」也能被发现。
+
+用法与真机验证：
+
+```
+--build deploy/golden/ashare.json   建基线
+--check deploy/golden/ashare.json   比对，有差异 exit 1
+```
+
+- 立刻自比 → `golden set 一致：结构形状无变化`，exit 0
+- 篡改基线（砍掉 `000002` 的 bi_ids + 改 dataset_hash）→ 报 2 处差异，exit 1
+
+第一版踩了个坑：自选文件存的是**对象** `{"code": ..., "note": ...}`，
+直接 `str()` 会得到 `"{'code': '600519', ...}"` 这种垃圾代码，一路混进基线。
+真机跑出来集合里多了一个 `{'code` 才暴露，已修。
+
+### 门禁
+
+**pytest（`--junit-xml` 权威计数）**：853 tests / 15 failures / 1 error /
+29 skipped → **808 passed**。
+
+为了确认「没打破契约」，本轮**额外跑了一次干净基线**（`git stash` 后同参数跑）
+逐条对比：基线与改动后**失败名单完全一致**（同样 15+1，同一批用例名）。
+上面 15 条失败全是既存基线：14 条 `test_web_a_share_routes` + 1 条
+`test_a_share_pool` 是 `fcntl` 的 Windows 基线，2 条 chromium smoke 是无浏览器环境。
+
+> 更正一条记错的数：上一轮文档写的「852 tests / 13 failures → 810 passed」
+> 已过期，真实当前基线就是 **853 / 15+1 / 808 passed**。以本次实测为准。
+
+### 遗留 / 下一步
+
+1. **因子表 58% 占位**（3028/5222 全 1.0，沪市主板几乎全缺）—— 东财源已就位，
+   可以开始真重算；但按 R37 纪律**只写暂存表**，看报告后再决定是否切换。
+2. **000002 因子是脏数据**（800 行里 92 次 >2% 跳变，区间 152~400）—— 待定位来源。
+3. **Wind 积分余额不足**仍需 owner 充值；不过重算主线已改走东财，不再卡。
+4. journal 占 206.9M 的成因分析见下。

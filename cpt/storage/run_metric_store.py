@@ -49,6 +49,7 @@ __all__ = [
     "append_metrics",
     "ensure_table",
     "latest_inspection",
+    "latest_run_fingerprint",
     "prune",
     "recent_metrics",
     "waterline_trend",
@@ -229,6 +230,53 @@ def latest_inspection(conn: Any) -> RunMetric | None:
     """最近一条巡检结论（没有则 ``None``）。"""
     rows = recent_metrics(conn, kind=KIND_INSPECTION, limit=1)
     return rows[0] if rows else None
+
+
+#: 参与「变化原因归因」的四个指纹字段，顺序即 :func:`explain_cause` 的判定顺序。
+#: 只认 ``run`` 行 —— ``inspection`` 行是**读**水位表的结论，它自己的指纹是抄来的，
+#: 拿它当「上一轮」会把归因指向一次观测而不是一次运行。
+FINGERPRINT_FIELDS: Final[tuple[str, ...]] = (
+    "config_hash",
+    "dataset_hash",
+    "rules_version",
+    "backend",
+)
+
+
+def latest_run_fingerprint(conn: Any, *, market: str, symbol: str) -> dict[str, str] | None:
+    """某标的**最近一次运行**的算法指纹（``None`` = 从没跑过）。
+
+    ## 谁在用它、为什么时序上是对的
+
+    :func:`cpt.application.structure_event_recorder.record_structure_events` 在写
+    结构事件的那一刻调用它。那一刻**本轮的水位行还没落**（水位在一轮的最后才记），
+    所以「最近一次运行」拿到的必然是**上一轮**—— 正是 ``explain_cause`` 需要的前值。
+
+    ## 为什么返回 ``None`` 而不是空 dict
+
+    「从没跑过」和「跑过但四个指纹都是空串」必须能区分：前者没有前值可比，
+    归因应当留空（:func:`explain_cause` 返回 ``""``）；后者是真的四项全空。
+    混成空 dict 会让首次运行被归到 ``code``，凭空指控算法。
+    """
+    try:
+        rows = recent_metrics(conn, kind=KIND_RUN, market=market, symbol=symbol, limit=1)
+    except Exception as exc:  # noqa: BLE001 — 读侧 best-effort，与本模块其余读一致
+        _LOG.warning("读取上一轮指纹失败 %s/%s: %s", market, symbol, exc)
+        return None
+    if not rows:
+        return None
+    row = rows[0]
+
+    # ⚠️ ``recent_metrics`` 的元素是 **dict**（``_row_to_dict`` 的返回值），
+    # 不是 ``RunMetric`` 实例 —— 用 ``getattr`` 取会静默拿到 ``""``，
+    # 于是「上一轮指纹全空」→ 每一轮都被归成 ``backend``。
+    # 这是真机上逮到的：库里那行四个字段明明有值，读出来却是空的。
+    def _field(name: str) -> str:
+        if isinstance(row, dict):
+            return str(row.get(name) or "")
+        return str(getattr(row, name, "") or "")
+
+    return {name: _field(name) for name in FINGERPRINT_FIELDS}
 
 
 def waterline_trend(conn: Any, *, market: str, symbol: str, limit: int = 50) -> dict[str, Any]:

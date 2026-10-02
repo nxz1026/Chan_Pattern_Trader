@@ -71,6 +71,10 @@ from cpt.adapters.a_share_factor import (  # noqa: E402
     save_recompute_factors,
 )
 from cpt.adapters.a_share_local import AShareLocalClient  # noqa: E402
+from cpt.adapters.eastmoney_actions import (  # noqa: E402
+    EastmoneyActionClient,
+    EastmoneyActionError,
+)
 from cpt.adapters.wind_source import (  # noqa: E402
     WindQuotaError,
     WindSourceClient,
@@ -79,6 +83,60 @@ from cpt.adapters.wind_source import (  # noqa: E402
 )
 
 _LOG = logging.getLogger("factor_recompute")
+
+
+class _Source:
+    """取数源的统一形状：``fetch_corporate_actions`` + **自己那套**异常分类。
+
+    分类跟着源走，而不是写死成 Wind 的那几个类 —— 否则换源时
+    ``except`` 分支会静默失配：源换了、异常类型没换，于是新源的错误
+    落进「未知异常」分支被当普通失败重试。R39 实测踩到过一次
+    （给 ``WindSourceClient`` 临时挂属性，忘了 ``name``，直接 AttributeError）。
+    """
+
+    name = ""
+    fatal_errors: tuple[type[BaseException], ...] = ()
+    transient_errors: tuple[type[BaseException], ...] = ()
+
+    def fetch_corporate_actions(self, code: str) -> tuple[Any, ...]:
+        raise NotImplementedError
+
+
+class _EastmoneySource(_Source):
+    """把东财客户端包成与 :class:`WindSourceClient` **同形**的取数源。
+
+    R39 起东财是**默认**源：Wind 要积分（实测 24/2197 只就撞「账户积分余额不足」），
+    东财免费且从大阪直连 200。Wind 保留为 ``--source wind`` 的交叉校验。
+
+    东财没有额度概念，所以「fatal」= 接口不可达 / 返回坏数据 ——
+    那时重试同样没意义。
+    """
+
+    name = "eastmoney"
+    fatal_errors = (EastmoneyActionError,)
+    transient_errors = ()
+
+    def __init__(self) -> None:
+        self._client = EastmoneyActionClient()
+
+    def fetch_corporate_actions(self, code: str) -> tuple[Any, ...]:
+        # 东财只要 6 位，而 Wind 要 ``600519.SH``；这里统一收口，别让调用方记两套。
+        return self._client.fetch_actions(code.split(".")[0][:6])
+
+
+class _WindSource(_Source):
+    """Wind 客户端的同形包装。额度类**绝不重试**（重试只是白烧积分）。"""
+
+    name = "wind"
+    fatal_errors = (WindQuotaError, WindUnavailableError)
+    transient_errors = (WindSourceError,)
+
+    def __init__(self) -> None:
+        self._client = WindSourceClient()
+
+    def fetch_corporate_actions(self, code: str) -> tuple[Any, ...]:
+        return self._client.fetch_corporate_actions(code)
+
 
 #: 进度文件（断点续跑）
 STATE_PATH: Final[Path] = Path(
@@ -103,6 +161,33 @@ def load_state() -> dict[str, Any]:
         _LOG.warning("进度文件损坏，重开一轮：%s", STATE_PATH)
         return {"done": [], "failed": {}, "days": {}}
     return raw
+
+
+def bind_state_to_source(state: dict[str, Any], source_name: str) -> dict[str, Any]:
+    """把进度**按真值源分账**——换源就重开一轮，不继承别的源的 ``done``。
+
+    ## 为什么必须分账
+
+    ``done`` 的含义是「这只票的因子已经用**某一个源**算过并写进暂存表」。
+    换源之后这个含义就变了：Wind 算过的 24 只在东财口径下**并不算已算** ——
+    继承过来会让这 24 只被直接跳过，于是暂存表里留下两种口径混写的因子，
+    而报告看上去还「一切正常」。
+
+    这是**静默**的：进度文件、暂存表、报告三者都不报错，只有逐行对账才看得出来。
+
+    实测代价为零：Wind 那 24 只本来就没跑完（2197 里的 24），重开一轮不亏。
+    """
+    previous = state.get("source")
+    if previous == source_name:
+        return state
+    if previous:
+        _LOG.warning(
+            "真值源从 %s 换成 %s，进度**不继承**（done=%d 只将重跑）",
+            previous,
+            source_name,
+            len(state.get("done") or []),
+        )
+    return {"done": [], "failed": {}, "days": {}, "source": source_name}
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -213,7 +298,7 @@ def prev_closes_for(bars: tuple[tuple[int, float], ...], ex_dates: list[str]) ->
 
 def process_code(
     client: AShareLocalClient,
-    wind: WindSourceClient,
+    source: Any,
     code: str,
     *,
     write: bool,
@@ -228,22 +313,28 @@ def process_code(
     一次超时就等于**浪费一格额度**还拿不到数据，所以瞬时失败要重试。
 
     但**额度/通道类错误绝不重试** —— 那必须立刻停下等下一天（见 :func:`main`）。
+
+    ## R39：源可换
+
+    ``source`` 现在是「任何带 ``fetch_corporate_actions`` 的对象」，并且**自带**
+    异常分类（``fatal_errors`` / ``transient_errors``）—— 分类跟着源走，
+    而不是写死成 Wind 的那几个类。默认源已从 Wind 换成东财（免费、无额度）。
     """
     conn = client._get_conn()  # noqa: SLF001
-    windcode = AShareLocalClient._to_wind_code(code)  # noqa: SLF001
+    fetch_code = AShareLocalClient._to_wind_code(code)  # noqa: SLF001
 
     calls = 0
     actions: tuple[Any, ...] = ()
     last_err: Exception | None = None
     for attempt in range(retries + 1):
         try:
-            actions = wind.fetch_corporate_actions(windcode)
+            actions = source.fetch_corporate_actions(fetch_code)
             calls += 1
             last_err = None
             break
-        except (WindQuotaError, WindUnavailableError):
+        except source.fatal_errors:
             raise  # 额度/通道问题：交给 main 立刻停，不重试
-        except WindSourceError as exc:  # 超时 / 后端错
+        except source.transient_errors as exc:  # 超时 / 后端错
             calls += 1
             last_err = exc
             if attempt < retries:
@@ -256,7 +347,7 @@ def process_code(
     if len(bars) < 30:
         return CodeResult(code, False, note="本地 K 线不足 30 根"), calls
     if not actions:
-        return CodeResult(code, False, note="Wind 无公司行动记录"), calls
+        return CodeResult(code, False, note=f"{source.name} 无公司行动记录"), calls
 
     fmap = factor_from_actions(
         actions, prev_closes=prev_closes_for(bars, [a.ex_date for a in actions])
@@ -282,7 +373,11 @@ def process_code(
         # 整个分段结构塌成 2 个取值。是 R37 的形状对账（相对因子中位差 9%）逮到它的。
         later = [s for s in steps if s > d]
         factor = (fmap[later[0]] if later else 1.0) * scale
-        rows.append((code, d, factor, "wind_events", f"wind:get_stock_events steps={len(steps)}"))
+        # 因子来源**跟着实际用的源写**，别再写死 "wind_events" ——
+        # 东财算出来的行标成 wind 会让日后对账找不到出处（R39）。
+        rows.append(
+            (code, d, factor, f"{source.name}_events", f"{source.name}:events steps={len(steps)}")
+        )
     if write:
         save_recompute_factors(conn, rows)
     return CodeResult(code, True, rows=len(rows), steps=len(steps)), calls
@@ -304,17 +399,24 @@ def report(state: dict[str, Any]) -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="按 Wind 公司行动重算后复权因子（只写暂存表）")
+    parser = argparse.ArgumentParser(description="按公司行动重算后复权因子（只写暂存表）")
     parser.add_argument(
         "--max-calls",
         type=int,
         default=DEFAULT_MAX_CALLS,
-        help="本轮调用上限（真正的硬边界是 RATE_LIMIT_ERROR）",
+        help="本轮调用上限（Wind 侧真正的硬边界是 RATE_LIMIT_ERROR）",
     )
     parser.add_argument("--only", default="", help="只跑这些代码（逗号分隔，调试用）")
     parser.add_argument("--report", action="store_true", help="只打印进度，不取数")
     parser.add_argument(
         "--retries", type=int, default=2, help="单只票的瞬时失败重试次数（额度类错误不重试）"
+    )
+    parser.add_argument(
+        "--source",
+        choices=("eastmoney", "wind"),
+        default="eastmoney",
+        help="公司行动真值源。默认 eastmoney：免费、从大阪直连 200、无额度；"
+        "wind 保留作交叉校验（实测 24/2197 只就撞「账户积分余额不足」）",
     )
     parser.add_argument("--dry-run", action="store_true", help="照常取数与计算，但不写暂存表")
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -331,7 +433,9 @@ def main(argv: list[str] | None = None) -> int:
         return 0
 
     client = AShareLocalClient()
-    wind = WindSourceClient()
+    source: _Source = _WindSource() if args.source == "wind" else _EastmoneySource()
+    _LOG.info("真值源 = %s", source.name)
+    state = bind_state_to_source(state, source.name)
     conn = client._get_conn()  # noqa: SLF001
     if not args.dry_run:
         ensure_recompute_stage(conn)
@@ -351,9 +455,9 @@ def main(argv: list[str] | None = None) -> int:
             break
         try:
             result, used = process_code(
-                client, wind, code, write=not args.dry_run, retries=args.retries
+                client, source, code, write=not args.dry_run, retries=args.retries
             )
-        except (WindQuotaError, WindUnavailableError) as exc:
+        except source.fatal_errors as exc:
             _LOG.warning("额度/通道不可用（%s），本轮停止：%s", type(exc).__name__, exc)
             state["stopped"] = {"reason": type(exc).__name__, "detail": str(exc)[:200]}
             save_state(state)

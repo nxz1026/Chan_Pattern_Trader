@@ -36,8 +36,69 @@ __all__ = [
     "HEALTH_FAILING",
     "HEALTH_OK",
     "MetricRecorder",
+    "fingerprint_from_snapshot",
     "metric_from_snapshot",
 ]
+
+#: 结构变化的原因分类（R38 owner 拍板）。
+#:
+#: **为什么要有它**：``cpt_structure_event`` 记了 2575 行"什么结构变了"，但没说
+#: **为什么**。而这四种原因对 Loop/LLM 的价值天差地别：
+#:
+#: - ``data``     —— 输入数据变了（K 线/因子），结构随之变，**不是算法问题**
+#: - ``config``   —— 规则参数变了（``config_hash`` / ``rules_version``）
+#: - ``backend``  —— 结构后端换了（R36 那次"装个 czsc 就静默切生产"就属这类）
+#: - ``code``     —— 以上指纹都没变却仍变了 ⇒ **只能归到算法/代码自己**
+#:
+#: ⚠️ ``code`` 是**残差归因**，不是检测到的："代码变了"没法从数据里读出来 ——
+#: 它表示"排除了其他三种，还是变了"。把它和真正检测到的三种混在一列会误导，
+#: 所以本模块同时提供 :func:`explain_cause` 说明依据。
+CAUSE_BACKEND: Final[str] = "backend"
+CAUSE_CODE: Final[str] = "code"
+CAUSE_CONFIG: Final[str] = "config"
+CAUSE_DATA: Final[str] = "data"
+CAUSES: Final[tuple[str, ...]] = (CAUSE_DATA, CAUSE_CONFIG, CAUSE_BACKEND, CAUSE_CODE)
+
+
+def fingerprint_from_snapshot(snapshot: dict[str, Any], *, backend: str) -> dict[str, str]:
+    """快照 → 可比较的指纹（四个字段，缺就是空串）。
+
+    ``backend`` 只能由调用方给：它是**运行配置**（``resolve_backend`` 的结果），
+    不在快照里 —— R36 的教训正是"后端换了但没人知道"。
+    """
+    repro = snapshot.get("reproducibility") or {}
+    return {
+        "config_hash": str(repro.get("config_hash", "")),
+        "dataset_hash": str(repro.get("dataset_hash", "")),
+        "rules_version": str(repro.get("rules_version", "")),
+        "backend": str(backend or ""),
+    }
+
+
+def explain_cause(previous: dict[str, Any] | None, current: dict[str, Any]) -> str:
+    """这一轮结构变了，原因最可能是什么（纯函数，好测）。
+
+    判据按「确定性」从高到低：
+    1. ``backend`` 变了 —— 换实现，最确定；
+    2. ``config`` 变了（``config_hash`` 或 ``rules_version``）—— 换参数；
+    3. ``data`` 变了（``dataset_hash``）—— 换输入；
+    4. 都没有 ⇒ ``code``（残差：算法自己）。
+
+    没有上一轮（``previous is None``）时返回 ``""`` —— **不猜**。首次运行本来
+    就该是"全 created"，把它归到 ``code`` 会凭空指控算法。
+    """
+    if not previous:
+        return ""
+    if previous.get("backend") != current.get("backend"):
+        return CAUSE_BACKEND
+    if previous.get("config_hash") != current.get("config_hash") or previous.get(
+        "rules_version"
+    ) != current.get("rules_version"):
+        return CAUSE_CONFIG
+    if previous.get("dataset_hash") != current.get("dataset_hash"):
+        return CAUSE_DATA
+    return CAUSE_CODE
+
 
 HEALTH_OK: Final[str] = "ok"
 HEALTH_DEGRADED: Final[str] = "degraded"
