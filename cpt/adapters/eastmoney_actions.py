@@ -63,21 +63,20 @@ _HEADERS: Final[dict[str, str]] = {
     "Referer": "https://data.eastmoney.com/",
 }
 
-#: 送转比例的列名候选（实测这两个源在不同标的上给不同的列）
-_BONUS_COLS: Final[tuple[str, ...]] = ("BONUS_IT_RATIO", "BONUS_RATIO")
-_TRANSFER_COLS: Final[tuple[str, ...]] = ("IT_RATIO", "TRANSFER_IT_RATIO", "TRANSFER_RATIO")
+#: 送转比例的列语义（R41 打印原始行核对，**不是猜的**）：
+#:
+#: - ``BONUS_IT_RATIO`` —— 送 + 转的**总和**（实测恒在）
+#: - ``BONUS_RATIO``     —— 送股那部分（可为 ``None``）
+#: - ``IT_RATIO``        —— 转增那部分（可为 ``None``）
+#:
+#: ⚠️ 曾经把「总数」与「其中一项」相加，比例直接**大一倍**。见
+#: :func:`EastmoneyActionClient.fetch_actions` 里的注释。
+BONUS_TOTAL_COL: Final[str] = "BONUS_IT_RATIO"
 
 
 def normalize_code_for_em(code: str) -> str:
     """``600519`` / ``600519.SH`` → ``600519``（东财只要 6 位）。"""
     return code.split(".")[0][:6]
-
-
-def _first_value(row: dict[str, Any], cols: tuple[str, ...]) -> Any:
-    for c in cols:
-        if c in row:
-            return row[c]
-    return None
 
 
 def _parse_date(value: Any) -> str | None:
@@ -153,15 +152,38 @@ class EastmoneyActionClient:
             if ex is None:
                 continue  # 没有除权日 = 还没到实施，定位不到台阶
             cash10 = _as_float(row.get("PRETAX_BONUS_RMB"))
-            bonus = _as_float(_first_value(row, _BONUS_COLS))
-            transfer = _as_float(_first_value(row, _TRANSFER_COLS))
+            # ⚠️⚠️ R41 修：送转比例**重复计数一倍**。
+            # 东财的列语义（2026-10-02 打印原始行核对）：
+            #     BONUS_IT_RATIO = 送 + 转 的**总和**
+            #     BONUS_RATIO     = 送股那部分（可为 None）
+            #     IT_RATIO        = 转增那部分（可为 None）
+            # 实测三行：
+            #     000034 2026-05-19  BONUS_IT_RATIO=4  BONUS_RATIO=None  IT_RATIO=4
+            #     000403 2025-06-04  BONUS_IT_RATIO=3  BONUS_RATIO=None  IT_RATIO=3
+            #     000034 1996-07-16  BONUS_IT_RATIO=1  BONUS_RATIO=0.3   IT_RATIO=0.7
+            # 原代码拿 BONUS_IT_RATIO 当「送股」、拿 IT_RATIO 当「转增」再相加，
+            # 前两行就成了 4+4=8（真值 4）、3+3=6（真值 3）—— 因子直接大一倍。
+            #
+            # 判据是**除权后的实际收盘价**：000034 2026-05-19 前收 41.57、
+            # 送 4 转 4（=10 送 4）理论除权价 (41.57-0.73)/1.4 = 29.64，
+            # 按重复计数则是 /1.8 = 22.99；实际收 30.96，贴着 29.64。
+            # 这条是 R41 查「台阶失配 28.84%」时逮到的 —— 纯派息的票全部
+            # 对得上（±0.5%），失配 100% 集中在有送转的日子。
+            total_raw = _as_float(row.get(BONUS_TOTAL_COL))
+            if total_raw is None:
+                # 没有总列才自己加（实测 BONUS_IT_RATIO 恒在，这条是兜底）
+                total_raw = (_as_float(row.get("BONUS_RATIO")) or 0.0) + (
+                    _as_float(row.get("IT_RATIO")) or 0.0
+                )
             out.append(
                 CorporateAction(
                     ex_date=ex,
-                    # ⚠️ 每 10 股 → 每股；送转同理（那两列也是每 10 股的比例）
+                    # ⚠️ 每 10 股 → 每股（送转比例同样是「每 10 股」）
                     cash_pre_tax=None if cash10 is None else ex_div_ratio(cash10),
-                    share_bonus=None if bonus is None else ex_div_ratio(bonus),
-                    transfer=None if transfer is None else ex_div_ratio(transfer),
+                    # 总数已含送+转，故 transfer 留 None —— 否则 share_ratio
+                    # 会把它再加一遍（这正是上面那个一倍 bug）。
+                    share_bonus=ex_div_ratio(total_raw),
+                    transfer=None,
                     source="eastmoney",
                     status=str(row.get("ASSIGN_PROGRESS") or ""),
                 )

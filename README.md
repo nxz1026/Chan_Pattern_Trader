@@ -114,7 +114,7 @@ Wind 路径（`--source wind`）保留作交叉校验，但要积分 —— 实�
 | `docs/implementation-plan.md` | 实施计划（M0–M6 垂直切片里程碑 + M-LLM 独立线） |
 | `docs/reference-audit.md` | 参考仓库许可证与复用边界 |
 | `docs/progress-log.md` | 逐轮进度日志（R13 起；更早见 `docs/archive/`） |
-| `docs/known-traps.md` | 已知陷阱与非缺陷清单（16 条"像 bug 其实不是"，每条附**判定命令**） |
+| `docs/known-traps.md` | 已知陷阱与非缺陷清单（17 条"像 bug 其实不是"，每条附**判定命令**） |
 | `docs/pending-wiring.md` | 尚未接线模块清单（是产品决策，不是死代码） |
 | `docs/dashboard-product-roadmap.md` | 看板产品路线（Phase 1–5） |
 | `deploy/README.md` | Nginx / systemd / 静态看板部署说明（含权限坑） |
