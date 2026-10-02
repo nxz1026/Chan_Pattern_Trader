@@ -3682,3 +3682,94 @@ origin 的效果（父页读不到 `contentDocument`）。所以「plotly 是否
 
 本节只动生产依赖，未改代码，故无新增 commit。代码侧门禁见上一节：
 **806 tests / 13 failures / 0 errors / 29 skipped → 764 passed**。
+
+---
+
+## R29 · web 层复盘 —— 第一个「外面看不见里面」的层 · 2026-10-02
+
+`storage`（R24）与 `llm`（R25+R28）做过完整复盘后，接着做 `web/`。
+选它不是因为它最破，而是因为它是**唯一「外面看不见里面」的层**：改动全经
+HTTP 暴露、出问题直接打到用户，而它既没被复盘、也压着一条开放的中危项。
+
+### 一、勘察：先量结构，别先下结论
+
+| 指标 | 值 |
+|---|---|
+| `web/app.py` | 1,151 行 / 34 个函数 |
+| `make_handler` | **668 行**（单函数） |
+| `do_GET` | **483 行**，20 个路由分支的 if/elif 链 |
+| 分支节点（CC 近似） | 203 |
+| 路由分支宽度中位数 | 17 行 |
+| 最宽的 4 个分支 | 103 / 98 / 83 / 72 行 |
+
+结构上的判断：**中位数只有 17 行，说明不是「所有分支都胖」，而是少数几个超长分支
+把整个函数撑爆了**。`a-share/llm/explain` 103 行、`snapshot` 98 行、`canvas/wbt`
+83 行、`signal-radar` 72 行 —— 四个占了 356 行，其余 16 个加起来不到 130 行。
+
+### 二、第一个真发现：JSON API 有一半错误响应是 HTML
+
+**先说两个被真机推翻的怀疑**（都记下来，因为「查了发现不是」也是结论）：
+
+1. `snapshot` 分支行 618 的 `int(interval_ms)` **没有 try/except**，而同一分支另外
+   三处都有 → 怀疑能触发 `ValueError` 500。**真机实测四组 URL 全回 400** ——
+   前面三处带 guard 的先拦住了，它在实践中**到不了**。是潜在隐患，不是活 bug。
+2. 行 617 `payload["runtime"]["symbol"] = payload["runtime"]["symbol"]` 是自赋值，
+   怀疑顶栏符号不跟着 query 变。**真机实测 `runtime.symbol` 确实跟着变了** ——
+   无用代码，但无害。
+
+**真问题在别处。** 把 `send_error`（→ HTML 错误页）与 `_write_json_error`
+（→ JSON）按路由归类，发现分布不是随机的，而是按子系统分：
+
+- `a-share/*` 全部用 JSON（较新的代码，守纪律）
+- `snapshot` / `inspect` **全部用 HTML**（老代码）
+- **`/api/canvas/wbt` 同一个路由里两种混用**
+
+真机实测最刺眼的一组：
+
+    /api/canvas/wbt?start_ms=abc&end_ms=def  ->  400  Content-Type: text/html
+    /api/canvas/wbt?code=ZZZZZZ              ->  400  Content-Type: application/json
+
+**同一个 URL、同一类错误（参数不是整数）、两种响应形状。** 客户端
+`await response.json()` 遇到 HTML 会直接抛 `SyntaxError`，而前端恰恰是靠
+`error.code` 做分支的 —— 一半错误走 JSON、一半走 HTML，等于让错误处理随机失效。
+
+（自纠一次：我第一版探针把 `width_k=abc` 那行读成了「200 + text/html」，直接查
+响应头是 `application/json`。是我 `grep '^content-type'` 的读法错了，不是产品问题。
+`width_k` 在加密路径压根不读，属于另一个话题。）
+
+### 三、处置：全改 + 加门禁
+
+`web/app.py` 里 17 处 `send_error` **全部**换成 `_write_json_error`（13 处带 message、
+4 处无 message），并给每处补了稳定的 `error.code` slug。
+
+选「全改」而不是只修 `canvas/wbt` 那一处：只修一处的话，`snapshot` / `inspect`
+仍然是 HTML 错误页，门禁也写不出来（门禁要求「所有 API 错误都是 JSON」）。
+
+改前逐个核过消息**全是纯 ASCII** —— `_write_json_error` 的 docstring 记着
+`send_error` 的坑：非 ASCII 消息进状态行会 `UnicodeEncodeError` **直接断连接**。
+
+**门禁做成运行时契约而非源码 grep**：起真 server、打真请求、查真 `Content-Type`
+（`tests/test_web_error_contract.py`，15 条）。与本仓 SQL 分层门禁同一思路 ——
+**测行为，不测写法**。源码 grep 只证明「没调用」，证明不了「真的返回了 JSON」。
+
+红绿对照：把一处改回 `send_error`，运行时契约与源码守卫**两条同时红**。
+
+### 四、顺带钉住一个口径不一致（本轮不改）
+
+`?level=abc` 的行为**随模式而变**：level 分支被 `isinstance(provider,
+MultiLevelSource)` 门控 —— realtime（线上）回 **400**，demo / fixture 模式
+**整段跳过**、静默回 200。
+
+与 range 的处理也不一致：range 不可用时回 `available:false` + reason（**明说**），
+level 却一声不响。
+
+本轮**不改**（要先决定「demo 模式收到不支持的参数该怎么办」，那是产品口径），
+但写成显式测试 `test_level_param_is_silently_ignored_in_non_multilevel_mode` ——
+比留一个「看起来像有意为之」的坑要好。
+
+### 五、门禁
+
+- 7 条全绿（mypy 4 条仍是 `fcntl` Windows-only 基线）
+- **pytest 权威计数（`--junit-xml`）**：820 tests / 13 failures / 0 errors /
+  29 skipped → **778 passed**。13 条全在 `test_web_a_share_routes`（`fcntl` 基线），
+  **零新增失败**。
