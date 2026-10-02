@@ -1391,6 +1391,70 @@ body[data-runtime-mode="offline"] .chart-canvas::after {
   font-weight: 600;
 }
 
+/* ------------------------------------------- R28 LLM 面板 */
+
+.cpt-llm-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  margin-bottom: var(--space-2);
+}
+
+.cpt-llm-note {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.cpt-llm-calls {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  max-height: 320px;
+  overflow-y: auto;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.cpt-llm-calls > li {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  border: var(--border-width) solid var(--color-border);
+  border-left: 3px solid var(--color-border-strong);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-bg-elevated);
+  font-size: var(--font-size-sm);
+}
+
+.cpt-llm-calls > li[data-status="ok"] {
+  border-left-color: var(--color-confirmed);
+}
+
+.cpt-llm-calls > li[data-status="error"],
+.cpt-llm-calls > li[data-status="interrupted"] {
+  border-left-color: var(--color-error);
+}
+
+.cpt-llm-calls > li[data-status="rate_limited"] {
+  border-left-color: var(--color-alert);
+  background-color: var(--color-alert-bg);
+}
+
+.cpt-llm-text {
+  margin: var(--space-1) 0 0;
+  padding: var(--space-2);
+  max-height: 180px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  background-color: var(--color-bg);
+  border-radius: var(--radius-sm);
+  font-size: var(--font-size-sm);
+}
+
 .replay-controls {
   display: flex;
   flex-wrap: wrap;

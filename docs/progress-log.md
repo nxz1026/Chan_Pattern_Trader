@@ -3182,3 +3182,55 @@ D/E/F 都很显眼 —— `json.loads` 直接抛错，调用方立刻知道出�
 - **pytest 权威计数（--junit-xml）**：761 tests / 13 failures / 0 errors /
   31 skipped → **717 passed**。13 条全在 	est_web_a_share_routes（cntl 基线），
   **零新增失败**。
+
+### 三、R28-3：LLM 前端面板
+
+`/api/dashboard/llm/calls` 与 `POST .../a-share/llm/explain` 这两条接口 R25 就有了，
+但看板上看不到 —— 排查「为什么 LLM 不可用」只能 SSH 上翻 journalctl。
+而 `list_calls` 特意回 `unavailable_reason` + `config.redacted()`，其 docstring 写得很
+清楚：**最费时间的就是分不清「没 enable / 没 key / base_url 写错」**。这些信息回给
+前端却没人看，是白回的。
+
+#### 接了什么
+
+- `loadLlmCalls()` → `GET /llm/calls?limit=20`，显示配置状态行 + 调用列表
+  （status / purpose / subject / token / 延迟 / 结果全文）
+- 「解释选中的结构」按钮 → `POST /a-share/llm/explain?code=XXXXXX`，body 是选中的
+  结构对象；提交后立刻返回 `call_id`，结果在列表里跟
+- 「刷新」按钮
+
+#### 最容易写漏的一点：在途任务要继续轮询
+
+退避重入的 `backoff_max` 默认 **60 秒**。只拉一次就停的话，用户会盯着一个永远
+不变的 `queued`，直接判定「功能坏了」。
+
+所以：有非终态（`queued` / `running` / `rate_limited`）任务就 2 秒后再拉，终态了
+就停。终态集合写死成 `LLM_TERMINAL = {ok, error, interrupted}` —— 漏一个的后果是
+该状态的任务被永远当成「在途」，面板无限打接口。
+
+#### 「解释」按钮的可用条件
+
+explain 端点是 **A 股专用**（路由就在 `a-share/` 下）。所以按钮只在
+「当前是 A 股代码（6 位数字）+ 选中了 bi / zhongshu / trend_type 之一」时可点，
+否则标题直接说明为什么不可用。无条件可点的话，会把 crypto 侧的选中项 POST 到
+A 股端点上去。
+
+#### 契约测试 10 条
+
+与 R27-3 同一思路：面板是**拉到数据才渲染**的，静态 dump 看不见，所以用源码契约
+钉接线。重点三条：
+
+- **轮询条件**必须真的存在（`!LLM_TERMINAL.has(`），否则退避场景必然表现成「卡住」；
+- **终态集合必须含齐三个**（漏一个 = 无限轮询）；
+- **`unavailable_reason` 必须被渲染**，否则又回到「空列表 + 无说明」的老问题。
+
+CSS 变量逐个核对过，本次用到的 21 个全部已定义。
+
+
+#### 门禁
+
+- 7 条全绿；
+ode --check dashboard/dashboard.js 通过
+- **pytest 权威计数（--junit-xml）**：771 tests / 13 failures / 0 errors /
+  31 skipped → **727 passed**。13 条全在 	est_web_a_share_routes（cntl 基线），
+  **零新增失败**。

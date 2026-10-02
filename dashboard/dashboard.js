@@ -971,7 +971,7 @@
 
   // fetch 结果不在 snapshot 里（C5/C6/C3/C4 是独立路由），存这里供重渲染；
   // 只由 boot() 与手动刷新按钮触发，**不进 30s 轮询**（避免每轮多打几个请求）。
-  const remoteOps = { signalStats: null, watchlist: null, compare: null, multiRun: null, structureEvents: null, structureTimeline: null, days: "30" };
+  const remoteOps = { signalStats: null, watchlist: null, compare: null, multiRun: null, structureEvents: null, structureTimeline: null, llmCalls: null, llmTimer: null, days: "30" };
 
   const SIGNAL_STATS_REASON_LABELS = { signal_history_unavailable: "信号历史不可用" };
   const STRUCTURE_EVENTS_REASON_LABELS = { structure_event_stream_unavailable: "结构事件流不可用（数据库未就绪）" };
@@ -1292,6 +1292,193 @@
   // 每轮都 diff，而绝大多数轮次结构没变。这不是 bug，是它的口径（「本次算出什么
   // 变化」）。所以光靠它，时间线面板在绝大多数时候只会显示「暂无事件」，而库里
   // 其实已经攒了 700+ 条。
+  /* ---------------- R28 LLM 面板 ---------------- */
+
+  // 接口早就有了（`/api/dashboard/llm/calls` + `POST .../llm/explain`），R28 之前
+  // 看板上看不到：排查「为什么 LLM 不可用」只能 SSH 上翻 journalctl。
+  // `unavailable_reason` / `config` 就是为此回给前端的（`list_calls` 的 docstring
+  // 写得很清楚：最费时间的就是分不清「没 enable / 没 key / base_url 写错」）。
+
+  const LLM_STATUS_LABELS = {
+    queued: "排队中",
+    running: "调用中",
+    ok: "成功",
+    error: "失败",
+    rate_limited: "限流退避中",
+    interrupted: "已中断",
+  };
+
+  const LLM_REASON_LABELS = {
+    llm_disabled: "未启用（设 CPT_LLM_ENABLED=1）",
+    llm_missing_api_key: "缺 API key",
+    llm_missing_base_url: "缺 base_url",
+    llm_missing_model: "缺 model",
+  };
+
+  const LLM_TERMINAL = new Set(["ok", "error", "interrupted"]);
+
+  async function loadLlmCalls() {
+    const { body } = await requestJson(`${DASHBOARD_BASE()}/llm/calls?limit=20`);
+    remoteOps.llmCalls = isObject(body) ? body : null;
+    renderLlmPanel();
+    // 还有在途任务就继续跟：退避重入可能要等几十秒（cap 默认 60s），
+    // 停在 queued/running 上会让用户以为「卡住了」。
+    const pending = asArray(remoteOps.llmCalls && remoteOps.llmCalls.calls).some(
+      (call) => !LLM_TERMINAL.has(String(call.status || "")),
+    );
+    window.clearTimeout(remoteOps.llmTimer);
+    if (pending) {
+      remoteOps.llmTimer = window.setTimeout(() => {
+        loadLlmCalls();
+      }, 2000);
+    }
+  }
+
+  function explainSelectedStructure() {
+    const selection = state.selection;
+    // 只对结构类选中项提供解释；signal 选中项走的是 signal_id，不在这个端点范围内
+    if (!isObject(selection) || !isObject(selection.raw)) return;
+    if (!["bi", "zhongshu", "trend_type"].includes(String(selection.kind || ""))) return;
+    const symbol = isObject(state.snapshot) && isObject(state.snapshot.market)
+      ? state.snapshot.market.symbol
+      : "";
+    if (!/^\d{6}$/.test(String(symbol))) return; // explain 端点是 A 股专用
+
+    const button = q("[data-testid=llm-explain-selected]");
+    if (button) button.disabled = true;
+    return fetch(`${DASHBOARD_BASE()}/a-share/llm/explain?code=${encodeURIComponent(symbol)}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Accept: "application/json" },
+      body: JSON.stringify(selection.raw),
+    })
+      .then((response) => response.json().catch(() => null))
+      .then((body) => {
+        if (isObject(body) && body.available === false) {
+          setText("[data-testid=llm-submit-note]", `提交失败：${body.reason || "未知原因"}`);
+        } else {
+          setText(
+            "[data-testid=llm-submit-note]",
+            `已提交（call_id=${(body && body.call_id) || "—"}），结果会出现在下方列表`,
+          );
+        }
+        return loadLlmCalls();
+      })
+      .catch((error) => {
+        setText("[data-testid=llm-submit-note]", `提交失败：${error && error.message}`);
+      })
+      .finally(() => {
+        if (button) button.disabled = false;
+      });
+  }
+
+  function renderLlmPanel() {
+    const panel = q("[data-testid=event-panel]");
+    if (!panel) return;
+    let section = q("[data-testid=llm-panel]");
+    if (!section) {
+      section = document.createElement("section");
+      section.dataset.testid = "llm-panel";
+      const heading = document.createElement("h3");
+      heading.textContent = "LLM 调用（R28）";
+      const note = document.createElement("p");
+      note.className = "cpt-structure-events-note";
+      note.textContent =
+        "独立 LLM 层的调用审计。规则解释是异步的，提交后按 call_id 在下方列表跟踪。";
+      const toolbar = document.createElement("div");
+      toolbar.className = "cpt-llm-toolbar";
+      const refresh = document.createElement("button");
+      refresh.type = "button";
+      refresh.dataset.testid = "llm-refresh";
+      refresh.textContent = "刷新";
+      refresh.addEventListener("click", () => loadLlmCalls());
+      const explain = document.createElement("button");
+      explain.type = "button";
+      explain.dataset.testid = "llm-explain-selected";
+      explain.textContent = "解释选中的结构";
+      explain.addEventListener("click", () => explainSelectedStructure());
+      const submitNote = document.createElement("span");
+      submitNote.dataset.testid = "llm-submit-note";
+      submitNote.className = "cpt-llm-note";
+      toolbar.append(refresh, explain, submitNote);
+      section.append(heading, note, toolbar);
+      panel.appendChild(section);
+    }
+    // 重建按钮区（状态依赖当前选中项），其余保持
+    while (section.children.length > 3) section.removeChild(section.lastChild);
+
+    const data = remoteOps.llmCalls;
+    if (!isObject(data)) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+
+    // 「解释」按钮只在「A 股 + 选中了结构」时可用
+    const selection = state.selection;
+    const explain = q("[data-testid=llm-explain-selected]");
+    if (explain) {
+      const kind = isObject(selection) ? String(selection.kind || "") : "";
+      const symbol = isObject(state.snapshot) && isObject(state.snapshot.market)
+        ? state.snapshot.market.symbol
+        : "";
+      const usable =
+        isObject(selection) &&
+        isObject(selection.raw) &&
+        ["bi", "zhongshu", "trend_type"].includes(kind) &&
+        /^\d{6}$/.test(String(symbol));
+      explain.disabled = !usable;
+      explain.title = usable
+        ? `解释选中的${kind}`
+        : "需要：处于 A 股市场模式，且在画布上选中一个笔 / 中枢 / 走势类型";
+    }
+
+    // 配置状态行：排查「为什么不可用」的第一现场
+    const config = isObject(data.config) ? data.config : {};
+    const status = document.createElement("p");
+    status.dataset.testid = "llm-config-line";
+    const unavailable = typeof data.unavailable_reason === "string" ? data.unavailable_reason : "";
+    status.textContent = unavailable
+      ? `LLM 不可用：${LLM_REASON_LABELS[unavailable] || unavailable}`
+      : `模型 ${config.model || "—"} · ${config.provider || "—"} · 队列中 ${
+          Number(data.queued) || 0
+        } 个`;
+    if (unavailable) status.dataset.state = "blocked";
+    section.appendChild(status);
+
+    const calls = asArray(data.calls);
+    if (!calls.length) {
+      const empty = document.createElement("p");
+      empty.dataset.testid = "llm-calls-empty";
+      empty.textContent = "暂无调用记录";
+      section.appendChild(empty);
+      return;
+    }
+    const list = document.createElement("ol");
+    list.className = "cpt-llm-calls";
+    calls.forEach((call) => {
+      const item = document.createElement("li");
+      item.dataset.status = String(call.status || "");
+      const head = document.createElement("strong");
+      head.textContent = `${LLM_STATUS_LABELS[call.status] || call.status} · ${
+        call.purpose || "—"
+      }`;
+      const meta = document.createElement("span");
+      const tokens = call.total_tokens == null ? "" : ` · ${call.total_tokens} tok`;
+      const latency = call.latency_ms == null ? "" : ` · ${call.latency_ms}ms`;
+      meta.textContent = `${call.subject_id || "—"} · ${formatDateTime(num(call.created_at))}${tokens}${latency}`;
+      item.append(head, meta);
+      const text = call.result_text || call.error_detail || "";
+      if (text) {
+        const body = document.createElement("pre");
+        body.className = "cpt-llm-text";
+        body.textContent = text;
+        item.appendChild(body);
+      }
+      list.appendChild(item);
+    });
+    section.appendChild(list);
+  }
+
   async function loadStructureEvents() {
     const params = new URLSearchParams({ limit: "60" });
     const { body } = await requestJson(`${DASHBOARD_BASE()}/structure-events?${params.toString()}`);
@@ -1755,6 +1942,9 @@
     // R27：结构事件流。同样**不进 30s 轮询** —— 这张表只在结构真变了才追加，
     // 30s 轮一次几乎永远是同一批数据，纯浪费。
     loadStructureEvents();
+    // R28：LLM 调用记录。这个**要自己轮询**（不是 30s 那个）—— 提交一次解释后
+    // 需要看到状态推进到 ok/error，而退避重入可能要等几十秒。
+    loadLlmCalls();
   }
 
   function renderReproducibility(snapshot) {
