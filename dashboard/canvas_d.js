@@ -90,11 +90,16 @@
    */
   const DIAG_SCRIPT =
     "window.addEventListener('error',function(e){" +
-    "parent.postMessage({__cptD:1,kind:'error',msg:String((e.error&&e.error.message)||e.message||e.type)},'*');});" +
+    "parent.postMessage({__cptD:1,kind:'error',phase:window.__cptPhase," +
+    "msg:String((e.error&&e.error.message)||e.message||e.type)},'*');});" +
     "window.addEventListener('unhandledrejection',function(e){" +
-    "parent.postMessage({__cptD:1,kind:'reject',msg:String(e.reason&&e.reason.message||e.reason)},'*');});" +
+    "parent.postMessage({__cptD:1,kind:'reject',phase:window.__cptPhase," +
+    "msg:String(e.reason&&e.reason.message||e.reason)},'*');});" +
     "window.addEventListener('load',function(){" +
-    "parent.postMessage({__cptD:1,kind:'load',plotly:(typeof Plotly!=='undefined')},'*');});";
+    "parent.postMessage({__cptD:1,kind:'load',phase:window.__cptPhase," +
+    "plotly:(typeof Plotly!=='undefined')," +
+    "bootstrap:(typeof bootstrap!=='undefined')," +
+    "charts:document.querySelectorAll('.plotly-graph-div').length},'*');});";
 
   /**
    * 拼一整份 iframe 文档。
@@ -105,8 +110,12 @@
    *
    * ⚠️ **诊断脚本必须排在两个 vendor `<script src>` 之前** —— 否则 plotly
    * 加载失败抛出的错会在监听器装好之前发生，又变成静默。
+   *
+   * ``phase`` 是必需的：占位文档（"正在请求…"）与正式报告**都会**触发一次
+   * ``load``，不标 phase 父页就分不清收到的是**哪一次**，诊断结论不可信
+   * —— 第一版就栽在这：把占位文档的「plotly 未就绪」当成了报告的。
    */
-  function shell(base, bodyHtml, css, scripts) {
+  function shell(base, bodyHtml, css, scripts, phase) {
     const inline = (scripts || [])
       .map((source) => {
         const match = /<script\b[^>]*>([\s\S]*?)<\/script>/i.exec(source);
@@ -116,6 +125,7 @@
     return (
       '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">' +
       '<meta name="viewport" content="width=device-width, initial-scale=1">' +
+      `<script>window.__cptPhase=${JSON.stringify(phase || "report")};</script>` +
       // bootstrap：wbt 模板用了 .container / .nav-tabs / .table / .bi 图标，
       // 它的 CDN 链接被服务端剥掉了，这里补本地副本（离线可用）。
       `<link rel="stylesheet" href="${base}bootstrap.min.css">` +
@@ -170,8 +180,13 @@
    */
   function reportDiag(node, message) {
     if (!message || message.__cptD !== 1) return;
+    // 占位文档（"正在请求…"）的诊断没有意义 —— 它本来就不该有 plotly。
+    // 只显示**报告阶段**的，否则会拿占位阶段的结论当报告的（第一版栽在这）。
+    if (message.phase !== "report") return;
     const text = message.kind === "load"
-      ? `iframe 已加载；plotly ${message.plotly ? "已就绪" : "**未就绪**"}`
+      ? `iframe 已加载；plotly ${message.plotly ? "已就绪" : "**未就绪**"}` +
+        ` · bootstrap ${message.bootstrap ? "已就绪" : "**未就绪**"}` +
+        ` · 图表容器 ${message.charts} 个`
       : `${message.kind}: ${message.msg || "(无消息)"}`;
     node.dataset.canvasDiag = text;
     let box = q("[data-testid=canvas-d-diag]");
@@ -212,7 +227,10 @@
     node.dataset.canvasToken = token;
     node.dataset.canvasReady = "false";
 
-    const frame = buildFrame(node, shell(base, note("正在请求服务端 wbt 报告…"), "", []));
+    const frame = buildFrame(
+      node,
+      shell(base, note("正在请求服务端 wbt 报告…"), "", [], "placeholder"),
+    );
 
     // iframe 的诊断回传（跨 origin 允许，是不透明 origin 下唯一的可观测通道）
     const onDiag = (event) => {
@@ -240,7 +258,13 @@
         if (node.dataset.canvasToken !== token) return; // 已被下一次重绘取代
         if (!payload.available) {
           node.dataset.canvasReady = "unavailable";
-          frame.srcdoc = shell(base, note(`画布 D 不可用：${payload.reason || "unknown"}`), "", []);
+        frame.srcdoc = shell(
+          base,
+          note(`画布 D 不可用：${payload.reason || "unknown"}`),
+          "",
+          [],
+          "unavailable",
+        );
           return;
         }
         const server = payload.counts || {};
@@ -253,7 +277,13 @@
           document.body.dataset.canvasError = `D:count_mismatch:${mismatch.join(",")}`;
         }
         awaitingReport = true;
-        frame.srcdoc = shell(base, payload.body_html || "", payload.css || "", payload.scripts || []);
+        frame.srcdoc = shell(
+          base,
+          payload.body_html || "",
+          payload.css || "",
+          payload.scripts || [],
+          "report",
+        );
       })
       .catch((error) => {
         if (node.dataset.canvasToken !== token) return;
