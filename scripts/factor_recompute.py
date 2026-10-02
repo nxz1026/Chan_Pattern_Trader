@@ -162,29 +162,40 @@ def current_latest_factor(conn: Any, code: str) -> float | None:
     return float(row[0]) if row and row[0] else None
 
 
-def reanchor(new_factors: dict[str, float], anchor_factor: float) -> dict[str, float]:
-    """把按定义算出的因子**重标定**到与库里一致的锚点。
+def anchor_scale(steps: dict[str, float], anchor_factor: float | None) -> float:
+    """算出「整段序列」的重标定系数 ``k``，使**最新一根**的因子等于 ``anchor_factor``。
 
-    ## 为什么这一步不做就会毁掉所有图
+    ## 基准是什么
 
-    实测 000001：库里最新一根的因子是 **200.57**，而按定义算出来（锚在最新）只有
-    **1.0219** —— 差 **196 倍**。两者**形状相同**（都是把分红加回去的后复权：
-    腾讯 hfq 首末比 1.1616 vs 不复权 0.9966，多出的 1.1656 ≈ 三年分红累积），
-    **只是归一化锚点不同**：库里的锚在最早那根，我算的锚在最新那根。
+    :func:`~cpt.adapters.a_share_factor.factor_from_actions` 从最新一次除权往前乘，
+    所以它产出的 ``fmap[ex_date]`` 作用于**该除权日之前**的 bar，而
+    **最后一次除权之后**（含最新一根）的 bar 因子就是定义式里的 ``1.0``。
+
+    ⇒ 整段序列的最新一根原始值 = 1.0，所以 ``k = anchor_factor``，
+    **整段直接乘 anchor**。
+
+    ## 为什么不做这一步就会毁掉所有图
+
+    实测 000001：库里最新一根的因子是 **200.57**，按定义算出来只有 **1.0219** ——
+    差 **196 倍**。两者**形状相同**（都是把分红加回去的后复权：腾讯 hfq 首末比
+    1.1616 vs 不复权 0.9966，多出的 1.1656 ≈ 三年分红累积），**只是归一化锚点不同**
+    （库里的锚在最早那根，我算的锚在最新那根）。
 
     因子是**乘在价格上**的，所以直接换表 ⇒ 每张 A 股图的每一个价格都会**缩放
     ~200 倍**。这不是精度问题，是量纲问题。
 
-    :param anchor_factor: 库里**最新一根**的因子值（换算后的目标锚点）。
+    ## 两版都错过，记下来
+
+    - v1：只缩放台阶值、bar 里写死字面量 ``1.0`` ⇒ 最后一个除权日处凭空多出
+      一个 7 倍假台阶（600519 暂存表最新 1.0 vs 库里 7.0605）；
+    - v2：``k = anchor / fmap[max]`` ⇒ 缩放了两遍，最新一根变成 6.8973
+      （应为 7.0605）。两次都是**看数字看出来的**，不是读代码看出来的。
+
+    :returns: ``k``；拿不到锚点时返回 1.0（不重标定）。
     """
-    if not new_factors:
-        return {}
-    latest_key = max(new_factors)
-    base = new_factors[latest_key]
-    if not base:
-        return dict(new_factors)
-    k = anchor_factor / base
-    return {d: v * k for d, v in new_factors.items()}
+    if not steps or not anchor_factor:
+        return 1.0
+    return anchor_factor
 
 
 def prev_closes_for(bars: tuple[tuple[int, float], ...], ex_dates: list[str]) -> dict[str, float]:
@@ -256,9 +267,12 @@ def process_code(
 
     # ⚠️ 必须重标定：按定义算出的因子锚在**最新**一根，库里锚在**最早**一根
     # （实测 000001 相差 ~196 倍）。不重标定就直接换表 ⇒ 全部价格缩放两个数量级。
+    # ⚠️⚠️ 缩放要作用在**整段序列**上，包括「最后一次除权之后」那些 bar。
+    # 第一版只缩放了台阶值、而 bar 里写死字面量 ``1.0``，于是最后一个除权日
+    # 处凭空多出一个 7 倍的假台阶（600519 暂存表最新 1.0 vs 库里 7.0605）。
+    # 是"暂存表 vs 库里逐行对账"逮到的。
     anchor = current_latest_factor(conn, code)
-    if anchor:
-        fmap = reanchor(fmap, anchor)
+    scale = anchor_scale(fmap, anchor)
 
     rows: list[tuple[str, str, float, str, str]] = []
     for open_ms, _close in bars:
@@ -267,7 +281,7 @@ def process_code(
         # 写成 ``later[-1]``（最晚那次）会让每一根 bar 都拿到同一个因子 ——
         # 整个分段结构塌成 2 个取值。是 R37 的形状对账（相对因子中位差 9%）逮到它的。
         later = [s for s in steps if s > d]
-        factor = fmap[later[0]] if later else 1.0
+        factor = (fmap[later[0]] if later else 1.0) * scale
         rows.append((code, d, factor, "wind_events", f"wind:get_stock_events steps={len(steps)}"))
     if write:
         save_recompute_factors(conn, rows)
