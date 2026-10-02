@@ -417,6 +417,34 @@ class WindSourceClient:
         )
         return parse_wind_kline(call.data, windcode=windcode)
 
+    def fetch_corporate_actions(self, windcode: str) -> tuple[CorporateAction, ...]:
+        """取该标的的**公司行动**（分红派息 / 送转），按 :class:`CorporateAction` 归一化。
+
+        R37 新增。这是重算后复权因子的**真值来源**：因子可以由「除权除息日 +
+        每股派息 + 送转比例」**按定义**算出来，而不必去拟合某个供应商那条带漂移的
+        后复权序列（实测漂移可达 6%，见 ``docs/progress-log.md`` R36）。
+
+        ## 为什么解析要**按列名**而不是按下标
+
+        Wind 返回的列**按标的而变**（实测 2026-10-02）：
+
+        - ``000001.SZ`` → ``历史分红除权除息日`` / ``历史分红税前每股派息`` / …
+        - ``600036.SH`` → ``历史分红税后每股派息`` / ``内地股票分红红股上市日`` /
+          ``历史分红转增比…``（**税后**，还多一个转增列）
+
+        所以按下标取值必然在某些标的上崩（实测：``list.index('历史分红除权除息日')``
+        直接 ValueError）。这里一律**按列名子串匹配**，缺哪项就留 ``None``，
+        由 :class:`CorporateAction` 显式表达"这项没有"，而不是猜。
+
+        :returns: 按除权日升序的公司行动；**没有记录时返回空元组**（不抛）。
+        """
+        call = self.call(
+            "stock_data",
+            "get_stock_events",
+            {"question": f"查询{windcode} 的分红派息历史，包括除权除息日、每股派息与送转比例"},
+        )
+        return parse_corporate_actions(call.data)
+
     def fetch_adjust_factors(
         self,
         windcode: str,
@@ -496,6 +524,129 @@ def _first(mapping: Mapping[str, Any], names: Sequence[str]) -> Any:
         if lower in mapping:
             return mapping[lower]
     return None
+
+
+@dataclass(frozen=True)
+class CorporateAction:
+    """一次公司行动（除权除息）。
+
+    :param ex_date: 除权除息日（ISO）。**取不到时该条会被丢弃** —— 没有日期就无法
+        定位因子台阶，宁缺勿猜。
+    :param cash_pre_tax: 税前每股派息（元）。``None`` = 该标的这次没这一项。
+    :param cash_after_tax: 税后每股派息（元）。后复权序列按**实际到手**还是**税前**
+        口径，各供应商不同（实测腾讯与 Wind 都在税前附近），所以两个都留着。
+    :param share_bonus: 送股比例（每股送几股）。
+    :param transfer: 转增比例（每股转增几股）。
+    """
+
+    ex_date: str
+    cash_pre_tax: float | None = None
+    cash_after_tax: float | None = None
+    share_bonus: float | None = None
+    transfer: float | None = None
+
+    @property
+    def share_ratio(self) -> float:
+        """送股 + 转增的合计比例（``1 + s`` 里的那个 ``s``）。"""
+        return (self.share_bonus or 0.0) + (self.transfer or 0.0)
+
+
+def _pick_column(columns: list[str], *needles: str) -> int | None:
+    """按列名子串找列下标；找不到返回 ``None``（不猜、不抛）。"""
+    for idx, name in enumerate(columns):
+        if all(n in name for n in needles):
+            return idx
+    return None
+
+
+def _to_float_or_none(value: Any) -> float | None:
+    if value is None or value == "" or value == "-":
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _find_table(node: Any, depth: int = 0) -> Mapping[str, Any] | None:
+    """递归找出第一个 ``{"columns": [...], "rows": [...]}`` 表。
+
+    ## 为什么不能假设层级
+
+    ``WindSourceClient.call`` 返回的 ``data`` 是**已解析的 content[0].text**，而
+    Wind 的信封本身又套了一层：实测 2026-10-02 的真实形状是::
+
+        data = {"data": {"data": [{"columns": [...], "rows": [...]}], "error": None},
+                "error": None}
+
+    第一版按 ``data["data"]`` 取，拿到的是 **dict** 不是 list，于是整表被当成
+    「无记录」—— 表现为「Wind 无公司行动记录」，一个**看起来像数据缺失的错误**。
+    递归找表比数层级稳：信封套几层、以后再加一层，都不影响。
+    """
+    if depth > 6:
+        return None
+    if isinstance(node, Mapping):
+        if isinstance(node.get("columns"), list) and isinstance(node.get("rows"), list):
+            return node
+        for value in node.values():
+            found = _find_table(value, depth + 1)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _find_table(item, depth + 1)
+            if found is not None:
+                return found
+    return None
+
+
+def parse_corporate_actions(data: Mapping[str, Any]) -> tuple[CorporateAction, ...]:
+    """把 ``get_stock_events`` 的返回体归一化成 :class:`CorporateAction` 序列。
+
+    Wind 的返回是「信封套信封套表」，且**列集合按标的、甚至按次而变**（实测：
+    000001 的两次调用分别少了/多了「税后每股派息」「转增比例」），所以定位表用
+    递归、取值用**列名子串**，全程不按下标。
+    """
+    table = _find_table(data)
+    if table is None:
+        return ()
+    columns = [str(c.get("name", "")) for c in (table.get("columns") or [])]
+    rows = table.get("rows") or []
+    if not columns or not rows:
+        return ()
+
+    i_date = _pick_column(columns, "除权除息日") or _pick_column(columns, "分红红股上市日")
+    if i_date is None:
+        i_date = next((i for i, n in enumerate(columns) if "分红" in n and "日" in n), None)
+    if i_date is None:
+        return ()
+    i_pre = _pick_column(columns, "税前", "派息")
+    i_post = _pick_column(columns, "税后", "派息")
+    i_bonus = _pick_column(columns, "送股")
+    i_transfer = _pick_column(columns, "转增")
+
+    out: list[CorporateAction] = []
+    for row in rows:
+        if not isinstance(row, list) or i_date >= len(row):
+            continue
+        raw_date = str(row[i_date] or "").strip()
+        if len(raw_date) < 10:  # "2026-09-24" / "2026/09/24"
+            continue
+
+        def cell(idx: int | None, _row: list[Any] = row) -> Any:
+            return _row[idx] if idx is not None and idx < len(_row) else None
+
+        out.append(
+            CorporateAction(
+                ex_date=raw_date[:10].replace("/", "-"),
+                cash_pre_tax=_to_float_or_none(cell(i_pre)),
+                cash_after_tax=_to_float_or_none(cell(i_post)),
+                share_bonus=_to_float_or_none(cell(i_bonus)),
+                transfer=_to_float_or_none(cell(i_transfer)),
+            )
+        )
+    out.sort(key=lambda a: a.ex_date)
+    return tuple(out)
 
 
 def parse_wind_kline(data: Mapping[str, Any], *, windcode: str) -> tuple[CanonicalBar, ...]:

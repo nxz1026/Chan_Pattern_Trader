@@ -46,9 +46,15 @@ __all__ = [
     "FactorUnavailableError",
     "OnDemandFactorFetcher",
     "SOURCE_TX",
+    "FACTOR_RECOMPUTE_TABLE",
     "build_factor_rows",
+    "codes_with_factors",
+    "ensure_recompute_stage",
+    "factor_from_actions",
     "factor_source_ref",
     "fetch_factor_rows",
+    "load_recent_closes",
+    "save_recompute_factors",
     "upsert_factor_rows",
 ]
 
@@ -410,3 +416,149 @@ def upsert_factor_rows(
         )
     conn.commit()
     return len(payload)
+
+
+# --------------------------------------------------------------------------- #
+# R37：按 Wind 公司行动重算后复权因子（**只写暂存表**，见 factor_recompute.py）
+# --------------------------------------------------------------------------- #
+
+#: 暂存表名。**生产表 ``asel.ref_adjust_factor`` 一个字节都不碰** ——
+#: 切换是人工决定（看报告 → 决定），脚本绝不自动切。
+FACTOR_RECOMPUTE_TABLE: Final[str] = "asel.ref_adjust_factor_v2"
+
+_RECOMPUTE_DDL: Final[str] = f"""
+CREATE TABLE IF NOT EXISTS {FACTOR_RECOMPUTE_TABLE} (
+    code        text        NOT NULL,
+    trade_date  date        NOT NULL,
+    hfq_factor  numeric     NOT NULL,
+    basis       text        NOT NULL,
+    source      text        NOT NULL,
+    computed_at timestamptz NOT NULL DEFAULT now(),
+    PRIMARY KEY (code, trade_date)
+)
+"""
+
+
+def ensure_recompute_stage(conn: Any) -> None:
+    """建暂存表（幂等）。"""
+    with conn.cursor() as cur:
+        cur.execute(_RECOMPUTE_DDL)
+    conn.commit()
+
+
+def load_recent_closes(conn: Any, code: str, *, limit: int = 800) -> tuple[tuple[int, float], ...]:
+    """``(open_time_ms, close)`` **升序**，取最近 ``limit`` 根不复权 K 线。
+
+    ⚠️ ``public.daily_bar`` **没有** ``open_time`` 列 —— 交易日的 ``open_time``
+    是由 ``date`` 推出来的（UTC 当日零点毫秒），口径与
+    :func:`cpt.adapters.a_share_local.fetch_validated_klines` 装配 ``CanonicalBar``
+    时那一行 ``open_ms`` 完全一致。第一版这里直接 ``SELECT open_time``，
+    在真机上当场炸 ``column "open_time" does not exist``。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT date, close FROM public.daily_bar WHERE code=%s ORDER BY date DESC LIMIT %s",
+            (code, limit),
+        )
+        rows = cur.fetchall()
+    out: list[tuple[int, float]] = []
+    for day, close in rows:
+        open_ms = int(datetime(day.year, day.month, day.day, tzinfo=UTC).timestamp() * 1000)
+        out.append((open_ms, float(close)))
+    return tuple(sorted(out))
+
+
+def codes_with_factors(conn: Any) -> tuple[str, ...]:
+    """已有因子行的裸码（升序）—— 重算的候选全集。"""
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT code FROM asel.ref_adjust_factor WHERE source IS NOT NULL")
+        return tuple(sorted({str(r[0]).split(".")[0] for r in cur.fetchall()}))
+
+
+def hot_pool_codes(conn: Any, *, limit: int = 60) -> tuple[str, ...]:
+    """热门池（``public.hot_rank`` 最新一期）与策略源最新一期的裸码。
+
+    重算要按额度分几天，所以**顺序有意义**：先跑正在被看的票。
+    """
+    out: list[str] = []
+    with conn.cursor() as cur:
+        cur.execute("SELECT max(date) FROM public.hot_rank")
+        row = cur.fetchone()
+        if row and row[0]:
+            cur.execute("SELECT code FROM public.hot_rank WHERE date=%s", (row[0],))
+            out.extend(str(r[0]).split(".")[0] for r in cur.fetchall())
+        cur.execute("SELECT max(trade_date) FROM public.strategy_signal")
+        row = cur.fetchone()
+        if row and row[0]:
+            cur.execute("SELECT code FROM public.strategy_signal WHERE trade_date=%s", (row[0],))
+            out.extend(str(r[0]).split(".")[0] for r in cur.fetchall())
+    seen: list[str] = []
+    for c in out:
+        if c and c not in seen:
+            seen.append(c)
+    return tuple(seen[:limit])
+
+
+def save_recompute_factors(conn: Any, rows: Sequence[tuple[str, str, float, str, str]]) -> int:
+    """写暂存表并 commit。``rows`` = ``(code, trade_date, factor, basis, source)``。"""
+    if not rows:
+        return 0
+    with conn.cursor() as cur:
+        cur.executemany(
+            f"""INSERT INTO {FACTOR_RECOMPUTE_TABLE}
+                 (code, trade_date, hfq_factor, basis, source)
+                 VALUES (%s,%s,%s,%s,%s)
+                 ON CONFLICT (code, trade_date) DO UPDATE
+                 SET hfq_factor=EXCLUDED.hfq_factor,
+                     basis=EXCLUDED.basis, computed_at=now()""",
+            rows,
+        )
+    conn.commit()
+    return len(rows)
+
+
+def factor_from_actions(
+    actions: Sequence[Any],
+    *,
+    prev_closes: dict[str, float],
+) -> dict[str, float]:
+    """由公司行动按**定义**算后复权因子 → ``{除权日: 该日起生效的累计乘子}``。
+
+    公式（从最新一次除权往前乘）::
+
+        f = Π  (1 + 送转比例) / (1 − 每股派息 / 除权前收盘)
+
+    ## 为什么不能继续用供应商的后复权序列相除
+
+    现在的因子就是 ``腾讯后复权收盘 ÷ 库里不复权收盘`` 的**逐日比值**，而那个比值
+    本身不是常数（R36 实测：600519 在 125 个交易日里相对极差 6.25%，000001 在
+    20 天里 2.57%）。**拿一条带漂移的曲线当因子，等于把漂移固化下来。**
+    公司行动是离散事件，事件才是真值。
+
+    :param actions: :class:`~cpt.adapters.wind_source.CorporateAction` 序列。
+    :param prev_closes: ``{除权日: 除权前收盘}``；取不到的那次会被跳过
+        （**宁可少一个台阶，也不用猜的收盘价**）。
+    :returns: 只含**除权日**上的因子（分段常数的分段点）。
+    """
+    out: dict[str, float] = {}
+    acc = 1.0
+    for act in sorted(actions, key=lambda a: a.ex_date, reverse=True):
+        # 税前优先、税后回落：Wind 的列集合**按标的而变**（实测 600036 只给"税后"），
+        # 少了任一种都不能让那一次除权凭空消失。
+        cash = getattr(act, "cash_pre_tax", None)
+        if cash is None:
+            cash = getattr(act, "cash_after_tax", None)
+        prev = prev_closes.get(act.ex_date)
+        ratio = float(getattr(act, "share_ratio", 0.0) or 0.0)
+        if cash is None or prev is None or prev <= 0:
+            if ratio:
+                acc *= 1.0 + ratio
+                out[act.ex_date] = acc
+            continue
+        drop = float(cash) / prev
+        if not 0 <= drop < 1:  # 派息不可能超过除权前收盘，否则是数据错
+            _LOG.warning("跳过异常除权 %s：派息 %s / 前收 %s", act.ex_date, cash, prev)
+            continue
+        acc *= (1.0 + ratio) / (1.0 - drop)
+        out[act.ex_date] = acc
+    return out

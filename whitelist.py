@@ -85,3 +85,8 @@ fetch_validated_bars  # adapters/a_share_local —— 取数 + 校验的组合�
 call_count  # adapters/wind_source —— 调用计数，供测试断言节流行为
 clear_runs  # application/dashboard_runs —— 清空进程内运行环形缓冲（测试用）
 drain  # llm/queue —— 等异步队列排空（测试同步用；vulture 只扫 cpt/，看不见 tests/）
+
+# R37：重算因子的两个新入口 —— 都在 scripts/factor_recompute.py 里被调用，
+# 而 vulture 只扫 cpt/，所以它们在门禁眼里是死的（实际不是）。
+fetch_corporate_actions  # adapters/wind_source 供 scripts/factor_recompute.py 取公司行动
+hot_pool_codes  # adapters/a_share_factor 供 scripts/factor_recompute.py 排优先级
