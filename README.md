@@ -57,15 +57,36 @@ domain/        纯算法与领域模型（零第三方依赖，一套算法跨�
 
 **两个市场共用同一套缠论后端与同一份 `dashboard.v2` 快照 schema** —— 所以四个画布对 A 股**零改动复用**（由 `tests/test_dashboard_ashare_contract.py` 钉住：`canvas_b.js`/`canvas_c.js` 里不得出现市场分支）。
 
-### A 股复权因子：全量兜底 + 按需精修
+### A 股复权因子：两条路，生产表用哪条要看报告
 
-全库 5,222 只已全部写入 `asel.ref_adjust_factor`（默认 `hfq_factor=1.0`，兜底全覆盖）。对于除权日价格敏感的标的，可通过**按需拉取**精修：输入代码 → 从腾讯拉 `raw + hfq` 两个序列（同源同对，`hfq_factor = hfq/raw` 绝对自洽）→ 幂等落库 → 重出快照，覆盖默认的 1.0 因子。
+**先说清楚现状**（R39/R40 实测，不是推断）：
+
+- `asel.ref_adjust_factor` 里 5222 只票中，**3028 只（58%）的 `hfq_factor` 全程
+  等于 1.0** —— 那是 2026-09-29「全量兜底」写进去的占位值，从未计算过；
+- 另有 **992 只票的因子会向下跳**（全表向上 4162 次 / 向下 2852 次）。纯后复权
+  因子必须单调不降（除权日向上跳把分红加回去），所以**这一列对那 992 只不是
+  后复权因子**。根因在上游 `asel` 的产数逻辑，不在本仓。
+
+两条补算路径：
+
+| 路径 | 来源 | 说明 |
+|---|---|---|
+| `scripts/factor_backfill.py` | 腾讯 `hfq/raw` | 按需拉单只标的；`hfq_factor = hfq/raw` 自洽 |
+| `scripts/factor_recompute.py` | **东财** `RPT_SHAREBONUS_DET` | 全量重算，默认源；免费、从大阪直连 200、**无额度** |
+
+Wind 路径（`--source wind`）保留作交叉校验，但要积分 —— 实测 24/2197 只就撞
+「账户积分余额不足」，所以不再是默认。
+
+> ⚠️ `factor_recompute.py` **只写暂存表 `asel.ref_adjust_factor_v2`**，
+> **不碰生产表**。这是 R37 定下的纪律：先看对账报告，再由人决定是否切换。
+> 切换前的唯一依据是 `scripts/factor_report.py` 的逐票结论。
+
+⚠️ 东财的 `PRETAX_BONUS_RMB` 是**每 10 股**的税前派息（茅台 2024-12-31 报告期
+276.73 ⇒ 每股 27.673 元）。忘了除以 10，因子会差整整一个数量级 ⇒ 所有历史价格 ×10。
+该换算已由 R39 的真机对账钉死：东财算出的单次除权台阶与库里真实跳变 **18/23 匹配、
+偏差 ±0.9% 内**。
 
 > 腾讯是否提供某标的的 `hfqday` 是**逐标的**属性、**无法用代码前缀预测**（实测 `688111`/`688036` 有而 `688981` 没有；多数 `301` 有而近期新股没有）。所以实现里**没有任何板块判断**，只如实报告腾讯实际返回了什么。教训见 `docs/progress-log.md` R15-1 节（同一处先后记错过两次）。
->
-> 2026-09-29 全量兜底：用 `daily_bar` 自身数据写入 `hfq_factor=1.0`，覆盖全部 5,222 只，
-> 消除"约 100 只"的覆盖缺口。后续若发现价格偏差，可用 `scripts/factor_backfill.py`
-> 从 akshare 拉真实因子覆盖。
 
 ### A 股标的名称
 
@@ -93,8 +114,21 @@ domain/        纯算法与领域模型（零第三方依赖，一套算法跨�
 | `docs/implementation-plan.md` | 实施计划（M0–M6 垂直切片里程碑 + M-LLM 独立线） |
 | `docs/reference-audit.md` | 参考仓库许可证与复用边界 |
 | `docs/progress-log.md` | 逐轮进度日志（R13 起；更早见 `docs/archive/`） |
-| `docs/known-traps.md` | 已知陷阱与非缺陷清单（8 类"像 bug 其实不是"，每条附判定命令） |
+| `docs/known-traps.md` | 已知陷阱与非缺陷清单（16 条"像 bug 其实不是"，每条附**判定命令**） |
+| `docs/pending-wiring.md` | 尚未接线模块清单（是产品决策，不是死代码） |
+| `docs/dashboard-product-roadmap.md` | 看板产品路线（Phase 1–5） |
 | `deploy/README.md` | Nginx / systemd / 静态看板部署说明（含权限坑） |
+
+### 运维脚本
+
+| 脚本 | 作用 | 会写库吗 |
+|---|---|---|
+| `scripts/run_inspection.py` | 每日巡检：读 `cpt_run_metric` + 源状态 → 飞书告警 | 只写巡检结论行 |
+| `scripts/snapshot_a_share_batch.py` | A 股批量快照（systemd timer 每日触发） | 是 |
+| `scripts/factor_recompute.py` | 按公司行动重算后复权因子 | **只写暂存表** |
+| `scripts/factor_report.py` | 因子对账报告（切生产表的唯一依据） | 否 |
+| `scripts/golden_set.py` | 结构指纹基线，`--check` 有差异 exit 1 | 会留水位行 |
+| `scripts/check_sql_layering.py` | 门禁：SQL 只许出现在 `adapters`/`storage` | 否 |
 
 ## 参考仓库
 
@@ -123,7 +157,12 @@ cp deploy/env/cpt-dashboard.env.example deploy/env/cpt-dashboard.env
 ```
 
 `--mode` 三档：`demo`（内置样例）/ `fixture`（确定性离线，UI 冒烟用）/ `realtime`（Binance 轮询）。
-`--backend auto|czsc|native` 选缠论后端（`auto` = 装了 czsc 就用 czsc）。
+
+`--backend native|czsc|auto` 选缠论后端，**默认是 `native`（自研）**。
+`auto` 的语义是「装了 czsc 就用 czsc」—— ⚠️ **它只用于 CI 与画面对照，任何情况下都不要
+用它跑生产**：一旦某台机器多装了 `czsc`，同一份配置就会在**毫无报错**的情况下切到
+另一套实现，结构随之全变。R36 因此把 `DEFAULT_BACKEND` 从 `auto` 钉回 `native`；
+czsc 现在的位置是 parity 的**参照侧**（`parity_reference.py`），那边回落是安全的。
 
 ### A 股
 
@@ -172,10 +211,16 @@ vulture --min-confidence 60 cpt whitelist.py    # 死代码审计
 - **`check_sql_layering.py` 管的是 import-linter 管不了的那一半**。import-linter
   查依赖方向，查不了「职责有没有放对层」。
 
-> Windows 开发机上有两个**已知且与代码无关**的基线偏差：
+> Windows 开发机上有几个**已知且与代码无关**的基线偏差（`fcntl` / 无浏览器）：
 > `a_share_pool.py` 顶层 `import fcntl` 导致该模块在 Windows 不可导入
-> （跑全量需 `--ignore=tests/test_a_share_pool.py`），以及由此产生的
-> `test_web_a_share_routes.py` 13 条 failed 与 mypy 4 条 `flock` 报错。
+> （跑全量需 `--continue-on-collection-errors`），并连带
+> `test_web_a_share_routes.py` 14 条 failed、`test_a_share_pool.py` 1 条 collection error、
+> 两条 chromium smoke failed，以及 mypy 4 条 `flock` 报错。
+>
+> **权威基线（2026-10-02 实测，`--junit-xml` 取值）**：
+> **853 tests / 15 failures / 1 error / 29 skipped / 808 passed**。
+> 判断「有没有打破契约」时，**不要数失败条数**，要把 `git stash` 后的干净基线
+> 跑一遍**逐条对比失败名单** —— 条数会随环境漂，名单不会。
 > CI 跑在 ubuntu 上不受影响。
 
 CI 只装 `requirements-dev.txt`，因此 czsc/ccxt/psycopg/pandas/plotly/wbt 均不在
