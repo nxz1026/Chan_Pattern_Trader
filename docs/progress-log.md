@@ -3528,3 +3528,90 @@ A 股 level 30 必须标未启用、未知市场不许猜、渲染**不污染入
 - **pytest 权威计数（`--junit-xml`）**：804 tests / 13 failures / 0 errors /
   29 skipped → **762 passed**。13 条全在 `test_web_a_share_routes`（`fcntl` 基线），
   **零新增失败**。
+
+### 八、R28-11：画布 D 换不透明 origin —— M3 的彻底解法
+
+#### 先勘察：R28-5 那个「代价」判断是错的
+
+R28-5 写「去掉 `allow-same-origin` → 父页读不到 `contentDocument` → 四画布计数
+一致性断言全废」。**那是假设，不是事实。** 本轮 grep 核实：
+
+    grep -r contentDocument  →  只命中 dashboard/canvas_d.js 自己
+
+**全仓没有任何测试、审计脚本或其他代码读 iframe 的 DOM。** 四画布计数一致性走的是
+父节点上的 `data-canvas-counts`，数据来自服务端 JSON 的 `counts` 字段 ——
+**不经过 iframe**。所以那条「代价接近架构级」是虚的，实际代价接近于零。
+
+#### 改法
+
+`srcdoc` + `sandbox="allow-scripts"`（**去掉** `allow-same-origin`）。DOM 组装从
+父页搬进字符串侧 —— 父页不再触碰 `contentDocument`。
+
+iframe 因此拿到**不透明 origin**：即使内容里跑进恶意脚本，它也**够不到父页面的
+DOM / cookie / localStorage**。`removeAttribute("sandbox")` 那个逃逸原语
+**从根上不存在了** —— 不是「没有输入喂它」，是「喂了也没用」。
+
+代价逐条核实过：
+
+- **plotly 仍要跑** —— `allow-scripts` 保留；srcdoc 文档里外链 `<script src>` 与
+  内联脚本按**文档顺序**执行，plotly 放 `<head>`、片段脚本放 `</body>` 前即满足依赖；
+- **相对 URL 仍解析** —— srcdoc 的 base URL 取自父文档，`<link>` / `<script src>`
+  用相对路径就能命中本地 vendor；
+- **计数一致性不受影响** —— 见上。
+
+一处诚实说明：srcdoc 是**字符串**拼装，`body_html` 原样嵌进 `<body>`。它取自 wbt
+`render()` 的正文、标签配平；但万一上游产出出现落单的 `</body>`，解析器会提前收尾。
+这不是安全问题（内容仍受 sandbox 约束），但值得知道。
+
+顺带把 `data-canvas-ready` 的语义修准了：原来在 fetch 的 `then` 里直接置 `true`，
+而那时 iframe 里还是空壳 —— 那是**撒谎**。现在监听 iframe 的 `load` 事件，在报告
+真的画出来之后才置 true。
+
+#### 测试
+
+- `test_iframe_no_longer_has_allow_same_origin` —— flag 必须是 `allow-scripts` 单独一个，
+  且代码里不许再出现 `allow-same-origin` / `contentDocument`
+- `test_counts_do_not_depend_on_iframe_dom` —— 钉住 R28-5 那个错误判断：计数只依赖
+  `payload.counts`，不经过 iframe DOM
+- `test_sandbox_escape_is_explained_in_source` —— 逃逸原语要留在注释里，
+  免得有人把 flag 加回去以为在做加固
+
+断言前先**剥掉注释**再查：文件头保留着「以前是 allow-same-origin + contentDocument」
+这段历史说明（免得后人加回去），而断言要禁的是**代码里**再用它。两件事不冲突 ——
+第一版没剥注释，测试被自己的说明文字顶红了。
+
+红绿对照：把 `allow-same-origin` 加回去，测试立刻红。
+
+### 九、R28-13：`_pkg` 清理（规矩终于执行了）
+
+R28-8 只写了规矩没动手，本轮执行。
+
+**新增一条规则**：*比「最新被引用包」还新的未引用包，视为「可能正在发布中」，
+一律保留。* 理由是 `linux7` 的时间戳比 run6 引用的 `linux6` 新却没有对应 run 脚本
+—— 有人发了包还没接线。**删掉一个刚发布的包，风险远大于多留 55 KB。**
+
+结果：删 `base` + `linux1` ~ `linux4` 共 **5 个**（320 KB），保留 `linux5`/`linux6`
+（run 脚本引用）与 `linux7`（可能在发布中）。目录 **516K → 188K**。
+
+**清理后从公网实测两条一键安装链路**：
+
+    GET /cpt/_pkg/run5.sh = 200；下载 linux5 = 200，59447 字节，sha256 一致 ✓
+    GET /cpt/_pkg/run6.sh = 200；下载 linux6 = 200，61222 字节，sha256 一致 ✓
+
+**一次自纠 + 一次守卫生效**：
+
+第一版判定「被引用包」用 `[A-Za-z0-9._-]*\.tgz` 裸匹配，把 `run6.sh` 里的
+`$TMP/linux6.tgz` 误判成「被引用但不存在」→ 触发恢复流程并退出。**它一个文件都没
+删** —— 第 4 步「被引用的包必须完好」的校验拦住了。
+
+教训写进脚本注释：判定「线上包」不能靠文件名裸匹配，要认命名规范
+（`collector-cn-*.tgz`）。下载后的本地临时文件名不是线上包。
+
+备份留在 `/tmp/cpt-pkg-backup-20261002T010718Z`（可恢复）。
+
+### 十、门禁
+
+- 7 条全绿（mypy 4 条仍是 `fcntl` Windows-only 基线）；`node --check` 通过
+- **pytest 权威计数（`--junit-xml`）**：806 tests / 13 failures / 0 errors /
+  29 skipped → **764 passed**。13 条全在 `test_web_a_share_routes`（`fcntl` 基线），
+  **零新增失败**。

@@ -16,20 +16,25 @@
 
 ## 那它仍然值得管
 
-``canvas_d.js`` 建 iframe 时用的是
-``sandbox="allow-same-origin allow-scripts"``。这个组合下，frame 内的脚本可以
-``frameElement.removeAttribute('sandbox')`` 再重载，从而拿到父页面的同源权限 ——
-**逃逸原语今天就存在**，只是没有攻击者可控的输入喂给它。
+``canvas_d.js`` 此前建 iframe 用的是
+``sandbox="allow-same-origin allow-scripts"``。这个组合下 frame 内的脚本可以
+``window.frameElement.removeAttribute("sandbox")`` 再重载，从而拿到父页面的
+同源权限 —— **逃逸原语一直存在**，只是没有攻击者可控的输入喂给它。
 
-而两个 flag 都是**承重**的：去掉 ``allow-scripts`` → plotly 不跑，画布 D 废；
-去掉 ``allow-same-origin`` → 父页读不到 ``contentDocument``，四画布一致性断言全废。
-所以「收紧 sandbox」不是免费的，属于要 owner 拍板的架构决策。
+R28-5 时我判断「两个 flag 都是承重的，去掉 allow-same-origin 会让四画布计数
+断言全废」。**那个判断是错的**：全仓 `grep contentDocument` 只命中 `canvas_d.js`
+自己，没有任何测试或审计脚本读 iframe DOM —— 四画布计数走的是父节点上的
+``data-canvas-counts``，数据来自服务端 JSON 的 ``counts`` 字段。
+
+R28-11 据此改成 ``srcdoc`` + ``sandbox="allow-scripts"``：DOM 组装搬到字符串侧，
+iframe 拿到**不透明 origin**，逃逸原语从根上不存在。代价接近于零。
 
 本文件钉的是**无争议的那一半**：把隐式边界变成被强制的。
 
 - 任何非白名单字符进了 ``body_html`` 就失败；
 - ``symbol`` 里的 HTML 元字符必须被转义成字面文本（纵深防御：今天靠上游校验，
-  上游哪天放宽格式，这里就是静默的注入点）。
+  上游哪天放宽格式，这里就是静默的注入点）；
+- ``allow-same-origin`` 不许被加回来，``contentDocument`` 不许被重新使用。
 """
 
 from __future__ import annotations
@@ -88,16 +93,54 @@ def test_source_does_not_interpolate_unescaped_symbol() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_iframe_sandbox_flags_are_documented_load_bearing() -> None:
-    """把「两个 flag 都是承重的」钉下来，防止有人顺手删一个。
+def _canvas_d_code() -> str:
+    """``canvas_d.js`` 剥掉注释后的**代码部分**。
 
-    删 ``allow-scripts`` → plotly 不跑；删 ``allow-same-origin`` → 父页读不到
-    contentDocument，画布 D 的计数一致性断言全废。都是功能性破坏，不是安全收益。
+    刻意剥注释：文件头里要保留「以前是 allow-same-origin + contentDocument」
+    这段历史说明（免得后人把 flag 加回去），而断言要禁的是**代码里**再用它。
+    两件事不冲突。
     """
+    text = (_REPO / "dashboard" / "canvas_d.js").read_text(encoding="utf-8")
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)  # 块注释
+    text = re.sub(r"^\s*//.*$", "", text, flags=re.M)  # 行注释
+    return text
+
+
+def test_iframe_no_longer_has_allow_same_origin() -> None:
+    """R28-11：``allow-same-origin`` 已移除，iframe 拿到**不透明 origin**。
+
+    这是 M3 的彻底解法：即使内容里跑进恶意脚本，它也够不到父页面的
+    DOM / cookie / localStorage —— 逃逸原语**从根上不存在**了。
+
+    ``allow-scripts`` 保留：去掉它 plotly 就不跑，画布 D 直接废。
+    """
+    code = _canvas_d_code()
+    assert 'frame.setAttribute("sandbox", "allow-scripts")' in code
+    assert "allow-same-origin" not in code, "allow-same-origin 必须已移除"
+    # 逃逸原语依赖的 contentDocument 也不该再出现
+    assert "contentDocument" not in code, "父页不该再触碰 iframe 的 contentDocument"
+
+
+def test_sandbox_escape_is_explained_in_source() -> None:
+    """那条逃逸原语要留在注释里 —— 免得有人把 flag 加回去以为在做加固。"""
     js = (_REPO / "dashboard" / "canvas_d.js").read_text(encoding="utf-8")
-    assert 'frame.setAttribute("sandbox", "allow-same-origin allow-scripts")' in js
-    # 逃逸原语存在这件事本身要留在代码注释里
-    assert "removeAttribute" in js, "canvas_d.js 应记录同源+sandbox 的逃逸原语"
+    assert "removeAttribute" in js
+    assert "不透明 origin" in js
+
+
+def test_counts_do_not_depend_on_iframe_dom() -> None:
+    """四画布计数一致性**必须**只依赖服务端 JSON，不能读 iframe DOM。
+
+    这是 R28-5 写错过的地方：当时假设「去掉 allow-same-origin 会让计数断言全废」，
+    实际全仓没有任何代码读 ``contentDocument``。这条测试把这个事实钉住 ——
+    万一将来有人为了拿 DOM 把 ``contentDocument`` 加回来，这条立刻红。
+    """
+    code = _canvas_d_code()
+    # 计数来自 payload.counts（服务端字段）
+    assert "payload.counts || {}" in code
+    assert "node.dataset.canvasCounts" in code
+    # 且不经过 iframe DOM
+    assert "contentDocument" not in code
 
 
 # --------------------------------------------------------------------------- #
