@@ -20,6 +20,23 @@ czsc，中枢仍走 CPT 自研），但**没有任何生产路径用它**——`
 | ``native`` | 强制 CPT 自研后端（离线/回放/对照用）                    |
 +----------+------------------------------------------------------------+
 
+⚠️ **R36：``auto`` 不再是生产默认档**（owner 2026-10-02 定）
+
+> 「我们是参照 czsc 的算法，然后做了一些自己的算法，**不能全走 czsc**。」
+
+R16-4 当初把 ``auto`` 定成默认的理由是「装了 czsc 就用 czsc（生产意图）」——
+那条**意图现在被明确否掉了**。而 ``auto`` 留着的实际风险是：**任何人
+``pip install -e ".[chan]"`` 装上 czsc，生产结构就会静默从自研切成 czsc**，
+看板上每一根笔都会变（native 笔端点中位跨度 2 根、短跨度占 66.9%；czsc 是
+9~10 根、6.1%）。一个装依赖的动作不该改变产品输出，所以：
+
+- :data:`DEFAULT_BACKEND` 改为 ``"native"``（**自研**）—— 今天 czsc 未装，
+  实际行为**零变化**，只是把那条静默切换的路堵上；
+- ``auto`` 档保留（CI 与离线对照仍可用），但它不再是任何人默认拿到的档位；
+- czsc 现在的定位是 **parity 的参照侧**（``parity_reference.py`` 显式请求
+  ``resolve_backend("czsc")``），**不是**生产路径 —— 要看"两边差多少"用它，
+  要画生产图用自研。
+
 ``auto`` 的回落是刻意的：czsc 是可选依赖（``.[chan]`` extra），CI 只装
 ``requirements-dev.txt``（**不含 czsc**）。若 ``auto`` 在缺 czsc 时抛错，CI
 与本地行为就会分叉；回落 native 保证两边都能跑，只是精度不同。因此**任何测试
@@ -49,8 +66,13 @@ __all__ = [
 #: ``--backend`` 的合法取值（顺序＝帮助信息里的展示顺序）。
 BACKEND_CHOICES: Final[tuple[str, ...]] = ("auto", "czsc", "native")
 
-#: 未显式指定时的默认档：装了 czsc 就用 czsc（生产意图），否则回落自研。
-DEFAULT_BACKEND: Final[str] = "auto"
+#: 未显式指定时的默认档。
+#:
+#: **R36：改成 ``"native"``（自研）** —— owner 明确「参照 czsc 的算法做了自己的
+#: 算法，不能全走 czsc」。而 ``auto`` 留着的实际风险是「谁装了 ``.[chan]`` extra，
+#: 生产结构就静默切换」。今天 czsc 未装，行为零变化；改的是**堵住那条静默切换**。
+#: ``auto`` 档仍在 :data:`BACKEND_CHOICES` 里（CI / 离线对照可用），只是不再是默认。
+DEFAULT_BACKEND: Final[str] = "native"
 
 
 class UnknownBackendError(ValueError):
