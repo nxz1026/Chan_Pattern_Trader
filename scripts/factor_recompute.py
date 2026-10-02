@@ -148,8 +148,15 @@ STATE_PATH: Final[Path] = Path(
     os.getenv("CPT_FACTOR_RECOMPUTE_STATE", "~/.cache/cpt/factor_recompute_state.json")
 ).expanduser()
 
-#: 默认每日调用上限。**真正的硬边界是供应商的 RATE_LIMIT_ERROR**，这个只是保险。
-DEFAULT_MAX_CALLS: Final[int] = 80
+#: 默认单轮处理上限。
+#:
+#: ⚠️ R42：它**不再是「额度」**，只是时间预算。R39 起默认源换成东财 ——
+#: 免费、无额度，于是这个数字唯一的作用是「别让一轮跑太久」。
+#: 全部 5222 只按实测 ~1 只/秒约 87 分钟，远在 cron 的 10h ``timeout`` 内，
+#: 所以默认值给到 ``6000``（足够一轮跑完全集）。
+#: 用 ``--source wind`` 时它才重新变成**真正的硬边界**（Wind 的
+#: ``RATE_LIMIT_ERROR``），此时应当把 ``CPT_RECOMPUTE_MAX_CALLS`` 调小。
+DEFAULT_MAX_CALLS: Final[int] = 6000
 
 #: 自选文件（``WatchlistStore`` 用的同一个路径）
 WATCHLIST_PATH: Final[Path] = Path(
@@ -192,7 +199,7 @@ def bind_state_to_source(state: dict[str, Any], source_name: str) -> dict[str, A
             source_name,
             len(state.get("done") or []),
         )
-    return {"done": [], "failed": {}, "days": {}, "source": source_name}
+    return {"done": [], "failed": {}, "days": {}, "source": source_name, "scope": None}
 
 
 def save_state(state: dict[str, Any]) -> None:
@@ -218,11 +225,79 @@ def watchlist_codes() -> list[str]:
     return out
 
 
-def priority_codes(conn: Any) -> list[str]:
-    """候选代码，按「是否正在被看」排序。"""
+#: ``--scope`` 的三个取值
+SCOPES: Final[tuple[str, ...]] = ("placeholder", "all", "wired")
+
+
+def codes_with_bars(conn: Any) -> tuple[str, ...]:
+    """本地有 K 线的裸码（升序）—— 能算因子的**全集**。
+
+    因子是按 ``public.daily_bar`` 逐根算的，没有 bar 就算不出来，所以候选集
+    的天然上界就是这张表的 distinct code。
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT code FROM public.daily_bar")
+        return tuple(sorted({str(r[0]).split(".")[0] for r in cur.fetchall()}))
+
+
+def placeholder_codes(conn: Any) -> tuple[str, ...]:
+    """生产因子**从未算过**的票（``source IS NULL``）。
+
+    这是 R42 挖出来的最大一个洞：这些票的 ``hfq_factor`` 恒为 1.0 ⇒
+    后复权价 == 不复权价 ⇒ 每个除权日的价格跳空被当成**真实下跌**喂给缠论。
+    2026-10-02 实测 5222 只里 **3025 只**是这种状态，也就是 58% 的 A 股宇宙
+    在用未复权价算结构。
+
+    而它**恰恰**是重算唯一能救的：没有别的数据源，也不需要额度。
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT DISTINCT code FROM asel.ref_adjust_factor WHERE source IS NULL")
+        return tuple(sorted({str(r[0]).split(".")[0] for r in cur.fetchall()}))
+
+
+def priority_codes(conn: Any, scope: str = "placeholder") -> list[str]:
+    """候选代码，按「重算收益从大到小」排序，去重保序。
+
+    ## ⚠️ R42 修：候选集曾经**排除了全部 3025 只占位票**
+
+    原来第三组是 ``codes_with_factors``（= ``WHERE source IS NOT NULL``），
+    也就是**已经有真值的那 2197 只**。于是「因子表 58% 是占位值」这个
+    被写进文档、也当作本轮重算主要理由的问题，**一只都碰不到** ——
+    声明的目标和实际做的事对不上。
+
+    真实机数据（2026-10-02）：
+
+    ==========================  ====  ==========================================
+    分桶                          只数   含义
+    ==========================  ====  ==========================================
+    ``source IS NULL``           3025   占位，因子恒 1.0 —— **重算收益最大**
+    ``source='tx:fqkline'``      2125   有真值但**非单调**（>0.1% 口径）
+    ``source='tx:fqkline'``        72   有真值且单调
+    ==========================  ====  ==========================================
+
+    ## 现在的排序与 scope
+
+    1. **占位票**（``scope='placeholder'`` 默认）—— 它们现在是错的，重算能修好；
+    2. 自选 / 热门池 —— 人在看的，总要新鲜；
+    3. 其余有 bar 的票（``scope='all'``）。
+
+    ``scope='wired'`` 保留旧行为（只重算已有真值的），仅供对照复现。
+    """
+    groups: list[Any] = []
+    if scope == "placeholder":
+        groups.append(placeholder_codes(conn))
+    elif scope == "wired":
+        groups.append(codes_with_factors(conn))
+    else:  # all
+        groups.append(placeholder_codes(conn))
+    groups.append(watchlist_codes())
+    groups.append(hot_pool_codes(conn))
+    if scope == "all":
+        groups.append(codes_with_bars(conn))
+
     order: list[str] = []
     seen: set[str] = set()
-    for group in (watchlist_codes(), list(hot_pool_codes(conn)), list(codes_with_factors(conn))):
+    for group in groups:
         for c in group:
             c = str(c).split(".")[0]
             if c and c not in seen:
@@ -434,6 +509,13 @@ def main(argv: list[str] | None = None) -> int:
         help="本轮调用上限（Wind 侧真正的硬边界是 RATE_LIMIT_ERROR）",
     )
     parser.add_argument("--only", default="", help="只跑这些代码（逗号分隔，调试用）")
+    parser.add_argument(
+        "--scope",
+        choices=SCOPES,
+        default="placeholder",
+        help="候选集：placeholder=只算从没算过的（默认，重算收益最大）/ "
+        "all=所有有 bar 的票 / wired=只算已有真值的（旧行为，仅供对照）",
+    )
     parser.add_argument("--report", action="store_true", help="只打印进度，不取数")
     parser.add_argument(
         "--retries", type=int, default=2, help="单只票的瞬时失败重试次数（额度类错误不重试）"
@@ -463,6 +545,23 @@ def main(argv: list[str] | None = None) -> int:
     source: _Source = _WindSource() if args.source == "wind" else _EastmoneySource()
     _LOG.info("真值源 = %s", source.name)
     state = bind_state_to_source(state, source.name)
+    # 候选集换了也要重开一轮：``done`` 的含义是「这只票**在某个 scope 下**算过」，
+    # 从 placeholder 扩到 all 之后，先前算过的不代表全集都算过。
+    if state.get("scope") != args.scope:
+        if state.get("scope"):
+            _LOG.warning(
+                "候选集 scope 从 %s 变成 %s，进度**不继承**（done=%d 只将重跑）",
+                state.get("scope"),
+                args.scope,
+                len(state.get("done") or []),
+            )
+        state = {
+            "done": [],
+            "failed": {},
+            "days": {},
+            "source": source.name,
+            "scope": args.scope,
+        }
     conn = client._get_conn()  # noqa: SLF001
     if not args.dry_run:
         ensure_recompute_stage(conn)
@@ -471,8 +570,10 @@ def main(argv: list[str] | None = None) -> int:
         todo = [c.strip() for c in args.only.split(",") if c.strip()]
     else:
         done = set(state.get("done", []))
-        todo = [c for c in priority_codes(conn) if c not in done]
-        _LOG.info("待处理 %d 只（已跳过 %d 只）", len(todo), len(done))
+        todo = [c for c in priority_codes(conn, scope=args.scope) if c not in done]
+        _LOG.info(
+            "候选集 scope=%s：待处理 %d 只（已完成跳过 %d 只）", args.scope, len(todo), len(done)
+        )
 
     today = dt.date.today().isoformat()
     calls = 0
