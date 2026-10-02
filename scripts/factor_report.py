@@ -69,14 +69,23 @@ class CodeReport:
     step_matched: int = 0
     max_step_dev: float = 0.0
     prod_placeholder: bool = False
-    new_placeholder: bool = False
+    #: 重算侧因子**恒定**（= 窗口内无任何已实施公司行动）
+    new_constant: bool = False
     mean_rel_dev: float = 0.0
     flags: list[str] = field(default_factory=list)
 
     @property
     def verdict(self) -> str:
-        if self.new_placeholder:
-            return "重算也没算出来"
+        # ⚠️ 顺序有讲究：「恒定」与「台阶对不齐」**不冲突**。窗口内无公司
+        # 行动的票，台阶数就是 0（无从对齐），但那**恰恰是对的结果** ——
+        # R40 实测 000016/000002/000826/000615 窗口内确实一次分红都没有
+        # （末次分别在 2022-06 / 2023-08 / 2019-07 / 2018-06），因子恒定
+        # 才对；而生产侧同期在 152~400 之间乱跳，那边才是错的。
+        # 所以「恒定」优先于「台阶对不齐」判。
+        if self.new_constant:
+            if self.prod_down_jumps:
+                return "无公司行动/因子恒定（生产在乱跳）"
+            return "无公司行动/因子恒定"
         if "step_mismatch" in self.flags:
             return "台阶对不齐"
         if "nonmono" in self.flags:
@@ -98,7 +107,7 @@ def _down_jumps(rows: Sequence[tuple[str, float]], tol: float = 0.999) -> int:
     return sum(1 for i in range(1, len(rows)) if rows[i][1] < rows[i - 1][1] * tol)
 
 
-def analyse(cur: Any, client: EastmoneyActionClient, code: str) -> CodeReport | None:
+def analyse(cur: Any, code: str, ex_dates: Sequence[str]) -> CodeReport | None:
     prod = _series(cur, "asel.ref_adjust_factor", code)
     new = _series(cur, "asel.ref_adjust_factor_v2", code)
     if not prod or not new:
@@ -108,17 +117,13 @@ def analyse(cur: Any, client: EastmoneyActionClient, code: str) -> CodeReport | 
     rep.prod_down_jumps = _down_jumps(prod)
     rep.new_down_jumps = _down_jumps(new)
     rep.prod_placeholder = len({v for _, v in prod}) == 1
-    rep.new_placeholder = len({v for _, v in new}) == 1
+    rep.new_constant = len({v for _, v in new}) == 1
 
     pm = dict(prod)
     devs = [abs(pm[d] / v - 1.0) for d, v in new if d in pm and v]
     rep.mean_rel_dev = sum(devs) / len(devs) if devs else 0.0
 
-    try:
-        ex_dates = sorted({a.ex_date for a in client.fetch_actions(code)})
-    except Exception as exc:  # noqa: BLE001 — 取不到就只报能报的部分
-        print(f"    [warn] {code} 公司行动取数失败: {exc}", file=sys.stderr)
-        ex_dates = []
+    ex_dates = sorted(ex_dates)
 
     ordered = [d for d, _ in prod]
     idx = {d: i for i, d in enumerate(ordered)}
@@ -167,9 +172,21 @@ def main(argv: list[str] | None = None) -> int:
         codes = [r[0] for r in cur.fetchall()]
 
     print(f"逐票对账 {len(codes)} 只（暂存表 asel.ref_adjust_factor_v2）\n")
+    # 公司行动**先批量取**再逐票分析：每只票一次 HTTP 在 2000+ 只上要跑很久，
+    # 而这批数据在一次运行里是**不变**的，没必要反复取。
+    ex_by_code: dict[str, list[str]] = {}
+    for i, code in enumerate(codes, 1):
+        try:
+            ex_by_code[code] = sorted({a.ex_date for a in client.fetch_actions(code)})
+        except Exception as exc:  # noqa: BLE001 — 单只取不到不中断整批
+            print(f"    [warn] {code} 公司行动取数失败: {exc}", file=sys.stderr)
+            ex_by_code[code] = []
+        if i % 100 == 0:
+            print(f"  ... 公司行动 {i}/{len(codes)}")
+    print()
     reports: list[CodeReport] = []
     for i, code in enumerate(codes, 1):
-        rep = analyse(cur, client, code)
+        rep = analyse(cur, code, ex_by_code.get(code, ()))
         if rep is None:
             continue
         reports.append(rep)
