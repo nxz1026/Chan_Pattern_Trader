@@ -3234,3 +3234,67 @@ ode --check dashboard/dashboard.js 通过
 - **pytest 权威计数（--junit-xml）**：771 tests / 13 failures / 0 errors /
   31 skipped → **727 passed**。13 条全在 	est_web_a_share_routes（cntl 基线），
   **零新增失败**。
+
+### 四、R28-4：真机撞到「提交后永远 queued」—— worker 线程静默死亡
+
+R28-3 面板做完，真打一次 LLM 调用验链路，**当场撞上一个真 bug**。
+
+#### 现场
+
+    提交响应 = {"available": true, "call_id": "d1775cb...", "status": "queued"}
+    [5s]  status = queued      [30s] status = queued      [60s] status = queued
+    [90s] status = queued
+    队列深度 = 0        ← 任务既没被 worker 取走，也没在排队
+    日志：只有一条「LLM 队列就绪」，没有任何状态流转记录
+
+重启服务后**同一条链路 8 秒跑完**（`queued → running → running → running → ok`），
+旧的卡死行也被正确标成 `interrupted`。所以 LLM 通路本身没坏 ——
+坏的是那个进程里的队列。
+
+#### 根因（代码上可直接证实，不需要知道是哪个异常）
+
+`LLMQueue._run` 调 `self._execute(job)` 时**没有 try/except**，而 `_execute`
+首尾两处 `self._on_status(...)` 都在自己的 try 之外。于是任何逃出去的异常
+都会让 worker 线程**永久退出**。
+
+线程死掉之后：
+
+- `submit()` 仍返回 `accepted=True` —— 它只管往 `PriorityQueue` 里塞，
+  不知道还有没有活着的消费者；
+- 任务永远不执行，**任何地方都不报错**：没有日志、没有异常、没有状态变化；
+- 同一进程里后续所有提交全部**静默丢失**。
+
+这比「直接报错」坏得多 —— 报错至少会有人看见。真机上那行 `queued` 就是这么来的：
+调用方拿到 `accepted`，把状态写成 `queued`，然后永远等。
+
+（真机那次**具体是哪个异常没能捕获到**，`_run` 里没有任何记录。但「线程一死就
+永久静默丢任务」这个结构本身已经足够严重，不该留着。）
+
+#### 修法
+
+1. **`_run` 加兜底 try/except**（`BaseException`）：worker 绝不能因为一个任务死掉；
+   捕获后 `_LOG.exception` 留痕，并**尽力**把这次调用标成 `error` ——
+   worker 活着但这次死了，不标的话调用方会永远等一个不会来的结果。
+2. **`submit` 在 worker 不可用时如实拒绝**：新增 `_worker_alive()`，刻意
+   **不只看 `_stop`** —— 那只能反映「被人正常停掉」，反映不了「线程意外死了」，
+   而后者才是真机上遇到的那种。拒绝时返回 `llm_worker_unavailable`，
+   调用方据此把状态写成 error 而不是 queued。
+
+#### 测试 10 条
+
+- 状态回调抛异常 → worker 必须活着，后续任务照常处理
+- provider 抛出逃出 `Exception` 的异常（用 `KeyboardInterrupt` 模拟）→ 同上
+- worker 已死时 `submit` **不许**返回 `accepted=True`
+- 429 退避、致命错误落 `error`、正常路径 —— 都未被这次改动破坏
+
+红绿验证：修复前这三条**全部红**（pytest 报 `PytestUnhandledThreadExceptionWarning`，
+正是线程死了的直接证据），修复后全绿。
+
+
+#### 门禁
+
+- 7 条全绿（mypy 4 条仍是 cntl Windows-only 基线）
+- 全部 LLM 相关测试（4 个文件）通过
+- **pytest 权威计数（--junit-xml）**：781 tests / 13 failures / 0 errors /
+  31 skipped → **737 passed**。13 条全在 	est_web_a_share_routes（cntl 基线），
+  **零新增失败**。

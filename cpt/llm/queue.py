@@ -154,11 +154,30 @@ class LLMQueue:
         return False
 
     def submit(self, job: Job) -> SubmitResult:
-        """入队并**立刻返回**。这是「不阻塞核心」的落点。"""
+        """入队并**立刻返回**。这是「不阻塞核心」的落点。
+
+        R28-4：worker 不可用时**必须如实拒绝**。原先只查 ``enabled``，于是
+        worker 线程万一死掉（本该由 ``_run`` 的兜底 try 兜住，但那是最后一道
+        防线），``submit`` 仍会返回 ``accepted=True`` —— 调用方据此把状态写成
+        ``queued``，那一行就永远停在 queued 且**没有任何错误可查**。
+        真机上就是这么丢过一次调用。
+        """
         if not self._config.enabled:
             return SubmitResult(False, job.call_id, "llm_disabled")
+        if not self._worker_alive():
+            return SubmitResult(False, job.call_id, "llm_worker_unavailable")
         self._enqueue(job)
         return SubmitResult(True, job.call_id)
+
+    def _worker_alive(self) -> bool:
+        """worker 线程是否还活着。
+
+        刻意**不**只看 ``_stop``：那只能反映「被人正常停掉」，反映不了
+        「线程意外死了」—— 而后者才是真机上遇到的那种。
+        """
+        if self._stop.is_set():
+            return False
+        return any(thread.is_alive() for thread in self._threads)
 
     def stop(self, timeout: float = 5.0) -> None:
         """停 worker（测试与优雅退出用）。"""
@@ -199,7 +218,37 @@ class LLMQueue:
                 time.sleep(min(0.2, due - now))
                 continue
 
-            self._execute(job)
+            # R28-4：这一层 try/except 是**必须的**，不是保险。
+            #
+            # 没有它时，任何从 ``_execute`` 逃出去的异常都会让 worker 线程
+            # **永久退出**；而 ``submit()`` 只管往队列里塞，不知道还有没有
+            # 活着的消费者，于是继续返回 ``accepted=True``。后果是任务永远
+            # 不执行、状态永远停在 ``queued``、**且任何地方都不报错** ——
+            # 比直接抛异常坏得多（抛异常至少会有人看见）。
+            #
+            # 真机撞到过：2026-10-02 一次提交永久 ``queued``、队列深度 0，
+            # 重启服务后同一条链路 8 秒跑完。具体触发异常未捕获到，但
+            # 「线程一死就永久静默丢任务」这个结构本身已足够严重。
+            try:
+                self._execute(job)
+            except BaseException as exc:  # noqa: BLE001 — worker 绝不能因为一个任务死掉
+                _LOG.exception(
+                    "LLM worker 执行任务时未捕获异常（call_id=%s attempt=%s）：%r",
+                    job.call_id,
+                    job.attempt,
+                    exc,
+                )
+                # 尽力把这次调用标成失败：worker 活着但这次死了，不标的话
+                # 调用方会永远等一个不会来的结果。
+                try:
+                    self._on_status(
+                        job.call_id,
+                        STATUS_ERROR,
+                        f"worker_exception: {type(exc).__name__}",
+                        None,
+                    )
+                except Exception as status_exc:  # noqa: BLE001 — 连标记都失败就算了
+                    _LOG.warning("标记 worker 异常失败时又出错 %s: %s", job.call_id, status_exc)
 
     def _execute(self, job: Job) -> None:
         self._on_status(job.call_id, STATUS_RUNNING, "", None)
