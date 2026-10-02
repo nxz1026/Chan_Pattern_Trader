@@ -5064,6 +5064,102 @@ owner 批了「按台阶分段常数重算 + Wind 交叉校验」，并说明**�
   写明理由；`CorporateAction.cash_after_tax` 则改成**真被用上**（税前缺失时
   回落税后，因为部分标的只给税前列）。
 
+---
+
+## R38 · 日志分两轨：告警出口 + 水位表 + 巡检 + 看板上可看 · 2026-10-02 晚
+
+owner 定调：日志分两类 —— **运行日志**（数据完整性 / 运行时问题）与**算法日志**
+（算法是否符合预期、结果是否偏移，给未来 Loop/LLM 支撑）。本节是它的落地。
+
+### 一、先量现状（不然是空对空）
+
+| 维度 | 实测 |
+|---|---|
+| 代码侧 logging | 89 处，其中 **61 处是 warning（68%）** |
+| 线上 24h | 266 行 journal / **53 条**应用日志（49 INFO + 4 WARNING） |
+| 常态噪声占比 | **22/53（41%）** 全是同一句 `parity 参照侧 czsc 不可用，回落公开源` |
+| 「偏移/漂移/收敛/笔数/中枢数」类信号 | **24h 内 0 条** |
+| 已有算法侧数据面（不是日志） | `cpt_structure_event` 2575 / `cpt_signal_event` 34 / `cpt_llm_call` 6 / `cpt_dashboard_run` 20 行 |
+
+**而日志已经抓到一个真 bug，只是没人看**：`LLM 状态落库失败 ...
+'str' object is not callable`（10-01 11:55，4 条）。现在复现不出来（`_write` 包装
+修过），但**它在日志里躺了 22 小时**。⇒ 「记下来」≠「有人看」，必须有出口。
+
+### 二、轨道一：运行日志
+
+1. **告警出口** `cpt/adapters/feishu.py`：webhook 从 `CPT_FEISHU_WEBHOOK` 读，
+   真实值只在 gitignore 挡着的 env 里（仓里只有占位符，验过 `git grep` 干净）。
+   **best-effort** —— 失败只记一条 warning、绝不抛进被观测的路径；不重试。
+2. **水位表** `public.cpt_run_metric`，每轮一行，一表装两轨：
+   - 轨道一：`last_bar_time` / `gap_count` / `stale` / `factor_coverage` / `health`
+   - 轨道二：`config_hash` / `dataset_hash` / `rules_version` / **`backend`** /
+     笔/分型/中枢计数
+   - **R36 补的第一块是 `backend`** —— 没有它，"装个 czsc 就静默切生产后端"查不出来。
+3. **health 三态不是两态**：`ok` / `degraded`（配置导致的已知降级）/ `failing`
+   （数据不完整）。判据只认**数据事实**，不认"某个依赖没装"。
+4. **摘常态噪音**：`parity 参照侧 czsc 不可用` 由 INFO 降 debug —— 它在**每次**
+   A 股快照都走，占 41% 日志量；常态改由巡检统一汇报。
+
+落点选在加密侧那句「**只有走到这里才算成功发布**」之后 —— 上面几条 return 是降级
+快照，记进去就等于把"降级"记成"正常水位"。
+
+### 三、轨道二：算法日志（地基已就位）
+
+巡检会看**结构计数突变**（笔/中枢/分型相对上一行 >15%）与**指纹变化**
+（`dataset_hash` / `backend`）。R36 那次静默切后端，本该被这一条抓住。
+
+### 四、真机验到的
+
+```
+水位行：crypto/BTCUSDT bars=600 bi=223 zs=20 health=ok backend=NativeChanlunBackend
+飞书：连通性自检已送达；"状态有变化"→ 告警已送达
+巡检：首次只记基线不发 / 状态无变化不发 / 变了或 failing 就发
+看板（真实浏览器）：面板已渲染
+  summary  = 降级 · 检查时间 10-02 10:46Z · 水位行 13 条（最新一行 8 分钟前）
+  first_row= [crypto/BTCUSDT, 正常, 600, 0, 100.0%, 10-02 10:00Z, 223, 20, NativeChanlunBackend]
+  degraded = 降级 1：数据源 ccxt 不可用
+```
+
+新增 `GET /api/dashboard/inspection`（只读旁路，DB 抖动降级成 `available:false`）、
+`dashboard/inspection_panel.js`（照 `renderParity` 同款动态建 section）、
+`scripts/run_inspection.py`。
+
+### 五、四个 bug，全是真机逮到的（其中两个「输出看着对、机制是坏的」）
+
+1. `observed_at` 显式传 `None` → NOT NULL 违约。**DEFAULT 只在"不写这一列"时生效**。
+   修成「值为 None 的列整列省略」；随后发现不止一列（巡检行一写就炸
+   `null value in column "config_hash"`），规则统一后不用再逐列踩。
+2. `detail::jsonb` 写在**列名**位置（语法错误）—— 转换该在占位符上。第一版用
+   `executemany` 时是对的，改逐行插入时丢了一次。
+3. **「首次不告警」只写在 docstring 里、没实现**：空 `prev_state` 必然 != state ⇒
+   第一次就发。跑起来才发现，补了实现。
+4. **最阴的一个**：`detail` 是 jsonb、psycopg 读回来是 **dict 不是 str**，
+   `isinstance(detail, str)` 恒为假 ⇒ `prev_state` 恒空 ⇒ **每次运行都被当成首次**
+   ⇒ 状态变了也不告警。而输出看着完全正常（"不打扰"）。是"我本该发却没发"这个
+   **反例**逼出来的 —— 正面输出无法区分"逻辑对"和"分支没走到"。
+
+前端也踩了两个：fetch 写死 `/api/...`（页面在 `/cpt/` 下 → 拿到 nginx 的 404 HTML，
+报 `Unexpected token '<'`）；`while (children.length > 2)` 在**首次创建**时把刚建的
+body 删掉，随后在 undefined 上炸 `replaceChildren`。
+
+### 六、门禁
+
+- **pytest 权威计数（`--junit-xml`）**：852 tests / 13 failures / 0 errors /
+  29 skipped → **810 passed**。13 条失败**全在** `test_web_a_share_routes`
+  （`fcntl` Windows 基线），**零新增失败**。中途有一条 `test_dashboard_canvas_contract`
+  红了 —— 契约要求 `./dashboard.js` 是**最后一个** script（boot 要读到完整画布注册表），
+  我新加的面板排在它后面。**没有去松契约测试**，而是把自己的面板挪到前面。
+- ruff check / ruff format --check / mypy（4 条 `fcxtl` 基线）/ vulture /
+  import-linter（6 kept, 0 broken）/ `check_sql_layering` 全绿。
+
+### 七、待办
+
+1. `structure_event.cause` 四类 + golden set（自选 + 热门池 + 600519）—— 已拍板未实现。
+2. 日志保留：journal 已占 **206.9M**，而 CPT 自己 24h 只有 266 行 —— 占地方的是
+   别的服务，保留策略要单独看。
+3. A 股侧也接落水位（现在只接了加密侧）。
+
+
 
 
 

@@ -48,6 +48,53 @@ from cpt.web.app import serve_snapshot
 _LOG = logging.getLogger("cpt.web")
 
 
+def _record_run_metric(
+    snapshot: dict[str, Any],
+    *,
+    market: str,
+    symbol: str,
+    backend: Any,
+    fractals: int = 0,
+    bis: int = 0,
+    zhongshus: int = 0,
+    trend_types: int = 0,
+    bars: Sequence[Any] = (),
+) -> None:
+    """把本轮水位+指纹落一行。**best-effort**：失败只记 warning。
+
+    刻意做成模块级函数而不是 provider 方法 —— A 股那条路径（``a_share_routes``）
+    也要用同一个，而它拿不到 provider 实例。
+
+    连接照 :mod:`cpt.application.structure_event_recorder` 的做法现开一条
+    （加密侧本身不持有 PG 连接），并**自己 commit** —— 这里没有外层事务边界，
+    与「store 不 commit、边界归调用方」并不矛盾：调用方就是这里。
+    """
+    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+
+    try:
+        client = AShareLocalClient()
+    except Exception as exc:  # noqa: BLE001
+        _LOG.debug("运行水位记录跳过（拿不到 DB 连接）：%s: %s", type(exc).__name__, exc)
+        return
+    try:
+        from cpt.application.run_metric import MetricRecorder  # noqa: PLC0415
+
+        MetricRecorder(client._get_conn()).record_and_commit(  # noqa: SLF001
+            snapshot,
+            market=market,
+            symbol=symbol,
+            backend=type(backend).__name__ if not isinstance(backend, str) else backend,
+            fractal_count=fractals,
+            bi_count=bis,
+            zhongshu_count=zhongshus,
+            trend_type_count=trend_types,
+        )
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("运行水位记录失败 %s/%s：%s: %s", market, symbol, type(exc).__name__, exc)
+    finally:
+        client.close()
+
+
 def demo_snapshot(symbol: str, interval: str) -> dict[str, Any]:
     """Build an empty but schema-complete offline snapshot for local deployment."""
     config = RulesConfig()
@@ -838,6 +885,20 @@ class _RealtimeProvider:
         snapshot["runtime"]["buffer_size"] = len(bars)
         snapshot["runtime"]["window_size"] = len(bars)
         snapshot["alerts"] = self._compute_alerts(snapshot)
+        # R38：每轮落一行「运行水位 + 算法指纹」。就落在**这里** —— 上面几条
+        # return 是降级快照（没有真 bar），记进去就等于把"降级"记成"正常水位"。
+        # 观测失败只记 warning，绝不拖垮本轮发布。
+        _record_run_metric(
+            snapshot,
+            market="crypto",
+            symbol=target_symbol,
+            backend=self._backend,
+            fractals=len(fractals),
+            bis=len(bis),
+            zhongshus=len(zhongshus),
+            trend_types=len(trend_types),
+            bars=bars,
+        )
         fresh_bars = tuple(bars)
         # 只有走到这里（数据守卫通过、上游可用）才算「成功发布」，才允许进缓存：
         # 降级快照在上面几条 return 里就返回了，不会被缓存成兜底数据。

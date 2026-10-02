@@ -936,6 +936,47 @@ def make_handler(
                         "count": 0,
                         "calls": [],
                     }
+            elif path.path == "/api/dashboard/inspection":
+                # R38：运行巡检 + 水位（R31-R38 讨论的"日志分两轨"的落地入口）。
+                # 只读旁路：DB 抖动不 500，降级成 available=false + reason。
+                try:
+                    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+                    from cpt.storage import run_metric_store as _rms  # noqa: PLC0415
+
+                    limit = int((query.get("limit") or ["60"])[0])
+                    _client = AShareLocalClient()
+                    try:
+                        _conn = _client._get_conn()  # noqa: SLF001
+                        latest = _rms.latest_inspection(_conn)
+                        runs = _rms.recent_metrics(_conn, kind=_rms.KIND_RUN, limit=limit)
+                        trends: dict[str, Any] = {}
+                        seen: set[tuple[str, str]] = set()
+                        for _row in runs:
+                            _key = (_row["market"], _row["symbol"])
+                            if _key in seen:
+                                continue
+                            seen.add(_key)
+                            trends[f"{_key[0]}/{_key[1]}"] = _rms.waterline_trend(
+                                _conn, market=_key[0], symbol=_key[1], limit=limit
+                            )
+                        payload = {
+                            "schema_version": "dashboard_inspection.v1",
+                            "available": True,
+                            "latest_inspection": dict(latest) if latest else None,
+                            "waterlines": list(runs),
+                            "trends": trends,
+                            "health_values": list(_rms.HEALTH_VALUES),
+                        }
+                    finally:
+                        _client.close()
+                except Exception as exc:  # noqa: BLE001
+                    _LOG.warning("inspection unavailable: %s", exc)
+                    payload = {
+                        "schema_version": "dashboard_inspection.v1",
+                        "available": False,
+                        "reason": "inspection_unavailable",
+                        "detail": f"{type(exc).__name__}: {exc}"[:200],
+                    }
             elif path.path == "/api/dashboard/structure-events":
                 # R27：结构事件流列表页（「最近发生了什么」）。与
                 # /signal-stats 同一个降级纪律：只读旁路，DB 抖动不 500。

@@ -61,7 +61,12 @@ def _czsc_structures(
     try:
         backend = resolve_backend("czsc", min_bi_len=config.min_bi_len)
     except (CzscNotInstalledError, CzscVersionError) as exc:
-        _LOG.info("parity 参照侧 czsc 不可用，回落公开源：%s", exc)
+        # R38：**降为 debug**。这是**配置状态**（czsc 没装），不是事件 ——
+        # 而这段在**每次** A 股快照都会走一遍，于是它一个人就占了线上日志的
+        # 41%（24h 内 22/53 条），把真信号淹掉了。
+        # 常态由 `scripts/run_inspection.py` 统一汇报（ccxt / czsc 都归 degraded），
+        # 日志流只留"不该发生"的东西。
+        _LOG.debug("parity 参照侧 czsc 不可用，回落公开源：%s", exc)
         return None
     fractals, bis, zhongshus = compute_domain_structures(bars, config, backend)
     return (

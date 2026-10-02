@@ -1,0 +1,284 @@
+"""每轮计算的**运行水位 + 算法指纹**（``public.cpt_run_metric``）。
+
+## 这张表为什么存在（R38）
+
+owner 把日志分成两轨：
+
+1. **运行日志** —— 数据是否完整、程序运行期间有没有问题；
+2. **算法日志** —— 算法是否符合预期、结果是否偏移，给未来 Loop/LLM 做支撑。
+
+R38 量完的现状是"第一轨只有半个（记了没人看、没告警、**没有水位**），第二轨基本
+没有"。而两轨最缺的那个共同底座就是这张表：
+
+- **数据完整性不能靠报错来发现**。``data_quality`` 只在响应时现算、没有历史序列，
+  所以"数据什么时候开始不完整"根本查不出来 —— 出事才查，一定已经晚了。
+  **水位**（最后一根 bar 时间 / bar 数 / 缺口数 / 因子覆盖率 / 快照 age）每轮落一行，
+  才有"什么时候开始坏"的证据。
+- **算法偏移需要一个可比基线**。一次算完，光有"我算了什么"没用，要有
+  "这次的指纹是什么、结构计数是多少、和上一次/参照差多少"。R36 那次
+  「装个 czsc 就能静默切生产后端」之所以查不出来，就是因为**没记 backend**。
+
+## 一张表装两轨
+
+``kind='run'`` 的行是每轮计算的水位+指纹（**高���率**，一条几百字节）；
+``kind='inspection'`` 的行是每日巡检的结论（**低频**，一天一条）。巡检读的是最近
+的 run 行，结论自己也落一行 —— 这样"看板上看到的"和"发到飞书的"是同一份数据。
+
+## 边界
+
+只存储、只 SELECT/INSERT；SQL 都在这里；**不 commit**（事务边界归调用方）。
+写入失败**不抛**（观测数据不该拖垮计算路径）。
+
+保留：默认按 ``observed_at`` 保留窗口（见 :func:`prune`），别让它长成第二份
+``daily_bar``。
+"""
+
+from __future__ import annotations
+
+import logging
+from collections.abc import Sequence
+from typing import Any, Final
+
+_LOG = logging.getLogger(__name__)
+
+__all__ = [
+    "HEALTH_VALUES",
+    "KIND_INSPECTION",
+    "KIND_RUN",
+    "RunMetric",
+    "append_metrics",
+    "ensure_table",
+    "latest_inspection",
+    "prune",
+    "recent_metrics",
+    "waterline_trend",
+]
+
+KIND_RUN: Final[str] = "run"
+KIND_INSPECTION: Final[str] = "inspection"
+
+#: 三态而不是二态 —— ``degraded`` 是"配置导致的已知降级"，``failing`` 才是要叫人起床的
+HEALTH_VALUES: Final[tuple[str, ...]] = ("ok", "degraded", "failing")
+
+_COLUMNS: Final[tuple[str, ...]] = (
+    "observed_at",
+    "kind",
+    "market",
+    "symbol",
+    # --- 第二轨：可复现指纹 ---
+    "config_hash",
+    "dataset_hash",
+    "rules_version",
+    "backend",
+    # --- 第二轨：结构计数 ---
+    "bar_count",
+    "fractal_count",
+    "bi_count",
+    "zhongshu_count",
+    "trend_type_count",
+    # --- 第一轨：水位 ---
+    "last_bar_time",
+    "gap_count",
+    "stale",
+    "factor_coverage",
+    "snapshot_age_ms",
+    # --- 结论 ---
+    "health",
+    "detail",
+)
+
+_DDL: Final[str] = """
+CREATE TABLE IF NOT EXISTS public.cpt_run_metric (
+    id                bigserial   PRIMARY KEY,
+    observed_at       timestamptz NOT NULL DEFAULT now(),
+    kind              text        NOT NULL DEFAULT 'run',
+    market            text        NOT NULL DEFAULT '',
+    symbol            text        NOT NULL DEFAULT '',
+    config_hash       text        NOT NULL DEFAULT '',
+    dataset_hash      text        NOT NULL DEFAULT '',
+    rules_version     text        NOT NULL DEFAULT '',
+    backend           text        NOT NULL DEFAULT '',
+    bar_count         integer     NOT NULL DEFAULT 0,
+    fractal_count     integer     NOT NULL DEFAULT 0,
+    bi_count          integer     NOT NULL DEFAULT 0,
+    zhongshu_count    integer     NOT NULL DEFAULT 0,
+    trend_type_count  integer     NOT NULL DEFAULT 0,
+    last_bar_time     bigint      NOT NULL DEFAULT 0,
+    gap_count         integer     NOT NULL DEFAULT 0,
+    stale             boolean     NOT NULL DEFAULT false,
+    factor_coverage   numeric     NOT NULL DEFAULT 0,
+    snapshot_age_ms   bigint      NOT NULL DEFAULT 0,
+    health            text        NOT NULL DEFAULT 'ok',
+    detail            jsonb       NOT NULL DEFAULT '{}'::jsonb
+)
+"""
+
+_INDEX_DDL: Final[tuple[str, ...]] = (
+    "CREATE INDEX IF NOT EXISTS cpt_run_metric_observed_idx "
+    "ON public.cpt_run_metric (observed_at DESC)",
+    "CREATE INDEX IF NOT EXISTS cpt_run_metric_kind_idx "
+    "ON public.cpt_run_metric (kind, observed_at DESC)",
+    "CREATE INDEX IF NOT EXISTS cpt_run_metric_symbol_idx "
+    "ON public.cpt_run_metric (market, symbol, observed_at DESC)",
+)
+
+
+#: 一行水位/指纹。**刻意是 dict 而不是 tuple** —— 20 个字段的 tuple 读代码时
+#: 没人知道第 7 个是什么；键名自带语义，且前端/巡检都按键取。
+#: 曾经试过 ``class RunMetric(dict)``，mypy 对 dict 子类的 ``__add__`` 重载意见很大，
+#: 收益抵不上麻烦，于是退回别名。
+RunMetric = dict[str, Any]
+
+
+def ensure_table(conn: Any) -> None:
+    """建表 + 建索引（幂等）。**不 commit** —— 由调用方决定。"""
+    with conn.cursor() as cur:
+        cur.execute(_DDL)
+        for stmt in _INDEX_DDL:
+            cur.execute(stmt)
+
+
+def append_metrics(conn: Any, rows: Sequence[RunMetric]) -> int:
+    """批量写入。返回写入行数。
+
+    **写入失败只记 warning、不抛** —— 观测数据丢了不该让计算路径跟着挂。
+
+    ⚠️ **值为 ``None`` 的列整列省略**（让 DB 的 ``DEFAULT`` 生效），而不是写 NULL。
+    DEFAULT 只在"不写这一列"时生效，显式 NULL 照样触发 NOT NULL 违约。
+    这不是 ``observed_at`` 一列的特例：本表 21 列全是 ``NOT NULL``，巡检行只填
+    其中几列 —— 第一版逐列判断结果只特判了 ``observed_at``，于是巡检行一写就
+    炸 ``null value in column "config_hash"``。规则统一之后就不用再逐列踩。
+    （代价：本表没有可空列，所以"想写 NULL"这个语义用不上。）
+    """
+    if not rows:
+        return 0
+    with_conn = conn.cursor()
+    try:
+        for row in rows:
+            cols: list[str] = []
+            values: list[Any] = []
+            placeholders: list[str] = []
+            for col in _COLUMNS:
+                if row.get(col) is None:
+                    continue  # 整列省略 → DEFAULT
+                cols.append(col)
+                values.append(row.get(col))
+                # 转换写在**占位符**上（``%s::jsonb``），不是列名上 ——
+                # 列名里写 ``detail::jsonb`` 是语法错误（实测 ``syntax error at or
+                # near "::"``）。第一版用 executemany 时占位符是对的，
+                # 改成逐行插入时把这件事弄丢过一次。
+                placeholders.append("%s::jsonb" if col == "detail" else "%s")
+            with_conn.execute(
+                f"INSERT INTO public.cpt_run_metric ({', '.join(cols)})"
+                f" VALUES ({', '.join(placeholders)})",
+                values,
+            )
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("cpt_run_metric 写入失败（%d 行）：%s: %s", len(rows), type(exc).__name__, exc)
+        return 0
+    return len(rows)
+
+
+def _row_to_dict(row: Sequence[Any]) -> RunMetric:
+    out = RunMetric()
+    for name, value in zip(_COLUMNS, row, strict=False):
+        if name == "observed_at" and hasattr(value, "timestamp"):
+            value = int(value.timestamp() * 1000)
+        if name in {"factor_coverage"} and value is not None:
+            value = float(value)
+        out[name] = value
+    return out
+
+
+_SELECT: Final[str] = ", ".join(_COLUMNS)
+
+
+def recent_metrics(
+    conn: Any,
+    *,
+    kind: str | None = None,
+    market: str | None = None,
+    symbol: str | None = None,
+    limit: int = 200,
+) -> tuple[RunMetric, ...]:
+    """按 ``observed_at`` 倒序读最近的行（**只读**，游标不出这一层）。"""
+    capped = max(1, min(int(limit), 1000))
+    where: list[str] = []
+    args: list[Any] = []
+    if kind:
+        where.append("kind = %s")
+        args.append(kind)
+    if market:
+        where.append("market = %s")
+        args.append(market)
+    if symbol:
+        where.append("symbol = %s")
+        args.append(symbol)
+    clause = ("WHERE " + " AND ".join(where)) if where else ""
+    args.append(capped)
+    with conn.cursor() as cur:
+        cur.execute(
+            f"SELECT {_SELECT} FROM public.cpt_run_metric {clause} "
+            f"ORDER BY observed_at DESC LIMIT %s",
+            args,
+        )
+        return tuple(_row_to_dict(r) for r in cur.fetchall())
+
+
+def latest_inspection(conn: Any) -> RunMetric | None:
+    """最近一条巡检结论（没有则 ``None``）。"""
+    rows = recent_metrics(conn, kind=KIND_INSPECTION, limit=1)
+    return rows[0] if rows else None
+
+
+def waterline_trend(conn: Any, *, market: str, symbol: str, limit: int = 50) -> dict[str, Any]:
+    """把某标的的水位序列压成"趋势"（给前端/巡检看的极简形态）。
+
+    只给**变化了的**字段 —— 一串 50 行全等的水位对人是噪声。
+    """
+    rows = tuple(reversed(recent_metrics(conn, market=market, symbol=symbol, limit=limit)))
+    if not rows:
+        return {"market": market, "symbol": symbol, "samples": 0, "changes": []}
+    tracked = (
+        "bar_count",
+        "bi_count",
+        "zhongshu_count",
+        "gap_count",
+        "factor_coverage",
+        "last_bar_time",
+        "health",
+        "backend",
+        "dataset_hash",
+    )
+    changes: list[dict[str, Any]] = []
+    for prev, cur in zip(rows, rows[1:], strict=False):
+        diff = {k: [prev.get(k), cur.get(k)] for k in tracked if prev.get(k) != cur.get(k)}
+        if diff:
+            changes.append({"at": cur.get("observed_at"), "changed": diff})
+    return {
+        "market": market,
+        "symbol": symbol,
+        "samples": len(rows),
+        "first_seen": rows[0].get("observed_at"),
+        "last_seen": rows[-1].get("observed_at"),
+        "latest": rows[-1],
+        "changes": changes[-20:],
+    }
+
+
+def prune(conn: Any, *, keep_days: int = 30) -> int:
+    """删掉 ``keep_days`` 之前的行，返回删除行数。**不 commit**。
+
+    run 行是高频的（每轮一行），不留窗口就会长成第二份 ``daily_bar``。
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "DELETE FROM public.cpt_run_metric "
+                "WHERE observed_at < now() - make_interval(days => %s)",
+                (max(1, int(keep_days)),),
+            )
+            return int(cur.rowcount or 0)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("cpt_run_metric 清理失败：%s: %s", type(exc).__name__, exc)
+        return 0

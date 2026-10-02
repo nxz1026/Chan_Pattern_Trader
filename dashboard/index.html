@@ -573,6 +573,12 @@
     <script src="./canvas_c.js" defer></script>
     <script src="./canvas_d.js" defer></script>
     <script src="./market_a_share.js" defer></script>
+    <!-- R38：运行巡检与水位面板（自带轮询，不依赖 dashboard.js 的内部状态）。
+         ⚠️ 必须排在 dashboard.js **之前** —— 契约
+         tests/test_dashboard_canvas_contract.py::test_canvas_scripts_load_in_registration_order
+         要求 `./dashboard.js` 是最后一个 script（boot() 要读到完整画布注册表）。
+         本面板自取数自轮询，放前面照样工作。 -->
+    <script src="./inspection_panel.js" defer></script>
     <script src="./dashboard.js" defer></script>
   </body>
 </html>
