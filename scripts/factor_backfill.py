@@ -50,6 +50,9 @@
   不复权/后复权两次 K 线相除）算出，落库 ``source`` 标成
   ``wind:get_stock_kline`` 以便与腾讯行区分。**Wind 不可用或取数失败只记
   原因并继续**，绝不中断整轮回填。
+  **R31 追加：还有一道基准闸**（``check_wind_basis``）—— Wind 的后复权基准与
+  腾讯不是同一个（600519 实测因子差 22.47%），而落库是覆盖式 upsert，所以
+  重叠不足或中位比超 ±2% 时**带着数字拒绝写入**，绝不静默改写主源历史。
 """
 
 from __future__ import annotations
@@ -103,6 +106,12 @@ DEFAULT_KLINE_DAYS = 800  # 腾讯单次上限 801 根（实测 count=800 → 80
 #: ``tencent_fqkline`` / ``tx:fqkline`` 分裂坑的翻版。
 SOURCE_WIND: Final[str] = "wind:get_stock_kline"
 WIND_SOURCE_URL: Final[str] = "wind://stock_data.get_stock_kline"
+
+#: Wind 因子与本地因子的**基准**允许的相对偏差（R31 真机实测，见
+#: :func:`check_wind_basis`）。2% 足够容纳同一家的取整误差，又远小于跨家基准差。
+WIND_BASIS_TOLERANCE: Final[float] = 0.02
+#: 建立/核对基准至少需要几天重叠。低于这个数就只能说"不知道"，不能"大概一致"。
+WIND_BASIS_MIN_OVERLAP: Final[int] = 3
 
 logger = logging.getLogger("factor_backfill")
 
@@ -398,13 +407,69 @@ def _failure_text(kind: str, etype: str, detail: str) -> str:
     return f"本地源{kind}失败 {etype}: {detail}"
 
 
-def _wind_fallback(code: str) -> tuple[list[FactorRow], str]:
+def _local_factors(conn: Any, code: str) -> dict[str, float]:
+    """本地库里这只票**已落盘**的因子（``{ISO 日期: hfq_factor}``）。
+
+    只取 ``source IS NOT NULL`` 的行 —— ``source IS NULL`` 的是回填前的占位行，
+    拿它当"本地基准"等于自己跟自己比。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT trade_date, hfq_factor FROM asel.ref_adjust_factor "
+            "WHERE code = %s AND source IS NOT NULL",
+            (code,),
+        )
+        return {str(d): float(v) for d, v in cur.fetchall()}
+
+
+def check_wind_basis(rows: Sequence[FactorRow], local: dict[str, float]) -> str:
+    """Wind 因子与本地因子的基准是否一致；返回 ``""``=一致，否则是一句拒绝理由。
+
+    ## R31 真机实测（2026-10-02，600519，2026-09-30）
+
+    - **不复权收盘两边完全一致**：Wind 1258.62 = 本地 ``public.daily_bar`` 1258.62；
+    - **后复权因子差 22.47%**：Wind 8.6469 vs 本地 7.0605。
+
+    也就是说**数据没错，是"后复权"的基准不是同一个**。后复权价 = 不复权价 × 因子，
+    而因子落库走 ``ON CONFLICT (code, trade_date) DO UPDATE`` **直接覆盖**同键旧值。
+    于是写进去的不是"精度略差的数据"，而是**整段历史被换了一套基准**，并且在与
+    旧数据的交界处凭空出现一个 22% 的跳空 —— 而 ``fetch_validated_klines`` 正是
+    拿这个因子去乘 OHLC 画笔的。
+
+    宁可少取几只票，也不能悄悄改写主源数据。所以这里只做两件事：能证明一致就放行，
+    不能证明（重叠不足）或证明不一致，就带着数字拒绝。
+
+    :param rows: Wind 取回的因子行。
+    :param local: 本地已落盘因子。
+    :returns: ``""`` 表示放行；非空为拒绝理由（会进日志）。
+    """
+    shared = [r for r in rows if r.trade_date in local and local[r.trade_date] > 0]
+    if len(shared) < WIND_BASIS_MIN_OVERLAP:
+        return (
+            f"wind_basis_unknown: 与本地因子只重叠 {len(shared)} 天"
+            f"（<{WIND_BASIS_MIN_OVERLAP}），无法确认基准一致，不写入"
+        )
+    ratios = sorted(r.hfq_factor / local[r.trade_date] for r in shared)
+    mid = ratios[len(ratios) // 2]
+    if abs(mid - 1.0) > WIND_BASIS_TOLERANCE:
+        return (
+            f"wind_basis_mismatch: Wind/本地 因子中位比 {mid:.4f}"
+            f"（偏差 {(mid - 1) * 100:+.2f}%，容差 ±{WIND_BASIS_TOLERANCE:.0%}）"
+            f"，两家的后复权基准不是同一个，不写入"
+        )
+    return ""
+
+
+def _wind_fallback(code: str, conn: Any) -> tuple[list[FactorRow], str]:
     """跑一次 Wind 兜底，返回 ``(行, 状态文案)``。
 
     **任何异常都只转成文案，绝不向上抛**：兜底失败不能把整轮回填带崩（任务硬约束）。
     文案前缀区分"功能没接通"（``wind_unavailable``）与"接通了但取不到"
     （``wind_error`` / ``wind_quota`` / ``wind_empty``）—— 否则运维看到一行
     "没数据"分不清是去修数据还是去装 CLI。
+
+    R31 新增一道**基准闸**：Wind 取回来的因子未必和本地同一基准（实测差 22.47%），
+    而落库是覆盖式 upsert，所以对不齐就不写（见 :func:`check_wind_basis`）。
     """
     try:
         rows = fetch_wind_factor_rows(code)
@@ -420,6 +485,13 @@ def _wind_fallback(code: str) -> tuple[list[FactorRow], str]:
         return [], f"wind_unexpected: {type(e).__name__}: {e}"
     if not rows:
         return [], "wind_empty: Wind 未返回可用因子行"
+    try:
+        basis_note = check_wind_basis(rows, _local_factors(conn, code))
+    except Exception as e:  # noqa: BLE001
+        # 基准核不出来就不能放行 —— 与其猜，不如明说
+        return [], f"wind_basis_check_failed: {type(e).__name__}: {e}"
+    if basis_note:
+        return [], basis_note
     return rows, "wind ok"
 
 
@@ -433,7 +505,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--wind-fallback",
         action="store_true",
-        help="本地（腾讯）取不到时改用 Wind 源补取。默认关闭：Wind 调用消耗真实额度",
+        help=(
+            "本地（腾讯）取不到时改用 Wind 源补取。默认关闭：Wind 调用消耗真实额度。"
+            "另需与本地因子基准一致（±2%%）才写入，否则只记原因不写"
+        ),
     )
     parser.add_argument(
         "--retries",
@@ -517,7 +592,7 @@ def main(argv: list[str] | None = None) -> int:
                     time.sleep(args.sleep_ms / 1000)
                     continue
                 # ---- Wind 兜底（--wind-fallback）----
-                wind_rows, wind_note = _wind_fallback(code)
+                wind_rows, wind_note = _wind_fallback(code, conn)
                 if not wind_rows:
                     logger.warning(
                         "Wind 兜底未取到 %s：本地[%s]；Wind[%s]",

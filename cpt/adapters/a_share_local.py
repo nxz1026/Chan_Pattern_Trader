@@ -26,7 +26,7 @@ import pathlib
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any, Final
 
 from cpt.adapters._dbconfig import connection_kwargs as _shared_connection_kwargs
@@ -133,6 +133,26 @@ def is_trade_day(conn: Any, date_iso: str) -> bool | None:
     if row is None:
         return None
     return bool(row[0])
+
+
+def open_days_between(conn: Any, start: date, end: date) -> set[date]:
+    """``[start, end]`` 区间内**所有开市日**（一次查询，不逐日问）。
+
+    R31 新增：给「缺整天」的探测用。
+
+    **为什么要批量**：``is_trade_day`` 是单日查询，而探测要扫 45 天 —— 逐日调就是
+    45 次往返。日历表 13k 行、一次拉区间更划算。
+
+    :returns: 开市日集合。**表里整个区间都没数据时返回空集**（调用方需自己区分
+        「没有缺口」与「日历不可用」—— 本函数不替调用方猜）。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT date FROM public.trade_calendar WHERE is_open AND date >= %s AND date <= %s",
+            (start, end),
+        )
+        rows = cur.fetchall()
+    return {row[0] for row in rows}
 
 
 # --------------------------------------------------------------------------- #

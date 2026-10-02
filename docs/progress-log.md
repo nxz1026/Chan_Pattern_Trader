@@ -691,6 +691,13 @@ CanonicalBar"的窄接口，所以直接用 ccxt，只沿用它的选所与代�
 2. **复权口径必须与本地库一致**：`public.daily_bar × asel.ref_adjust_factor` 是
    **后复权**，所以腾讯侧请求 `hfq`（同一天后复权 8838.081 vs 不复权 1250.010，
    因子 ≈ 7.07）、Wind 侧 `aftype="1"`。口径不一致会让兜底源和主源画出完全不同的笔。
+
+   > **2026-10-02（R31）更正后半句**：腾讯侧成立，**Wind 侧不成立**。
+   > 「都是后复权」≠「同一条序列」—— 600519 / 2026-09-30 实测：不复权两边都是
+   > **1258.62**（底层数据一模一样），但因子 Wind 8.6469 vs 本地 7.0605，
+   > **差 22.47%**。差的是后复权的**起算基准**，跨家不可比。证据与处置见
+   > 「R31 · adapters 层复盘」第三节 3.c。
+
 3. **`validate_ashare_bars` 的默认周期**原本是 5 分钟（`DEFAULT_INTERVAL_MS`），
    调用方忘传 `interval_ms` 就会收到 `open_time+300000-1` 的契约报错 —— 已改为
    新增的 `A_SHARE_DAILY_INTERVAL_MS = 86_400_000`。
@@ -4011,3 +4018,170 @@ CDP 在父页里试 `iframe.contentDocument`：
 浪费。真要治得让 iframe 只建一次、之后用 `postMessage` 让它自己换内容 ——
 R30 的诊断通道已经把路铺好了（跨 origin postMessage 可用），但那是独立的优化，
 不在本轮范围。
+
+---
+
+## R31 · adapters 层复盘 —— 对外契约核账 · 2026-10-02
+
+`storage`（R24）、`llm`（R25/R28）、`web`（R29）、`domain`（R30）都复盘过了，
+接着做 `adapters/`。选它的理由很直接：**这一层是唯一「代码里的假设」直接顶在外部
+系统上的地方** —— PG 的表/列、腾讯的字段顺序、Wind 的 CLI 与额度。所以本轮不
+读代码下结论，而是**拿真机去顶每一条假设**。
+
+### 一、勘察结论（已提交 `259c671`）
+
+19 个 `dashboard_*` 函数我先按字符串计数判成「孤儿」，**错了**：AST 复核后确认
+**19 个全部有生产引用，孤儿数 0**（在 `application/` 18 个 + `storage/` 1 个，
+不是 `adapters/`）。根因是字符串计数启发式，已在 `259c671` 就地更正。
+
+### 二、PG schema：8 张表、47 个列引用，**零漂移**
+
+列清单**从代码里捞**（grep 出的 `FROM public.* / asel.*` 全部展开），再逐条问真库
+`information_schema`：
+
+| 表 | 代码用到的列 | 结论 |
+|---|---|---|
+| `public.daily_bar` | code/date/open/high/low/close/volume/amount | 全部存在（另有 pre_close、turnover_rate） |
+| `public.derived_bar` | code/date/is_limit_up/is_limit_down/is_bomb/is_one_word | 全部存在 |
+| `public.trade_calendar` | date/is_open | 全部存在（13,162 行，1990→2026 底） |
+| `asel.ref_adjust_factor` | code/trade_date/**hfq_factor** | 全部存在（列名是 `hfq_factor`，不是 `adj_factor`） |
+| `public.hot_rank` | date/code/rank | 全部存在，无多余列 |
+| `public.ladder_day` | date/code/cont_days | 全部存在 |
+| `public.limit_pool_em` | date/code/name/cont_days_em/pool_type | 全部存在 |
+| `public.strategy_signal` | trade_date/code/strategy/name/action/score/confidence/reason/model | 全部存在 |
+
+`date` / `trade_date` 的类型都是 **`date`**（不是 text/timestamp），所以
+`BETWEEN %s AND %s` 传 `datetime.date` 的写法成立。**这一项没有发现任何漂移。**
+
+### 三、Wind：三个真问题，其中一个会静默改写主源数据
+
+#### a. `availability()` 是个可证伪的假承诺 —— 已修
+
+`WindSourceClient.availability()` 过去只查两样东西：CLI 文件在不在、密钥读不读得到。
+于是 oracle 上真机跑出来是：
+
+    which node = None
+    availability() = (True, '')      ← 说「可用」
+
+而真调用立刻死：
+
+    WindUnavailableError: 无法执行 node：[Errno 2] No such file or directory: 'node'
+
+**要判断一个通道能不能跑，就得把真正要执行的那个东西也查一遍。** 现在
+`availability()` 多查 `node`（`CPT_WIND_NODE` 可指定，裸名走 PATH），缺了就说
+`wind_node_missing:<名字>`。测试也从「碰运气看跑测试的机器上有没有 node」改成
+显式注入。
+
+#### b. 线上从来就没跑起来过 —— 代码已留好开关，**待 owner 决定是否打开**
+
+服务的 `PATH` 是 systemd 给的 `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin`，
+**里面没有 node**；node 只在 `~/.nvm/versions/node/v22.23.2/bin/`。所以
+`cpt-dashboard` 进程发起的 Wind 调用**每一次都死在 spawn 上**。
+
+旁证：配额台账 123 条里只有 **2 条 `ok: true`**，都在 2026-09-24 21:13/21:18（当时是
+我在交互 shell 里手验的），之后 121 条全是 `TIMEOUT`。而那 121 条的
+`params_digest` 全是 `44136fa355b3678a` = `sha256("{}")` 且 `duration_ms=0.0`
+—— **空参数 + 0 毫秒**，真超时不可能 0 毫秒，所以那是某次调试循环的残留，
+不是生产行为。**别把它读成「Wind 挂了 121 次」**（台账是共享追加文件，测试已
+全部改用 tmp 路径，不会再污染）。
+
+修法是留一个显式开关而不是猜 PATH（nvm 会换版本）：在
+`deploy/env/cpt-dashboard.env` 里加一行
+
+    CPT_WIND_NODE=/home/ubuntu/.nvm/versions/node/v22.23.2/bin/node
+
+**这属于部署决定，等 owner 拍板**（它会让线上具备消耗真实额度的能力）。另外实测
+这条通道**本身也不稳**：本轮 3 次 `get_stock_kline` 里 1 次在 90s 上限真超时。
+
+#### c. Wind 与本地库的「后复权」不是同一个基准 —— 已加基准闸
+
+| 600519 / 2026-09-30 | 不复权收盘 | 后复权因子 | 后复权收盘 |
+|---|---|---|---|
+| Wind | 1258.62 | **8.6469** | 10883.14 |
+| 腾讯 / 本地库 | **1258.62** | **7.0605** | 8886.536 |
+
+**不复权两边一模一样**（说明底层数据没问题），**因子差 22.47%** —— 差的是后复权
+的起算基准，跨家不可比。而 `scripts/factor_backfill.py --wind-fallback` 的落库语句是
+
+    ON CONFLICT (code, trade_date) DO UPDATE SET hfq_factor=EXCLUDED.hfq_factor
+
+**覆盖式**。后复权价 = 不复权价 × 因子，所以写错基准不是「精度差一点」，是
+**主源那段历史被换了一套基准**，并在交界处凭空出现一个 22% 的跳空 ——
+而 `fetch_validated_klines` 正是拿这个因子去乘 OHLC 画笔的。
+
+**好消息**：因子表里 `source` 分布是 `NULL` 1,955,687 行 + `tx:fqkline`
+1,433,407 行，**`wind:*` 零行** —— 这条路默认关闭且从未跑过，**今天没有数据被污染**。
+
+处置**不发明未经验证的归一化**，只把静默改成大声：新增
+`factor_backfill.check_wind_basis()`，取 Wind 行与本地已落盘因子的重叠日中位比，
+**重叠 < 3 天**（= 不知道）或**中位比偏离 ±2%**（= 知道且不一致）就带着数字拒绝写入：
+
+    wind_basis_mismatch: Wind/本地 因子中位比 1.2247（偏差 +22.47%，容差 ±2%），
+    两家的后复权基准不是同一个，不写入
+
+### 四、探活的假警：把法定休市日报成「缺整天」—— 已修
+
+真机探测报 `a_share_local 缺 1 个工作日整天：2026-09-25`，而 09-25 是**周五**。
+去查 `public.trade_calendar`：
+
+    2026-09-24  Thu  is_open=true
+    2026-09-25  Fri  is_open=false    ← 法定休市日
+    2026-09-28  Mon  is_open=true
+
+**那天根本不开市，没有数据是完全正确的**，而探活把它报成缺口并把整个源标成
+`degraded`。**假警比不报警更贵** —— 它会把人引去查一个不存在的数据问题。
+
+根因是一行过期的注释：
+
+    # 工作日缺整天 = 可疑；节假日不在此列（本地没有交易日历，所以只报
+    # "工作日无数据"，由人判断是否为节假日）。
+    if cursor_day.weekday() < 5 and cursor_day not in have:
+
+「本地没有交易日历」这个前提**早已过期**（13,162 行，`is_trade_day` 早就在用）。
+改法：新增 `a_share_local.open_days_between()`（一次查区间，不逐日往返 45 次），
+探活改用交易日历；**日历不可用时退回 weekday 口径但必须说明退回**，而不是安静
+地当成「没有缺口」。新增 `missing_trade_days` / `trade_calendar_available` 两个键，
+`missing_weekdays` 保留兼容。
+
+真机复验（同一台机、同一份数据，只换代码）：
+
+| | 改前 | 改后 |
+|---|---|---|
+| `status` | `degraded` | **`ok`** |
+| `detail` | `缺 1 个工作日整天：2026-09-25` | **`''`** |
+| `missing_trade_days` | （无此键） | `[]` |
+| `trade_calendar_available` | （无此键） | `True` |
+
+**真警没被一起消掉**：单测钉住「日历说开市而库里没有 → 必须报 + 必须降级」，
+`tests/test_source_registry_gap.py` 6 条在本地与 oracle 上都过。
+
+顺带记一条：这个探测器在 R17 报过 `2026-09-22` 缺整天，那次是**真警**（周二、
+腾讯与 Wind 两个独立通道都确认当天有成交）—— 同一个 weekday 启发式，既会漏报
+也会误报，只有换成日历才两头都对。
+
+### 五、被推翻的三个假设（本轮勘察成本的大头）
+
+1. 「`data_quality.gap: false` 与 `gap_count: 25` 并存是矛盾」→ **不是**，是
+   `dashboard.py:120` docstring 明写的刻意设计。
+2. 「本地没有交易日历」→ **有**，且早就在用。
+3. 「19 个 `dashboard_*` 是孤儿」→ **0 孤儿**，全有生产引用（我的错，已更正）。
+
+另有一次同款陷阱在**测试侧**复现：假游标用宽松分支派发 SQL，新加的日历查询被
+兜底分支吞成一行总数，`open_days_between` 拿到 `{20862}` 这种整数集合，缺口判定
+**静默失效**。已把假游标改成「先判更具体的」（`group by date` 里也含
+`count(*) from public.daily_bar`，先判它就会得到一句看不懂的 `IndexError`）。
+
+### 六、门禁
+
+- **pytest 权威计数（`--junit-xml`）**：841 tests / 13 failures / 0 errors /
+  29 skipped → **799 passed**（R30 基线是 829/13 → 787，本轮 +12 条新测试）。
+  13 条失败**全在** `test_web_a_share_routes`（`fcntl` Windows 基线），**零新增失败**。
+- ruff check / ruff format --check / mypy（4 条 `fcntl` Windows 基线）/
+  vulture / import-linter（6 kept, 0 broken）/ `check_sql_layering` 全绿。
+
+### 七、待 owner
+
+1. **要不要给服务配 `CPT_WIND_NODE`**（一 env 行，让 Wind 通道在线上真的能跑）——
+   代价是线上具备消耗真实额度的能力，且实测该通道 3 次里超时 1 次。
+2. `_pkg` 的 `linux7` 归属（比 `linux6` 新却无对应 run 脚本，归属存疑）。
+

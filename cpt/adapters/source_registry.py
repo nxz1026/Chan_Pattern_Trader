@@ -223,11 +223,14 @@ def _probe_sina_quote() -> Mapping[str, Any]:
 
 
 def _probe_a_share_local() -> Mapping[str, Any]:
-    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+    from cpt.adapters.a_share_local import AShareLocalClient, open_days_between  # noqa: PLC0415
 
     # AShareLocalClient 构造时不连库（lazy），这里显式取一次连接做最轻的探活。
     client = AShareLocalClient()
-    with client._get_conn().cursor() as cur:  # noqa: SLF001 — 探活就是要碰真连接
+    # ⚠️ 显式持有连接：R31 要在游标关闭**之后**再查交易日历，
+    # `with client._get_conn().cursor()` 那种写法会把连接一起回收掉。
+    conn = client._get_conn()  # noqa: SLF001 — 探活就是要碰真连接
+    with conn.cursor() as cur:  # noqa: SLF001
         cur.execute("SELECT count(*) FROM public.daily_bar")
         total = int(cur.fetchone()[0])
         cur.execute("SELECT count(*) FROM asel.ref_adjust_factor")
@@ -244,16 +247,36 @@ def _probe_a_share_local() -> Mapping[str, Any]:
         )
         per_day = [(row[0], int(row[1])) for row in cur.fetchall()]
     gaps: list[str] = []
+    calendar_missing = False
     if per_day:
         counts = sorted(count for _, count in per_day)
         median = counts[len(counts) // 2]
         have = {day for day, _ in per_day}
         first, last = per_day[0][0], per_day[-1][0]
+        # R31：改用**交易日历**判定「这天本该开市」。
+        #
+        # 原实现是 ``cursor_day.weekday() < 5``，注释写着「本地没有交易日历，
+        # 由人判断是否为节假日」。**那条前提早已过期** ——
+        # `public.trade_calendar` 存在（13k 行、1990→2026 底），且
+        # `a_share_local.is_trade_day` 早就在用了（收盘倒计时）。
+        #
+        # 实测代价：2026-09-25（周五）是**法定休市日**，日历里 `is_open=false`，
+        # `daily_bar` 没有它是完全正确的 —— 而旧逻辑把它报成
+        # 「缺 1 个工作日整天」并把整个源标成 degraded。**假警会把人引去查
+        # 一个不存在的数据问题**，这比不报警更贵。
+        open_days = open_days_between(conn, first, last)
+        if not open_days:
+            # 日历查不到 = 无法判定。此时**退回旧的 weekday 口径但如实标注**，
+            # 而不是安静地当成「没有缺口」—— 那会把探测器的失效也藏起来。
+            calendar_missing = True
+            open_days = {
+                first + timedelta(days=i)
+                for i in range((last - first).days + 1)
+                if (first + timedelta(days=i)).weekday() < 5
+            }
         cursor_day = first
         while cursor_day <= last:
-            # 工作日缺整天 = 可疑；节假日不在此列（本地没有交易日历，所以只报
-            # "工作日无数据"，由人判断是否为节假日）。
-            if cursor_day.weekday() < 5 and cursor_day not in have:
+            if cursor_day in open_days and cursor_day not in have:
                 gaps.append(cursor_day.isoformat())
             cursor_day += timedelta(days=1)
         low_coverage = [
@@ -264,15 +287,25 @@ def _probe_a_share_local() -> Mapping[str, Any]:
     else:
         median = 0
         low_coverage = []
+    if gaps:
+        detail = f"缺 {len(gaps)} 个**开市日**整天：{', '.join(gaps)}"
+    elif calendar_missing:
+        # 日历不可用时不能安静地回「ok」—— 那等于把探测器失效也藏起来
+        detail = "交易日历查不到，已退回「周一到周五」口径（可能误报节假日）"
+    else:
+        detail = ""
     return {
         "status": "degraded" if gaps else "ok",
         "daily_bar_rows": total,
         "adjust_factor_rows": factors,
         "latest_date": per_day[-1][0].isoformat() if per_day else None,
         "median_bars_per_day": median,
+        # 键名沿用旧名（前端/脚本可能在读），但语义已从「工作日」变成「开市日」
         "missing_weekdays": gaps,
+        "missing_trade_days": gaps,
+        "trade_calendar_available": not calendar_missing,
         "low_coverage_days": low_coverage,
-        "detail": f"缺 {len(gaps)} 个工作日整天：{', '.join(gaps)}" if gaps else "",
+        "detail": detail,
     }
 
 

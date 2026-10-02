@@ -234,17 +234,27 @@ def test_fetch_pair_uses_the_shared_endpoint(script: Any, monkeypatch: Any) -> N
 # --------------------------------------------------------------------------- #
 
 
-def _install_fake_psycopg(monkeypatch: Any) -> list[tuple[str, Any]]:
+def _install_fake_psycopg(
+    monkeypatch: Any, local_factors: dict[str, float] | None = None
+) -> list[tuple[str, Any]]:
     """注入够用的假 ``psycopg``（CI 没装、也没库）。
 
     只实现 ``main()`` 走到的部分：``connect(**kwargs)`` 上下文 + ``cursor()``。
     返回 SQL 日志，供断言"写库时带的 source/source_url 是哪一个源"。
+
+    :param local_factors: 这只票**已落盘**的因子。R31 的 Wind 基准闸要拿它对账；
+        默认空 = 本地一行都没有，闸会以 ``wind_basis_unknown`` 拒绝 —— 那也是真实
+        行为：没有重叠就无法确认两家的后复权基准是否同一个。
     """
     import types
 
     logs: list[tuple[str, Any]] = []
+    factors = dict(local_factors or {})
 
     class _Cursor:
+        def __init__(self) -> None:
+            self._rows: list[Any] = []
+
         def __enter__(self) -> Any:
             return self
 
@@ -253,10 +263,15 @@ def _install_fake_psycopg(monkeypatch: Any) -> list[tuple[str, Any]]:
 
         def execute(self, sql: str, params: Any = None) -> None:
             logs.append((sql, params))
+            flat = " ".join(sql.split()).lower()
+            if "from asel.ref_adjust_factor" in flat and "source is not null" in flat:
+                self._rows = list(factors.items())
+            else:
+                # 其余查询（unverifiable_dates 等）返回空 = 没有不可考日期，行全部放行
+                self._rows = []
 
         def fetchall(self) -> list[Any]:
-            # unverifiable_dates 的查询：返回空 = 没有不可考日期，行全部放行
-            return []
+            return self._rows
 
         def executemany(self, sql: str, payload: Any) -> None:
             logs.append((sql, payload))
@@ -283,11 +298,16 @@ def _install_fake_psycopg(monkeypatch: Any) -> list[tuple[str, Any]]:
     return logs
 
 
-def _prepare_main(script: Any, monkeypatch: Any, codes: list[str]) -> list[tuple[str, Any]]:
+def _prepare_main(
+    script: Any,
+    monkeypatch: Any,
+    codes: list[str],
+    local_factors: dict[str, float] | None = None,
+) -> list[tuple[str, Any]]:
     """把 ``main()`` 的 DB 边界全部假掉（代码清单 + 连接参数 + psycopg）。"""
     monkeypatch.setattr(script, "list_all_a_codes", lambda: list(codes))
     monkeypatch.setattr(script, "connection_kwargs", lambda: {"dbname": "fake"})
-    return _install_fake_psycopg(monkeypatch)
+    return _install_fake_psycopg(monkeypatch, local_factors)
 
 
 def test_main_default_path_never_touches_wind(script: Any, monkeypatch: Any) -> None:
@@ -330,10 +350,14 @@ def test_main_wind_fallback_wires_both_orphan_functions(
         seen["windcode"] = windcode
         return windcode
 
+    # 基准闸（R31）：本地要已有 3 天以上**同基准**因子，Wind 才被放行。
+    # 这里两边都给 2.5，就是"基准一致"的最小可信场景。
+    wind_days = {"2026-09-28": 2.5, "2026-09-29": 2.5, "2026-09-30": 2.5}
+
     def spy_factors(self: Any, windcode: str, **kwargs: Any) -> dict[str, float]:
         seen["fetch_windcode"] = windcode
         seen["fetch_kwargs"] = kwargs
-        return {"2026-09-30": 2.5}
+        return dict(wind_days)
 
     monkeypatch.setattr(local_mod.AShareLocalClient, "_to_wind_code", staticmethod(spy_code))
     monkeypatch.setattr(wind_mod.WindSourceClient, "fetch_adjust_factors", spy_factors)
@@ -342,7 +366,7 @@ def test_main_wind_fallback_wires_both_orphan_functions(
         raise script.ASharePublicError("腾讯不供该标的后复权")
 
     monkeypatch.setattr(script, "fetch_tx_factor_rows", boom)
-    logs = _prepare_main(script, monkeypatch, ["600519"])
+    logs = _prepare_main(script, monkeypatch, ["600519"], dict(wind_days))
 
     with caplog.at_level("INFO", logger="factor_backfill"):
         assert script.main(["--mode", "full", "--wind-fallback", "--sleep-ms", "0"]) == 0
@@ -355,7 +379,9 @@ def test_main_wind_fallback_wires_both_orphan_functions(
     # 写库必须带上 Wind 的 source/source_url，能和腾讯行区分
     inserts = [payload for sql, payload in logs if "INSERT INTO asel.ref_adjust_factor" in sql]
     assert inserts, "Wind 兜底取到行之后必须真的写库"
-    row = inserts[0][0]
+    rows = {r[1]: r for r in inserts[0]}
+    assert set(rows) == set(wind_days), f"三天都该落库：{sorted(rows)}"
+    row = rows["2026-09-30"]
     assert (row[0], row[1], row[3], row[4]) == (
         "600519",
         "2026-09-30",
@@ -438,3 +464,67 @@ def test_main_wind_fallback_reports_invalid_code(
 
     assert rc == 0
     assert "wind_code_invalid" in caplog.text
+
+
+# --------------------------------------------------------------------------- #
+# Wind 基准闸（R31）：两家的后复权基准不是同一个时**不许写**
+# --------------------------------------------------------------------------- #
+
+
+def _wind_rows(script: Any, factors: dict[str, float]) -> list[Any]:
+    return [
+        script.FactorRow(code="600519", trade_date=day, hfq_factor=value, source=script.SOURCE_WIND)
+        for day, value in sorted(factors.items())
+    ]
+
+
+def test_check_wind_basis_accepts_matching_basis(script: Any) -> None:
+    days = {"2026-09-28": 2.5, "2026-09-29": 2.5, "2026-09-30": 2.5}
+    assert script.check_wind_basis(_wind_rows(script, days), dict(days)) == ""
+
+
+def test_check_wind_basis_rejects_measured_22pct_gap(script: Any) -> None:
+    """R31 真机：Wind 因子 8.6469 vs 本地 7.0605 = +22.47% → 必须拒绝。
+
+    这不是精度问题：落库是 ``ON CONFLICT DO UPDATE`` 覆盖式 upsert，写进去等于
+    把主源那段历史换一套基准，并在交界处造出一个 22% 的假跳空。
+    """
+    local = {"2026-09-28": 7.06, "2026-09-29": 7.06, "2026-09-30": 7.0605}
+    wind = {d: v * 1.2247 for d, v in local.items()}
+    note = script.check_wind_basis(_wind_rows(script, wind), local)
+    assert note.startswith("wind_basis_mismatch")
+    assert "22.47%" in note.replace("+", "").replace(" ", "") or "22.4" in note
+
+
+def test_check_wind_basis_refuses_when_overlap_too_small(script: Any) -> None:
+    """重叠不足 = **不知道**，不是"大概一致" —— 也要拒绝。"""
+    local = {"2026-09-30": 7.06}
+    wind = {"2026-09-28": 2.0, "2026-09-29": 2.0, "2026-09-30": 2.0}
+    assert script.check_wind_basis(_wind_rows(script, wind), local).startswith("wind_basis_unknown")
+    assert script.check_wind_basis(_wind_rows(script, wind), {}).startswith("wind_basis_unknown")
+
+
+def test_main_wind_fallback_does_not_write_on_basis_mismatch(
+    script: Any, monkeypatch: Any, caplog: Any
+) -> None:
+    """端到端守住：基准对不上时**一行都不许落库**，且要报出偏差数字。"""
+    local = {"2026-09-28": 7.06, "2026-09-29": 7.06, "2026-09-30": 7.0605}
+    monkeypatch.setattr(
+        script,
+        "fetch_wind_factor_rows",
+        lambda code, **kwargs: _wind_rows(script, {d: v * 1.2247 for d, v in local.items()}),
+    )
+
+    def boom(code: str, *, days: int = 0) -> Any:
+        raise script.ASharePublicError("腾讯不供该标的后复权")
+
+    monkeypatch.setattr(script, "fetch_tx_factor_rows", boom)
+    logs = _prepare_main(script, monkeypatch, ["600519"], dict(local))
+
+    with caplog.at_level("INFO", logger="factor_backfill"):
+        assert script.main(["--mode", "full", "--wind-fallback", "--sleep-ms", "0"]) == 0
+
+    assert not [1 for sql, _ in logs if "INSERT INTO asel.ref_adjust_factor" in sql], (
+        "基准对不上还落库 = 静默改写主源历史"
+    )
+    assert "wind_basis_mismatch" in caplog.text

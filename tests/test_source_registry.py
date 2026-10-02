@@ -207,15 +207,27 @@ def test_sources_route_defaults_to_no_quota(monkeypatch: pytest.MonkeyPatch) -> 
 class _FakeCursor:
     """按 SQL 关键词返回预设行的假游标。"""
 
-    def __init__(self, counts: dict[str, int], per_day: list[tuple[Any, int]]) -> None:
+    def __init__(
+        self,
+        counts: dict[str, int],
+        per_day: list[tuple[Any, int]],
+        open_days: list[Any] | None = None,
+    ) -> None:
         self._counts = counts
         self._per_day = per_day
+        # R31：探活改成查 ``public.trade_calendar`` 判「这天本该开市」。不给
+        # open_days 时默认「有数据的日子就是开市日」—— 不显式给，兜底分支会把
+        # 日历查询也吞成一行总数，``open_days_between`` 于是拿到一个整数集合，
+        # 缺口判定静默失效（这正是 R31 修掉的那类假象在测试侧的同款）。
+        self._open_days = list(open_days) if open_days is not None else [d for d, _ in per_day]
         self._result: list[tuple[Any, int]] = []
 
     def execute(self, sql: str, *args: Any) -> None:
         flat = " ".join(sql.split())
         if "group by date" in flat.lower():
             self._result = list(self._per_day)
+        elif "from public.trade_calendar" in flat.lower():
+            self._result = [(d,) for d in self._open_days]
         elif "from asel.ref_adjust_factor" in flat.lower():
             self._result = [(self._counts["factors"],)]
         else:
@@ -242,10 +254,14 @@ class _FakeConn:
         return self._cursor
 
 
-def _install_fake_local(monkeypatch: pytest.MonkeyPatch, per_day: list[tuple[Any, int]]) -> None:
+def _install_fake_local(
+    monkeypatch: pytest.MonkeyPatch,
+    per_day: list[tuple[Any, int]],
+    open_days: list[Any] | None = None,
+) -> None:
     from datetime import date
 
-    cursor = _FakeCursor({"bars": sum(n for _, n in per_day), "factors": 49790}, per_day)
+    cursor = _FakeCursor({"bars": sum(n for _, n in per_day), "factors": 49790}, per_day, open_days)
 
     class _FakeClient:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
@@ -275,7 +291,18 @@ def test_local_probe_detects_missing_whole_trading_day(monkeypatch: pytest.Monke
         (date(2026, 9, 23), 5221),
         (date(2026, 9, 24), 5221),
     ]
-    _install_fake_local(monkeypatch, per_day)
+    # 日历说 09-22 **开市**（它确实是交易日），只是库里没有 → 报缺口
+    _install_fake_local(
+        monkeypatch,
+        per_day,
+        [
+            date(2026, 9, 18),
+            date(2026, 9, 21),
+            date(2026, 9, 22),
+            date(2026, 9, 23),
+            date(2026, 9, 24),
+        ],
+    )
     result = probe_source("a_share_local", use_cache=False)
     assert result.status == "degraded"
     assert result.evidence["missing_weekdays"] == ["2026-09-22"]

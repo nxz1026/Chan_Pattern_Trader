@@ -84,11 +84,16 @@ def _client(
     config = tmp_path / "config"
     config.write_text("WIND_API_KEY=test-key\n", encoding="utf-8")
     ledger = tmp_path / "ledger.jsonl"
+    # 显式给一个存在的 node 路径：availability() 现在会查它，测试不能去依赖
+    # 跑测试的这台机器上恰好装了 node（oracle 上就没有，见 R31）。
+    node = tmp_path / "node"
+    node.write_text("// fake", encoding="utf-8")
     runner = FakeRunner(outputs)
     client = WindSourceClient(
         cli_script=cli,
         config_path=config,
         ledger_path=ledger,
+        node=str(node),
         runner=runner,
         **kwargs,
     )
@@ -111,14 +116,42 @@ def test_availability_requires_cli_and_key(tmp_path: Path) -> None:
     assert reason.startswith("wind_api_key_missing")
 
 
+def test_availability_reports_missing_node(tmp_path: Path) -> None:
+    """CLI 与密钥都在，但 node 不在 PATH → **必须**说不可用。
+
+    R31 真机：oracle 的 node 装在 nvm 下，systemd 给服务的 PATH 里没有它。
+    改之前 ``availability()`` 返回 ``(True, "")``，线上体检把跑不起来的通道
+    报成可用；改之后理由码是 ``wind_node_missing``，指明缺的是哪一样。
+    """
+    cli = tmp_path / "cli.mjs"
+    cli.write_text("// fake", encoding="utf-8")
+    config = tmp_path / "config"
+    config.write_text("WIND_API_KEY=test-key\n", encoding="utf-8")
+    client = WindSourceClient(
+        cli_script=cli, config_path=config, node="definitely-not-a-real-node-xyz"
+    )
+    ok, reason = client.availability()
+    assert ok is False
+    assert reason == "wind_node_missing:definitely-not-a-real-node-xyz"
+
+
+def test_configured_node_path_is_what_gets_executed(tmp_path: Path) -> None:
+    """给了绝对路径就用它 —— 线上要靠 ``CPT_WIND_NODE`` 绕开缺 node 的 PATH。"""
+    client, runner, _ = _client(tmp_path, [_success(KLINE_ROWS)])
+    client.call("stock_data", "get_stock_kline", {"windcode": "600519.SH"})
+    assert runner.argv[0][0] == str(tmp_path / "node")
+
+
 def test_call_parses_success_envelope_and_records_ledger(tmp_path: Path) -> None:
     client, runner, ledger = _client(tmp_path, [_success(KLINE_ROWS)])
     call = client.call("stock_data", "get_stock_kline", {"windcode": "600519.SH"})
     assert call.ok is True
     assert call.data["data"] == KLINE_ROWS
-    # argv 形状：node <cli> call <server_type> <tool> <params_json>
+    # argv 形状：<node> <cli> call <server_type> <tool> <params_json>
+    # R31：argv[0] 现在是**解析后的** node 路径，不再是裸名 "node" ——
+    # 线上要靠 CPT_WIND_NODE 指向 nvm 里的那个（服务的 PATH 里没有 node）。
     argv = runner.argv[0]
-    assert argv[0] == "node"
+    assert argv[0] == str(tmp_path / "node")
     assert argv[2] == "call"
     assert argv[3] == "stock_data"
     assert argv[4] == "get_stock_kline"
@@ -175,11 +208,15 @@ def test_call_timeout_raises_source_error(tmp_path: Path) -> None:
     cli.write_text("// fake", encoding="utf-8")
     config = tmp_path / "config"
     config.write_text("WIND_API_KEY=k\n", encoding="utf-8")
+    node = tmp_path / "node"
+    node.write_text("// fake", encoding="utf-8")
 
     def runner(argv: Sequence[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess[str]:
         raise subprocess.TimeoutExpired(cmd=list(argv), timeout=timeout)
 
-    client = WindSourceClient(cli_script=cli, config_path=config, ledger_path=None, runner=runner)
+    client = WindSourceClient(
+        cli_script=cli, config_path=config, ledger_path=None, node=str(node), runner=runner
+    )
     with pytest.raises(WindSourceError, match="超时"):
         client.call("stock_data", "get_stock_kline", {})
 

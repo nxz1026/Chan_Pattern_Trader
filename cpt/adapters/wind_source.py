@@ -16,13 +16,32 @@ node scripts/cli.mjs call <server_type> <tool_name> '<params_json>'
   ``backend_error`` 等（见 SKILL.md §3）。
 - 密钥在 ``~/.wind-aifinmarket/config`` 的 ``WIND_API_KEY``。
 
-## 复权口径（关键）
+## 复权口径（关键，且 R31 实测改过一次结论）
 
 ``get_stock_kline`` 的 ``aftype``：**0=前复权，1=后复权，2=不复权**。CPT 本地库
 （``public.daily_bar × asel.ref_adjust_factor``）用的是**后复权**，所以本适配器
 默认 ``aftype="1"``。同时：**该工具不返回复权因子**，只有价格 —— 想补
 ``ref_adjust_factor`` 必须同区间调两次（``aftype=2`` 与 ``aftype=1``）再相除，
 即 ``factor = hfq_price / raw_price``。
+
+### ⚠️ 「都是后复权」不等于「同一条序列」（R31 真机实测）
+
+600519 / 2026-09-30：
+
+| | 不复权收盘 | 后复权因子 | 后复权收盘 |
+|---|---|---|---|
+| Wind | 1258.62 | 8.6469 | 10883.14 |
+| 腾讯 / 本地库 | 1258.62 | 7.0605 | 8886.536 |
+
+**不复权两边一模一样**（说明底层数据没问题），**因子差 22.47%** —— 差的是
+"后复权的基准"，各家自选基准日，跨家不可比。所以：
+
+- 本模块返回的因子是 **Wind 基准**的，不能直接当本地因子用；
+- 写进 ``asel.ref_adjust_factor`` 是 ``ON CONFLICT DO UPDATE`` **覆盖式**的，
+  而后复权价 = 不复权价 × 因子 ⇒ 写错基准不是"精度差一点"，是**主源历史被改写**
+  且在交界处出现假跳空；
+- 落地前的基准闸在 ``scripts/factor_backfill.py::check_wind_basis``（R31 加），
+  对不齐就带着偏差数字拒绝写入。
 
 ## 配额纪律
 
@@ -39,6 +58,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import time
 from collections.abc import Callable, Mapping, Sequence
@@ -53,6 +73,7 @@ __all__ = [
     "DEFAULT_CLI_SCRIPT",
     "DEFAULT_CONFIG_PATH",
     "DEFAULT_LEDGER_PATH",
+    "DEFAULT_NODE",
     "DAILY_INTERVAL_MS",
     "WindQuotaError",
     "WindSourceClient",
@@ -65,6 +86,11 @@ DEFAULT_CONFIG_PATH: Final[Path] = Path("~/.wind-aifinmarket/config").expanduser
 DEFAULT_LEDGER_PATH: Final[Path] = Path(
     os.getenv("CPT_WIND_LEDGER", "~/.cache/cpt/wind_quota.jsonl")
 ).expanduser()
+#: 跑 ``cli.mjs`` 的 node。**R31：默认的 "node" 在这台机器上根本不在 PATH 里**
+#: （node 装在 nvm 下 ``~/.nvm/versions/node/v22.23.2/bin/node``，而 systemd 给
+#: 服务的 PATH 是 ``/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin``）。
+#: 所以线上要用 ``CPT_WIND_NODE`` 指到绝对路径 —— 拼 PATH 不可靠，nvm 会换版本。
+DEFAULT_NODE: Final[str] = os.getenv("CPT_WIND_NODE", "node")
 DEFAULT_TIMEOUT_SECONDS: Final[float] = 90.0
 DAILY_INTERVAL_MS: Final[int] = 86_400_000
 #: 后复权（与 CPT 本地库口径一致）。0=前复权 1=后复权 2=不复权。
@@ -160,6 +186,7 @@ class WindSourceClient:
         cli_script: ``cli.mjs`` 路径。
         config_path: 含 ``WIND_API_KEY`` 的配置文件。
         ledger_path: 配额台账（JSONL）；``None`` 关闭记账。
+        node: 跑 CLI 的 node（裸名走 PATH 查找，也可给绝对路径）。
         timeout: 单次调用超时（秒）。
         runner: 注入式执行器，测试用。
     """
@@ -170,12 +197,14 @@ class WindSourceClient:
         cli_script: Path | None = None,
         config_path: Path | None = None,
         ledger_path: Path | None = None,
+        node: str | None = None,
         timeout: float = DEFAULT_TIMEOUT_SECONDS,
         runner: Runner | None = None,
     ) -> None:
         self._cli_script = Path(cli_script) if cli_script is not None else DEFAULT_CLI_SCRIPT
         self._config_path = Path(config_path) if config_path is not None else DEFAULT_CONFIG_PATH
         self._ledger_path = Path(ledger_path) if ledger_path is not None else DEFAULT_LEDGER_PATH
+        self._node = node if node is not None else DEFAULT_NODE
         self._timeout = timeout
         self._runner: Runner = runner if runner is not None else _default_runner
         self._calls = 0
@@ -185,12 +214,28 @@ class WindSourceClient:
         """本实例已发起的调用次数（含失败）—— 测试与配额核对用。"""
         return self._calls
 
+    def _resolve_node(self) -> str | None:
+        """把 :attr:`_node` 解析成可执行路径；解析不到返回 ``None``。
+
+        给的是裸名（无目录分隔符）就当命令名查 PATH；给了路径就当路径，
+        **不要求可执行**（测试注入假 node 文件时才能过）。
+        """
+        if Path(self._node).name == self._node:
+            return shutil.which(self._node)
+        return self._node if Path(self._node).is_file() else None
+
     def availability(self) -> tuple[bool, str]:
         """``(是否可用, 原因)``；不联网。"""
         if not self._cli_script.is_file():
             return False, f"wind_cli_missing:{self._cli_script}"
         if _read_api_key(self._config_path) is None:
             return False, f"wind_api_key_missing:{self._config_path}"
+        # R31：这一条以前**不存在**，于是 availability() 在「CLI 文件在、密钥在，
+        # 但 node 不在 PATH」时返回 (True, "") —— 一个可证伪的假承诺。真机后果：
+        # 线上服务（systemd PATH 无 node）每次 Wind 调用都死在 spawn 上，而体检
+        # 报「可用」。**要判断能不能跑，就得把真正要执行的东西也查一遍。**
+        if self._resolve_node() is None:
+            return False, f"wind_node_missing:{self._node}"
         return True, ""
 
     def call(
@@ -213,7 +258,7 @@ class WindSourceClient:
             raise WindUnavailableError(reason)
 
         argv = [
-            "node",
+            self._resolve_node() or self._node,
             str(self._cli_script),
             "call",
             server_type,
