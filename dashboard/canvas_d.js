@@ -88,8 +88,13 @@
    * 在能看见里面之前，没人知道是 plotly 没加载、是 newPlot 抛了、
    * 还是被 Basic Auth 挡了。现在这三种会给出三种不同的文案。
    */
+  // ⚠️ 这里**不能**再给 window.__cptPhase 赋值 —— 它由 shell() 在本段之前
+  // 设成 placeholder / report / unavailable。曾经这里多了一句
+  // `window.__cptPhase=null;`（编辑时留下的残渣），把所有消息的 phase 抹成
+  // null，父页的 `phase !== "report"` 过滤就把它们**全丢了** —— 表现为
+  // 「诊断框一个字都没有」，看起来像 iframe 根本没上报。
   const DIAG_SCRIPT =
-    "window.__cptPhase=" + "null;window.addEventListener('error',function(e){" +
+    "window.addEventListener('error',function(e){" +
     "parent.postMessage({__cptD:1,kind:'error',phase:window.__cptPhase," +
     "msg:String((e.error&&e.error.message)||e.message||e.type)},'*');});" +
     "window.addEventListener('unhandledrejection',function(e){" +
@@ -234,6 +239,9 @@
     const token = `${Date.now()}-${Math.random()}`;
     node.dataset.canvasToken = token;
     node.dataset.canvasReady = "false";
+    // 重绘计数：用来判断「plotly 还没下载完画布就重绘了」这类时序问题。
+    // 每次 draw 都新建 iframe + 重新拉 1.17MB vendor，这个数会涨得很快。
+    node.dataset.canvasRenders = String(Number(node.dataset.canvasRenders || 0) + 1);
 
     const frame = buildFrame(
       node,
@@ -241,10 +249,13 @@
     );
 
     // iframe 的诊断回传（跨 origin 允许，是不透明 origin 下唯一的可观测通道）
-    const onDiag = (event) => {
-      if (node.dataset.canvasToken !== token) return;
-      reportDiag(node, event.data);
-    };
+    //
+    // ⚠️ **刻意不做 token 守卫**：token 守卫是为了不把「上一次重绘的 load 事件」
+    // 当成本次的。但 vendor 脚本的 onload 往往在**下一次重绘之后**才到达（1.17MB
+    // plotly 要下载几秒，而画布 30s 轮询 + 任何缩放/重绘都会换 token）——
+    // 加了守卫，诊断就永远收不到消息，表现为「诊断框一个字都没有」，
+    // 看起来像 iframe 根本没上报。诊断信息晚到一点没关系，宁可旧一点也要有。
+    const onDiag = (event) => reportDiag(node, event.data);
     window.addEventListener("message", onDiag);
 
     // srcdoc 导航是**异步**的，所以「报告真的画出来了」只能听 load 事件。
