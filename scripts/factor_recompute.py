@@ -1,4 +1,4 @@
-"""按 Wind 公司行动**重算**后复权因子（R37）。
+"""按公司行动**重算**后复权因子（R37 落地；R39 起默认源是东财）。
 
 ## 为什么要有这个脚本
 
@@ -21,18 +21,38 @@ R36 实测的后果（全部真机量过）：
 
     f = Π_{除权日 e}  (1 + 送转比例_e) / (1 − 每股派息_e / 除权前收盘_e)
 
-Wind 的 ``get_stock_events`` 给的就是这三样（除权除息日 / 每股派息 / 送转比例）。
+这三样由 ``--source`` 选的数据源提供（东财 / Wind），见
+:class:`_EastmoneySource` 与 :class:`_WindSource` 的说明。
+
+## 数据源（R39 起默认东财）
+
+| 源 | 说明 |
+|---|---|
+| **东财**（默认） | ``RPT_SHAREBONUS_DET``，免费、从大阪直连 200、**无额度** |
+| Wind | ``get_stock_events``，要积分 —— 实测 24/2197 只就撞「账户积分余额不足」，
+  只留作交叉校验（``--source wind``） |
+
+⚠️ 东财有两个单位陷阱（都在 ``cpt/adapters/eastmoney_actions.py`` 注释里）：
+``PRETAX_BONUS_RMB`` 是**每 10 股**；``BONUS_IT_RATIO`` 已是**送+转总数**，
+不能再和 ``IT_RATIO`` 相加（R41 曾因此把因子算大一倍）。
 
 ## 安全边界（这个脚本刻意做不到的那几件事）
 
 - **绝不写** ``asel.ref_adjust_factor``（生产表）—— 只写暂存表
   ``asel.ref_adjust_factor_v2``；
 - **绝不自动切换** —— 切换是人工决定（看报告 → 决定）；
-- **每天有调用上限**（``--max-calls``），撞到 ``RATE_LIMIT_ERROR`` / 通道不可用
-  **立即停**并落盘进度 —— 额度按天切，所以这是分几天跑完的机制；
+- **单轮有处理上限**（``--max-calls``，默认 6000）。⚠️ R42：默认源是东财、
+  **没有额度**，所以它现在只是「别让一轮跑太久」的时间预算（全集 5223 只
+  约 87 分钟），不是「分几天跑完」的机制。用 ``--source wind`` 时它才重新
+  变成真正的硬边界（Wind 的 ``RATE_LIMIT_ERROR``）；
+- **通道不可用会立即停**并落盘进度（东财侧=接口不可达，Wind 侧=额度/通道）；
 - **可断点续跑**（``~/.cache/cpt/factor_recompute_state.json``）；
-- **优先跑正在被看的票**（自选 → 热门池/策略源 → 其余）：额度只够跑一部分时，
-  先修用户眼前会看的那批；
+- **候选集与优先级由 ``--scope`` 决定**（R42）。默认 ``placeholder`` =
+  **从没算过的票优先**（``source IS NULL``），其次自选、热门池 —— 理由是
+  占位票的因子恒为 1.0，后复权价 == 不复权价，每个除权日的价格跳空都被
+  当成**真实下跌**喂给缠论。⚠️ 此前这里写的是「自选 → 热门池 → 其余」，
+  而候选集是 ``{source IS NOT NULL}`` —— **只重算已经有真值的那批**，
+  占位票一只都碰不到，声明要修的问题和实际在做的事对不上；
 - 单只票失败只记账，不中断整轮。
 
 ## 用法
@@ -40,8 +60,11 @@ Wind 的 ``get_stock_events`` 给的就是这三样（除权除息日 / 每股�
     # 看看进度
     .venv/bin/python scripts/factor_recompute.py --report
 
-    # 今天跑一批（默认 80 次调用上限；额度不够会自动提前停）
+    # 跑一轮（默认 scope=placeholder，即优先补从没算过的票）
     .venv/bin/python scripts/factor_recompute.py
+
+    # 扩到所有有 bar 的票（3098 -> 5223 只）
+    .venv/bin/python scripts/factor_recompute.py --scope all
 
     # 调试单只（不写暂存表）
     .venv/bin/python scripts/factor_recompute.py --only 000001 --dry-run

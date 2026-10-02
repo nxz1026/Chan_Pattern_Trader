@@ -261,6 +261,54 @@ DELETE FROM public.cpt_dashboard_run
 部署与健康检查脚本走 `http://127.0.0.1:8010/...`（不经 nginx），所以加认证
 **不会**影响自动化验证 —— 只需注意别改成走公网 URL。
 
+## cron（用户级 crontab，**R43 补**）
+
+两个每天跑的作业。它们此前**只存在于 oracle 的 `/home/ubuntu/bin/`**、既不在仓里、
+也没写进本文 —— 照本文重建一台机器，这两个作业会静默消失（2026-10-02 实测：
+`run_inspection.py` 从 R38 建好到 R43 之前**从未被调度过**，
+`cpt_run_metric.kind='inspection'` 只有手工验证时那 6 行、相隔 66 秒）。
+
+脚本在 `deploy/cron/`，安装：
+
+```bash
+install -m 755 deploy/cron/run-inspection-daily.sh   /home/ubuntu/bin/
+install -m 755 deploy/cron/factor-recompute-daily.sh /home/ubuntu/bin/
+( crontab -l | grep -v run-inspection-daily.sh; \
+  echo '40 3 * * * /home/ubuntu/bin/run-inspection-daily.sh >> /home/ubuntu/logs/run-inspection.log 2>&1' ) | crontab -
+```
+
+| 时间(UTC) | 作业 | 作用 | 写不写库 |
+|---|---|---|---|
+| 02:20 | `factor-recompute-daily.sh` | 按公司行动重算后复权因子 | **只写暂存表** `asel.ref_adjust_factor_v2` |
+| 03:40 | `run-inspection-daily.sh` | 巡检水位+数据源 → 飞书告警 | 只写巡检结论行 |
+
+刻意错开：A 股快照 timer 在 08:00 UTC。
+
+### ⚠️ cron 必须自己 source env 文件
+
+`CPT_FEISHU_WEBHOOK` 只存在于 `deploy/env/cpt-dashboard.env`（被 gitignore）。
+systemd 那边靠 `EnvironmentFile=`，**cron 没有等价物** —— 忘了 source 的话，
+每天只会往日志里写「未配置」，一条告警也发不出去，而且**不报错**。
+两份脚本开头都有 `set -a; . $ENV_FILE; set +a`。
+
+验证（不打印值）：
+
+```bash
+cd /home/ubuntu/DSH/Chan_Pattern_Trader
+set -a; . deploy/env/cpt-dashboard.env; set +a
+[ -n "$CPT_FEISHU_WEBHOOK" ] && echo "webhook LOADED (${#CPT_FEISHU_WEBHOOK})"
+# -> webhook LOADED (81)
+```
+
+### 巡检的告警判据（读之前要知道它什么时候**不会**叫）
+
+`scripts/run_inspection.py`：首次运行只建基线不发；之后**只在**
+`health` 枚举（`ok`/`degraded`/`failing`）变化、或出现 `failing` 时发。
+
+⚠️ 已知缺陷：crypto 是 30s 轮询，`dataset_hash` **每轮都在变**，于是巡检会
+**长期停在 `degraded`** —— 「状态变化」这条判据因此几乎不会触发。`failing`
+那条路仍然有效，所以仍值得每天跑。
+
 ## `_pkg/` — ⚠️ 混进来的另一个项目，不属于 CPT
 
 `/var/www/cpt-dashboard/_pkg/` 里放的是 **`collector-cn` 采集机**的发布产物

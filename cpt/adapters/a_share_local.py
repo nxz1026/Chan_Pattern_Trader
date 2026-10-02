@@ -1,11 +1,28 @@
 """A 股本地适配器：从 ``public.daily_bar`` × ``asel.ref_adjust_factor`` 读后复权
 OHLC，转为 :class:`~cpt.domain.models.CanonicalBar`。
 
-**只读**，绝不写 DB。因子由 ``scripts/factor_backfill.py`` 单独维护（不在 cpt
-核心依赖里，避免把 akshare/psycopg 等拖进 ``dependencies = []``）。
+**只读**，绝不写 DB。因子由 ``scripts/factor_recompute.py``（R39 起默认东财源，
+写暂存表）或 ``scripts/factor_backfill.py``（按需从腾讯补单只）维护 ——
+两者都不在 cpt 核心依赖里，避免把 akshare/psycopg 等拖进 ``dependencies = []``。
+
+## ⚠️ 当前生产因子表是**坏的**（2026-10-02 实测，R42）
+
+读本模块之前必须知道，否则会把下面 3036 只票的结构结果当成正常的：
+
+- ``asel.ref_adjust_factor`` 里 5222 只票中，**3036 只是占位**（``source IS NULL``，
+  从未计算过；其中 3028 只算出来恰好恒为 1.0）；
+- 另有 **2125 只票的因子会向下跳**（``>0.1%`` 口径）—— 纯后复权因子必须单调不降，
+  所以那一列对它们**不是后复权因子**；2197 只「有真值」的票里 96.7% 中招。
+
+后果很具体：占位票的 ``hfq_factor ≡ 1.0`` ⇒ **``CanonicalBar.open = raw_open``**，
+于是每个除权日的价格跳空被当成**真实下跌**喂给缠论 ⇒ 分型/笔端点位置偏。
+
+重算只写暂存表 ``asel.ref_adjust_factor_v2``，**不碰生产表**（R37 起的纪律），
+切换与否见 ``scripts/factor_report.py`` 的逐票结论。详见
+``docs/known-traps.md`` 与 ``docs/progress-log.md`` R39~R42。
 
 ## 数据流
-- ``public.daily_bar``: ``code`` / ``date`` / OHLC / volume / amount（**不复权**，5,225 只）
+- ``public.daily_bar``: ``code`` / ``date`` / OHLC / volume / amount（**不复权**，5,223 只）
 - ``asel.ref_adjust_factor``: ``(code, trade_date) → hfq_factor``
 - 输出：``CanonicalBar.open = raw_open × factor``，high/low/close 同理；
   ``volume / amount / trade_count / quote_volume`` 保留**不复权**数值（成交量复权
