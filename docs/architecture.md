@@ -54,16 +54,23 @@
 |---|---:|---:|---|
 | `storage/` | 5 | 1,070 | ✅ **已做**（R24 恢复 + 划边界 + CI 门禁） |
 | `llm/` | 7 | 1,092 | ✅ **已做**（R25 从零建 + R28 真机验 + 修 3 个真问题） |
-| `adapters/` | 16 | 4,519 | ⚠️ 只被 R28-1 修 rollback 碰过；**7 个 `dashboard_*` 疑似孤儿**（09-25 审计提出，两轮未动） |
+| `adapters/` | 16 | 4,519 | ⚠️ 只被 R28-1 修 rollback 碰过；**唯一接触外部系统的一层**（Wind / 腾讯 / 交易所 / PG），外部契约会漂移，是测试抓不到的那种 |
 | `application/` | 29 | 4,182 | ⚠️ 只被 R26 / R27-1 碰过；`a_share_snapshot.py` 950 行 / 26 个 except |
-| `domain/` | 16 | 2,894 | ⚠️ 只被 R26 / R28-9 碰过；结构上最干净（纯函数零 IO）但没系统看过 |
-| `web/` | 5 | 2,680 | ❌ **没做过**；`app.py` 1,151 行 / 22 个路由分支（09-25 审计报 CC 94 未处理），且压着中危 M1（watchlist 写接口无鉴权） |
+| `domain/` | 16 | 2,894 | ✅ **已做**（R30：改掉留在源头的错误前提 + 语义契约门禁） |
+| `web/` | 5 | 2,680 | ✅ **已做**（R29：JSON 错误响应统一 + 15 条运行时门禁） |
 | `dashboard/`（前端） | 7 | ~1.6 MB | ⚠️ 只被画布 D 与几个面板碰过 |
 | `engine/` | — | — | 🚫 2026-09-25 整层删除（四个孤儿文件，R24 未恢复） |
 
-**下一层建议做 `web/`**：它不是最破的，却是唯一「外面看不见里面」的层 ——
-改动全经 HTTP 暴露、出问题直接打到用户，而它既没复盘、也压着一条开放的中危项。
-`adapters/` 的孤儿代码是纯清理，不紧急。
+**下一层建议做 `adapters/`**：它是唯一「出去问别人要数据」的层，外部契约（Wind 字段、
+腾讯 K 线格式、PG schema）漂移了不会让任何测试变红 —— 而这正是 R28 反复吃的那类亏
+（记录与现实脱节、优雅降级掩盖缺失）。相比之下 `application/` 内部消化，不紧急。
+
+> ⚠️ **一条已被推翻的旧结论**：`docs/audit/cpt-code-audit-20260930.md` 与 09-25 审计
+> 都写着「14 个 `dashboard_*` 模块无生产导入方」。2026-10-02 用 AST 逐个核对
+> `import` 后确认：**19 个全部有生产引用，孤儿数为 0**。它们在
+> `cpt/application/`（18）与 `cpt/storage/`（1），不是 `adapters/`。R16-5 四画布、
+> R20/R23 runs、R24~R26 陆续把它们接上了，审计结论早已过期。
+> **别照抄审计里的「未接线」清单，先用 AST 复核。**
 
 依赖方向（`.importlinter` 的 `layers` 契约强制，实测依赖图见下）：
 
@@ -216,7 +223,7 @@ cpt/
 ├── application/    用例编排（27 个模块；**不出现 SQL**）
 │   replay.py  export.py  dashboard.py  dashboard_snapshot_v2.py
 │   multi_level.py  a_share_snapshot.py  first_buy_bridge.py  canvas_wbt.py
-│   dashboard_runs.py  dashboard_*.py（13 个面板投影）  _bar_dict.py
+│   dashboard_runs.py  dashboard_*.py（另有 17 个面板投影，全部有生产引用）  _bar_dict.py
 ├── storage/        CPT 自有持久化（R24 恢复；SQL 只许在这里和 adapters）
 │   signal_event_store.py   → public.cpt_signal_event（R21）
 │   dashboard_run_store.py  → public.cpt_dashboard_run（R23）
