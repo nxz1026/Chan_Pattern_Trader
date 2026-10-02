@@ -4514,4 +4514,98 @@ R31 我说「照抄 `run6.sh` 做 `run7.sh` 会挂，因为 linux7 里没有
 权威计数：**844 tests / 13 failures / 0 errors / 29 skipped → 802 passed**，
 13 条全在 `test_web_a_share_routes`（`fcntl` Windows 基线）。文档侧无门禁。
 
+---
+
+## R34 · 前端（静态看板）复盘 —— 三个键名错配 + 一次自己造出来的假漂移 · 2026-10-02 晚
+
+六层里剩下最后两层（前端静态资源、`cpt/__main__`）。前端这一层的风险形状很特别：
+**它没有构建、没有测试、没有部署校验**，全靠「改完 `cp` 过去、刷新页面看一眼」。
+所以本轮先量部署完整性，再核「前端读的键 vs 服务给的键」。
+
+### 一、部署完整性：静态根与仓**逐字节一致**（无漂移）
+
+`/var/www/cpt-dashboard/` 8 个文件 + `vendor/` 5 个，逐个 sha256 与服务器上的仓
+比对：**全部一致**，也没有反向漂移（线上没有仓里没有的文件，`_pkg/` 除外）。
+
+> ⚠️ **一次我自己造出来的假漂移**：我先拿 **Windows 本地检出**（CRLF）比**服务器**
+> （LF），`dashboard.js` 差 4,761 字节、`canvas_b.js` 差 1,198 字节，看着像线上落后。
+> `git ls-files --eol` 说 `dashboard.js: i/lf w/crlf`，而 4,761 **正好等于 CRLF 行数**
+> ⇒ 纯换行差异。**跨机器比文件大小前先统一换行**，否则每次部署检查都在演假警报。
+>
+> 这个坑第二次咬人：我从 Windows `scp` 上线时把 CRLF 版**真的**部署进去了，
+> 静态根与仓当场对不上。现在部署用 `tr -d '\r'` 归一化后再 `install -m 644`。
+
+> ⚠️ 还有一次更基础的看错：我一度以为「`canvas_b.js` 从 6,932 变成了 8,130」，
+> 其实是我**把自己上一条 `ls` 输出的两行读串了**（6932 是 canvas_c.js 那行），
+> 文件 mtime 根本没变。**第四次自纠，而且是最不体面的一次。**
+
+**顺带发现一个真实的坑**：`docs/handoff-20260930-snapshot-batch-and-run-table.md:152`
+给的更新命令是
+
+    sudo cp dashboard/{index.html,dashboard.css,dashboard.js,market_a_share.js} /var/www/cpt-dashboard/
+
+**只有 4 个文件，5 个 `canvas_*.js` 不在里面。** 照这份文档走，R30 刚加的画布 D
+诊断就会静默停在旧版。权威流程在 `deploy/README.md`（那里是对的，含 `canvas_*.js`）；
+已在那份历史交接文档上就地标注指向。
+
+### 二、键名对账：抓到 3 个真错配
+
+做法：把线上 18 个端点的真实 JSON 递归收键（242 个），再从 6 个 JS 文件里抽
+snake_case 属性访问 token（380 个），取差集；**差集先当候选清单**，再逐个看上下文。
+
+差集里绝大多数是 JS/DOM/图表库词汇（`zoom`/`axis`/`candlestick`…），但三个是真错配：
+
+| 位置 | 前端读的 | 服务实际发的 | 后果 |
+|---|---|---|---|
+| `dashboard.js:700` | `snapshot.closeCountdown` | `close_countdown` | 取到 `undefined` → 三个分支全落空 → 掉进 `else if (last)` 显示「距下一根 K 线」，**一个看着挺合理的错标签** |
+| `dashboard.js:723` | `snapshot.dualCompare` | `dual_compare` | `dc.available` 恒 undefined → `dualSection.hidden = true`，**双数据集对比面板永久隐藏**，无报错 |
+| `dashboard.js:1983` | `data.config_version` | `rules_version` | 那一行永远显示「—」，而真正的规则版本号前端**一个字都没读过** |
+
+根因是前端有一层**本地 camelCase 视图模型**（`payload.isClosed = raw.is_closed !== false`
+就是它），而这两处把它**泄漏到了原始 API 对象上** —— 同一个文件别处全用 snake_case
+（`snapshot.level_tree` / `snapshot.watch_metrics` / `market.bar_count`）。
+
+三处已改（`close_countdown` / `dual_compare` / `rules_version`），并归一化换行后部署，
+线上确认生效（704/726/1987 三行）。
+
+### 三、被推翻的三个怀疑
+
+1. **`data_quality.factor_fetch` 服务不发 → 前端面板是死的** → **不是**。
+   `_attach_factor_fetch` 在 `outcome is None` 时直接返回，那个块**只在走按需补因子
+   路径时**才有；前端也有 `isObject(...)` 守卫。是条件数据，不是缺陷。
+2. **`canvas_d.js` 的 `data.aShareCode` 键名不对** → **不是**。它读的是 HTML
+   `dataset`，`data-a-share-code` → `aShareCode` 是规范转义。
+3. **静态根与仓漂移了** → 不是（见 §一，第一次是换行造成的假警报，第二次是我自己
+   部署时引入的真偏离，已归一化修掉）。
+
+### 四、⚠️ **没能验完的部分**（这条比上面三条都重要）
+
+**我没能演示出改前/改后的可见差异。** 真实 Chrome + CDP 起两个代理（旧版 18082 /
+新版 18081，同一套探针），A 股页面：
+
+    ashare_pressed = true   页面确实渲染了（202 个 data-testid，A/B/C/D 四画布都在，
+                            顶栏「市场 A · 标的 600519」）
+    改前: countdown_text="—"  countdown_title=""  dual_hidden=true
+    改后: countdown_text="—"  countdown_title=""  dual_hidden=true
+
+**一模一样。** 而且按代码，改后（键名正确 + `reason=not_a_trade_day`）那个分支**应该**
+给 title 填上「今日非交易日」—— 实测 title **仍然是空**。
+
+所以：**键名错配是机器核对过的事实（两侧都验了），但「改完面板就对了」这句话我不能说**，
+而且还留一个**没解释的观察**：那个倒计时分支在 A 股页面上似乎压根没执行（否则
+title 该有值）。可能的原因是这段渲染属于加密路径、或 A 股快照替换了 `state.snapshot`
+而这段没跟着重跑 —— **没查清，不下结论**。
+
+> 我这轮踩的坑和 R30 同源：**验证手段自己会造出它要检出的现象**。第一版探针的等待
+> 条件是「`countdown_text` 非空」，而它的初始值就是「—」（非空）⇒ 第一次循环就退出，
+> 量到的是**页面还没 fetch 完**的状态。改成「市场已切到 A 股」才量到真实页面。
+> 两次都差点让我把「没测到」当成「没问题」。
+
+### 五、门禁
+
+本节只改前端 1 个文件（`dashboard/dashboard.js`），`cpt/` 未动 ⇒ 沿用 R32 计数
+**844 / 13 → 802 passed**（13 条全在 `test_web_a_share_routes`）。前端无自动化门禁 ——
+**这本身就是这层的结论**：它只能靠人肉核对，所以核对步骤必须写死在文档里。
+
+
 

@@ -153,6 +153,12 @@ CPT 看板在 oracle 上是**两处部署**，只重启服务**不会更新浏�
    并按需补 `vendor/`，再逐个 `diff -q` 核对；**不要 `sudo chmod -R`**——会
    把 `vendor/` 目录执行位打掉（vendor/*.js 全 403），逐文件 `chmod u=rw,go=r` 即可。
 
+   > **2026-10-02（R34）更正**：上面那条 `cp` 的**文件清单不全** —— 漏了 5 个
+   > `canvas_*.js`（含 `canvas_registry.js`）。照它执行，R30 刚加的**画布 D 诊断会
+   > 静默停在旧版**，而页面看起来完全正常。权威流程在 `deploy/README.md`
+   > 「部署静态看板」一节（含 `canvas_*.js`、换行归一化、`install -m 644`）。
+   > 本条命令保留原样以记录当时状态，**别再照抄**。
+
 ### 3.3 `~/.dbconfig` 真实配置（oracle 上）
 
 ```ini

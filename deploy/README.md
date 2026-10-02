@@ -50,6 +50,23 @@ sudo cp dashboard/{index.html,dashboard.css,dashboard.js,canvas_*.js,market_a_sh
 sudo cp -r dashboard/vendor /var/www/cpt-dashboard/
 ```
 
+> ⚠️ **从 Windows 部署必须先归一化换行**（2026-10-02 R34 实测踩了两次）。
+> Windows 检出的 `dashboard.js` 是 **CRLF**，仓里的规范内容与服务器都是 **LF**
+> （`git ls-files --eol` → `i/lf w/crlf`）。不归一化的话：
+>
+> - 静态根与仓永远对不上，之后每次漂移检查都在演假警报（R34 第一次就因此误判
+>   「线上落后 4,761 字节」，而 4,761 正好是 CRLF 行数）；
+> - 反过来，scp 上去的就是 CRLF 版，**真的**把偏离部署进了生产。
+>
+> ```bash
+> # 在开发机上先归一化再 scp，或在服务器上：
+> tr -d '\r' < dashboard.js.new > dashboard.lf.js
+> sudo install -m 644 -o ubuntu -g ubuntu dashboard.lf.js /var/www/cpt-dashboard/dashboard.js
+> ```
+>
+> `install -m 644` 而不是 `cp`：09-29 那 3 次 `run6.sh` 的 403 就是文件被给成
+> 0600 造成的（`error.log`：`open() failed (13: Permission denied)`）。
+
 **权限用 `X`（大写），不要写 `chmod 644 *`**：
 
 ```bash

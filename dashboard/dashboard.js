@@ -697,7 +697,11 @@
     }
     const countdownNode = q("[data-testid=close-countdown]");
     if (countdownNode) {
-      const cc = snapshot.closeCountdown;
+      // R34：这里是 `close_countdown`（snake_case），不是 `closeCountdown`。
+      // 写错的代价特别隐蔽：取到 undefined → 三个分支全落空 → 掉进
+      // `else if (last)` 显示「距下一根 K 线」，**一个看着挺合理的错标签**，
+      // 而服务算好的 available/reason 永远没人读。
+      const cc = snapshot.close_countdown;
       if (cc && cc.available && cc.is_open) {
         const mins = Math.floor(cc.seconds_to_close / 60);
         const secs = cc.seconds_to_close % 60;
@@ -716,7 +720,10 @@
     // 双数据集对比（R21 Phase 6 P2）
     const dualSection = q("[data-testid=dual-compare]");
     if (dualSection) {
-      const dc = snapshot.dualCompare;
+      // R34：同上，服务发的是 `dual_compare`。写错的后果是
+      // `dc.available` 恒为 undefined → 走 else → `dualSection.hidden = true`，
+      // **整个双数据集对比面板永久隐藏**，而且没有任何报错。
+      const dc = snapshot.dual_compare;
       if (dc && dc.available) {
         dualSection.hidden = false;
         setText("[data-testid=dual-cpt-close]", dc.cpt_close ? formatPrice(dc.cpt_close) : "—");
@@ -1973,7 +1980,11 @@
     [
       ["config_hash", data.config_hash],
       ["dataset_hash", data.dataset_hash],
-      ["config_version", data.config_version],
+      // R34：这里原来写的是 `config_version`，而 reproducibility 里**从来没有**
+      // 这个字段（真实键：config_hash / dataset_hash / **rules_version** /
+      // schema_version / engine_version / dataset_scope / …）。于是这一行永远
+      // 显示「—」，而真正的规则版本号 `rules_version` 前端一个字都没读过。
+      ["rules_version", data.rules_version],
       ["schema_version", data.schema_version],
     ].forEach(([key, value]) => {
       const row = document.createElement("div");
