@@ -3935,3 +3935,79 @@ iframe 换成不透明 origin 之后父页读不到里面，于是「图没画�
 - **pytest 权威计数（`--junit-xml`）**：829 tests / 13 failures / 0 errors /
   29 skipped → **787 passed**。13 条全在 `test_web_a_share_routes`（`fcntl` 基线），
   **零新增失败**（本节只动前端与 nginx）。
+
+### 十二、R30 结案：画布 D 的图一直是好的（2026-10-02 上午）
+
+上一节记的「待用户在真浏览器刷新确认」，**用本机真实 Chrome + CDP 验完了**，结论
+出乎意料但很干净。
+
+#### 用真实 Chrome 而不是 headless 的理由
+
+`--headless --dump-dom` 推进**虚拟时间**，不为嵌套 browsing context 的子资源等
+那么久 —— 1.17MB 的 plotly 永远下载不完，我拿到的始终是「快照瞬间」的 DOM。
+换成**非 headless 的真实 Chrome + CDP**（`--remote-debugging-port`，
+WebSocket 握手用标准库手写，环境里没有 websockets/websocket-client）就没有这个
+限制。
+
+#### 实测结果（四次独立运行，结论完全一致）
+
+    ready   = true
+    renders = 1
+    diag    = OK plotly | OK bootstrap.bundle
+    source  = wbt.report.HtmlReportBuilder@0.9.1
+
+`diag` 里**没有任何 error / vendor-fail** —— 即 newPlot 跑完没抛错。截图肉眼确认：
+报告渲染完整（笔 72 / 笔中枢 6 / 走势类型 3），且右下角浮着
+`2026-09-30 16:00:00 UTC O 84,104.80 H 84,462.60 L 84,093.50 C 84,318.30`
+—— **那是 plotly 的 hover 读数，只有图真的画出来才会有**。
+
+#### 于是「有数据没画图」的真实原因
+
+**`[report]` extra 从来没在生产装过**（R28-14 已定位并装上）。用户两次截图分别
+对应：第一次是**装 wbt 之前**（所以只有静态表格、没有图 —— 表格来自 wbt 自带的
+13KB **内联 CSS**，不走网络；而 plotly/bootstrap 走网络、模块都缺）；第二次是
+装上之后。
+
+**不是** Basic Auth 挡住了 iframe 子资源，也**不是** R28-11 的不透明 origin ——
+这两个假设都被实测排除了（`diag` 显示 vendor 两个都 OK）。
+
+#### 最大的坑：`captureBeyondViewport` 自己在造假象
+
+`Page.captureScreenshot({captureBeyondViewport:true})` 会**改视口** → 触发
+`ResizeObserver` → 画布重绘 → 回到占位态「正在拉取可视图 wbt 报告…」。
+
+也就是说：**我截的每一张整页图，都恰好抓到画布重绘中途**，看起来就是「没画图」。
+那个「空白图」很大一部分是**我的截图机制造出来的**，不是产品的问题。
+改成「先滚进视口、再按当前视口截」后，图就在了。
+
+（`data-canvas-renders` 计数就是为了量化这件事加的，结果 `renders = 1~2`，
+说明重绘并不频繁。）
+
+#### 顺带确认：不透明 origin 真的挡住了读
+
+CDP 在父页里试 `iframe.contentDocument`：
+
+    iframe DOM = opaque(不可读)
+
+**R28-11 的安全属性确实生效** —— 逃逸原语从根上不存在，代价是父页看不见里面
+（所以才需要 postMessage 诊断回传）。
+
+#### 教训
+
+**验证手段本身会制造它要检出的现象。** 这一条和 R28 挖到的那些同源：
+
+- 画布 D「一直不可用」两周没人发现 —— 优雅降级掩盖功能缺失
+- chromium 测试恒 skip —— 绿灯来自没跑
+- 这次 `captureBeyondViewport` —— 截图工具自己造出空白图
+
+三次都是「看起来正常 / 看起来坏了」的东西在骗人。判据是：**换一个不依赖该现象
+的观测手段**，比如 runtime 状态 + hover 读数 + vendor 加载事件，而不是「图看起来
+在不在」。
+
+#### 一条仍然留下的真问题
+
+`renders` 计数说明重绘不频繁，**但每次 draw 都新建 iframe + 重拉 1.17MB vendor**
+这件事本身仍然成立。30s 轮询 + 任何缩放/重排都会重来一遍。功能是对的，代价是
+浪费。真要治得让 iframe 只建一次、之后用 `postMessage` 让它自己换内容 ——
+R30 的诊断通道已经把路铺好了（跨 origin postMessage 可用），但那是独立的优化，
+不在本轮范围。
