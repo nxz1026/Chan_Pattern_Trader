@@ -43,6 +43,20 @@
     frame.className = "cpt-canvas-d-frame";
     frame.setAttribute("data-testid", "canvas-d-frame");
     frame.setAttribute("title", "wbt 结构报告");
+    // R28-5（审计 M3）信任边界：
+    //
+    // `allow-same-origin` + `allow-scripts` 是**已知可逃逸**的组合 —— frame 内的
+    // 脚本可以 `window.frameElement.removeAttribute("sandbox")` 再重载，从而拿到
+    // 父页面的同源权限。所以 iframe 的内容必须是**完全可信的服务端产物**。
+    //
+    // 实测（2026-10-02）服务端侧只有一个外部值会进 HTML（`market.symbol`），
+    // 且两条入口都拦得住（A 股走 normalize_code，线上实测恶意 code 回 400），
+    // 另有 `html.escape` 纵深防御 + 回归测试钉住。**当前无可利用路径。**
+    //
+    // 为什么两个 flag 都留着：去掉 `allow-scripts` → plotly 不跑，画布 D 废；
+    // 去掉 `allow-same-origin` → 父页读不到 contentDocument，四画布计数一致性
+    // 断言全废。要真正收敛这个边界得换 null origin 方案（独立静态根），那是
+    // 架构决策，已挂账。
     frame.setAttribute("sandbox", "allow-same-origin allow-scripts");
     node.appendChild(frame);
     const doc = frame.contentDocument;

@@ -34,6 +34,7 @@ bootstrap 更是如此。直接注入主页面会打乱现有 CPT 看板（R12 �
 
 from __future__ import annotations
 
+import html
 import re
 from collections.abc import Mapping, Sequence
 from typing import Any, Final
@@ -347,6 +348,17 @@ def build_canvas_d_payload(
     market = snapshot.get("market") or {}
     symbol = str(market.get("symbol") or "—")
     kind = str(market.get("kind") or "—")
+    # M3（信任边界）：``symbol`` 是**唯一**被拼进 HTML 的外部值。实测当前两条
+    # 入口都拦得住 —— A 股走 ``normalize_code``（恶意 code 回 400 invalid_code，
+    # 线上实测过），加密走 provider 自己配置的 symbol。所以今天**没有**可利用
+    # 路径，M3 是「边界隐式且无人看守」而不是「有 XSS」。
+    #
+    # 这里补转义是**纵深防御**：现在靠上游校验兜着，而上游哪天放宽了格式
+    # （比如支持更多市场代码），这个 f-string 就会静默变成注入点 —— 而且它落进
+    # 的是一个 ``sandbox="allow-same-origin allow-scripts"`` 的 iframe，那组合
+    # 允许 frame 内脚本 ``frameElement.removeAttribute('sandbox')`` 后重载，
+    # 等于拿到父页面的同源权限。转义之后，即便上游失守也只会显示成字面文本。
+    safe_symbol = html.escape(symbol, quote=True)
     window_label = (
         "全部"
         if window is None
@@ -354,9 +366,9 @@ def build_canvas_d_payload(
         f"{datetime.fromtimestamp(window[1] / 1000, tz=UTC):%Y-%m-%d}"
     )
 
-    builder = wbt.report.HtmlReportBuilder(title=f"CPT 结构报告 · {symbol}", theme="light")
+    builder = wbt.report.HtmlReportBuilder(title=f"CPT 结构报告 · {safe_symbol}", theme="light")
     builder.add_header(
-        {"市场": kind, "代码": symbol, "可视窗口": window_label},
+        {"市场": html.escape(kind, quote=True), "代码": safe_symbol, "可视窗口": window_label},
         subtitle=(
             "由 wbt HtmlReportBuilder 渲染的报告外壳"
             "（CDN 外链已在 CPT 侧剥离，改注入本地 vendor 资产）"

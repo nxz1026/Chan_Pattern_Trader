@@ -3331,3 +3331,84 @@ R28-3 面板做完，真打一次 LLM 调用验链路，**当场撞上一个真 
 level 与分钟无关」（最省，但等于承认标签无意义）、或者换掉 level 字段。
 这是产品/建模口径的决策，不是 bug 修复，交给 owner。记在这里免得下一个人
 看到「5 分钟」的 A 股解释时以为模型在胡说。
+
+### 五、R28-5：审计 M3 勘察 —— 结论是「边界隐式」，不是「有 XSS」
+
+M3（canvas iframe 信任边界，基线 S1）从 09-30 挂到现在。本轮先勘察，**没有直接
+改架构**，因为勘察结论推翻了处置的前提。
+
+#### 勘察过程与结论
+
+**注入面到底有多大？** 把 `build_canvas_d_payload` 里所有进 HTML 的值列了一遍：
+
+- `builder = HtmlReportBuilder(title=f"CPT 结构报告 · {symbol}")` —— **全文唯一的
+  f-string 插值点**
+- 其余 `add_header` / `add_metrics` / `add_chart_tab` / `add_table` / `add_footer`
+  传进去的全是字面量或纯数值（时间戳格式化出来的日期、计数、plotly figure）
+
+`snapshot["market"]` 里其实还有一个 `name` 字段（A 股证券名，来自
+`asel.security_master` —— **真正外部不可信的那个**），但 `canvas_wbt.py`
+只读 `symbol` 和 `kind`，**没有读 `name`**。所以它不构成注入面。
+
+**`symbol` 能否被外部控制？** 两条入口都拦得住：
+
+- A 股：`a_share_routes._normalize` → `normalize_code`。**线上实测**：
+  `?code=<script>alert(1)</script>` → **400 invalid_code**；
+- 加密：provider 自己配置的 symbol，不来自任何请求参数。
+
+**所以：当前没有可利用的注入路径。** M3 的性质是「**边界隐式、无人看守**」，
+不是「有 XSS」。
+
+#### 那它仍然值得管
+
+`canvas_d.js` 建 iframe 用的是 `sandbox="allow-same-origin allow-scripts"`。
+这个组合下 frame 内的脚本可以
+`window.frameElement.removeAttribute("sandbox")` 再重载，从而拿到父页面的
+**同源权限** —— **逃逸原语今天就存在**，只是没有攻击者可控的输入喂给它。
+
+而**两个 flag 都是承重的**：
+
+- 去掉 `allow-scripts` → plotly 不跑，画布 D 废；
+- 去掉 `allow-same-origin` → 父页读不到 `contentDocument`，
+  四画布计数一致性断言全废。
+
+所以「收紧 sandbox」不是免费的：那是**架构决策**（要真正收敛得换 null origin
+方案，比如给报告一个独立静态根），不是 bug 修复。**已挂账，交给 owner。**
+
+#### 本轮做的是无争议的那一半
+
+把隐式边界变成**被强制**的：
+
+1. `symbol` / `kind` 进 HTML 前 `html.escape(..., quote=True)`。这是**纵深防御** ——
+   现在靠上游 `normalize_code` 兜着，而上游哪天放宽格式（支持更多市场代码之类），
+   这个 f-string 就会静默变成注入点，且落进的是那个可逃逸的 iframe。转义之后，
+   即便上游失守也只显示成字面文本。
+   （正常值不受影响：6 位数字代码 / `BTCUSDT` / `—` 转义后不变，有测试钉住。）
+2. `canvas_d.js` 里把逃逸原语与「两个 flag 为什么都留着」写进注释 ——
+   防止下一个人顺手删一个以为是在做安全加固。
+3. 回归测试 8 条：源码级守卫（title 那行必须用 `safe_symbol`，有人改回去立刻红）
+   + 运行时端到端（构造 `market.symbol` 带 payload 的 snapshot，**绕过上游校验**，
+   验证输出 HTML 不含可执行标签）+ sandbox 组合的现状钉住。
+
+红绿对照：把转义撤掉后源码守卫与运行时两条立刻红。
+
+一处自纠：写运行时那条时给了空 `candles`，被
+`no_candles_in_window` 分支提前降级 —— 测试根本没走到 title 构造。补了 K 线；
+又发现本机没装 `plotly`（可选依赖，CI 也不装），补了 figure 桩。
+
+#### 还没做的（需 owner 决策）
+
+给画布 D 报告一个 **null origin 的独立静态根**，从根上消掉同源逃逸面。代价是父页
+拿不到 `contentDocument`，四画布一致性断言要改成别的做法（比如让服务端把
+`counts` 提到 JSON 字段里，客户端不再读 iframe DOM —— 实际上 `canvas_d.js`
+已经在这么做了，`data-canvas-counts` 用的是服务端返回的 `counts`）。
+所以这条路可能比看起来便宜，但需要先确认审计脚本对 `contentDocument` 的依赖有多深。
+
+
+#### 门禁
+
+- 7 条全绿（mypy 4 条仍是 cntl Windows-only 基线）；
+ode --check 两个 js 文件通过
+- **pytest 权威计数（--junit-xml）**：789 tests / 13 failures / 0 errors /
+  31 skipped → **745 passed**。13 条全在 	est_web_a_share_routes（cntl 基线），
+  **零新增失败**。
