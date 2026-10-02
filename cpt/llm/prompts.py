@@ -15,7 +15,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-__all__ = ["PURPOSE_EXPLAIN", "explain_request", "render_structure_payload"]
+from cpt.domain.levels import level_label, level_table_for
+
+__all__ = ["PURPOSE_EXPLAIN", "explain_request", "level_label", "render_structure_payload"]
 
 #: 用例标识，会落进审计表的 ``purpose`` 列
 PURPOSE_EXPLAIN = "explain_structure"
@@ -28,7 +30,12 @@ _SYSTEM_EXPLAIN = """你是一个缠中说禅（缠论）结构分析助手，�
    这类开场白，直接给结论。
 3. 你**只解释**，不做判断：不要给买卖建议、不要预测涨跌、不要说「建议买入/卖出」。
 4. 不确定的地方明说「这一点从给出的结构无法判断」，不要编。
-5. 全文控制在 5 段以内。"""
+5. 全文控制在 5 段以内。
+6. **级别单位按市场而异，务必照抄输入里的「本级标签」，不要自己把 level 数字
+   换算成时间。** 具体地：输入市场为 `a_share` 时，数据源是**日线**，
+   level=5 的含义是「日线级别」，**不是**「5 分钟级别」；输入市场为 `crypto`
+   时 level 的单位才是分钟。写错级别单位会产出一条听起来专业、实则完全错误的
+   解释，比说「不知道」有害得多。"""
 
 
 def render_structure_payload(
@@ -42,11 +49,29 @@ def render_structure_payload(
     """把一条结构渲染成给模型看的紧凑文本。
 
     直接喂整个 snapshot 太大（几十万 token 的 candles），所以只挑**结构对象**。
+
+    ## 级别标签必须一起给（R28-9）
+
+    ``structure`` 里的 ``level`` 是**裸数字**，而它的单位**按市场而异**：
+    加密侧是分钟数，A 股侧是相对层级编号（数据源是日线）。模型看到裸 ``5``
+    只能按「分钟」猜 —— 实测它确实猜了，正文写「5 分钟级别的一笔」。
+
+    所以这里把 ``级别说明`` 整张表附上，并在结构里补一个 ``本级标签``，
+    让模型**照抄标签而不是自己换算单位**。
     """
+    table = level_table_for(market)
+    enriched = dict(structure)
+    if "level" in structure:
+        enriched["本级标签"] = level_label(market, structure.get("level"))
+
     payload: dict[str, Any] = {
         "标的": f"{code} {name}".strip(),
         "市场": market,
-        "结构": structure,
+        "级别说明": {
+            "重要": "level 的单位按市场而异，**不要**一律当成分钟数",
+            "级别表": {str(key): spec.as_dict() for key, spec in table.items()},
+        },
+        "结构": enriched,
     }
     if rules:
         payload["规则口径"] = rules

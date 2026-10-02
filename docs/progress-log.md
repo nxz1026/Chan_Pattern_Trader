@@ -3470,3 +3470,61 @@ per-user，以及 Edge 三个位置）与 macOS/Linux 原有路径。
 - **pytest 权威计数（`--junit-xml`）**：789 tests / 13 failures / 0 errors /
   29 skipped → **747 passed**。13 条全在 `test_web_a_share_routes`（`fcntl` 基线），
   **零新增失败**。
+
+### 七、R28-9：按市场的级别标签表（A 股 level 不再被讲成「5 分钟」）
+
+#### 问题
+
+R28-4 部署复验时发现：给 A 股结构 `level=5`，LLM 解释正文写的是
+
+    该结构为深物业A在**5 分钟级别**（level=5）的一笔向上运动
+
+**模型没胡说** —— `RulesConfig.levels = (5, 30)` 的 docstring 明写「级别链，元素为
+**分钟**级别」，而 A 股喂的是 `daily_bar` 日线（`INTERVAL_MS = 24*3600*1000`），
+却复用了同一份配置。问题在上游的**标签**。
+
+一条听起来很专业、实则完全错误的解释，比「不知道」有害得多 —— 用户会拿它做判断。
+
+#### 为什么只修标签、不重编 level
+
+level 的**计算**含义（哪个相对层级的结构）在两个市场里其实是同一套；对不上的是
+**展示单位**。重编 A 股的 level 数字要动全链路计算口径，而修展示标签只改提示词
++ 一张表 —— 便宜得多，风险小得多。
+
+#### 做了什么
+
+新增 `cpt/domain/levels.py`：按市场给每个 level 一个**人类可读标签**。
+
+- **加密**：`5 → 5 分钟级别`、`30 → 30 分钟级别`（`minutes` 字段带真值）
+- **A 股**：`5 → 日线级别`（**没有** `minutes` 字段 —— 日线不是「1440 分钟级别」
+  那种换算说法，说「日线」才准确）；`30 → 日线之上的高级别` 且标 **`produced: False`**
+  —— A 股侧当前只产出 level 5，**如实说未启用**而不是编一个「30 分钟」，因为后者
+  会制造第二个错误（模型会拿一个不存在的级别讲内容）
+- **未知市场**：回落成「未标注级别（level=N）」，**绝不**默认按分钟解释 ——
+  猜错单位比不回答更糟
+
+接线（`cpt/llm/prompts.py`）：
+
+1. `render_structure_payload` 附带 `级别说明` 整张表 + 一句「level 的单位按市场而异，
+   **不要**一律当成分钟数」；
+2. 结构里补 `本级标签` 字段，让模型**照抄标签**而不是自己换算；
+3. system prompt 加第 6 条硬规则：明确写出「`a_share` 时 level=5 是日线级别，
+   不是 5 分钟级别」，并说明写错的后果。
+
+只给表**不够** —— 模型仍可能照数字推，所以 prompt 那条规则是必须的。
+
+#### 测试 15 条
+
+核心是 `test_a_share_level_5_is_daily_not_five_minutes`（断言标签里**不含「分钟」**
+三个字）与 `test_crypto_level_5_stays_five_minutes`（**不能被一起改掉**）。另有：
+A 股 level 30 必须标未启用、未知市场不许猜、渲染**不污染入参**（snapshot 里的
+对象）、两个表必须是不同对象（共用会静默把 A 股标签带进加密侧）。
+
+#### 门禁
+
+- 7 条全绿（mypy 4 条仍是 `fcntl` Windows-only 基线）。中途 mypy 一度涨到 10 条
+  —— `MappingProxyType` 缺类型参数，补 `Final[MappingProxyType[int, LevelSpec]]`
+  与 `_EMPTY` 常量后回到 4 条。
+- **pytest 权威计数（`--junit-xml`）**：804 tests / 13 failures / 0 errors /
+  29 skipped → **762 passed**。13 条全在 `test_web_a_share_routes`（`fcntl` 基线），
+  **零新增失败**。
