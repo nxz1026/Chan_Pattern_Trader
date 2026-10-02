@@ -280,9 +280,53 @@ curl -sSk https://<host>/cpt/_pkg/run5.sh | bash
 **无人引用的 6 个**：`collector-cn-dd2b9b8.tgz`（base）、`linux1` ~ `linux4`、
 以及 `linux7`。合计约 380 KB。
 
-⚠️ `linux7` 的时间戳（08:32）**比 `linux6`（07:35）新，却没有对应的 run 脚本** ——
-说明有人发了包但没接线。所以它到底是「发完忘了脚本」还是「脚本在别处」，**光看这台
-机器判断不了**。这条尤其不能凭猜测删。
+### `linux7` 归属：已定论（2026-10-02，R31）
+
+上一版这里写着「光看这台机器判断不了」。**现在判断得了**，三条证据：
+
+**① `linux7` 不是重复包，是一版更新的构建（2026-09-29 08:32 vs linux6 07:35）。**
+解包对比，它相对 linux6 多了这一行：
+
+```python
+# landlock-run 沙箱把 umask 设成 0077 → 新批次文件 0600（oracle 端 league 属主不可读）→ ingest 阻塞
+# 显式设回 022，让 out/ 下 jsonl 落成 0644（与 tar --mode=0644 双保险）
+os.umask(0o022)
+```
+
+同时它的**内部布局也变了**：扁平结构（没有 `collector-cn/` 这一层前缀）、多了
+`doc/`、少了 `scripts/collect_batch.bat` 与 `scripts/collector_linux.sh`；包里
+自带的 `scripts/run5.sh` 是**指向 linux5 包的陈旧残留**。
+
+**② 这条安装通道从来没被用过。** nginx 访问日志连续覆盖 2026-09-18 → 10-02
+（14 个轮转文件全查了），`_pkg` 命中数 **0** —— `run5.sh` / `run6.sh` / 三个 tgz
+**一次都没被下载过**。采集机实际更新走的是别的途径（`incoming/cn-collector/`
+在今天 03:40 还在持续收到推送）。所以「linux7 没有 run 脚本」今天没有任何代价。
+
+**③ 它修的那个症状线上并没有发生。** `/srv/league-staging/incoming/cn-collector/`
+下 6,573 个文件里，权限分布是 644×3,485 / 664×1,908 / 666×1,179，**0600 只有 1 个**
+—— `_probe_tencent.txt`（35 字节，属主就是 `league` 自己，`sudo -u league test -r`
+读得到）。真实数据文件全是 644，ingest 正常。`os.umask(0o022)` 是**加固**，不是在线抢修。
+
+### 结论与处置
+
+**三个包全部保留，一个都不删。** linux5/linux6 被 `run*.sh` 引用（老规矩第 2 条：
+删了就是打断一键安装链路）；linux7 虽然无人引用，但它是**唯一带 umask 修复的
+版本**，按「无引用就删」处理会丢掉别人已经写好的修复。
+
+**并且不要照抄 run6.sh 做一份 run7.sh** —— 那个脚本第 6 步是
+`bash scripts/collector_linux.sh offer`，而 **linux7 里没有这个文件**，照抄必挂。
+
+剩下的选择是 owner 的，两条都合理：
+
+- **退役这条通道**：既然 0 下载，先确认采集机的真实更新途径，再把 3 个 tgz +
+  2 个 run 脚本一起清掉（更根本：给 `collector-cn` 独立静态根，别寄居在
+  CPT 的看板目录里）；
+- **补齐它**：由 collector-cn 的主人按 **linux7 自己的布局**写 run 脚本
+  （扁平结构、无 `collector_linux.sh`），而不是照抄 run6.sh。
+
+> 本轮**没有执行任何删除**。上述判断全部来自只读核对：
+> `ls --time-style=full-iso` + `sha256sum` + `tar tzvf` + `diff -r` 解包对比
+> + nginx 轮转日志 + `find -printf '%m'` 权限分布。
 
 ### 清理规矩（待 owner 拍板后执行）
 

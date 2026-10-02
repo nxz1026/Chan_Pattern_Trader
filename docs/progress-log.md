@@ -4072,7 +4072,7 @@ R30 的诊断通道已经把路铺好了（跨 origin postMessage 可用），�
 `wind_node_missing:<名字>`。测试也从「碰运气看跑测试的机器上有没有 node」改成
 显式注入。
 
-#### b. 线上从来就没跑起来过 —— 代码已留好开关，**待 owner 决定是否打开**
+#### b. 线上从来就没跑起来过 —— 代码已留好开关，owner 当场决定打开
 
 服务的 `PATH` 是 systemd 给的 `/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin`，
 **里面没有 node**；node 只在 `~/.nvm/versions/node/v22.23.2/bin/`。所以
@@ -4088,10 +4088,10 @@ R30 的诊断通道已经把路铺好了（跨 origin postMessage 可用），�
 修法是留一个显式开关而不是猜 PATH（nvm 会换版本）：在
 `deploy/env/cpt-dashboard.env` 里加一行
 
-    CPT_WIND_NODE=/home/ubuntu/.nvm/versions/node/v22.23.2/bin/node
+    CPT_WIND_NODE=/home/ubuntu/.local/bin/node
 
-**这属于部署决定，等 owner 拍板**（它会让线上具备消耗真实额度的能力）。另外实测
-这条通道**本身也不稳**：本轮 3 次 `get_stock_kline` 里 1 次在 90s 上限真超时。
+**owner 当场决定打开**，实测走通（见 §八.1）。另外要记住：这条通道**本身不稳** ——
+本轮 3 次 `get_stock_kline` 里 1 次在 90s 上限真超时。
 
 #### c. Wind 与本地库的「后复权」不是同一个基准 —— 已加基准闸
 
@@ -4193,9 +4193,59 @@ R30 的诊断通道已经把路铺好了（跨 origin postMessage 可用），�
 
 经 nginx 带 auth 头访问同一接口 **http=200**。
 
-### 八、待 owner
+### 八、待 owner 两项的处置（2026-10-02 下午，owner 指示「先做了再继续」）
 
-1. **要不要给服务配 `CPT_WIND_NODE`**（一 env 行，让 Wind 通道在线上真的能跑）——
-   代价是线上具备消耗真实额度的能力，且实测该通道 3 次里超时 1 次。
-2. `_pkg` 的 `linux7` 归属（比 `linux6` 新却无对应 run 脚本，归属存疑）。
+#### 1. Wind 通道已在线上跑通（`CPT_WIND_NODE`）
+
+留开关而不猜 PATH 是对的（nvm 会换版本），但总得有人把线接上。做法：
+
+    ln -sfn ~/.nvm/versions/node/v22.23.2/bin/node ~/.local/bin/node   # 稳定路径
+    # deploy/env/cpt-dashboard.env（0600，gitignore 挡住）
+    CPT_WIND_NODE=/home/ubuntu/.local/bin/node
+
+逐级验证，不跳步：
+
+1. env 改前先 `cp -a` 打时间戳备份（`.bak.1790913046`），追加后权限仍是 `0600`；
+2. 重启后**读 `/proc/<pid>/environ`** 确认变量真的到了进程里（`MainPID=1930153`），
+   顺便再次确认 `PATH` 里依然没有 node；
+3. 用 `env -i` 复刻服务的真实环境跑 `availability()` → `(True, '')`，
+   `_resolve_node()` → `/home/ubuntu/.local/bin/node`；
+4. **走真实接口** `?include_quota=1&refresh=1` 打一次真调用：
+
+       wind  ok  lat=4077.6ms
+       evidence: {"calls": 1, "fields": ["data","error"],
+                  "tool": "get_stock_price_indicators"}
+
+   台账正好 +1 条，且 `pid` 就是服务的新 MainPID ——
+   `ok:true` 从 5 变 6，总条数 128 → 129。**额度消耗 1 次，如实记账。**
+
+顺带说明：台账里现在有 **1 条 `SPAWN_ERROR`**，那是这次修复**之前**的调用留下的
+（node 缺失 → spawn 失败）。留着它是有用的 —— 它记录了「修复前」的真实状态。
+
+⚠️ **仍然要记住的坑**：这条通道**不稳**。本轮 3 次 `get_stock_kline` 里 1 次在
+90s 上限真超时（台账里那条 `duration_ms: 32238` 的成功是另一次）。所以线上
+「Wind 可用」不等于「Wind 稳」。
+
+#### 2. `_pkg` 的 `linux7` 归属：已定论，三条证据
+
+`deploy/README.md` 原来写着「光看这台机器判断不了」——**现在判断得了**：
+
+| 问题 | 证据 | 结论 |
+|---|---|---|
+| linux7 是不是重复包？ | `diff -r` 解包对比：多出 `os.umask(0o022)`，且布局扁平化（无 `collector-cn/` 前缀）、少了 `collect_batch.bat` / `collector_linux.sh` | **不是重复**，是更新的构建（08:32 vs linux6 07:35），且**唯一带 umask 修复** |
+| 没人用 run 脚本会不会出事？ | nginx 轮转日志连续覆盖 09-18 → 10-02（14 个文件），`_pkg` 命中 **0** | **这条通道一次都没被下载过**；采集机走别的途径（`incoming/cn-collector/` 今天 03:40 还在收） |
+| 它修的 bug 还在发生吗？ | `find -printf '%m'`：6,573 个文件里 0600 **只有 1 个**（`_probe_tencent.txt`，35 字节，属主就是 league，`sudo -u league test -r` 读得到） | **没有发生**；真实数据全是 644，ingest 正常。这是**加固**不是抢修 |
+
+**处置：三个包全部保留，一个都不删。** linux5/linux6 被 `run*.sh` 引用；linux7
+虽无人引用，但它是唯一带修复的版本，按「无引用就删」会丢掉别人的修复。
+
+**并且不要照抄 `run6.sh` 做 `run7.sh`** —— 它的第 6 步是
+`bash scripts/collector_linux.sh offer`，**linux7 里没有这个文件**，照抄必挂。
+剩下的两条路留给 owner：退役这条 0 下载的通道（需先确认采集机真实更新途径），
+或由 collector-cn 的主人按 linux7 自己的布局补脚本。
+
+> ⚠️ 顺带更正本节里已经过时的一行：上面 §三.b 写的是「等 owner 拍板」并给了
+> `CPT_WIND_NODE=/home/ubuntu/.nvm/versions/node/v22.23.2/bin/node`。owner 当场
+> 决定打开，且**实际用的是 `~/.local/bin/node` 软链**（不写死 nvm 版本号，
+> 换版本只重指软链）。env 示例文件里记的是软链那条。
 
