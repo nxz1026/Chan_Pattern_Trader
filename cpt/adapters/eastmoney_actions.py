@@ -88,6 +88,58 @@ def _parse_date(value: Any) -> str | None:
     return text[:10].replace("/", "-")
 
 
+#: 东财「查无此数据」的返回码。实测 2026-10-03（真机直连，非二手转述）：
+#:
+#: ==========================  ==========================================
+#: 请求                        响应
+#: ==========================  ==========================================
+#: ``600519``（有分红）         ``success:true, code:0``，``result.data`` 28 行
+#: ``001239``（无分红）         ``success:false, code:9201, "返回数据为空"``
+#: ``999999``（不存在）         ``success:false, code:9201, "返回数据为空"``
+#: 错误的 reportName           ``success:false, code:9501, "报表配置不存在"``
+#: ==========================  ==========================================
+#:
+#: ⚠️ ``9201`` 与 ``9501`` 都是 ``success:false``，但语义**完全相反**：
+#: 前者是「这张表里没有这只票的记录」（正常），后者是「你请求错了」
+#: （配置/结构问题，重试无用）。把两者混为一谈，就会把一次真实的
+#: 接口配置错误静默地当成「这家公司没分过红」而写进暂存表 —— 那是
+#: 比掐停整轮**更糟**的失败，因为它悄无声息地产出错误的因子。
+_NO_DATA_CODE: Final[int] = 9201
+_NO_DATA_MESSAGES: Final[tuple[str, ...]] = ("返回数据为空", "没有数据", "暂无数据")
+
+
+def _is_no_data(payload: dict[str, Any], message: str) -> bool:
+    """这次 ``success:false`` 是否**真的**只是「查无此记录」。
+
+    R44 新增。**刻意保守**：code 与 message 必须同时对上，且 ``result``
+    必须是空的 —— 三者任一不满足就返回 ``False``，让调用方按原样 fatal。
+
+    为什么宁可漏判不可误判：
+
+    - 漏判（真无数据被当成 fatal）= 回到今天的行为：一只票掐停整轮。**吵，但安全。**
+    - 误判（接口故障被当成「没分过红」）= 给一只**确实分过红**的票写一条
+      恒为 1.0 的因子，正是本项目要消灭的那类脏数据，而且**报告里看不出异常**。
+
+    独立判据（2026-10-03 真机）：``success:false`` 既不是限流也不是抖动 ——
+    600519 连打 25 次全部 28 行、零波动；而 001239/001241/688981 稳定返回 9201。
+    另用**独立数据源**（新浪财经 vISSUE_ShareBonus）交叉核对 001239：确有
+    3 条「分红」记录，但方案全是 **「不分配」**（送 0 / 转 0 / 派 0），
+    即从未真正派过红利 —— 与东财 9201 一致。
+    """
+    if payload.get("code") != _NO_DATA_CODE:
+        return False
+    if not any(marker in message for marker in _NO_DATA_MESSAGES):
+        return False
+    # ``result`` 必须也是空的：若哪天东财在 9201 里回了一个**非空** result，
+    # 那它就不是「查无此记录」，按 fatal 处理更安全。
+    result = payload.get("result")
+    if result is None:
+        return True
+    if isinstance(result, dict):
+        return not (result.get("data") or [])
+    return False
+
+
 class EastmoneyActionClient:
     """按 6 位代码取全部公司行动（已过滤为**已实施**）。"""
 
@@ -103,8 +155,17 @@ class EastmoneyActionClient:
     def fetch_actions(self, code: str) -> tuple[CorporateAction, ...]:
         """取该代码的公司行动；**无记录返回空元组**（不抛）。
 
+        「无记录」有两种等价来源，**都必须**走空元组这条路（否则 fatal 会掐停整轮，
+        见 :func:`_is_no_data`）：
+
+        - ``success:true`` 但 ``data`` 为空；
+        - ``success:false`` + ``code:9201`` +「返回数据为空」—— 这家公司
+          **从来没分过红**（含「代码不存在」，两者对本项目等价）。
+
         Raises:
-            EastmoneyActionError: HTTP/网络/JSON 层面的失败（区别于"这家没分红"）。
+            EastmoneyActionError: 响应**结构/语义**层面的失败（非 JSON、字段类型不对、
+                ``code:9501`` 报表配置不存在等）—— 这些重试无用，必须停下来。
+            EastmoneyActionUnavailable: 网络不可达，**值得重试**（是本类的子类）。
         """
         em_code = normalize_code_for_em(code)
         params = {
@@ -141,11 +202,51 @@ class EastmoneyActionClient:
                 f"东财分红接口返回非 JSON（{em_code}）：{str(raw)[:120]}"
             ) from exc
 
-        if payload.get("success") is False:
+        if not isinstance(payload, dict):
             raise EastmoneyActionError(
-                f"东财分红接口返回失败（{em_code}）：{payload.get('message')}"
+                f"东财分红接口返回结构异常（{em_code}）：顶层不是对象（{str(raw)[:120]}）"
             )
-        rows = ((payload.get("result") or {}).get("data")) or []
+
+        if payload.get("success") is False:
+            message = str(payload.get("message") or "")
+            if _is_no_data(payload, message):
+                # ⚠️⚠️ R44 修（2026-10-03）：这是**合法结果**，不是失败。
+                #
+                # 东财对「这只票**从来没有分红记录**」返回的是
+                #     {"version":null,"result":null,"success":false,
+                #      "message":"返回数据为空","code":9201}
+                # 也就是说 **success:false 并不等于「接口坏了」**。原代码在这里
+                # 无差别 raise，于是 :class:`EastmoneyActionError`（fatal）被触发，
+                # ``_EastmoneySource.fatal_errors`` 命中 -> ``process_code`` 直接
+                # 抛出 -> ``main`` 停掉**整轮**。后果实测：一只从没分过红的
+                # 001239 在启动 3 分钟后把 3036 只占位票的任务掐死了。
+                #
+                # 判据不是「success 为假」，而是「**服务端明说查无此数据**」。
+                # 见 :func:`_is_no_data` —— 它要求 code 与 message 同时对上，
+                # 宁可漏判（退回 fatal、旧行为）也不误判（把接口故障当成
+                # 「没分过红」而**静默写进暂存表**）。
+                _LOG.debug(
+                    "%s 东财返回「%s」（code=%s）—— 按「无公司行动」处理",
+                    em_code,
+                    message,
+                    payload.get("code"),
+                )
+                return ()
+            raise EastmoneyActionError(
+                f"东财分红接口返回失败（{em_code}）：{message}"
+            )
+
+        result = payload.get("result")
+        if result is not None and not isinstance(result, dict):
+            raise EastmoneyActionError(
+                f"东财分红接口返回结构异常（{em_code}）：result 不是对象（{str(raw)[:120]}）"
+            )
+        data = (result or {}).get("data")
+        if data is not None and not isinstance(data, list):
+            raise EastmoneyActionError(
+                f"东财分红接口返回结构异常（{em_code}）：data 不是数组（{str(raw)[:120]}）"
+            )
+        rows = data or []
         out: list[CorporateAction] = []
         for row in rows:
             ex = _parse_date(row.get("EX_DIVIDEND_DATE"))
