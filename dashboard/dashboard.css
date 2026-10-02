@@ -1455,6 +1455,26 @@ body[data-runtime-mode="offline"] .chart-canvas::after {
   font-size: var(--font-size-sm);
 }
 
+/* R30-1 画布 D 的诊断回传：iframe 里出错时，父页把它显示出来。
+   定位用（覆盖在 iframe 之上），所以要有底色才读得清。 */
+.cpt-d-diag {
+  position: absolute;
+  left: var(--space-2);
+  bottom: var(--space-2);
+  z-index: 5;
+  max-width: calc(100% - var(--space-4));
+  margin: 0;
+  padding: var(--space-1) var(--space-2);
+  border: var(--border-width) solid var(--color-error);
+  border-radius: var(--radius-sm);
+  background-color: var(--color-bg);
+  color: var(--color-error);
+  font-size: var(--font-size-sm);
+  pointer-events: none;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
 .replay-controls {
   display: flex;
   flex-wrap: wrap;

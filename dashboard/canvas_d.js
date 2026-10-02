@@ -73,11 +73,38 @@
     ".cpt-d-note{font:13px/1.6 system-ui,sans-serif;color:#4a5568;padding:12px;}";
 
   /**
+   * iframe 侧的诊断回传。
+   *
+   * R28-11 把 iframe 换成不透明 origin 之后，父页**读不到里面**了 ——
+   * 于是「图没画出来」这件事在父页上表现为**一片空白、零线索**。
+   * 这正是本仓反复吃过的亏：优雅降级会掩盖功能缺失（画布 D 一直「不可用」
+   * 两周没人发现、chromium 测试恒 skip）。
+   *
+   * 修法不是「想办法让父页看进去」（那等于把刚收掉的同源逃逸面又打开），
+   * 而是让 iframe **主动报告**：`postMessage` 跨 origin 是允许的。
+   *
+   * 它同时回答了一个实际故障：2026-10-02 真机上「有数据但没画图」——
+   * 表格和指标都出来了（那是静态 HTML），只有 plotly 图缺席。
+   * 在能看见里面之前，没人知道是 plotly 没加载、是 newPlot 抛了、
+   * 还是被 Basic Auth 挡了。现在这三种会给出三种不同的文案。
+   */
+  const DIAG_SCRIPT =
+    "window.addEventListener('error',function(e){" +
+    "parent.postMessage({__cptD:1,kind:'error',msg:String((e.error&&e.error.message)||e.message||e.type)},'*');});" +
+    "window.addEventListener('unhandledrejection',function(e){" +
+    "parent.postMessage({__cptD:1,kind:'reject',msg:String(e.reason&&e.reason.message||e.reason)},'*');});" +
+    "window.addEventListener('load',function(){" +
+    "parent.postMessage({__cptD:1,kind:'load',plotly:(typeof Plotly!=='undefined')},'*');});";
+
+  /**
    * 拼一整份 iframe 文档。
    *
    * **plotly 必须排在片段内联脚本之前**：外链 `<script src>` 与内联
    * `<script>` 在同一文档里按文档顺序执行，所以把 plotly / bootstrap 放在
    * `<head>`、片段脚本放在 `</body>` 前就满足依赖。
+   *
+   * ⚠️ **诊断脚本必须排在两个 vendor `<script src>` 之前** —— 否则 plotly
+   * 加载失败抛出的错会在监听器装好之前发生，又变成静默。
    */
   function shell(base, bodyHtml, css, scripts) {
     const inline = (scripts || [])
@@ -95,6 +122,7 @@
       `<link rel="stylesheet" href="${base}bootstrap-icons.css">` +
       `<style>${LOCAL_CSS}</style>` +
       (css ? `<style>${css}</style>` : "") +
+      `<script>${DIAG_SCRIPT}</script>` +
       `<script src="${base}plotly-finance.min.js"></script>` +
       `<script src="${base}bootstrap.bundle.min.js"></script>` +
       "</head><body>" +
@@ -129,6 +157,33 @@
     return frame;
   }
 
+  /**
+   * 收 iframe 的诊断回传，把失败原因显示在**父页**上。
+   *
+   * 为什么父页要知道：R28-11 之后父页读不到 iframe 内部（那正是我们要的
+   * 安全属性），所以「图没画出来」如果不主动上报，就是一片空白 + 零线索。
+   * 这条把它变成「空白 + 一句原因」。
+   *
+   * 只认带 `__cptD` 标记的消息，且不校验 origin —— 因为 srcdoc + sandbox 的
+   * 文档 origin **就是不透明源**（`"null"`），`event.origin` 没有可校验的值。
+   * 这里只读、不写，且消息内容只落到一个 data-* 属性上，不构成提权。
+   */
+  function reportDiag(node, message) {
+    if (!message || message.__cptD !== 1) return;
+    const text = message.kind === "load"
+      ? `iframe 已加载；plotly ${message.plotly ? "已就绪" : "**未就绪**"}`
+      : `${message.kind}: ${message.msg || "(无消息)"}`;
+    node.dataset.canvasDiag = text;
+    let box = q("[data-testid=canvas-d-diag]");
+    if (!box) {
+      box = document.createElement("pre");
+      box.className = "cpt-d-diag";
+      box.dataset.testid = "canvas-d-diag";
+      node.appendChild(box);
+    }
+    box.textContent = text;
+  }
+
   function localCounts(view) {
     return {
       canvas: "D",
@@ -158,6 +213,13 @@
     node.dataset.canvasReady = "false";
 
     const frame = buildFrame(node, shell(base, note("正在请求服务端 wbt 报告…"), "", []));
+
+    // iframe 的诊断回传（跨 origin 允许，是不透明 origin 下唯一的可观测通道）
+    const onDiag = (event) => {
+      if (node.dataset.canvasToken !== token) return;
+      reportDiag(node, event.data);
+    };
+    window.addEventListener("message", onDiag);
 
     // srcdoc 导航是**异步**的，所以「报告真的画出来了」只能听 load 事件。
     // 直接在 fetch 的 then 里置 true 会撒谎 —— 那时 iframe 里还是空壳。
