@@ -129,8 +129,22 @@ def collect(limit: int) -> dict[str, Any]:
             f"  {code}  bars={fp['bar_count']:>4}  frac={len(fp['fractal_ids']):>3} "
             f"bi={len(fp['bi_ids']):>3}  zs={len(fp['zhongshu_ids']):>2}"
         )
-    conn.rollback()  # 只读检查：水位行由正式路径自己提交，这里不回滚别人的
-    return {"generated_at": dt.datetime.now(dt.UTC).isoformat(), "codes": out}
+    # ⚠️ 这里**不是**「只读」：`conn.rollback()` 撤不干净。
+    #
+    # `build_ashare_snapshot` 内部会调 `record_structure_events`，而那个函数
+    # 结尾有 `db.commit()` —— 水位行是在它**之后**才写的，可那次 commit 提前
+    # 把事务边界划走了，于是后面的 rollback 只回滚了最后一段。实测：14 只票
+    # 跑一次，`cpt_run_metric` 多了 50+ 行。
+    #
+    # 所以这里**如实记录**「本次采集会产生水位行」，而不是假装只读。
+    # 这些行是**真实运行**的水位（不是垃圾数据），代价只是表会大一点；
+    # 真要严格只读，得先让 `record_structure_events` 支持「不 commit」。
+    conn.rollback()
+    return {
+        "generated_at": dt.datetime.now(dt.UTC).isoformat(),
+        "note": "采集会经由 record_structure_events 提交结构事件，并留下运行水位行（本脚本非只读）",
+        "codes": out,
+    }
 
 
 def compare(base: dict[str, Any], now: dict[str, Any]) -> list[str]:

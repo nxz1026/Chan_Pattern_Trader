@@ -44,6 +44,8 @@ __all__ = [
     "EASTMONEY_BONUS_URL",
     "DEFAULT_TIMEOUT_SECONDS",
     "EastmoneyActionClient",
+    "EastmoneyActionError",
+    "EastmoneyActionUnavailable",
     "normalize_code_for_em",
 ]
 
@@ -126,7 +128,12 @@ class EastmoneyActionClient:
         try:
             raw = send(urllib.request.Request(url, headers=_HEADERS), self._timeout)  # noqa: S310
         except (urllib.error.URLError, OSError) as exc:
-            raise EastmoneyActionError(f"东财分红接口不可达 {em_code}：{exc}") from exc
+            # ⚠️ 网络不可达与「返回坏数据」是**两件事**，必须分开：
+            # 读超时是**瞬时**的（重试有意义），返回非 JSON 是**确定性**的
+            # （重试只会再拿一次同样的坏数据）。R40 实测：把两者混成同一个
+            # 异常类、且一律当「不重试」，一次 15s 读超时就把 2189 只的
+            # 整轮批次掐停了 —— 而那条其实重试一次就成了。
+            raise EastmoneyActionUnavailable(f"东财分红接口不可达 {em_code}：{exc}") from exc
 
         try:
             payload = json.loads(raw.decode("utf-8", "replace") if isinstance(raw, bytes) else raw)
@@ -163,4 +170,17 @@ class EastmoneyActionClient:
 
 
 class EastmoneyActionError(RuntimeError):
-    """东财分红接口访问/解析失败（与"这家没有分红"是两件事）。"""
+    """东财分红接口**解析**失败（与"这家没有分红"是两件事）。
+
+    这是**确定性**失败：同样的请求再发一次，还是同样的坏数据，
+    所以调用方不该重试。
+    """
+
+
+class EastmoneyActionUnavailable(EastmoneyActionError):
+    """东财分红接口**网络不可达**（读超时 / 连接失败 / DNS 失败）。
+
+    与 :class:`EastmoneyActionError` 的区别就是**该不该重试**：网络故障是
+    瞬时的，隔几秒再试很可能就成了。R40 实测一次 15s 读超时让整轮 2189 只
+    的批次直接停止，而那一次重试本可以拿到数据。
+    """

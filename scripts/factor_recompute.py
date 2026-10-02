@@ -74,6 +74,7 @@ from cpt.adapters.a_share_local import AShareLocalClient  # noqa: E402
 from cpt.adapters.eastmoney_actions import (  # noqa: E402
     EastmoneyActionClient,
     EastmoneyActionError,
+    EastmoneyActionUnavailable,
 )
 from cpt.adapters.wind_source import (  # noqa: E402
     WindQuotaError,
@@ -113,8 +114,12 @@ class _EastmoneySource(_Source):
     """
 
     name = "eastmoney"
+    # 解析类失败是确定性的（再发一次还是同样的坏数据）-> 不重试
     fatal_errors = (EastmoneyActionError,)
-    transient_errors = ()
+    # 网络不可达/读超时是瞬时的 -> 有界重试。
+    # R40 实测：原先把两者混为一谈且一律不重试，一次 15s 读超时就
+    # 把 2189 只的整轮批次掐停了，而那一次重试本可以拿到数据。
+    transient_errors = (EastmoneyActionUnavailable,)
 
     def __init__(self) -> None:
         self._client = EastmoneyActionClient()
@@ -332,14 +337,18 @@ def process_code(
             calls += 1
             last_err = None
             break
-        except source.fatal_errors:
-            raise  # 额度/通道问题：交给 main 立刻停，不重试
-        except source.transient_errors as exc:  # 超时 / 后端错
+        # ⚠️⚠️ 两个 except 的**顺序有语义**：transient 必须写在 fatal 前面。
+        # 东财侧 `EastmoneyActionUnavailable`（网络）是 `EastmoneyActionError`
+        # （解析）的**子类**；fatal 写在前面时，网络故障会被父类分支先吃掉
+        # 并直接 raise，重试**永远不会发生**。R40 注入故障实测到的。
+        except source.transient_errors as exc:  # 超时 / 后端错：值得重试
             calls += 1
             last_err = exc
             if attempt < retries:
                 _LOG.warning("%s 第 %d 次取数失败（%s），重试", code, attempt + 1, exc)
                 time.sleep(3.0 * (attempt + 1))
+        except source.fatal_errors:
+            raise  # 额度/确定性失败：交给 main 立刻停，不重试
     if last_err is not None:
         raise last_err
 
@@ -371,8 +380,26 @@ def process_code(
         # ⚠️ ``steps`` 已升序 ⇒ 要取**最近的那一次**除权（``later[0]``）的累计乘子。
         # 写成 ``later[-1]``（最晚那次）会让每一根 bar 都拿到同一个因子 ——
         # 整个分段结构塌成 2 个取值。是 R37 的形状对账（相对因子中位差 9%）逮到它的。
+        # R40 修 off-by-one：原来取 fmap[later[0]]，是**反的**。
+        #
+        # factor_from_actions 从**最新**一次除权往前连乘，所以 fmap[s] = Π{ex >= s}。
+        # 对一根 bar d，要的是「**已经发生**的那些事件」的乘积 Π{ex <= d} ——
+        # 两者互补，而原代码取的是 Π{ex > d}，正好取反。
+        #
+        # 后果不是精度问题，是**方向**问题：除权日当天价格已向下跳，因子却还停在
+        # 除权前的水平，于是后复权价在除权日**凭空多出一次下跌**。
+        # 实测（600519 / 002614，四个除权日）：
+        #     生产因子在除权日  1.0167 / 1.0265 / 1.0123 / 1.0196  向上，抵消除权
+        #     原重算因子       0.9833 / 0.9769 / 0.9849 / 0.9808  向下，把除权放大
+        # 独立判据是「后复权价在除权日应当连续」：生产侧消掉 43.3% 的跳空，
+        # 原重算侧 -65.7%（把跳空放大）。是这项检验逮到它的，不是台阶幅度对账 ——
+        # 后者当时 18/23 匹配，因为**幅度对、挂的日子错**。
+        #
+        # 取倒数正好还原「已发生事件的乘积」：
+        #     f(d) = 1 / Π{ex > d} = 1 / fmap[min{ex > d}]
+        # 最新一根（其后无事件）取 1.0 => 与 anchor_scale 的 k = anchor 自洽。
         later = [s for s in steps if s > d]
-        factor = (fmap[later[0]] if later else 1.0) * scale
+        factor = (1.0 / fmap[later[0]] if later else 1.0) * scale
         # 因子来源**跟着实际用的源写**，别再写死 "wind_events" ——
         # 东财算出来的行标成 wind 会让日后对账找不到出处（R39）。
         rows.append(
