@@ -95,12 +95,31 @@ def chromium_path() -> str | None:
     后半段**不校验存在性**，于是"本机没装 chromium"时它也不是 ``None``，
     ``skipif`` 形同虚设、测试直接 ``AssertionError``（本机假红、CI 假红）。
     两个文件各写一份实现正是它漂移的原因，故收到这里共用。
+
+    ## Windows 也认（2026-10-02 补）
+
+    原先只枚举 Linux 路径，于是本机装了 Chrome 也返回 ``None``，
+    ``test_dashboard_chromium_smoke.py`` 在 Windows 上**恒 skip**。
+
+    skip 不会变 pass，所以它不掩盖任何失败 —— 但它让人以为「冒烟测试在 Windows
+    上是绿的」，实际是根本没跑。这正是比红更糟的那种假象：绿灯来自没执行。
     """
+    home = Path.home()
     candidates = (
         shutil.which("chromium"),
+        shutil.which("chromium-browser"),
         shutil.which("google-chrome"),
-        Path.home() / ".local/bin/chromium",
-        Path.home() / ".cache/ms-playwright/chromium-1243/chrome-linux-arm64/chrome",
+        shutil.which("google-chrome-stable"),
+        # Windows：默认安装位 + winget 常见的 per-user 位
+        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+        str(home / "AppData/Local/Google/Chrome/Application/chrome.exe"),
+        r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        r"C:\Program Files\Microsoft\Edge\Application\msedge.exe",
+        str(home / "AppData/Local/Microsoft/Edge/Application/msedge.exe"),
+        # Linux / macOS
+        str(home / ".local/bin/chromium"),
+        str(home / ".cache/ms-playwright/chromium-1243/chrome-linux-arm64/chrome"),
     )
     for candidate in candidates:
         if candidate and Path(candidate).exists():

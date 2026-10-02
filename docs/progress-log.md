@@ -2552,14 +2552,23 @@ snapshot.events    长度 21     ← 此前恒为 []
 
 ### 十二、仍未做
 
-1. **UI 没有入口**：`snapshot.events` 有数据了，但看板上看不到，也没有查时间线的
-   HTTP 接口（`structure_event_store.timeline` 已在存储层就绪，路由未接）。
-2. **`a_share_snapshot.py` 仍缺 `conn.rollback()`**（49/51 skip 的根因，R24 起挂账）。
-3. 审计 **M3（canvas iframe 信任边界）** 仍开放。
-4. R25 其余遗留：前端未接 LLM、结构化 LLM 用例需先做防御式解析、429 退避未经真机验证。
-5. **`structure_id` 没有市场命名空间**（见下节实测）。目前两个市场实测交集为 0，
-   但表里不存 market，一旦两边在同 level 上撞上 `start_time` 就会**静默合并**。
-   修法是 id 前缀市场（`cn:` / `crypto:`），属破坏性变更，未在 R26 做。
+> **已于 R28 全部销账**（本节写于 R26 收尾时，下列五条是当时的开放状态）：
+
+1. ~~**UI 没有入口**~~ → **R27-2 / R27-3 已做**：两条路由
+   （`/structure-events` 列表 + `/structure-events/timeline` 详情）+ 看板「结构事件流
+   （累计）」面板，点结构 id 展开完整时间线。
+2. ~~**`a_share_snapshot.py` 缺 `conn.rollback()`**~~ → **R27-1 已做**：8 处出错路径
+   补回滚，外加适配器层漏网的 `check_t_plus_one_calendar` 一处；顺带修掉
+   `load_previous_signal` 裸调（原本一抛就 500）。
+3. ~~审计 **M3（canvas iframe 信任边界）** 仍开放~~ → **R28-5 勘察完毕**：结论是
+   **无可利用注入路径**（全文唯一插值点是 `symbol`，两条入口都拦得住，线上实测恶意
+   code 回 400）。M3 的真实性质是「边界隐式、无人看守」，已加 `html.escape` 纵深防御
+   + 8 条测试钉住。彻底收敛要换 null origin 静态根，**属架构决策，挂账待 owner**。
+4. ~~R25 其余遗留~~ → 429 退避**真机验证完毕**（R28-1，耗尽/恢复两场景）+ 结构化
+   防御式解析**已建**（R28-2，并推翻了 R25「模型无视 JSON 指令」那条前提）+ 前端
+   LLM 面板**已接**（R28-3）。
+5. ~~**`structure_id` 没有市场命名空间**~~ → **R27-4 已做**：`cn:` / `crypto:` 前缀，
+   历史 727 行已迁移（`381ea14`），备份表留在 `cpt_structure_event_id_backup_20261001`。
 
 ### 十三、加密侧上线复验（2026-10-01 晚）
 
@@ -3411,4 +3420,53 @@ M3（canvas iframe 信任边界，基线 S1）从 09-30 挂到现在。本轮先
 ode --check 两个 js 文件通过
 - **pytest 权威计数（--junit-xml）**：789 tests / 13 failures / 0 errors /
   31 skipped → **745 passed**。13 条全在 	est_web_a_share_routes（cntl 基线），
+  **零新增失败**。
+
+### 六、R28-6 / R28-7 / R28-8：收尾零碎
+
+#### R28-6：销 R26 台账的开放项
+
+R26 收尾时留的「十二、仍未做」五条已全部销账，逐条标注了对应的 R27/R28 轮次与
+commit。留着不销的后果是：下一个人读到会以为这些还开着。
+
+#### R28-7：`chromium_path()` 认 Windows 路径
+
+原实现只枚举 Linux 路径（`shutil.which("chromium")`、`~/.local/bin/chromium`、
+playwright 的 Linux 缓存路径），于是本机装了 Chrome 也返回 `None`，
+`test_dashboard_chromium_smoke.py` / `test_dashboard_chromium_interactions.py`
+在 Windows 上**恒 skip**。
+
+skip 不会变 pass，所以它不掩盖任何失败 —— 但它制造了**比红更糟的假象**：绿灯
+来自「根本没执行」。本轮补上 Windows 常见安装位（Chrome 的 Program Files /
+per-user，以及 Edge 三个位置）与 macOS/Linux 原有路径。
+
+效果可在权威计数里直接看到：**skipped 从 31 降到 29**，passed 从 745 升到 747
+（测试总数不变 —— 789）。两条 Chromium 测试在 Windows 上从「跳过」变成真跑并通过。
+
+#### R28-8：`_pkg` 发布通道 —— 规矩写清，但一个字节都没删
+
+`/var/www/cpt-dashboard/_pkg/` 是 `collector-cn` 采集机的发布通道，**不属于 CPT**。
+台账上「只保留 run5.sh 里那一个 tgz」这条老建议，**实测下来是错的**：
+
+| 脚本 | 引用的包 | sha256 是否对得上 |
+|---|---|---|
+| `run5.sh` | `collector-cn-dd2b9b8-linux5.tgz` | ✅ `66e2bd84…` |
+| `run6.sh` | `collector-cn-dd2b9b8-linux6.tgz` | ✅ `ff297dfa…` |
+
+**两个脚本都是活的**。按老建议执行会把 `run6.sh` 的包删掉，直接打断一条正在用的
+一键安装链路。
+
+无人引用的 6 个：base、`linux1` ~ `linux4`、以及 **`linux7`**。`linux7` 的时间戳
+（08:32）比 `linux6`（07:35）**新却没有对应 run 脚本** —— 有人发了包没接线，它到底
+是「发完忘了」还是「脚本在别处」，光看这台机器判断不了。
+
+**所以本轮只写规矩，没删任何东西。** 理由三条：这是另一个项目的产物、在生产上、
+删除不可逆；而 `linux7` 的归属本身就是未解问题。规矩已写进 `deploy/README.md`：
+只删无任何 `run*.sh` 引用者、删前逐个核 sha256、先 `cp` 到 `/tmp` 留底再移走。
+
+#### 本轮门禁
+
+- 7 条全绿（mypy 4 条仍是 `fcntl` Windows-only 基线）
+- **pytest 权威计数（`--junit-xml`）**：789 tests / 13 failures / 0 errors /
+  29 skipped → **747 passed**。13 条全在 `test_web_a_share_routes`（`fcntl` 基线），
   **零新增失败**。
