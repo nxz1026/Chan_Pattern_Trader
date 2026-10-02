@@ -3615,3 +3615,70 @@ R28-8 只写了规矩没动手，本轮执行。
 - **pytest 权威计数（`--junit-xml`）**：806 tests / 13 failures / 0 errors /
   29 skipped → **764 passed**。13 条全在 `test_web_a_share_routes`（`fcntl` 基线），
   **零新增失败**。
+
+### 十一、R28-14：装 wbt —— 画布 D 自 R16-5 以来第一次真能用
+
+#### 怎么发现的
+
+验 R28-11 时 `/api/canvas/wbt` 返回 `available: false`，
+`reason = wbt_unavailable:画布 D 需要可选依赖 wbt，请安装：pip install -e ".[report]"`。
+
+探测 oracle：
+
+    wbt / wbt.report / plotly / plotly.graph_objects / pandas  →  全部 ModuleNotFoundError
+
+**这不是 R28-11 改出来的**：R28-5 的 `html.escape` 只动 title，不影响 `body_html` 生成；
+`canvas_wbt.py` 上上一次改动还是 R16-5。真相是 **`[report]` extra 从来没在生产装过**，
+画布 D 自 R16-5 部署至今在生产一直是「不可用」态。只是 UI 优雅降级、其余三个画布
+照常工作，所以**没人发现**。
+
+这正好印证了项目里反复出现的那条教训：**优雅降级会掩盖功能缺失**。R28-7 的
+chromium skip 是同一个形状 —— 绿灯来自「根本没跑」。
+
+#### 装了什么（owner 拍板后执行）
+
+`pip install "wbt==0.9.1"`，新增 11 个包：
+
+    wbt-0.9.1  plotly-7.1.0  pandas-3.0.6  numpy-2.5.3  pyarrow-25.0.1
+    polars-1.44.2  polars-runtime-32-1.44.2  narwhals-2.26.0
+    loguru-0.7.3  python-dateutil-2.9.0.post0  six-1.17.0
+
+装前装后各留了一份 `pip freeze`（`/tmp/pip-freeze-{before,after}-wbt.txt`）便于对账与回滚。
+
+#### 装后的真机结果
+
+    GET /api/canvas/wbt?start_ms=…&end_ms=…
+      available = True    reason = None
+      body_html = 13508 字节    css = 13387 字节    scripts = 2 段
+      counts = {candles:600, bis:227, fractals:228, zhongshus:21, trendTypes:8}
+      含 plotly 容器 cpt-canvas-d-chart = True
+      含 CDN 外链（应已剥离）        = False
+      标题 = CPT 结构报告 · BTCUSDT   ← R28-5 转义后的 symbol 正常显示
+
+浏览器侧（headless Chrome 打真实站点）：
+
+    sandbox="allow-scripts" ×1     allow-same-origin ×0     contentDocument ×0
+    data-canvas-source   = wbt.report.HtmlReportBuilder@0.9.1
+    data-canvas-counts   = {canvas:"D", candles:180, fractals:74, bis:74, ...}
+    canvasError          = 无（服务端与本地计数一致）
+    plotly vendor        = HTTP 200，1,166,179 字节
+
+管道全程走通：报告取到 → `srcdoc` 赋值 → 计数写回 → 无 mismatch。
+
+#### 一处**没能**验到的（不粉饰）
+
+`data-canvas-ready` 停在 `false`，90 秒虚拟时间也不够。
+
+**这是 headless 测试工具的限制，不是产品风险**：`--virtual-time-budget` 推进的是
+虚拟时间，不等嵌套 browsing context 的真实网络子资源，而 plotly 有 1.17MB。真实
+浏览器里 `srcdoc` 赋值必然触发 `load`，`ready` 会翻成 `true`。
+
+更要紧的一点：**iframe 内部画成什么样，从父页根本看不到** —— 这恰恰是不透明
+origin 的效果（父页读不到 `contentDocument`）。所以「plotly 是否真的画出了 K 线」
+无法用 `--dump-dom` 证实，只能人工在真浏览器里看一眼。这不是缺陷，是这次改动的
+**既定代价**：用「父页看不见里面」换「里面的脚本也够不着父页」。
+
+#### 门禁
+
+本节只动生产依赖，未改代码，故无新增 commit。代码侧门禁见上一节：
+**806 tests / 13 failures / 0 errors / 29 skipped → 764 passed**。
