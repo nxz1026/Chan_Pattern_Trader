@@ -6,6 +6,22 @@ slots=True)`` 的不可变数据类，构造后不得修改；结构演进通过
 
 ``CanonicalBar`` 实现 ``BarLike`` 协议（``cpt.domain.types``），使 K 线可被
 分型/笔/中枢等结构元素算法跨级别复用。
+
+## ``level`` 字段的单位**按市场而异**（R30）
+
+``Fractal`` / ``Bi`` / ``ZhongShu`` / ``TrendType`` / ``StructureState`` /
+``Signal`` 六个对象都带 ``level: int``，而**这个数字的单位不是全局固定的**：
+
+- 加密市场：``level`` 就是**分钟数**（``5`` = 5 分钟级别）；
+- A 股：数据源是 ``daily_bar`` **日线**，``5`` 是「日线级别」，**不是** 5 分钟。
+
+**这不是注释洁癖。** R28-9 实测过：``RulesConfig.levels`` 的 docstring 原本写
+「元素为分钟级别」，LLM 读到后如实照讲，把 A 股日线结构解释成「**5 分钟级别**的
+一笔」—— 一条听起来专业、实则完全错误的解释。
+
+**要按市场解释这个数字，用 :mod:`cpt.domain.levels` 的 ``level_label(market, level)``**，
+不要自己换算。域内计算（分型/笔/中枢/走势类型）只关心 level 的**相对大小**，
+与单位无关 —— 所以同一个 ``5`` 在两个市场都能跑通，错误只发生在**给人看的标签**上。
 """
 
 from __future__ import annotations

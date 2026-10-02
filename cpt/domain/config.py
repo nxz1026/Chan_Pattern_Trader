@@ -51,7 +51,14 @@ class RulesConfig:
         macd_slow: MACD 慢线周期。
         macd_signal: MACD 信号线周期。
         divergence_compare: 背驰比较方式，``"area"``=MACD 柱面积（§9.6 冻结）。
-        levels: 级别链，元素为分钟级别（单位：分钟）。
+        levels: 级别链。**元素的单位按市场而异**：加密侧是分钟数（``5`` = 5 分钟
+            级别）；A 股数据源是**日线**（``daily_bar``），``5`` 是「日线级别」，
+            **不是** 5 分钟。域内计算只关心 level 的相对大小、与单位无关，但
+            **给人看的标签必须按市场取** —— 用
+            :func:`cpt.domain.levels.level_label`，不要自己换算。
+            （R28-9 实测：这句话原本无条件写「单位：分钟」，LLM 照着把 A 股日线
+            结构讲成了「5 分钟级别」。域内计算没错，错在标签，而错误的标签会被
+            人当成结论。）
         config_version: 配置版本号，写入每个计算结果元数据。
     """
 

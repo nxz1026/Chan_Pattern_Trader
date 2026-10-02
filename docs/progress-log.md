@@ -3773,3 +3773,80 @@ level 却一声不响。
 - **pytest 权威计数（`--junit-xml`）**：820 tests / 13 failures / 0 errors /
   29 skipped → **778 passed**。13 条全在 `test_web_a_share_routes`（`fcntl` 基线），
   **零新增失败**。
+
+---
+
+## R30 · domain 层复盘 —— 契约的地基 · 2026-10-02
+
+按上一轮排的顺序，接着做 `domain/`。选它的理由：它是**契约的地基**，
+`levels` 那个 bug 就在这一层，而且它是唯一「测试全绿但语义错」的重灾区 ——
+域内只比较 level 的**相对大小**，所以 `5` 在两个市场都能跑通，错的是**标签**。
+
+### 一、勘察：这一层的代码防守比看上去强
+
+16 文件 / 2,894 行，最大三个：`structure_events.py`(393)、`signal.py`(391)、
+`contain.py`(269)。出向依赖只有 stdlib（import-linter 一直在钉）。
+
+**两个怀疑都被推翻**（老规矩，「查了发现不是」也是结论）：
+
+1. `zhongshu._resolve_level` / `trend_type._resolve_level` 都只查了
+   `len(levels) > 1`，**没查空** → 怀疑空输入会 `IndexError`。
+   **实测全部正常返回空元组** —— 调用前有显式守卫（`if len(bis) < 3: return ()`），
+   docstring 也写明了「空输入或不足三笔返回空元组」。
+2. 顺带确认 `classify_trend([], [])` / `build_zhongshus(detect_fractals([]))`
+   整条链在空输入下也都正常。
+
+**结论：domain 的代码是守规矩的。** 风险不在逻辑，在**语义前提的表述**。
+
+### 二、真发现：错误的前提还留在**源头**
+
+R28-9 修的是**消费端**（`domain/levels.py` + 提示词），但**权威出处那句错话
+一直留着**：
+
+- `config.py`：`levels: 级别链，元素为分钟级别（单位：分钟）。` —— 无条件
+- `models.py`：6 个 dataclass 的 `level: int`，**一个字都没写** —— 读者唯一的
+  依据就是上面那句错的
+- `recursion.py`：「5m 走势类型 → 30m 元素」，同样把分钟写死
+
+也就是说：**今天读 `config.py` 的人学到的还是错的东西。** 修消费端而不修源头，
+等于只把地雷引爆了，没拆。
+
+### 三、处置
+
+三处 docstring 改掉，全部指向 `cpt.domain.levels.level_label(market, level)`：
+
+- `config.py` 的 `levels` 字段：说清「单位按市场而异」，加密是分钟数、A 股是日线，
+  并说明**域内计算只关心相对大小、与单位无关**（这解释了为什么两个市场能共用一套）
+- `models.py` 模块说明：加一节讲 `level` 的单位按市场而异，并给出日线反例
+  （只说「不是 5 分钟」不够，读者仍可能以为分钟是默认）
+- `recursion.py` 的 `target_level`：把「5m → 30m」标注为**只对加密市场成立**
+
+### 四、门禁（`tests/test_domain_semantic_contract.py`，9 条）
+
+这类 bug **没有任何运行时症状可测** —— 域内计算是对的。所以门禁只能盯
+「错误的前提能不能以文档形式留在权威位置」。这不是测文档本身，而是因为本仓
+把口径写进 docstring 是既定风格（`docs/rules.md` 同理），**口径写错就是 bug**。
+
+包含：无条件「单位是分钟」断言的扫描 + 三处权威出处的必备说明 + 对 R28-9
+运行时语义测试的交叉引用（防止它被当冗余删掉）+ 顺手复钉「domain 只依赖 stdlib」。
+
+红绿对照：把 `config.py` 那句错话放回去，**两条测试同时红**。
+
+### 五、门禁自己被红绿对照逼出两个洞（自纠两处）
+
+1. **`_doc_text` 用行首前缀过滤，漏掉 docstring 正文行** —— 结果真话放回去时
+   `test_no_unqualified_minute_claim` **没响**，只有另一条抓到。改用 `ast`
+   真正提取 docstring。
+2. 改用 `ast` 后，它开始**误报我自己的解释文字** —— 「这句话原本无条件写
+   『单位：分钟』」这句**描述**错误的话，被当成了**断言**错误的话。
+   先加「同行元叙述词排除」，**还是漏**（解释里的「原本」被换行拆到上一行），
+   最后改成看命中处**前后各 160 字符的上下文窗口** —— 解释与断言本就在同一段里。
+
+第二次红绿对照确认：加了元叙述排除之后，门禁**仍然**能抓到真话放回去。
+
+### 六、门禁数字
+
+- 7 条全绿（mypy 4 条仍是 `fcntl` Windows-only 基线）
+- **pytest 权威计数（`--junit-xml`）**：829 tests / 13 failures / 0 errors /
+  29 skipped → **787 passed**。13 条全在 `test_web_a_share_routes`（`fcntl` 基线），
+  **零新增失败**。
