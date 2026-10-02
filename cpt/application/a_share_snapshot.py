@@ -44,6 +44,7 @@ from cpt.adapters.validators import validate_ashare_bars
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
 from cpt.application.first_buy_bridge import derive_first_buy_facts, detect_structural_break
 from cpt.application.multi_level import build_multi_level, format_multi_level
+from cpt.application.parity_reference import build_parity_snapshot_for
 from cpt.application.replay import compute_domain_structures
 from cpt.application.structure_event_recorder import record_structure_events
 from cpt.domain.a_share_rules import apply_ashare_tags_to_bis
@@ -316,6 +317,28 @@ def build_ashare_snapshot(
             "as_of_ms": int(datetime.now(UTC).timestamp() * 1000),
         },
     )
+    # R35：parity 的**参照侧**（czsc 优先，回落腾讯）。此前这个块从上线起就恒为
+    # ``{"available": false, "reason": "oracle_reference_unavailable"}`` —— 6 个
+    # build_dashboard_snapshot_v2 调用点没有一个传 parity=，即**压根没有生产者**。
+    # 现在有了：同批 K 线下，生产侧结构 vs 参照侧结构的逐项对照。
+    # 失败只降级 parity 一块（best-effort），绝不影响快照本体。
+    try:
+        snapshot["parity"] = build_parity_snapshot_for(
+            code=code,
+            bars=validated,
+            fractals=fractals,
+            bis=raw_bis,
+            zhongshus=zhongshus,
+            production_backend=active_backend,
+            config=RulesConfig(),
+        )
+    except Exception as exc:  # noqa: BLE001
+        _LOG.info("parity 对照失败 %s: %s", code, exc)
+        snapshot["parity"] = {
+            "available": False,
+            "reason": "parity_error",
+            "reference": {"source": "none", "detail": f"{type(exc).__name__}: {exc}"},
+        }
     # 显式覆盖（v1 默认 BTCUSDT）— A 股代码在 market.symbol
     snapshot["market"]["symbol"] = code
     snapshot["market"]["kind"] = "a_share"

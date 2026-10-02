@@ -2426,11 +2426,24 @@
       section.appendChild(summary);
       return;
     }
-    const parts = Object.entries(parity).map(([kind, value]) => {
-      const item = isObject(value) && isObject(value.summary) ? value.summary : {};
-      return `${kind}: ${item.matched || 0} matched / ${item.missing || 0} missing / ${item.extra || 0} extra`;
-    });
-    summary.textContent = parts.join(" · ") || "无对比项";
+    // R35：**按已知 kind 列表**走，不要遍历 payload 的键 —— payload 顶层除了三个
+    // kind 還有 available / reason / reference 这些元数据，遍历它们会渲染出
+    // "available: 0 matched" 这种假行。列表与 renderParityCharts 里那份一致。
+    const parts = ["fractals", "bis", "zhongshus"].map((kind) => {
+      const value = parity[kind];
+      const item = isObject(value) && isObject(value.summary) ? value.summary : null;
+      if (!item) return null;
+      // R35：把「容差内的数值漂移」也说出来 —— 否则 matched 27 会被读成
+      // 「27 条完全一样」，而实际上 price 字段有 0.5% 量级的舍入差。
+      const drift = Number.isFinite(item.max_drift_pct) && item.max_drift_pct > 0
+        ? ` (±${item.max_drift_pct}%)` : "";
+      return `${kind}: ${item.matched || 0} matched / ${item.missing || 0} missing / ${item.extra || 0} extra${drift}`;
+    }).filter(Boolean);
+    const ref = isObject(parity.reference) ? parity.reference : null;
+    const refNote = ref && ref.source && ref.source !== "none"
+      ? `（参照：${ref.source}${ref.detail ? " · " + ref.detail : ""}）`
+      : "";
+    summary.textContent = (parts.join(" · ") || "无对比项") + refNote;
     section.appendChild(summary);
   }
 

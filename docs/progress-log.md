@@ -4588,18 +4588,19 @@ snake_case 属性访问 token（380 个），取差集；**差集先当候选清
     改前: countdown_text="—"  countdown_title=""  dual_hidden=true
     改后: countdown_text="—"  countdown_title=""  dual_hidden=true
 
-**一模一样。** 而且按代码，改后（键名正确 + `reason=not_a_trade_day`）那个分支**应该**
-给 title 填上「今日非交易日」—— 实测 title **仍然是空**。
+**一模一样。**
 
-所以：**键名错配是机器核对过的事实（两侧都验了），但「改完面板就对了」这句话我不能说**，
-而且还留一个**没解释的观察**：那个倒计时分支在 A 股页面上似乎压根没执行（否则
-title 该有值）。可能的原因是这段渲染属于加密路径、或 A 股快照替换了 `state.snapshot`
-而这段没跟着重跑 —— **没查清，不下结论**。
+> **2026-10-02 晚（R35b）结案：那次测的是一个"从未加载过任何快照"的错误页。**
+> 我的本地验证代理把 `/cpt/api` 截掉后转给上游，**把 `/api` 前缀也吞了**，
+> 而上游服务实际服务的路径就是 `/api/...` ⇒ 每个 API 请求 404 ⇒ 页面
+> ``data-status=error``。修好代理后重跑：`countdown_title = "今日非交易日"`。
+> 详见 R35b 第八节。**本节的两处「一模一样」与「分支没执行」都是工具的产物。**
 
-> 我这轮踩的坑和 R30 同源：**验证手段自己会造出它要检出的现象**。第一版探针的等待
-> 条件是「`countdown_text` 非空」，而它的初始值就是「—」（非空）⇒ 第一次循环就退出，
-> 量到的是**页面还没 fetch 完**的状态。改成「市场已切到 A 股」才量到真实页面。
-> 两次都差点让我把「没测到」当成「没问题」。
+我这一轮踩的坑和 R30 同源：**验证手段自己会造出它要检出的现象**。第一版探针的等待
+条件是「`countdown_text` 非空」，而它的初始值就是「—」（非空）⇒ 第一次循环就退出，
+量到的是页面还没 fetch 完的状态。改成「市场已切到 A 股」才量到真实页面 ——
+而**那时的"真实页面"本身还是错的**。两次都差点让我把「没测到」当成「没问题」。
+
 
 ### 五、门禁
 
@@ -4688,6 +4689,102 @@ CPT 自己的 A 股行情走的是 `public.daily_bar` + 腾讯 + Wind，从没�
   import-linter / `check_sql_layering` 全绿。
 - 改动范围：`cpt/application/a_share_snapshot.py`、`cpt/adapters/a_share_local.py`、
   `tests/conftest.py` 与 6 个测试文件（fixture 改名）。
+
+### 七、parity 接上（owner 拍板「接上」；参照侧 = czsc 优先，回落腾讯）
+
+#### 它的来历：被删掉的实现留下一整条对外链路
+
+R20（`a5365bd`）的提交消息把来龙去脉写得很清楚：
+
+    oracle 参照实现 R13 已整体删除，available:false 是永久的，投影函数属死代码。
+    删模块 83 行、摘白名单豁免、移除两处自证用例。
+    保留 dashboard_snapshot_v2.py:61 的 unavailable 键位、app.py 的路由与前端
+    renderParityCharts —— 前端 28 处消费点依赖该形状，摘面板代价大于收益。
+
+所以「删实现、留外壳」：HTTP 路由在、前端 28 个消费点在、快照里恒是
+`available:false`，而**6 个调用点没有一个传 `parity=`** ⇒ 压根没有生产者。
+R20 的结论「永久 unavailable」在**当时**是对的（oracle 那个项目确实没交付），
+但它把「没有参照」写成了「永远没有参照」。
+
+#### 参照侧：owner 2026-10-02 拍板 czsc 优先、回落腾讯
+
+| 优先 | 参照 | 语义 | 成本 |
+|---|---|---|---|
+| 1 | czsc 后端 | 同批 K 线、两个后端逐项对照（**实现**对照） | 零外部成本 |
+| 2 | 腾讯 hfq 同窗口 | 本地库结构 vs 公开源结构（**数据链路**对照） | 每快照 TTL 一次 HTTP |
+
+真机现状：oracle 上 **czsc 没装**（`.[chan]` extra 未安装）⇒ `auto` 回落 native
+⇒ 实际走的是回落分支，payload 里 `reference.source` 如实写明。
+（顺带发现：**R16-4「把 czsc 接进生产路径」其实从未在生产生效过** —— 装了才有。）
+
+#### 真机三次失败才接通，每次都是真条件
+
+1. **整段 800 根喂 `replay_bars` → 被数据守卫生效**（节假日缺口，259,200,000ms）。
+2. **切到本地 122 根窗口 → 仍然失败**，缺口就在窗口内
+   （`1775779200000` 附近 3 天 = 清明）。根因：`replay_bars` 走**通用**
+   `validate_canonical_bars`，它按固定 86,400,000ms 判缺口 —— 那是 BTC 24/7 的假设。
+   本地路径用的 `validate_ashare_bars` 第 4 条就是「**忽略缺口**」。**换成同一个
+   校验器**才谈得上对照。
+3. **接通了，但 `matched=0`**。量下去：结构**其实配上了**（同 level/时间/方向），
+   差的是 high/low，实测相对差 **0.002% ~ 0.54%**（中位 0.175%）—— 腾讯 hfq 只给
+   3 位小数。「全字段全等」的判据让**每一条**都变成 mismatched，面板会显示
+   「matched 0 · 100% 不一致」，那是**误导性结论**。
+
+#### 处置：容差判据（量出来的，不是拍的）
+
+`VALUE_TOLERANCE = 1%`（实测最大 0.54%，留一倍余量）。容差内的差异记进
+`value_diffs` + `summary.max_drift_pct`，**信息不丢**但不再把状态翻成 mismatched；
+`length` 这种整数差（实测 600519 有一条 `cpt=2 vs ref=3`，同一条笔两侧包含的 K 线
+根数不同）不在容差内，仍报 mismatched —— 那是真结构差异。
+
+#### 真机复验（真实浏览器 + 真实数据）
+
+    data-status=confirmed  data-connection=live        ← 页面真的加载成功了
+    parity_panel_exists=True  hidden=false  circles=161
+    parity_statuses = [matched, extra, mismatched, missing]
+    parity_summary:
+      fractals: 27 matched / 10 missing / 12 extra (±0.81%) ·
+      bis:      17 matched / 18 missing / 20 extra (±0.81%) ·
+      zhongshus: 2 matched /  4 missing /  3 extra (±0.18%)
+      （参照：tencent_hfq · 本地库结构 vs 腾讯 hfq 同窗口序列（122 根，
+        生产后端 NativeChanlunBackend））
+
+**这本身就是面板的价值**：本地库与公开源只有 22%~55% 的结构对得上，而此前没人
+知道这件事（因为它从上线起就是 `available:false`）。
+
+### 八、第四次自纠：我的验证工具自己坏掉，还伪装成产品结论
+
+R34 遗留的那条「倒计时 title 为空、那个分支似乎压根没执行」——**根因是工具**：
+我那个本地验证代理把 `/cpt/api` 截掉后转给上游，**把 `/api` 前缀也吞了**，而
+上游服务实际服务的路径就是 `/api/...`。于是每个 API 请求都拿到 404，页面静默进入
+错误态：
+
+    data-status=error  data-connection=error  data-snapshot-url=/cpt/api/dashboard/snapshot
+
+**我据此做的那轮「改前改后一模一样」结论，量的其实是一个从未加载过任何快照的错误页。**
+那个"一样"当然成立 —— 错误页没有任何东西可渲染。
+
+修好代理（`API_UPSTREAM + path[len("/cpt"):]`）后重跑，R34 那三处键名修复与 R35
+的换源**一次全部验通**：
+
+    countdown_title = "今日非交易日"          ← R34：close_countdown 键名修复生效
+    dual_hidden      = false  dual_cpt=8,886.54  ← R35：换源后面板真的出来了
+    parity_panel     = 可见，161 个圆点，四种状态都在
+
+**这是本项目第四次同形状的错**（R31 查错日志文件、R32 AST 工具漏同文件引用、
+R32 路由抽取只捞到 3/25、这次代理吞前缀）：**工具对了，位置/边界错了。**
+每一次都靠"换一个不依赖该现象的观测手段"兜住 —— 这次是"在页面上下文里直接 fetch
+一次，看真实状态码"，而不是继续盯那些"恰好一样"的读数。
+
+### 九、门禁
+
+- **pytest 权威计数（`--junit-xml`）**：852 tests / 13 failures / 0 errors /
+  29 skipped → **810 passed**（R35 是 845/13 → 803，本轮 +7 条 parity 契约测试）。
+  13 条失败**全在** `test_web_a_share_routes`（`fcntl` Windows 基线），
+  **零新增失败**。
+- ruff check / ruff format --check / mypy（4 条 `fcntl` 基线）/ vulture /
+  import-linter（6 kept, 0 broken）/ `check_sql_layering`（60 个文件）全绿。
+
 
 
 
