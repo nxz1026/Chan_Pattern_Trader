@@ -89,17 +89,29 @@
    * 还是被 Basic Auth 挡了。现在这三种会给出三种不同的文案。
    */
   const DIAG_SCRIPT =
-    "window.addEventListener('error',function(e){" +
+    "window.__cptPhase=" + "null;window.addEventListener('error',function(e){" +
     "parent.postMessage({__cptD:1,kind:'error',phase:window.__cptPhase," +
     "msg:String((e.error&&e.error.message)||e.message||e.type)},'*');});" +
     "window.addEventListener('unhandledrejection',function(e){" +
     "parent.postMessage({__cptD:1,kind:'reject',phase:window.__cptPhase," +
-    "msg:String(e.reason&&e.reason.message||e.reason)},'*');});" +
-    "window.addEventListener('load',function(){" +
-    "parent.postMessage({__cptD:1,kind:'load',phase:window.__cptPhase," +
-    "plotly:(typeof Plotly!=='undefined')," +
-    "bootstrap:(typeof bootstrap!=='undefined')," +
-    "charts:document.querySelectorAll('.plotly-graph-div').length},'*');});";
+    "msg:String(e.reason&&e.reason.message||e.reason)},'*');});";
+
+  /**
+   * vendor `<script>` 的 onload / onerror —— **比 load 事件可靠得多**。
+   *
+   * ``load`` 要等**全部**子资源（含 1.17MB plotly）都完成才触发，而：
+   * - headless 的 ``--virtual-time-budget`` 不会为嵌套 browsing context 的
+   *   子资源等那么久，于是 load 永远不触发，诊断框什么都不显示；
+   * - 真出问题时（plotly 被 401 挡住），load 同样不触发。
+   *
+   * 也就是说「等 load」这个设计**恰好在最需要它的时候失效**。改成给每个
+   * ``<script>`` 挂 onload/onerror，谁成功、谁失败、HTTP 什么状态，一目了然，
+   * 且不依赖任何聚合事件。
+   */
+  const vendorScript = (url, name) =>
+    `<script src="${url}" onload="parent.postMessage({__cptD:1,kind:'vendor-ok',phase:window.__cptPhase,` +
+    `name:'${name}'},'*')" onerror="parent.postMessage({__cptD:1,kind:'vendor-fail',phase:window.__cptPhase,` +
+    `name:'${name}',msg:'加载失败（401？路径不对？）'},'*')"></script>`;
 
   /**
    * 拼一整份 iframe 文档。
@@ -108,12 +120,8 @@
    * `<script>` 在同一文档里按文档顺序执行，所以把 plotly / bootstrap 放在
    * `<head>`、片段脚本放在 `</body>` 前就满足依赖。
    *
-   * ⚠️ **诊断脚本必须排在两个 vendor `<script src>` 之前** —— 否则 plotly
-   * 加载失败抛出的错会在监听器装好之前发生，又变成静默。
-   *
-   * ``phase`` 是必需的：占位文档（"正在请求…"）与正式报告**都会**触发一次
-   * ``load``，不标 phase 父页就分不清收到的是**哪一次**，诊断结论不可信
-   * —— 第一版就栽在这：把占位文档的「plotly 未就绪」当成了报告的。
+   * ``phase`` 必需：占位文档与正式报告**都会**触发一次 load/错误，不标 phase
+   * 父页就分不清收到的是哪一次 —— 第一版就栽在这。
    */
   function shell(base, bodyHtml, css, scripts, phase) {
     const inline = (scripts || [])
@@ -125,16 +133,17 @@
     return (
       '<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">' +
       '<meta name="viewport" content="width=device-width, initial-scale=1">' +
-      `<script>window.__cptPhase=${JSON.stringify(phase || "report")};</script>` +
+      `<script>window.__cptPhase=${JSON.stringify(phase || "report")};` +
+      DIAG_SCRIPT +
+      "</script>" +
       // bootstrap：wbt 模板用了 .container / .nav-tabs / .table / .bi 图标，
       // 它的 CDN 链接被服务端剥掉了，这里补本地副本（离线可用）。
-      `<link rel="stylesheet" href="${base}bootstrap.min.css">` +
-      `<link rel="stylesheet" href="${base}bootstrap-icons.css">` +
+      `<link rel="stylesheet" href="${base}bootstrap.min.css" onerror="parent.postMessage({__cptD:1,kind:'vendor-fail',phase:window.__cptPhase,name:'bootstrap.min.css',msg:'CSS 加载失败'},'*')">` +
+      `<link rel="stylesheet" href="${base}bootstrap-icons.css" onerror="parent.postMessage({__cptD:1,kind:'vendor-fail',phase:window.__cptPhase,name:'bootstrap-icons.css',msg:'CSS 加载失败'},'*')">` +
       `<style>${LOCAL_CSS}</style>` +
       (css ? `<style>${css}</style>` : "") +
-      `<script>${DIAG_SCRIPT}</script>` +
-      `<script src="${base}plotly-finance.min.js"></script>` +
-      `<script src="${base}bootstrap.bundle.min.js"></script>` +
+      vendorScript(`${base}plotly-finance.min.js`, "plotly") +
+      vendorScript(`${base}bootstrap.bundle.min.js`, "bootstrap.bundle") +
       "</head><body>" +
       (bodyHtml || "") +
       inline +
@@ -183,12 +192,11 @@
     // 占位文档（"正在请求…"）的诊断没有意义 —— 它本来就不该有 plotly。
     // 只显示**报告阶段**的，否则会拿占位阶段的结论当报告的（第一版栽在这）。
     if (message.phase !== "report") return;
-    const text = message.kind === "load"
-      ? `iframe 已加载；plotly ${message.plotly ? "已就绪" : "**未就绪**"}` +
-        ` · bootstrap ${message.bootstrap ? "已就绪" : "**未就绪**"}` +
-        ` · 图表容器 ${message.charts} 个`
-      : `${message.kind}: ${message.msg || "(无消息)"}`;
-    node.dataset.canvasDiag = text;
+    const mark = message.kind === "vendor-ok" ? "OK"
+      : message.kind === "vendor-fail" ? "★失败"
+      : message.kind;
+    const text = `${mark} ${message.name || ""}${message.msg ? " — " + message.msg : ""}`;
+    node.dataset.canvasDiag = (node.dataset.canvasDiag ? node.dataset.canvasDiag + " | " : "") + text;
     let box = q("[data-testid=canvas-d-diag]");
     if (!box) {
       box = document.createElement("pre");
@@ -196,7 +204,7 @@
       box.dataset.testid = "canvas-d-diag";
       node.appendChild(box);
     }
-    box.textContent = text;
+    box.textContent = node.dataset.canvasDiag;
   }
 
   function localCounts(view) {
