@@ -280,58 +280,81 @@ curl -sSk https://<host>/cpt/_pkg/run5.sh | bash
 **无人引用的 6 个**：`collector-cn-dd2b9b8.tgz`（base）、`linux1` ~ `linux4`、
 以及 `linux7`。合计约 380 KB。
 
-### `linux7` 归属：已定论（2026-10-02，R31）
+### `linux7` 归属：**上一版这里写错了**（2026-10-02 R31 错 → R33 更正）
 
-上一版这里写着「光看这台机器判断不了」。**现在判断得了**，三条证据：
+> ⚠️ **R31 在这一节写过「这条安装通道从来没被用过，`_pkg` 命中 0」——那是错的。**
+> 错因：我只查了 `/var/log/nginx/access.log`，而 `/cpt/` 这个 location 在
+> `dsh-web:31` 上写的是 `access_log /var/log/nginx/dsh-timing.log dsh_timing`
+> —— **access.log 根本不记这个 location**。`dsh-timing.log`（含轮转）里
+> `_pkg` / `.tgz` / `run*.sh` 合计 **64 条命中**。
+>
+> **教训：查「有没有人用过」之前，先确认请求会记在哪个日志里。** 一个存在但
+> 记错位置的日志，比没有日志更危险 —— 它给你一个假的 0。
 
-**① `linux7` 不是重复包，是一版更新的构建（2026-09-29 08:32 vs linux6 07:35）。**
-解包对比，它相对 linux6 多了这一行：
+**更正后的事实（逐条可复现）：**
 
-```python
-# landlock-run 沙箱把 umask 设成 0077 → 新批次文件 0600（oracle 端 league 属主不可读）→ ingest 阻塞
-# 显式设回 022，让 out/ 下 jsonl 落成 0644（与 tar --mode=0644 双保险）
-os.umask(0o022)
-```
+| 结论 | 证据 |
+|---|---|
+| 这条通道**在用** | `dsh-timing.log` 三个文件合计 32 条 `_pkg` 命中；`error.log.3.gz` 另有 3 条 |
+| **两个来源 IP** | `110.40.203.130`（**外部采集机**，14 条）、`140.83.62.161`（oracle 自身公网 IP，16 条）、`127.0.0.1`（2 条） |
+| **整条版本史都被下过** | base ×3、linux1 ×1、linux2 ×1、linux3 ×2、linux4 ×2、linux5 ×4、linux6 ×5、**linux7 ×2** |
+| **linux7 上传后 2 分钟就被取走** | 上传 `09-29 08:32:43`（oracle 公网 IP）→ 下载 `09-29 08:34:07`（`110.40.203.130`，ua=curl/8.5.0） |
+| 有人在重试一键安装 | `09-29 07:37:19` 连 3 次 `GET /cpt/_pkg/run6.sh` → **403 Permission denied**（文件当时是 0600），`07:37:50` 才拿到 200 |
 
-同时它的**内部布局也变了**：扁平结构（没有 `collector-cn/` 这一层前缀）、多了
-`doc/`、少了 `scripts/collect_batch.bat` 与 `scripts/collector_linux.sh`；包里
-自带的 `scripts/run5.sh` 是**指向 linux5 包的陈旧残留**。
+**所以 `linux7` 不是孤儿**：外部机器按直链 URL 取了它，缺的只是一个 `run7.sh`
+接线（见下）。R31 说它「归属存疑」也是错的。
 
-**② 这条安装通道从来没被用过。** nginx 访问日志连续覆盖 2026-09-18 → 10-02
-（14 个轮转文件全查了），`_pkg` 命中数 **0** —— `run5.sh` / `run6.sh` / 三个 tgz
-**一次都没被下载过**。采集机实际更新走的是别的途径（`incoming/cn-collector/`
-在今天 03:40 还在持续收到推送）。所以「linux7 没有 run 脚本」今天没有任何代价。
+#### 但 R31 有一条判断**成立**，而且比原话更严重
 
-**③ 它修的那个症状线上并没有发生。** `/srv/league-staging/incoming/cn-collector/`
-下 6,573 个文件里，权限分布是 644×3,485 / 664×1,908 / 666×1,179，**0600 只有 1 个**
-—— `_probe_tencent.txt`（35 字节，属主就是 `league` 自己，`sudo -u league test -r`
-读得到）。真实数据文件全是 644，ingest 正常。`os.umask(0o022)` 是**加固**，不是在线抢修。
+R31 说「不要照抄 `run6.sh` 做 `run7.sh`，照抄必挂」—— 对，但那只是症状。**根因是
+`linux7` 这个包本身是坏的**：
 
-### 结论与处置
+    linux7 的 scripts/scheduler.py:35   RUNNER = HERE / "collector_linux.sh"
+    而 linux7 的包里没有这个文件（linux6 有；两个包的 scheduler.py 逐字节相同）
 
-**三个包全部保留，一个都不删。** linux5/linux6 被 `run*.sh` 引用（老规矩第 2 条：
-删了就是打断一键安装链路）；linux7 虽然无人引用，但它是**唯一带 umask 修复的
-版本**，按「无引用就删」处理会丢掉别人已经写好的修复。
+后果**不是崩溃**：`scheduler.py` 的 `run()` 捕获 `OSError` → 记
+「mode=X 无法启动」`rc=-2` → `supervise.sh` 每 5s 重启一次。于是
+**进程活着、日志有输出、采集量恒为 0** —— 绿色的坏掉。
 
-**并且不要照抄 run6.sh 做一份 run7.sh** —— 那个脚本第 6 步是
-`bash scripts/collector_linux.sh offer`，而 **linux7 里没有这个文件**，照抄必挂。
+（另注：`linux7` 补进 `collector.py` 的 `os.umask(0o022)` 是**加固**而非抢修 ——
+`collector_linux.sh` 开头本来就有 `umask 022`；而 `incoming/cn-collector/` 下
+6,573 个文件里 0600 只有 1 个，还是 `league` 自己的探测文件。）
 
-剩下的选择是 owner 的，两条都合理：
+#### 处置（R33，owner 拍板「补一个真正的 run7.sh」）
 
-- **退役这条通道**：既然 0 下载，先确认采集机的真实更新途径，再把 3 个 tgz +
-  2 个 run 脚本一起清掉（更根本：给 `collector-cn` 独立静态根，别寄居在
-  CPT 的看板目录里）；
-- **补齐它**：由 collector-cn 的主人按 **linux7 自己的布局**写 run 脚本
-  （扁平结构、无 `collector_linux.sh`），而不是照抄 run6.sh。
+已发布 `_pkg/run7.sh`，它与 `run5`/`run6` 的唯一实质差别在第 4b 步：
+**补回 linux7 打包时掉的那个 runner** —— 从 linux6 包取回
+`scripts/collector_linux.sh`（实测与 linux6 那份**逐字节相同**），装完在第 4c 步
+**断言**它存在且可执行，补不回来就 `exit 1`，绝不留下一个装得上、采不到数的
+采集机。发布前做了**截断演练**（真下载 + 真校验 + 真解包 + 真补回，`WORK` 指向临时
+目录，只走到 4c），全绿。
 
-> 本轮**没有执行任何删除**。上述判断全部来自只读核对：
-> `ls --time-style=full-iso` + `sha256sum` + `tar tzvf` + `diff -r` 解包对比
-> + nginx 轮转日志 + `find -printf '%m'` 权限分布。
+> **给 collector-cn 主人的真问题**：应该出一个重新打包的版本（把
+> `collector_linux.sh` 放回去），而不是靠 run 脚本补。run7.sh 是止血，
+> 不是修包。
 
-### 清理规矩（待 owner 拍板后执行）
+### ⚠️ 三个 run 脚本的用法注释都曾「照抄跑不通」（R33 一并更正）
+
+`/cpt/` 挂 `auth_basic`（R30 加的，09-30 之后），而三个脚本是 **09-29** 写的 ——
+所以它们注释里那行 `curl -sSk <url> | bash` **不带凭据**，实测返回
+**172 字节的 401 HTML**，等于把 401 页面喂给 bash：
+
+    无凭据: http=401 bytes=172
+    带凭据: http=200 bytes=55319（sha 与磁盘一致）
+
+已在 `run5.sh` / `run6.sh` / `run7.sh` 里统一改成从环境变量 `CPT_AUTH` 读凭据
+（**不写进文件**，避免它变成秘密载体），并在注释里写明为什么。原文件已按时间戳
+备份（`run5.sh.bak.*` / `run6.sh.bak.*`）。改完逐个从 nginx 取回、`bash -n`、
+与磁盘逐字节比对，三项全过。
+
+> ⚠️ `linux7` 包**内部**那份 `scripts/run5.sh`（指向 linux5 包的陈旧残留）也还是
+> 旧用法 —— 那在别人的 tgz 里，重打包时一并清掉。
+
+### 清理规矩（仍然有效，但注意第 2 条已不止是「理论上」）
 
 1. **只删「没有任何 run*.sh 引用」的 tgz**，且删前逐个确认 sha256 没被引用；
-2. **保留 `run*.sh` 引用的每一个包** —— 删掉就是打断那条一键安装链路；
+2. **保留 `run*.sh` 引用的每一个包** —— 删掉就是打断那条一键安装链路。
+   ⚠️ R33 已证实这不是理论风险：`linux1`~`linux7` 全都被外部机器取过；
 3. 删之前先 `cp` 到 `/tmp` 留一份（可恢复），再从 `_pkg/` 移走；
 4. 更根本的做法：给 `collector-cn` 单独一个 nginx `location` 或独立静态根，
    别把另一个项目的发布通道寄居在 CPT 的看板目录里。
