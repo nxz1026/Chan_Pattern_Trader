@@ -641,73 +641,108 @@ def _attach_signal_change(snapshot: dict[str, Any], client: Any) -> None:
 
 
 def _attach_dual_compare(snapshot: dict[str, Any], code: str, client: Any) -> None:
-    """双数据集同步对比：CPT 本地 vs 东财实时行情（直连 eastmoney，无 akshare 依赖）。
+    """双数据集同步对比：CPT 本地（**后复权**）vs 上游实时行情。
 
-    比较最新收盘价 / 成交量 / 最高 / 最低。东财不可用时降级为 unavailable。
+    ## R35：换源 + 修口径（两件事，都因为一个实测结论）
+
+    **换源**：原实现直连 ``push2.eastmoney.com``。2026-10-02 在生产机（大阪）实测
+    **HTTP 502** —— 仓里 ``source_registry.KNOWN_DEAD_ENDPOINTS`` 早就记着
+    「本机（大阪）实测 502」。于是这个面板从上线起就一直是
+    ``{"available": false, "reason": "realtime_unavailable"}``。改用**新浪快照**
+    （``hq.sinajs.cn``，同机实测 200，且 ``adapters.SinaQuoteClient`` 早就存在）。
+
+    **修口径**：原实现拿上游的**不复权**现价直接比 CPT 的**后复权**收盘价。
+    这个错一直被 502 挡着没人看见 —— 一旦换源就会显形：600519 / 2026-09-30 实测，
+    库里不复权 1258.62、因子 7.06053932、快照收盘 8886.536，直接相比是 **−85.84%**
+    （读起来像「市场跌了 86%」）。所以先把现价乘上**同一根 bar 的因子**再比，
+    实测同口径下是 **+0.0000%**。
+
+    换源顺带解决了一个分层问题：IO 从 application 层挪回了 adapters
+    （原来的 ``urllib`` 调用写在 application 里，SQL 分层门禁管不到它）。
+
+    取的是**最后一根 bar 当日**的因子：盘中因子不变，跨日才会变，而面板比的就是
+    「今日 vs 上一根收盘」。
     """
-    import json as _json
-    import urllib.request as _url
-    from urllib.error import URLError as _URLError
+    from cpt.adapters.a_share_local import hfq_factor_on
+    from cpt.adapters.a_share_public import ASharePublicError, SinaQuoteClient
 
-    prefix = "1" if code.startswith(("6", "9")) else "0"
-    secid = f"{prefix}.{code[:6]}"
-    fields = "f43,f44,f45,f46,f47,f48,f57,f58,f60,f170"
-    url = (
-        f"https://push2.eastmoney.com/api/qt/stock/get"
-        f"?secid={secid}&fields={fields}&_={int(__import__('time').time() * 1000)}"
-    )
+    candles = snapshot.get("candles", [])
+    last_close = float(candles[-1].get("close") or 0.0) if candles else 0.0
+    last_date = None
+    if candles:
+        raw_open = candles[-1].get("open_time")
+        if isinstance(raw_open, (int, float)):
+            last_date = datetime.fromtimestamp(raw_open / 1000, tz=UTC).date()
+
     try:
-        req = _url.Request(
-            url, headers={"User-Agent": "Mozilla/5.0", "Referer": "https://quote.eastmoney.com/"}
-        )
-        with _url.urlopen(req, timeout=5) as resp:
-            data = _json.loads(resp.read().decode())
-        d = data.get("data") or {}
-        if not d or d.get("f43") is None:
-            raise ValueError(f"东财返回空数据: {data}")
-
-        # 价格单位：分 → 元（f43/f44/f45/f46/f60）；涨跌幅单位：百分之一（f170）
-        def _c(v: Any) -> float | None:
-            return float(v) / 100 if v is not None and v != "-" else None
-
-        def _pct(v: Any) -> float | None:
-            return float(v) / 100 if v is not None and v != "-" else None
-
-        realtime = {
-            "price": _c(d.get("f43")),
-            "high": _c(d.get("f44")),
-            "low": _c(d.get("f45")),
-            "open": _c(d.get("f46")),
-            "volume": float(d["f47"]) if d.get("f47") and d["f47"] != "-" else None,
-            "turnover": float(d["f48"]) if d.get("f48") and d["f48"] != "-" else None,
-            "prev_close": _c(d.get("f60")),
-            "change_pct": _pct(d.get("f170")),
-        }
-        candles = snapshot.get("candles", [])
-        last_close = float(candles[-1].get("close") or 0) if candles else 0.0
-        snapshot["dual_compare"] = {
-            "available": True,
-            "cpt_close": last_close,
-            "realtime_price": realtime["price"],
-            "divergence_pct": (
-                round((realtime["price"] - last_close) / last_close * 100, 4)
-                if last_close > 0 and realtime["price"] is not None
-                else None
-            ),
-            "realtime": realtime,
-        }
-    except (_URLError, ValueError, KeyError, TypeError) as exc:
+        quote = SinaQuoteClient().fetch_quote(code)
+    except ASharePublicError as exc:
         _LOG.debug("双数据集对比失败 %s: %s", code, exc)
-        snapshot["dual_compare"] = {
-            "available": False,
-            "reason": "realtime_unavailable",
-        }
+        snapshot["dual_compare"] = {"available": False, "reason": "realtime_unavailable"}
+        return
     except Exception as exc:  # noqa: BLE001
         _LOG.debug("双数据集对比未知错误 %s: %s", code, exc)
+        snapshot["dual_compare"] = {"available": False, "reason": "realtime_error"}
+        return
+
+    raw_price = quote.get("last")
+    factor: float | None = None
+    if last_date is not None and client is not None:
+        try:
+            factor = hfq_factor_on(_active_client_conn(client), code, last_date)
+        except Exception as exc:  # noqa: BLE001 — 查不到因子不该让整个面板消失
+            _LOG.debug("取后复权因子失败 %s %s: %s", code, last_date, exc)
+    if raw_price is None:
+        snapshot["dual_compare"] = {"available": False, "reason": "realtime_empty"}
+        return
+    if not factor:
+        # 没有因子就没法同口径比。**宁可说不知道**，也不给一个 −85% 的假数字。
         snapshot["dual_compare"] = {
             "available": False,
-            "reason": "realtime_error",
+            "reason": "factor_unavailable",
+            "realtime_raw_price": raw_price,
         }
+        return
+
+    price_hfq = float(raw_price) * factor
+    snapshot["dual_compare"] = {
+        "available": True,
+        "cpt_close": last_close,
+        # 与 cpt_close **同口径**（后复权）的上游现价
+        "realtime_price": price_hfq,
+        "divergence_pct": (
+            round((price_hfq - last_close) / last_close * 100, 4) if last_close > 0 else None
+        ),
+        "realtime": {
+            "price": price_hfq,
+            "raw_price": raw_price,
+            "hfq_factor": factor,
+            "open": _hfq(quote.get("open"), factor),
+            "high": _hfq(quote.get("high"), factor),
+            "low": _hfq(quote.get("low"), factor),
+            "prev_close": _hfq(quote.get("prev_close"), factor),
+            "volume": quote.get("volume"),
+            "change_pct": _pct_from(quote.get("last"), quote.get("prev_close")),
+            "source": "sina",
+            "quote_date": quote.get("date"),
+            "quote_time": quote.get("time"),
+        },
+    }
+
+
+def _hfq(value: Any, factor: float) -> float | None:
+    """不复权价 → 后复权价（``None`` 透传，不伪造 0）。"""
+    return None if value is None else float(value) * factor
+
+
+def _pct_from(last: Any, prev_close: Any) -> float | None:
+    """涨跌幅（%）：由现价与昨收算，而不是依赖上游给的那一个字段。"""
+    if last is None or prev_close is None:
+        return None
+    prev = float(prev_close)
+    if prev <= 0:
+        return None
+    return round((float(last) - prev) / prev * 100, 4)
 
 
 def _attach_t_plus_one(snapshot: dict[str, Any], client: Any) -> None:

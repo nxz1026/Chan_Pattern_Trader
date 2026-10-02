@@ -4607,5 +4607,89 @@ title 该有值）。可能的原因是这段渲染属于加密路径、或 A �
 **844 / 13 → 802 passed**（13 条全在 `test_web_a_share_routes`）。前端无自动化门禁 ——
 **这本身就是这层的结论**：它只能靠人肉核对，所以核对步骤必须写死在文档里。
 
+---
+
+## R35 · 换一个源，顺带挖出一个被「不可用」掩盖了半年的口径错 · 2026-10-02 晚
+
+起因是 owner 的一句判断：「CPT 就不需要国内机啊，改个源从大阪机直接取数据就可以」。
+**这个判断成立**，但执行前先量了三件事，量出两件不知道的事。
+
+### 一、先厘清：国内机本来就不是 CPT 的
+
+`_pkg` 那个采集机（`collector-cn`）服务的是 **league-predict**（体彩竞彩），它只是
+**恰好把发布通道寄居在 CPT 的静态根里** —— 这正是 R31/R33 收拾的那摊事。
+CPT 自己的 A 股行情走的是 `public.daily_bar` + 腾讯 + Wind，从没依赖过它。
+
+真正卡住 CPT 的是另一件事：**`push2.eastmoney.com`（东财实时）从大阪机是 502**
+（`source_registry.KNOWN_DEAD_ENDPOINTS` 其实早就写着「本机（大阪）实测 502」）。
+所以 CPT 确实只要**换源**。
+
+### 二、换源前量出的第一件事：`parity` 块从来没接过
+
+`v2["parity"] = parity or {"available": False, "reason": "oracle_reference_unavailable"}`
+—— 而 **6 个 `build_dashboard_snapshot_v2` 调用点没有一个传 `parity=`**。
+所以那个块**永远是默认值**，它跟 502 无关，是**压根没有生产者**。`/api/dashboard/parity`
+这条路由只是把这个死块原样回显。
+
+### 三、换源前量出的第二件事（更要紧）：口径错配，被 502 掩盖了半年
+
+`_attach_dual_compare` 拿东财的**不复权**现价，直接比 CPT 快照的**后复权**收盘价。
+实测（2026-09-30，600519）：
+
+| | 值 |
+|---|---|
+| `public.daily_bar` 不复权收盘 | 1258.62 |
+| 该日 `hfq_factor` | 7.06053932 |
+| 快照最后一根 close（后复权） | **8886.536** |
+| 上游现价（新浪/腾讯，不复权） | 1258.62 |
+| **直接相比** | **−85.84%** ← 换源后不开修正就是这个数 |
+| 先乘同一因子再比 | **+0.0000%** |
+
+也就是说：**只换源会往面板上放一个「市场跌了 86%」的假数字**，比现在的
+`unavailable` 更坏。这个错一直没人看见，纯粹因为 502 把整块挡在门外。
+
+### 四、处置
+
+1. **换源**：东财 → **新浪快照**（`hq.sinajs.cn`）。同机实测 200，且
+   `adapters.SinaQuoteClient` 早就存在并已在探活里用着。
+2. **修口径**：新增 `a_share_local.hfq_factor_on()`，把上游现价乘**最后一根 bar
+   当日**的因子再比；`realtime.raw_price` / `hfq_factor` 一并留在 payload 里可查。
+3. **查不到因子就说不知道**（新 reason `factor_unavailable`），不给假数字。
+4. **顺带修一个分层问题**：IO 从 application 层挪回 adapters（原来的 `urllib`
+   调用写在 `a_share_snapshot.py` 里，SQL 分层门禁管不到它）。
+5. **测试基建跟着换源**：`conftest.stub_eastmoney` → `stub_realtime_quote`，而且
+   **补丁收窄**成只 patch `SinaQuoteClient.fetch_quote` —— 旧 fixture 得把整个
+   `urllib.request.urlopen` 换掉、因此不敢 autouse（会打死 `served()` 的真 HTTP
+   调用），现在碰不到任何 `urlopen`。
+   新增一条**回归钉子** `test_dual_compare_adjusts_realtime_to_hfq_basis`，
+   里面把 −85.84% 这个数**写在断言里**，谁「简化」回去就红。
+
+### 五、真机复验（部署后打真实接口）
+
+    dual_compare.available : true          ← 原：false / realtime_unavailable
+    cpt_close              : 8886.536
+    realtime_price         : 8886.536      ← 同口径
+    divergence_pct         : 0.0           ← 今天休市，现价就是上一根收盘
+    realtime.raw_price     : 1258.62       ← 原始价留着
+    realtime.hfq_factor    : 7.06053932
+    realtime.source        : sina
+    realtime.change_pct    : 1.8647
+
+深市 `000001`（2307.105）与 `600036`（221.822）同样 `available: true`。
+其余源未受影响（探活 6 个源状态与改前一致）。
+
+### 六、门禁
+
+- **pytest 权威计数（`--junit-xml`）**：845 tests / 13 failures / 0 errors /
+  29 skipped → **803 passed**（R34 是 844/13 → 802，本轮 +1 条回归钉子）。
+  13 条失败**全在** `test_web_a_share_routes`（`fcntl` Windows 基线），
+  **零新增失败**。
+- ruff check / ruff format --check / mypy（4 条 `fcntl` Windows 基线）/ vulture /
+  import-linter / `check_sql_layering` 全绿。
+- 改动范围：`cpt/application/a_share_snapshot.py`、`cpt/adapters/a_share_local.py`、
+  `tests/conftest.py` 与 6 个测试文件（fixture 改名）。
+
+
+
 
 

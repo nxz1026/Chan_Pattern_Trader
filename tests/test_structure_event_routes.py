@@ -22,7 +22,7 @@ from cpt.storage.structure_event_store import recent_events, timeline
 
 from tests.conftest import served
 
-# 刻意**不**用 ``stub_eastmoney``：那个 fixture 全局替换 ``urllib.request.urlopen``，
+# 刻意**不**用 ``stub_realtime_quote``：那个 fixture 全局替换 ``urllib.request.urlopen``，
 # 而本文件恰恰要靠真 urlopen 去打 ``served()`` 起的真 HTTP server。
 # 这两条路由也不碰东财行情（纯 DB 只读），没有需要 stub 的出网调用。
 

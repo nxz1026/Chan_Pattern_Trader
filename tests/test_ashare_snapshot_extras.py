@@ -2,12 +2,11 @@
 
 from __future__ import annotations
 
-import json as _json
-import urllib.request as _url
 from typing import Any
 from unittest.mock import MagicMock, patch
 
 import pytest
+from cpt.adapters.a_share_public import ASharePublicError
 from cpt.application.a_share_snapshot import (
     _attach_close_countdown,
     _attach_dual_compare,
@@ -162,97 +161,159 @@ def test_signal_changed_db_failure() -> None:
 # ---------------------------------------------------------------------------
 # _attach_dual_compare
 # ---------------------------------------------------------------------------
+#
+# R35 重写：源从**东财 push2**（本机实测 502，生产上永远 unavailable）换成
+# **新浪快照**（同机 200），并修掉了被 502 掩盖的**口径错配** —— 原实现拿
+# **不复权**的现价去比 CPT 的**后复权**收盘价，600519 / 2026-09-30 实测会算出
+# **−85.84%**（1258.62 vs 8886.536）。现在先把现价乘同一根 bar 的因子再比。
+# ---------------------------------------------------------------------------
 
 
-def _eastmoney_response(
-    price: float = 100.0,
+def _quote(
+    last: float = 100.0,
+    prev_close: float = 99.0,
     high: float = 105.0,
     low: float = 95.0,
     open_: float = 98.0,
-    volume: float = 1000000,
-    turnover: float = 100000000,
-    prev_close: float = 99.0,
-    change_pct: float = 1.0,
-) -> bytes:
-    data = {
-        "data": {
-            "f43": int(price * 100),
-            "f44": int(high * 100),
-            "f45": int(low * 100),
-            "f46": int(open_ * 100),
-            "f47": str(int(volume)),
-            "f48": str(int(turnover)),
-            "f60": int(prev_close * 100),
-            "f170": int(change_pct * 100),
-            "f57": "600519",
-            "f58": "贵州茅台",
-        }
+) -> dict:
+    """新浪快照 ``fetch_quote`` 的返回形状（**不复权**）。"""
+    return {
+        "code": "sh600519",
+        "name": "贵州茅台",
+        "open": open_,
+        "prev_close": prev_close,
+        "last": last,
+        "high": high,
+        "low": low,
+        "volume": 3833098.0,
+        "date": "2026-10-02",
+        "time": "16:14:58",
     }
-    return _json.dumps(data).encode()
 
 
-class _FakeResponse:
-    def __init__(self, payload: bytes):
-        self._payload = payload
+def _factor_conn(factor: float | None) -> Any:
+    """一个只会回答「某日 hfq_factor 是多少」的假连接（``hfq_factor_on`` 唯一的依赖）。"""
 
-    def read(self):
-        return self._payload
+    class _Cur:
+        def __enter__(self) -> Any:
+            return self
 
-    def __enter__(self):
-        return self
+        def __exit__(self, *_: object) -> bool:
+            return False
 
-    def __exit__(self, *_):
-        return False
+        def execute(self, sql: str, params: Any = None) -> None:
+            return None
+
+        def fetchone(self) -> Any:
+            return None if factor is None else (factor,)
+
+    class _Conn:
+        def cursor(self) -> Any:
+            return _Cur()
+
+    return _Conn()
+
+
+class _FakeClient:
+    """``hfq_factor_on`` 只经 ``client._get_conn()`` 拿连接。"""
+
+    def __init__(self, conn: Any) -> None:
+        self._conn = conn
+
+    def _get_conn(self) -> Any:
+        return self._conn
 
 
 def test_dual_compare_success() -> None:
+    """因子 = 1.0 时退化成「现价 vs 收盘」，与旧行为一致。"""
     snapshot = {"candles": [{"close": 99.5, "open_time": 1, "close_time": 2}], "market": {}}
-    payload = _eastmoney_response(price=100.0, prev_close=99.0, change_pct=1.0)
-    with patch("urllib.request.urlopen", return_value=_FakeResponse(payload)):
-        _attach_dual_compare(snapshot, "600519", None)
+    with patch(
+        "cpt.adapters.a_share_public.SinaQuoteClient.fetch_quote",
+        lambda self, code, **kw: _quote(),
+    ):
+        _attach_dual_compare(snapshot, "600519", _FakeClient(_factor_conn(1.0)))
     dc = snapshot["dual_compare"]
     assert dc["available"] is True
     assert dc["cpt_close"] == 99.5
-    assert dc["realtime_price"] == 100.0
+    assert dc["realtime_price"] == pytest.approx(100.0)
     assert dc["divergence_pct"] == pytest.approx(0.5025, abs=0.01)
-    assert dc["realtime"]["change_pct"] == pytest.approx(1.0, abs=0.01)
+    assert dc["realtime"]["change_pct"] == pytest.approx(1.01, abs=0.02)
+    assert dc["realtime"]["source"] == "sina"
 
 
-def test_dual_compare_shenzhen_prefix() -> None:
-    snapshot = {"candles": [{"close": 10.0}], "market": {}}
-    payload = _eastmoney_response(price=10.1, prev_close=10.0)
-    with patch("urllib.request.urlopen", return_value=_FakeResponse(payload)) as mocked:
-        _attach_dual_compare(snapshot, "000001", None)
-    # 验证 secid 前缀为 0（深市）
-    call_args = mocked.call_args
-    req_arg = call_args[0][0]
-    assert "secid=0.000001" in req_arg.full_url
+def test_dual_compare_adjusts_realtime_to_hfq_basis() -> None:
+    """**回归钉子**：R35 那个 −85.84% 的口径错配不许回来。
+
+    真实数字（2026-10-02 实测）：库里不复权 1258.62、因子 7.06053932、
+    快照收盘 8886.536。同一天上游现价就是 1258.62 ⇒ 同口径下偏离应为 0。
+    """
+    factor = 7.06053932
+    last_hfq_close = 1258.62 * factor
+    snapshot = {
+        "candles": [{"close": last_hfq_close, "open_time": 1790726400000, "close_time": 0}],
+        "market": {},
+    }
+    with patch(
+        "cpt.adapters.a_share_public.SinaQuoteClient.fetch_quote",
+        lambda self, code, **kw: _quote(last=1258.62, prev_close=1258.62),
+    ):
+        _attach_dual_compare(snapshot, "600519", _FakeClient(_factor_conn(factor)))
+    dc = snapshot["dual_compare"]
+    assert dc["available"] is True
+    assert dc["realtime"]["raw_price"] == 1258.62
+    assert dc["realtime_price"] == pytest.approx(8886.536, rel=1e-4)
+    assert dc["divergence_pct"] == pytest.approx(0.0, abs=0.01)
+    # 拿不复权价直接比就是这个数 —— 明确记下来，免得有人"简化"回去
+    assert (1258.62 - last_hfq_close) / last_hfq_close * 100 == pytest.approx(-85.84, abs=0.05)
+
+
+def test_dual_compare_missing_factor_refuses_instead_of_faking() -> None:
+    """查不到因子 → 说不知道，**不给** −85% 那种数字。"""
+    snapshot = {"candles": [{"close": 8886.536, "open_time": 1790726400000}], "market": {}}
+    with patch(
+        "cpt.adapters.a_share_public.SinaQuoteClient.fetch_quote",
+        lambda self, code, **kw: _quote(last=1258.62),
+    ):
+        _attach_dual_compare(snapshot, "600519", _FakeClient(_factor_conn(None)))
+    dc = snapshot["dual_compare"]
+    assert dc["available"] is False
+    assert dc["reason"] == "factor_unavailable"
+    assert dc["realtime_raw_price"] == 1258.62
 
 
 def test_dual_compare_network_failure() -> None:
-    snapshot = {"candles": [{"close": 99.5}], "market": {}}
-    with patch("urllib.request.urlopen", side_effect=_url.URLError("timeout")):
-        _attach_dual_compare(snapshot, "600519", None)
+    snapshot = {"candles": [{"close": 99.5, "open_time": 1}], "market": {}}
+
+    def boom(self, code, **kw):
+        raise ASharePublicError("新浪快照不可达：sh600519（timeout）")
+
+    with patch("cpt.adapters.a_share_public.SinaQuoteClient.fetch_quote", boom):
+        _attach_dual_compare(snapshot, "600519", _FakeClient(_factor_conn(1.0)))
     dc = snapshot["dual_compare"]
     assert dc["available"] is False
     assert dc["reason"] == "realtime_unavailable"
 
 
-def test_dual_compare_empty_response() -> None:
-    snapshot = {"candles": [{"close": 99.5}], "market": {}}
-    payload = _json.dumps({"data": None}).encode()
-    with patch("urllib.request.urlopen", return_value=_FakeResponse(payload)):
-        _attach_dual_compare(snapshot, "600519", None)
+def test_dual_compare_empty_last_price() -> None:
+    snapshot = {"candles": [{"close": 99.5, "open_time": 1}], "market": {}}
+    with patch(
+        "cpt.adapters.a_share_public.SinaQuoteClient.fetch_quote",
+        lambda self, code, **kw: _quote(last=None),
+    ):
+        _attach_dual_compare(snapshot, "600519", _FakeClient(_factor_conn(1.0)))
     dc = snapshot["dual_compare"]
     assert dc["available"] is False
+    assert dc["reason"] == "realtime_empty"
 
 
 def test_dual_compare_no_candles() -> None:
+    """没有 candles → 没有"最后一根 bar 的因子"，只能如实说不知道。"""
     snapshot = {"candles": [], "market": {}}
-    payload = _eastmoney_response(price=100.0, prev_close=99.0)
-    with patch("urllib.request.urlopen", return_value=_FakeResponse(payload)):
-        _attach_dual_compare(snapshot, "600519", None)
+    with patch(
+        "cpt.adapters.a_share_public.SinaQuoteClient.fetch_quote",
+        lambda self, code, **kw: _quote(),
+    ):
+        _attach_dual_compare(snapshot, "600519", _FakeClient(_factor_conn(1.0)))
     dc = snapshot["dual_compare"]
-    assert dc["available"] is True
-    assert dc["cpt_close"] == 0.0
-    assert dc["divergence_pct"] is None
+    assert dc["available"] is False
+    assert dc["reason"] == "factor_unavailable"

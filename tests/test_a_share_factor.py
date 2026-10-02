@@ -30,7 +30,7 @@ from cpt.domain.models import CanonicalBar
 
 #: ``build_ashare_snapshot`` 内部每次都会直连东财拿实时价（见 conftest 说明）。
 #: 本文件显式打桩的是**因子**取数（腾讯），但快照构造这条外网链路同样要钉死。
-pytestmark = pytest.mark.usefixtures("stub_eastmoney")
+pytestmark = pytest.mark.usefixtures("stub_realtime_quote")
 
 
 def _Bar(day_index: int, close: float) -> CanonicalBar:

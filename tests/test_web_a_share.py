@@ -1,6 +1,6 @@
 """``cpt.web.a_share`` 测试 — 注入 mock client，不依赖 psycopg，**也不发外网请求**。
 
-外网由 ``conftest.stub_eastmoney`` 统一钉死（见那里的说明）。
+外网由 ``conftest.stub_realtime_quote`` 统一钉死（见那里的说明）。
 """
 
 from __future__ import annotations
@@ -17,7 +17,7 @@ from cpt.application.a_share_snapshot import (
     empty_ashare_snapshot as _empty_snapshot,
 )
 
-pytestmark = pytest.mark.usefixtures("stub_eastmoney")
+pytestmark = pytest.mark.usefixtures("stub_realtime_quote")
 
 
 class _FakeResult:
@@ -28,15 +28,44 @@ class _FakeResult:
 
 
 class _FakeClient:
-    """AShareLocalClient duck type — 只需实现 fetch_validated_klines。"""
+    """AShareLocalClient duck type — 只需实现 fetch_validated_klines。
 
-    def __init__(self, bars: list[Any]) -> None:
+    R35：``_attach_dual_compare`` 现在还要读**后复权因子**（经 ``_get_conn()``）把
+    不复权的上游现价换到同口径，所以这里补一个只会回答因子的假连接；不给的话
+    面板会如实降级成 ``factor_unavailable``（这也是对的行为，只是这条守卫要的是
+    「stub 生效」而不是「降级」）。
+    """
+
+    def __init__(self, bars: list[Any], factor: float = 1.0) -> None:
         self._bars = bars
+        self._factor = factor
         self.calls: list[tuple[str, int, int]] = []
 
     def fetch_validated_klines(self, code: str, start_ms: int, end_ms: int) -> _FakeResult:
         self.calls.append((code, start_ms, end_ms))
         return _FakeResult(self._bars)
+
+    def _get_conn(self) -> Any:
+        factor = self._factor
+
+        class _Cur:
+            def __enter__(self) -> Any:
+                return self
+
+            def __exit__(self, *_: object) -> bool:
+                return False
+
+            def execute(self, sql: str, params: Any = None) -> None:
+                return None
+
+            def fetchone(self) -> Any:
+                return (factor,)
+
+        class _Conn:
+            def cursor(self) -> Any:
+                return _Cur()
+
+        return _Conn()
 
 
 def _make_canonical(open_time_ms: int, close: float) -> Any:
@@ -121,19 +150,27 @@ def test_provider_caches_snapshot_within_ttl():
 
 
 def test_dual_compare_uses_stubbed_realtime_not_live_network():
-    """守卫：确认 ``conftest.stub_eastmoney`` 真的在生效。
+    """守卫：确认 ``conftest.stub_realtime_quote`` 真的在生效。
 
     没有这条，某天有人删掉那行 ``pytestmark``，flaky 会**静默**回来：
-    ``test_provider_caches_snapshot_within_ttl`` 又开始依赖东财的实时可达性，
+    ``test_provider_caches_snapshot_within_ttl`` 又开始依赖上游实时报价的可达性，
     而它自己不会给出任何提示。这里把「实时价被钉成固定值」变成显式断言。
 
-    顺带也是本模块不发外网请求的证据：``realtime_price`` 恰好等于 conftest 里
+    顺带也是本模块不发外网请求的证据：``realtime.raw_price`` 恰好等于 conftest 里
     写死的 100.0，而不是任何真实行情。
+
+    R35：``realtime_price`` 现在是**同口径**（后复权）的值 = raw × 因子，而
+    ``raw_price`` 保留上游原值。两条都断言，把这个契约钉住。
     """
-    snap = build_ashare_snapshot("600519", client=_FakeClient(_bars_for("600519", n=5)))
+    factor = 2.0
+    snap = build_ashare_snapshot(
+        "600519", client=_FakeClient(_bars_for("600519", n=5), factor=factor)
+    )
     dc = snap["dual_compare"]
     assert dc["available"] is True
-    assert dc["realtime_price"] == 100.0
+    assert dc["realtime"]["raw_price"] == 100.0
+    assert dc["realtime"]["hfq_factor"] == factor
+    assert dc["realtime_price"] == pytest.approx(200.0)
 
 
 def test_provider_default_width_k_matches_plan():

@@ -47,7 +47,9 @@ __all__ = [
     "fetch_daily_tags",
     "fetch_factor_codes",
     "fetch_security_names",
+    "hfq_factor_on",
     "is_trade_day",
+    "open_days_between",
 ]
 
 #: ``public.daily_bar`` 实际列名（与 DB schema 对齐）
@@ -153,6 +155,30 @@ def open_days_between(conn: Any, start: date, end: date) -> set[date]:
         )
         rows = cur.fetchall()
     return {row[0] for row in rows}
+
+
+def hfq_factor_on(conn: Any, code: str, trade_date: Any) -> float | None:
+    """``asel.ref_adjust_factor`` 里某个交易日的后复权因子；没这一行返回 ``None``。
+
+    R35 新增：给「把**不复权**的实时报价换算到后复权口径」用。
+
+    为什么要它：``fetch_validated_klines`` 出的 K 线是**后复权**（raw × 因子），
+    而所有实时行情快照（新浪 / 腾讯 / 东财）给的**现价都是不复权**的。两者直接
+    相减会得到荒谬的结论 —— 600519 / 2026-09-30 实测：库里不复权 1258.62、
+    因子 7.06053932，快照收盘 8886.536，拿 1258.62 去比就是 **−85.84%**。
+
+    :param trade_date: ``datetime.date`` 或 ISO 字符串。
+    """
+    bare = code.split(".", 1)[0]
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT hfq_factor FROM asel.ref_adjust_factor WHERE code = %s AND trade_date = %s",
+            (bare, trade_date),
+        )
+        row = cur.fetchone()
+    if not row or row[0] is None:
+        return None
+    return float(row[0])
 
 
 # --------------------------------------------------------------------------- #
