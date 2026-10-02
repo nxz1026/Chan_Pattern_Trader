@@ -119,11 +119,22 @@ def test_export_route_slices_requested_range() -> None:
     assert status == 200
     assert body["schema_version"] == "dashboard_export.v1"
     assert body["available"] is True
-    assert body["slice"] == {"start_ms": start_ms, "end_ms": end_ms}
+    # R32：原来是全等断言 ``slice == {start_ms, end_ms}``。现在信封里多带了
+    # 「切了什么 / 没切什么」的声明（纯新增，start_ms/end_ms 语义不变），
+    # 所以改成**分别**校验原有两键 —— 不能因为加字段就把原契约放掉。
+    assert body["slice"]["start_ms"] == start_ms
+    assert body["slice"]["end_ms"] == end_ms
+    assert body["slice"]["sliced_blocks"] == ["candles", "market"]
+    assert body["slice"]["candle_count"] == 31
+    assert body["slice"]["source_bar_count"] == 120
+    assert "bar_index" in body["slice"]["unsliced_blocks_note"]
     assert body["candle_count"] == 31  # 闭区间 [10, 40]
     assert len(body["snapshot"]["candles"]) == 31
     # 切片不得改动源快照：market.bar_count 被重算成窗口根数
     assert body["snapshot"]["market"]["bar_count"] == 31
+    # R32：market 的时间跨度也必须跟着切片走，不能还挂着完整窗口的跨度
+    assert body["snapshot"]["market"]["first_open_time"] == start_ms
+    assert body["snapshot"]["market"]["last_open_time"] == end_ms
 
 
 def test_export_route_rejects_bad_range() -> None:

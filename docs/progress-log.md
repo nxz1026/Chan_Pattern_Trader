@@ -4249,3 +4249,160 @@ R30 的诊断通道已经把路铺好了（跨 origin postMessage 可用），�
 > 决定打开，且**实际用的是 `~/.local/bin/node` 软链**（不写死 nvm 版本号，
 > 换版本只重指软链）。env 示例文件里记的是软链那条。
 
+---
+
+## R32 · application 层复盘 —— 「接上了」不等于「到了客户端」· 2026-10-02 下午
+
+`storage`（R24）/`llm`（R25、R28）/`web`（R29）/`domain`（R30）/`adapters`（R31）
+都复盘过了，接着做 `application/`。选它的理由：这一层是**唯一「算东西给人看」的
+层** —— 画布不可用两周没人发现、chromium 测试恒 skip、`captureBeyondViewport`
+自己造空白，都是「看起来接上了/看起来坏了」在骗人。所以本轮的老规矩不变：
+**先量结构，再真机验，最后才动代码。**
+
+### 一、量结构
+
+31 个文件。`a_share_snapshot.py` 950 行 / 22 个定义独大，后面是一长串
+**单函数薄模块**（`dashboard_alerts` / `_compare` / `_export` / `_indicators` /
+`_inspector` / `_levels` / `_market` / `_multi_run` / `_quality` / `_realtime` /
+`_reproducibility` / `_runs` / `_runtime` / `_snapshot_v2` / `_stats` / `_watch` /
+`_watchlist`）—— 这正是 R22「D 类 9 模块全部接线」那批。
+
+### 二、引用普查（AST，**不是字符串计数**）
+
+R31 栽在字符串计数上（19 个 `dashboard_*` 误判成孤儿、实际 0 孤儿），所以这次
+写了个 AST 级的普查，并且**分四档**而不是两档：
+
+| 档 | 数量 | 含义 |
+|---|---|---|
+| 已接线 | 42 | 有其它文件的引用 |
+| 只有测试引用 | 12 | 生产路径没人用 |
+| **仅同文件引用** | 2 | **要人工判断**（回调式接线长这样） |
+| 全仓 0 引用 | 3 | 候选死代码 |
+
+「仅同文件引用」这一档是**第一版工具漏掉的**：它把同文件引用一律排除，于是把
+`llm_cases.on_llm_status` 报成 0 引用 —— 而那正是
+`get_queue(on_status=on_llm_status)` 的回调，**同模块引用恰恰是生产接线**。
+补上「同文件裸名引用」之后它归位。**工具自己骗了我一次，这是本轮第一笔自纠。**
+
+改对之后的真结果：只有 3 个真 0 引用 —— `export_to_file`、
+`llm_cases.recover_interrupted`、`replay.replay_incremental`。
+
+### 三、真机验：长尾模块是不是真的「接上了」？
+
+这是本层最该验的问题，验法是**打真实服务**，不读代码。
+
+#### 3.1 快照里的 20 个顶层键
+
+`GET /api/dashboard/snapshot`（真实 452 KB）返回 20 个顶层键，
+`alerts` / `config_compare` / `data_quality` / `indicators`(72KB) /
+`level_tree`(94KB) / `market_24h` / `multi_level` / `overlays`(94KB) /
+`reproducibility` / `runtime` / `watch_metrics` / `runs` … **长尾模块的产物
+基本都在**。这个担心是**多余的**。
+
+#### 3.2 走独立路由的那批：25 条路由逐条打
+
+`21 个 200 / 7 个 400（缺参）/ 0 个要查`。**每一个只走独立路由的 application
+模块都活着**，都能被外部真的拿到东西。（中途我自己的 AST 路由抽取只捞到 3 条、
+又猜错 `/api/dashboard/stats` 的路径得到 404 —— 两次都是**我的工具/我的假设**错，
+不是产品错。改用「从源码抽全部 `/api/...` 字面量 + 逐条 curl」。）
+
+#### 3.3 唯一真问题：导出的「时间范围切片」只切了一半
+
+`GET /api/dashboard/export` 回了 **263 KB，却写着 `candle_count: 0`**（我请求的
+区间在缓冲外）。追下去发现：请求**窗口最末 1 小时**时 ——
+
+| 键 | 完整快照 | 导出内 | 与完整快照逐字节相同 |
+|---|---|---|---|
+| `candles` | 188,017 B | 315 B | **False**（被切了） |
+| `market` | 171 B | 169 B | False（只改了 `bar_count`） |
+| `level_tree` | 94,367 B | 94,367 B | **True** |
+| `overlays` | 94,341 B | 94,341 B | **True** |
+| `indicators` | 72,168 B | 72,168 B | **True** |
+| `data_quality` / `reproducibility` / `engine_state` / `summary` … | — | — | **True** |
+
+**只切了 `candles` 和 `market.bar_count`，其余 15 个块原样透传。** 危害量出来是
+硬的：1 根 candle 的导出里，`level_tree`+`overlays` 扫到的 **74 个 `bar_index`
+全部越界**（最大 121）。消费方按 `bar_index` 去索引 `candles` 就会 IndexError。
+
+而且 `market` **自己内部就矛盾**：`bar_count=1`，配着跨 **600 小时**的
+`first_open_time`/`last_open_time`。
+
+**为什么一直没被发现**：`tests/test_dashboard_export.py` 整个文件 9 行，只断言
+「candles 被切了」+「`bar_count` 改了」+「没改入参」—— **恰好只检查了被切的那两样**。
+
+#### 3.4 处置：让它自洽 + 如实声明，**不删数据**
+
+研究导出里结构数据本身就是要看的东西，**悄悄删掉比「多给了」更危险**。所以：
+
+1. `market.first/last_open_time` 跟着切片走（空切片给 `None`，沿用
+   `dashboard._market` 空序列的既有约定）—— 消除自相矛盾；
+2. `slice` 块写明切了什么、没切什么、丢掉了多少根：
+
+       "sliced_blocks": ["candles", "market"],
+       "source_bar_count": 600,
+       "unsliced_blocks_note": "level_tree/overlays/indicators 等块未切片，仍是
+         完整窗口的内容；其中的 bar_index 指向完整窗口，不能用来索引本导出的 candles"
+
+3. **`app.py` 把这个说明提到外层信封**（之前它只写在 `snapshot.slice` 里，而消费方
+   第一眼看的是 `envelope.slice`）；`start_ms`/`end_ms` 两个原有键**保持不变**，
+   纯新增；
+4. 测试从 1 条扩到 4 条，其中一条**钉住「结构块保持不变且下标会越界」这个事实**
+   —— 哪天真去切结构了，那条测试会失败，届时记得连 docstring 一起改。
+
+**真机复验（同一台机、同一条请求）**：
+
+    candle_count = 1   source_bar_count = 600
+    market: bar_count=1, first=last=1790913600000   ← 自洽了
+    level_tree / overlays / indicators 与完整快照逐字节相同：True（刻意保留）
+
+### 四、第二笔自纠：一行不存在的调用点声明
+
+`llm_cases.recover_interrupted` 的 docstring 写着「**进程启动时调用**」，而 AST
+普查说它全仓 0 引用。我一度以为是死接线，去日志里查 —— **被证伪**：
+
+    journal  10-02 00:39:44,927  已把 1 条中断的 LLM 调用标记为 interrupted
+    表里那条 d1775cb… 的 finished_at = 00:39:44.924        ← 差 3 毫秒
+
+**效果没丢**（中断标记在生产上是活的，有时间戳证据），只是走的不是这个函数，
+而是 `_bootstrap()` 里同样的 `mark_interrupted`（每次提交时调）。所以真正的问题
+是**那句话是假的**。已改成事实陈述：效果由 `_bootstrap` 触发，这个函数是同一动作
+的独立可调形式。
+
+与 R30 的 `config.py` 单位、R31 的「本地没有交易日历」、R31 的 Wind `aftype` 同一类：
+**注释里的调用点会过期，而且过期之后没有任何机制会告诉你。**
+
+### 五、第三笔自纠：roadmap 里那个「前端面板」不存在
+
+`docs/dashboard-product-roadmap.md` 写「前端『范围导出』面板加起止时间输入」。
+真机 grep `/var/www/cpt-dashboard/*.js`：**没有任何文件引用 `dashboard/export`**，
+那个面板从来没做。已在 roadmap 就地标注。
+
+### 六、被推翻的怀疑（这一层的勘察成本大头）
+
+1. 「长尾模块可能接上了但客户端看不见」→ **21×200 / 7×缺参 / 0 要查**，
+   快照 20 个键全在。（画布 D 那种事在这一层没有重演）
+2. `on_llm_status` 是死代码 → **不是**，回调式接线，且我在日志里看到了它产出的落库。
+3. 两份 `_infer_interval_ms`（`dashboard.py` 与 `replay.py`）行为不一致 →
+   **代码完全等价**（都是 min 正间隔 + 回落 `levels[0]*60000`），只是 docstring
+   措辞不同。是重复，不是缺陷。
+4. 静态页「没有导出入口」→ 准确说不是缺陷，是 roadmap 描述与现实脱节（见 §五）。
+
+### 七、门禁
+
+- **pytest 权威计数（`--junit-xml`）**：844 tests / 13 failures / 0 errors /
+  29 skipped → **802 passed**（R31 是 841/13 → 799，本轮 +3 条：导出契约从 1 条
+  扩到 4 条，另在 `test_dashboard_wiring_d` 里补了信封字段的校验）。
+  13 条失败**全在** `test_web_a_share_routes`（`fcntl` Windows 基线），
+  **零新增失败** —— 中途出现过 1 条 `test_dashboard_wiring_d` 失败，是
+  `assert body["slice"] == {start_ms, end_ms}` 的**全等断言**被我新增的声明字段
+  打破；已改成**分别**校验原有两键 + 校验新声明，而不是把原契约放掉。
+- ruff check / ruff format --check / mypy（4 条 `fcntl` Windows 基线）/
+  vulture / import-linter（6 kept, 0 broken）/ `check_sql_layering` 全绿。
+
+### 八、待 owner
+
+1. **导出的结构块要不要真的按时间过滤？** 现在是「保留完整窗口 + 如实声明」。
+   真要一致就得切结构 —— 但那会让研究导出少掉数据，是**减功能**，所以没自己动。
+2. `_pkg` 那条 0 下载的通道：退役，还是让 collector-cn 的主人补 `run7.sh`
+   （见 R31 §八.2 的两条路）。
+

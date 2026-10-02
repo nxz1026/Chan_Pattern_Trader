@@ -792,10 +792,19 @@ def make_handler(
                     }
                 else:
                     sliced = slice_snapshot(dict(snapshot), start_ms, end_ms)
+                    # R32：把切片自己的说明**提到外层信封**。之前这里只写
+                    # start_ms/end_ms 两个数，而 slice_snapshot 产出的
+                    # candle_count / source_bar_count / unsliced_blocks_note
+                    # 全被压在内层 ``snapshot.slice`` 里 —— 消费方第一眼看的是
+                    # envelope，于是「只切了 candles、结构块仍是完整窗口」这件
+                    # 事完全不可见。start_ms/end_ms 两个键保持不变（纯新增）。
+                    slice_meta = dict(sliced.get("slice", {}))
+                    slice_meta["start_ms"] = start_ms
+                    slice_meta["end_ms"] = end_ms
                     payload = {
                         "schema_version": "dashboard_export.v1",
                         "available": True,
-                        "slice": {"start_ms": start_ms, "end_ms": end_ms},
+                        "slice": slice_meta,
                         "candle_count": len(sliced.get("candles", [])),
                         "snapshot": sliced,
                     }

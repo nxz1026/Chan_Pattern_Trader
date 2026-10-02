@@ -166,7 +166,11 @@ parity
   R22 接进 `GET /api/dashboard/multi-run?run_ids=a,b,c`（2–5 个），输出
   `{run_count, timestamps, points[{open_time, run_0, run_1, ...}]}`，故本行两条并列，互不替代）；
 - 时间范围切片导出（✅ R22：`dashboard_export.py::slice_snapshot` 接进
-  `GET /api/dashboard/export?start_ms=&end_ms=`，前端「范围导出」面板加起止时间输入；
+  `GET /api/dashboard/export?start_ms=&end_ms=`；
+  **⚠️ R32 更正：前端「范围导出」面板并不存在** —— 真机 grep
+  `/var/www/cpt-dashboard/*.js`，没有任何文件引用 `dashboard/export`，本接口是
+  纯 API。且它**只切 `candles`**：结构/指标块仍是完整窗口的内容（下标会越界），
+  详见 `slice_snapshot` docstring；
   与 `docs/export-schema-v1.md` 的**数据集导出 schema v1 是两件事**，后者未动）。
 
 ## 后端代码框架

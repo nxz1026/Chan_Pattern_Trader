@@ -227,7 +227,29 @@ def list_calls(conn: Any, *, limit: int = 20, subject_id: str | None = None) -> 
 
 
 def recover_interrupted() -> int:
-    """进程启动时调用：把在途任务标成 interrupted。"""
+    """把在途任务标成 interrupted，返回被标记的行数。
+
+    ## R32：docstring 原来写的是「进程启动时调用」，**那句话是错的**
+
+    AST 引用普查（全仓 0 引用）翻出这个函数之后我一度以为是死接线，去日志里查
+    证伪了：journal 里
+
+        10-02 00:39:44,927  已把 1 条中断的 LLM 调用标记为 interrupted
+
+    而表里那条 `d1775cb…` 的 `finished_at` 是 `00:39:44.924` —— **差 3 毫秒**。
+    也就是说标记**确实在生产上生效了**，只是走的不是这个函数，而是
+    :func:`_bootstrap` 里同样的 ``mark_interrupted``（每次 ``explain_structure``
+    提交时都会调一次）。所以：
+
+    - **效果**没丢：中断标记是活的，有时间戳证据；
+    - **这个函数**确实是 0 引用，且它宣称的调用点不存在。
+
+    保留它作为「独立可调」的同一动作（运维/测试可以单独触发），但把调用点改成
+    事实：**当前生产路径由** :func:`_bootstrap` 触发，不是这里。
+
+    教训与 R30 的 ``config.py``、R31 的「本地没有交易日历」同一类：
+    **注释里的调用点是会过期的，而且过期之后没有任何机制会告诉你。**
+    """
     from cpt.adapters.a_share_local import AShareLocalClient
 
     client = AShareLocalClient()
