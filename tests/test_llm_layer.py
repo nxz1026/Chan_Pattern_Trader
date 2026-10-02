@@ -15,13 +15,17 @@
 
 from __future__ import annotations
 
+import http.server
+import json
 import threading
 import time
+import urllib.error
 from typing import Any
 
 import pytest
 from cpt.llm.base import LLMError, LLMRateLimited, LLMRequest, LLMResult, LLMUsage
 from cpt.llm.config import LLMConfig, load_config
+from cpt.llm.providers.openai_compatible import OpenAICompatibleClient
 from cpt.llm.queue import (
     STATUS_ERROR,
     STATUS_OK,
@@ -364,3 +368,153 @@ def test_http_error_classification() -> None:
         assert not isinstance(err, LLMRateLimited), f"{status} 不该被当成限流"
     assert isinstance(classify(_err(500)), LLMError)
     assert not isinstance(classify(_err(500)), LLMRateLimited)
+
+
+# --------------------------------------------------------------------------- #
+# 4. 端到端：真 HTTP 429 -> 退避重入
+# --------------------------------------------------------------------------- #
+#
+# ## 为什么要有这组
+#
+# 上面的分类单测是**手工构造** `urllib.error.HTTPError` 喂给
+# `_classify_http_error` 的 —— 它绕过了 `complete()` 里那段
+# `except urllib.error.HTTPError`。也就是说：把那个 except 删掉 / 改成
+# 宽泛捕获，**现有全部测试依然全绿**，而生产环境的 429 退避会静默失效。
+#
+# 这组用**真 HTTP server**（`http.server`，不联网、不装依赖）跑完整链路：
+# urlopen -> 真实 HTTPError -> 分类 -> LLMRateLimited -> 队列退避重入。
+#
+# 桩刻意复刻 agnes 的实测特征：**空响应体 + 无 Retry-After**。
+# 这一点很要紧 —— 带响应体的 429 会走上一条完全不同的代码路径。
+
+
+class _StubHandler(http.server.BaseHTTPRequestHandler):
+    """前 `fail_first` 次回 429（空体、无 Retry-After），之后回 200。"""
+
+    def do_POST(self) -> None:  # noqa: N802 — BaseHTTPRequestHandler 约定
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        state = self.server.stub  # type: ignore[attr-defined]
+        with state["lock"]:
+            state["calls"] += 1
+            n = state["calls"]
+        if n <= state["fail_first"]:
+            self.send_response(429)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        body = json.dumps(
+            {
+                "choices": [{"message": {"content": "桩内容"}, "finish_reason": "stop"}],
+                "usage": {"prompt_tokens": 5, "completion_tokens": 3, "total_tokens": 8},
+                "model": "stub-model",
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        return
+
+
+def _stub_provider(fail_first: int) -> tuple[OpenAICompatibleClient, dict[str, Any]]:
+    state: dict[str, Any] = {"calls": 0, "fail_first": fail_first, "lock": threading.Lock()}
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _StubHandler)
+    srv.stub = state  # type: ignore[attr-defined]
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    client = OpenAICompatibleClient(
+        base_url=f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions",
+        model="stub-model",
+        api_key="stub-key",
+        timeout=5.0,
+    )
+    return client, state
+
+
+def test_real_http_429_triggers_backoff_and_recovers() -> None:
+    """真 HTTP 429 必须走退避重入，并在限流解除后**真的恢复**。
+
+    「耗尽重试」和「恢复成功」在退避次数上表现一样，只验前者验不出这条路径
+    是不是真的能救回来 —— 而生产要的正是后者。
+    """
+    client, state = _stub_provider(fail_first=2)
+    queue = LLMQueue(
+        client,
+        _config(max_attempts=5, backoff_base=0.05, backoff_max=0.2),
+        on_status=lambda cid, st, detail, res: state.setdefault("seen", []).append((st, detail)),
+    )
+    try:
+        queue.submit(Job(request=_request(), call_id="c1"))
+        assert queue.drain(timeout=20.0), "队列没排空"
+    finally:
+        queue.stop()
+
+    seen: list[tuple[str, str]] = state["seen"]
+    statuses = [s for s, _ in seen]
+    assert statuses.count(STATUS_RATE_LIMITED) == 2, statuses
+    assert statuses[-1] == STATUS_OK, f"限流两次后应该恢复，实际 {statuses}"
+    assert state["calls"] == 3, f"应正好打 3 次，实际 {state['calls']}"
+
+
+def test_real_http_429_until_exhausted_terminates_cleanly() -> None:
+    """一直 429 时必须**收尾**成 error，而不是无限重试或卡死 worker。"""
+    client, state = _stub_provider(fail_first=99)
+    queue = LLMQueue(
+        client,
+        _config(max_attempts=3, backoff_base=0.05, backoff_max=0.2),
+        on_status=lambda cid, st, detail, res: state.setdefault("seen", []).append((st, detail)),
+    )
+    try:
+        queue.submit(Job(request=_request(), call_id="c1"))
+        assert queue.drain(timeout=20.0), "队列没排空 —— 说明退避收不了尾"
+    finally:
+        queue.stop()
+
+    seen: list[tuple[str, str]] = state["seen"]
+    assert seen[-1][0] == STATUS_ERROR
+    assert seen[-1][1].startswith("rate_limited_exhausted"), seen[-1]
+    assert state["calls"] == 3, f"应正好打 max_attempts=3 次，实际 {state['calls']}"
+
+
+def test_real_http_401_is_not_retried() -> None:
+    """真 HTTP 401 必须**不重试** —— 重试只是白烧配额，且永远不会成功。
+
+    走队列而不是直接调 ``complete()``：要验的是「生产上会不会烧掉 5 次重试」，
+    那是队列的职责，不是 client 的。
+    """
+
+    class _AuthHandler(_StubHandler):
+        def do_POST(self) -> None:  # noqa: N802
+            self.rfile.read(int(self.headers.get("Content-Length") or 0))
+            self.send_response(401)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _AuthHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    auth_client = OpenAICompatibleClient(
+        base_url=f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions",
+        model="stub-model",
+        api_key="bad",
+        timeout=5.0,
+    )
+    seen: list[tuple[str, str]] = []
+    queue = LLMQueue(
+        auth_client,
+        _config(max_attempts=5, backoff_base=0.05, backoff_max=0.2),
+        on_status=lambda cid, st, detail, res: seen.append((st, detail)),
+    )
+    try:
+        queue.submit(Job(request=_request(), call_id="c1"))
+        assert queue.drain(timeout=20.0)
+    finally:
+        queue.stop()
+        srv.shutdown()
+        srv.server_close()
+
+    statuses = [s for s, _ in seen]
+    assert statuses.count(STATUS_ERROR) == 1, f"401 应一次就结束，实际 {statuses}"
+    assert STATUS_RATE_LIMITED not in statuses, "401 不该被当成限流"
+    assert "HTTP 401" in seen[-1][1], seen[-1]

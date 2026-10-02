@@ -3011,3 +3011,74 @@ cn: 的加密结构：加密侧用 crypto: 前缀重新认领时匹配不上，�
 
 snapshot / structure-events / -share/snapshot / -share/pool 全 200，
 新启动周期内 ERROR / Traceback 为空。
+
+---
+
+## R28 · 429 验证 + LLM 两件 + M3 勘察 + 收尾 · 2026-10-02
+
+owner 拍板：A + B + C + D 全做，排 Todo 逐个来。
+
+### 一、R28-1：429 退避路径真机验证
+
+R25 台账挂着的「429 退避路径未经真机验证」销账。
+
+#### 不用真实 agnes 的理由
+
+`cpt/llm/base.py` 的实测记录写着：agnes 的 429 是**令牌桶**，恢复后单请求仍有
+约 1/8 概率吃到 429。要靠它验证退避就得反复撞 —— 不可靠，而且撞的是别人的额度。
+
+改用**本地 429 桩**（`http.server`，不联网、不装依赖），但走的是**完全相同的
+生产代码路径**：urlopen → 真实 `HTTPError` → `_classify_http_error` →
+`LLMRateLimited` → 队列退避重入。唯一替换的是服务端，客户端与队列一行没改。
+
+桩刻意复刻 agnes 的实测特征：**空响应体 + 无 `Retry-After`**。这一点很要紧 ——
+带响应体的 429 会走上一条完全不同的代码路径。
+
+#### 真机结果（oracle，真实 venv + 真实线程 + 真实计时）
+
+场景 A 耗尽（前 99 次 429，max_attempts=3）：
+
+    桩收到请求 = 3 次
+    状态序列   = running -> rate_limited -> running -> rate_limited -> running -> error
+        rate_limited  retry_in=0.5s attempt=1
+        rate_limited  retry_in=0.6s attempt=2
+        error         rate_limited_exhausted: LLM 服务商限流（HTTP 429）
+    429 间隔   = ['0.47s', '0.61s']
+
+退避上限的截断被真机计时验证了：base=0.2 时 attempt=2 的理论值是
+`0.2 × 2^2 = 0.8`，但 cap=0.5 把它截到 0.5（+jitter 后观测 0.6s）。
+
+场景 B 恢复（前 2 次 429，max_attempts=5）：
+
+    桩收到请求 = 3 次
+    状态序列   = running -> rate_limited -> running -> rate_limited -> running -> ok
+        ok            桩返回的正常内容
+    判定       = 通过
+
+**B 才是有价值的那条**：「耗尽重试」和「恢复成功」在退避次数上表现完全一样，
+只验 A 验不出这条路径是不是真的能救回来 —— 而生产要的正是后者。
+
+#### 顺带钉住一个真实测试缺口
+
+查完已有测试才发现：分类逻辑**有**单测（`test_llm_layer.py` 里手工构造
+`urllib.error.HTTPError` 喂给 `_classify_http_error`），但那**绕过了**
+`complete()` 里那段 `except urllib.error.HTTPError`。
+
+也就是说：把那个 except 分支删掉，**现有 19 条测试依然全绿**，而生产环境的
+429 退避会静默失效 —— 因为 `HTTPError` 是 `URLError` 的子类，会落到下一个
+except 变成普通 `LLMError`，于是不重试。
+
+于是补了 3 条**真 HTTP** 端到端测试（恢复 / 耗尽收尾 / 401 不重试），并做了
+红绿验证 —— 把 `HTTPError` 分支删掉后：
+
+    FAILED test_real_http_429_triggers_backoff_and_recovers
+    FAILED test_real_http_429_until_exhausted_terminates_cleanly
+    失败症状正是 'LLM 请求失败（HTTPError）: HTTP Error 429'
+    而非 'rate_limited_exhausted'
+    其余 19 条全绿
+
+这就是「测试是否真的防住了它声称防的东西」的判据。401 那条走队列而不是直接调
+`complete()`：要验的是「生产上会不会烧掉 5 次重试」，那是队列的职责。
+
+一处自纠：写 401 那条时我先建了个没用的 `queue` 又改成直接调 `complete()`，
+ruff 的 F841 抓出来后顺势把它改回走队列 —— 反而是更有价值的断言。
