@@ -4179,7 +4179,21 @@ R30 的诊断通道已经把路铺好了（跨 origin postMessage 可用），�
 - ruff check / ruff format --check / mypy（4 条 `fcntl` Windows 基线）/
   vulture / import-linter（6 kept, 0 broken）/ `check_sql_layering` 全绿。
 
-### 七、待 owner
+### 七、部署验证（`a07ca14` 已上线）
+
+`git pull` 后重启 `cpt-dashboard`，从**真实 API** 打一次：
+
+    binance_futures  ok
+    ccxt             unavailable  CcxtNotInstalledError（加密通道缺可选依赖，既有状态）
+    wind             skipped     quota_not_authorized（默认不探测，不花配额）
+    tencent_kline    ok
+    sina_quote       ok
+    a_share_local    ok  | missing_trade_days=[] missing_weekdays=[]
+                           trade_calendar_available=True latest=2026-09-30
+
+经 nginx 带 auth 头访问同一接口 **http=200**。
+
+### 八、待 owner
 
 1. **要不要给服务配 `CPT_WIND_NODE`**（一 env 行，让 Wind 通道在线上真的能跑）——
    代价是线上具备消耗真实额度的能力，且实测该通道 3 次里超时 1 次。
