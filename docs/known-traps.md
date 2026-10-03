@@ -493,3 +493,38 @@ A 股的周末/节假日/停牌缺口是合法的，不能被 `DataGapError` 拦
 
 ⇒ 想抓 ingest 丢数据，需要一个**独立于 K 线本身**的判据
 （本项目里现成的一个是 `public.trade_calendar`），而不是在 bar 序列里找洞。
+
+## 24. `except` 块**内部**抛出的异常，不会被兄弟 handler 接住（R45 连踩两次）
+
+R45 复盘 `a_share_snapshot` 时，我在**同一处**错了两次。
+
+代码形状：
+
+    try:
+        result = fetch()                      # 抛 AShareNoFactorError
+    except AShareNoFactorError:
+        outcome = _try_on_demand_factors(...)  # ← 在 except 块**内部**
+        ...                                    # 这里再出错怎么办？
+    except Exception:                          # ← 接不住上面那支！
+        ...
+
+**第一次修法（错）**：把内层的 `except Exception: return None` 删掉，
+以为「让它冒到下面的 `except Exception` 就能统一处理」。
+
+**结果更糟**：异常直接逃出 `build_ashare_snapshot` —— 原来至少还返回一个
+degraded 快照，改完变成 500。
+
+**为什么**：`except` 块内部抛出的异常，**不会**被同一个 `try` 的**兄弟**
+`except` 子句捕获（那些子句只匹配 `try` 主体里抛出的异常）。
+
+**正确修法**：在 `except` 块**内部**自己 try/except，就地处理
+（记日志 + rollback + 如实报 `db_error`）。
+
+## 判据
+
+改动跨了 `try` 边界时，先问一句：**这段代码在 `try` 主体里，还是在某个
+`except` 块里？** 后者的异常流向与前者完全不同。
+
+配套的一条：`scp` 到远端后**必须校验文件真的更新了**（`grep -c` 目标标识符）。
+R45 有三轮「改完测试不对」，真因是 scp 静默失败、跑的还是旧文件 ——
+比代码 bug 更浪费时间的坑。

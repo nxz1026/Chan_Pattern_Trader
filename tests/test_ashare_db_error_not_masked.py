@@ -146,10 +146,9 @@ def test_outer_handler_rolls_back_shared_connection(monkeypatch: pytest.MonkeyPa
     """
     client = _Client()
     monkeypatch.setattr(snap, "AShareLocalClient", lambda *a, **k: client)
-    # 强制走「借用连接」分支
-    monkeypatch.setattr(snap, "factor_ensurer_from_env", lambda *a, **k: None)
-
-    out = snap.build_ashare_snapshot("600519", client=client)  # type: ignore[arg-type]
+    out = snap.build_ashare_snapshot(  # type: ignore[arg-type]
+        "600519", client=client, ensure_factors=None
+    )
     # reason 有两个落点（empty_ashare_snapshot 同时写 data_quality 与 runtime）
     reason = out["data_quality"]["reason"]
     assert out["data_quality"]["degraded"] is True, "DB 故障必须标 degraded"
@@ -166,3 +165,46 @@ def test_reason_for_failure_never_labels_db_error_as_no_factor() -> None:
     """``_reason_for_failure(None)`` 是「没配置」而非「DB 挂了」，调用方要能区分。"""
     assert snap._reason_for_failure(None) == "no_factor"
     # 关键：DB 错误**不能**走到这里 —— 见上面两个测试
+
+
+def test_reread_after_factor_fetch_is_not_labelled_no_factor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R45 第二处：**补完因子后重读**失败，同样不得报成 ``no_factor``。
+
+    这一支的进入条件是 ``outcome.fetched`` 为真 —— 也就是「因子已经成功拉取
+    **并落库**了」。走到这里重读还失败，**几乎必然是 DB 问题**，
+    原实现却报 ``no_factor`` 且不 rollback，与上面那处是同一个 bug 的两处。
+    """
+    class _Ensurer:
+        """让 ``_try_on_demand_factors`` 返回「已取到因子」。"""
+
+        def __call__(self, code: str) -> Any:
+            return snap.FactorEnsureResult(code=code, fetched=True, rows=10)
+
+    class _RereadClient(_Client):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def fetch_validated_klines(self, *a: Any, **k: Any) -> Any:
+            self.calls += 1
+            if self.calls == 1:
+                # 第一次：因子不全，触发按需补
+                raise AShareNoFactorError("no factor")
+            # 第二次（补完之后重读）：DB 挂了
+            raise AShareLocalError("simulated DB failure on re-read")
+
+    client = _RereadClient()
+    monkeypatch.setattr(snap, "AShareLocalClient", lambda *a, **k: client)
+    # ⚠️ ``ensurer`` 是 ``build_ashare_snapshot`` 的**参数** ``ensure_factors``，
+    #    不是从模块级取的（踩过：monkeypatch ``factor_ensurer_from_env`` 无效，
+    #    因为这条路径压根没走它，ensurer 是 None → 直接返回 → 报 no_factor）。
+    out = snap.build_ashare_snapshot(  # type: ignore[arg-type]
+        "600519", client=client, ensure_factors=_Ensurer()
+    )
+    reason = out["data_quality"]["reason"]
+    assert reason.startswith("db_error"), (
+        f"补因子后重读的 DB 故障被报成 {reason!r} —— 会被误判成「腾讯没有这只票的因子」"
+    )
+    assert client.conn.rollbacks >= 1, "重读失败后没有 rollback"

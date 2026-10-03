@@ -202,24 +202,46 @@ def build_ashare_snapshot(
         # 最常见的一种失败（因子表只覆盖热门池并集）。必须与"没数据"和
         # "DB 挂了"分开报 —— 报成 db_error 会把排查方向带偏（实测踩过）。
         _LOG.info("A 股缺因子 %s: %s", code, exc)
-        outcome = _try_on_demand_factors(code, active_client, start_ms, end_ms, ensurer)
-        if outcome is not None and outcome.fetched:
-            try:
-                result = active_client.fetch_validated_klines(code, start_ms, end_ms)
-                canonical = list(result.bars)
-            except Exception as retry_exc:  # noqa: BLE001
-                _LOG.warning("按需补因子后重读仍失败 %s: %s", code, retry_exc)
+        # ⚠️⚠️ R45：下面整段包在自己的 try 里。**必要**，因为这里已经在
+        # ``except AShareNoFactorError`` 块**内部** —— Python 里 except 块中
+        # 抛出的异常**不会被同一 try 的兄弟 handler 接住**（第一版修法就踩了
+        # 这个：以为「冒到下面的 except Exception 就行」，结果异常直接逃出
+        # ``build_ashare_snapshot``，比原来更糟）。
+        try:
+            outcome = _try_on_demand_factors(code, active_client, start_ms, end_ms, ensurer)
+            if outcome is not None and outcome.fetched:
+                # 重读失败几乎必然是 DB 问题（因子已成功落库）⇒ 如实报 db_error，
+                # 绝不报 no_factor 把排查方向带偏。
+                try:
+                    result = active_client.fetch_validated_klines(code, start_ms, end_ms)
+                    canonical = list(result.bars)
+                except Exception as retry_exc:  # noqa: BLE001
+                    _LOG.warning("按需补因子后重读仍失败 %s: %s", code, retry_exc)
+                    _rollback_quietly(active_client, f"ashare_reread:{code}")
+                    snapshot = empty_ashare_snapshot(
+                        code,
+                        f"db_error:{type(retry_exc).__name__}",
+                        name=security_name,
+                        board=security_board,
+                    )
+                    _attach_factor_fetch(snapshot, outcome)
+                    return snapshot
+            else:
                 snapshot = empty_ashare_snapshot(
-                    code, "no_factor", name=security_name, board=security_board
+                    code, _reason_for_failure(outcome), name=security_name, board=security_board
                 )
                 _attach_factor_fetch(snapshot, outcome)
                 return snapshot
-        else:
-            snapshot = empty_ashare_snapshot(
-                code, _reason_for_failure(outcome), name=security_name, board=security_board
+        except Exception as inner_exc:  # noqa: BLE001
+            # 按需补因子这一步自己炸了（多为 DB）—— 如实报，别装成缺因子。
+            _LOG.warning("按需补因子失败 %s: %s", code, inner_exc)
+            _rollback_quietly(active_client, f"ashare_ondemand:{code}")
+            return empty_ashare_snapshot(
+                code,
+                f"db_error:{type(inner_exc).__name__}",
+                name=security_name,
+                board=security_board,
             )
-            _attach_factor_fetch(snapshot, outcome)
-            return snapshot
     except AShareNoDataError as exc:
         _LOG.info("A 股无行情 %s: %s", code, exc)
         return empty_ashare_snapshot(code, "no_data", name=security_name, board=security_board)
