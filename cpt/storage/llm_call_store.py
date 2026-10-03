@@ -21,6 +21,7 @@ from typing import Any
 _LOG = logging.getLogger(__name__)
 
 __all__ = [
+    "LLMCallError",
     "TERMINAL_STATUSES",
     "call_row",
     "enqueue_call",
@@ -36,6 +37,15 @@ __all__ = [
     "STATUS_RATE_LIMITED",
     "STATUS_RUNNING",
 ]
+
+
+class LLMCallError(RuntimeError):
+    """调用审计表**写**失败（R45 新增）。
+
+    只用于写路径。读路径的降级语义各不相同（见各函数 docstring），
+    但**写失败一律抛** —— 审计记录写不进去却假装成功，比没有审计更糟：
+    它让人以为「没调用过」，而实际上模型已经被调过、token 已经花掉了。
+    """
 
 #: ``status`` 列的取值。**定义在这里而不是 ``cpt/llm/queue.py``** ——
 #: 这张表是 storage 的，枚举就归 storage。反过来说 storage → llm 是低层依赖高层，
@@ -151,8 +161,31 @@ _ON_CONFLICT = (
 def enqueue_call(conn: Any, row: dict[str, Any]) -> bool:
     """写入一条 ``queued`` 记录。
 
-    :returns: ``True`` = 真的插进去了；``False`` = 同一提示词已在途或已成功
-        （被 ``ON CONFLICT DO NOTHING`` 挡掉），或写入失败。
+    :returns: ``True`` = 真的插进去了；``False`` = **同一提示词已在途或已成功**
+        （被 ``ON CONFLICT DO NOTHING`` 挡掉）。
+    :raises LLMCallError: **写入失败**。
+
+    ## R45 修：写失败必须抛，不能和「重复」共用一个 ``False``
+
+    原实现在 ``except`` 里 ``return False``，于是「重复提交」和「DB 写失败」
+    返回**同一个值**。调用方 ``llm_cases.explain_structure`` 据此回
+    ``{"status": "duplicate", "reason": "same_request_in_flight_or_done"}``，
+    也就是对用户说「你���经问过了」—— 而真相是「一条都没写进去」。
+
+    更糟的是它**静默违反了审计约束**（本模块头：「每次调用的模型与 token 用量
+    必须落盘」）：DB 一抖，这条调用凭空消失，无人知晓。
+
+    特别注意 ``application/llm_cases._write``（= ``fn()`` + ``conn.commit()``）
+    **救不了这个**。实测 PostgreSQL 18.6：
+
+        ① 语句失败: UndefinedTable
+        ② commit(): **没抛** ← 事务在 aborted 态下 COMMIT 等于 ROLLBACK
+
+    所以只要 store 函数吞掉异常，外层 commit 会静默回滚并原样返回那个假
+    ``False``。``_write`` 那道「防忘记提交」的防线**只在 store 抛异常时有效**。
+
+    ⇒ 「重复」是**业务事实**（可预期、可返回给用户）；
+      「写失败」是**故障**（必须响亮）。两者不能共用一个返回值。
     """
     params = tuple(row.get(col) for col in _COLUMNS)
     try:
@@ -161,7 +194,7 @@ def enqueue_call(conn: Any, row: dict[str, Any]) -> bool:
             return bool(cur.rowcount > 0)
     except Exception as exc:
         _LOG.warning("写入 LLM 调用记录失败: %s", exc)
-        return False
+        raise LLMCallError(f"写入 LLM 调用记录失败: {exc}") from exc
 
 
 def finish_call(
@@ -214,7 +247,16 @@ def find_by_id(conn: Any, call_id: str) -> dict[str, Any] | None:
 def recent_calls(
     conn: Any, *, limit: int = 20, subject_id: str | None = None
 ) -> tuple[dict[str, Any], ...]:
-    """最近若干次调用，**时间倒序**。可选按 ``subject_id`` 过滤。"""
+    """最近若干次调用，**时间倒序**。可选按 ``subject_id`` 过滤。
+
+    R45 修：读失败**抛**，不能返回 ``()``。
+
+    原实现返回空元组，而调用方 ``llm_cases.list_calls`` 直接
+    ``len(rows)`` 拼进响应、回 ``{"available": true, "count": 0}`` ——
+    那是把「库读不到」冒充成「确实没有调用过」。这正是本模块另一处
+    （``load_signal_events``）docstring 里明文禁止的事（「前者不能冒充后者」），
+    这里自己却犯了。
+    """
     capped = max(1, min(int(limit), 200))
     sql = f"SELECT {', '.join(_COLUMNS)} FROM public.cpt_llm_call"
     params: list[Any] = []
@@ -229,7 +271,7 @@ def recent_calls(
             rows = cur.fetchall() or ()
     except Exception as exc:
         _LOG.warning("读取 LLM 调用列表失败: %s", exc)
-        return ()
+        raise LLMCallError(f"读取 LLM 调用列表失败: {exc}") from exc
     return tuple(_row_to_dict(row) for row in rows)
 
 
@@ -238,6 +280,10 @@ def mark_interrupted(conn: Any, before: datetime | None = None) -> int:
 
     **进程重启时调用** —— 在途任务随进程一起没了，不标的话调用方会永远等一个
     不会来的结果。
+
+    # gate: allow-silent: 启动期 best-effort —— 失败不该挡住进程起来。
+    # 调用方 ``llm_cases._bootstrap`` 整段包在 try/except 里、且用**独立连接**，
+    # 所以这里吞掉不会污染别人的事务；``marked`` 回 0 时它只记一条 info。
 
     :param before: 截止时刻，**只清更早的**。必须是「本进程启动时间」这类水位线：
         不带这个条件就会**误伤本进程刚入队的行** —— 首次调用 ``_bootstrap()`` 恰好

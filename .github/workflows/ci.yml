@@ -53,6 +53,11 @@ jobs:
           # 分层的**内容级**门禁：import-linter 查依赖方向，查不了「职责有没有放对层」。
           # 2026-10-01 实测 SQL 铺在 domain/application/adapters/web 四层里而 3 条契约全绿。
           python scripts/check_sql_layering.py
+          # 门禁②：store 层的**失败语义**。SQL 待在对层里也可能语义写错，
+          # 而 import 图看不出异常处理（R45 storage 复盘实测到 2 个真 bug）。
+          # PostgreSQL 里「事务中一条语句失败 ⇒ 同一连接后续全部 aborted」，
+          # 所以 catch 住 DB 异常再返回空值，不是降级，是把局部失败放大成整页失败。
+          python scripts/check_storage_failure_semantics.py
       - name: Dead-code audit (vulture)
         run: |
           # vulture==2.14 自 2026-09-25 起已在 requirements-dev.txt 锁文件里，

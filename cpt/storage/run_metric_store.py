@@ -142,6 +142,11 @@ def ensure_table(conn: Any) -> None:
 def append_metrics(conn: Any, rows: Sequence[RunMetric]) -> int:
     """批量写入。返回写入行数。
 
+    # gate: allow-silent: 观测/记账数据是**旁路**，写失败不该让主计算路径挂。
+    # 调用方 ``run_metric.RunMetricRecorder.record`` 不因此中断。
+    # ⚠️ 代价：连接会留在 aborted 态，调用方**必须**自己 rollback
+    #（``cpt/application/run_metric.py`` 目前没有做，属于待办）。
+
     **写入失败只记 warning、不抛** —— 观测数据丢了不该让计算路径跟着挂。
 
     ⚠️ **值为 ``None`` 的列整列省略**（让 DB 的 ``DEFAULT`` 生效），而不是写 NULL。

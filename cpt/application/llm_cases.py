@@ -29,6 +29,7 @@ from cpt.llm.base import LLMResult
 from cpt.llm.prompts import PURPOSE_EXPLAIN, explain_request
 from cpt.storage.llm_call_store import (
     STATUS_OK,
+    LLMCallError,
     call_row,
     enqueue_call,
     finish_call,
@@ -119,6 +120,22 @@ def _bootstrap() -> Any:
     return get_queue(on_status=on_llm_status)
 
 
+def _rollback_quietly(conn: Any, tag: str) -> None:
+    """把连接从 aborted 态救回来，失败也只记日志。
+
+    PostgreSQL 语义：事务里一条语句失败后，**同一连接**的后续语句全部报
+    ``current transaction is aborted``。所以任何 catch 住 DB 异常的分支都必须
+    rollback，否则这个连接上后面每一个操作都失败。
+
+    R45 新增：``enqueue_call`` 改为抛之后，调用方第一次拿到了「写失败」这个
+    事实，也第一次有机会 rollback。
+    """
+    try:
+        conn.rollback()
+    except Exception as exc:  # noqa: BLE001 — 救不回来也不能把调用点带崩
+        _LOG.warning("rollback 失败 %s: %s", tag, exc)
+
+
 def explain_structure(
     conn: Any,
     *,
@@ -148,7 +165,22 @@ def explain_structure(
         subject_id=subject_id,
         request_hash_value=digest,
     )
-    if not _write(conn, enqueue_call, row):
+    # R45：``enqueue_call`` 写失败会抛，不再和「重复」共用一个 False。
+    # 之前两种情况都回 ``same_request_in_flight_or_done`` —— DB 一抖就对用户
+    # 谎称「你���经问过了」，而真相是一条都没写、LLM 也没调、审计链断了一条。
+    try:
+        enqueued = _write(conn, enqueue_call, row)
+    except LLMCallError as exc:
+        _LOG.warning("LLM 入队落库失败 %s: %s", row["call_id"], exc)
+        _rollback_quietly(conn, f"enqueue:{row['call_id']}")
+        return {
+            "available": False,
+            "call_id": row["call_id"],
+            "status": "error",
+            "reason": "llm_audit_write_failed",
+        }
+
+    if not enqueued:
         return {
             "available": False,
             "call_id": row["call_id"],
@@ -211,8 +243,23 @@ def list_calls(conn: Any, *, limit: int = 20, subject_id: str | None = None) -> 
     from cpt.llm.config import load_config  # noqa: PLC0415
     from cpt.llm.queue import LLMQueue  # noqa: PLC0415 — 读队列深度用
 
-    rows = recent_calls(conn, limit=limit, subject_id=subject_id)
     config = load_config()
+    # R45：``recent_calls`` 读失败改为抛。原先它返回空元组，这里就回
+    # ``available: true, count: 0`` —— 把「库读不到」冒充成「确实没有调用过」，
+    # UI 会显示一个**看起来正常的空列表**，排查的人完全看不出是 DB 挂了。
+    try:
+        rows = recent_calls(conn, limit=limit, subject_id=subject_id)
+    except LLMCallError as exc:
+        _LOG.warning("读取 LLM 调用列表失败: %s", exc)
+        _rollback_quietly(conn, "llm:list_calls")
+        return {
+            "schema_version": "dashboard_llm_calls.v1",
+            "available": False,
+            "count": 0,
+            "calls": [],
+            "reason": "llm_call_history_unavailable",
+            "unavailable_reason": config.missing_reason(),
+        }
     queue = get_queue()
     return {
         "schema_version": "dashboard_llm_calls.v1",
