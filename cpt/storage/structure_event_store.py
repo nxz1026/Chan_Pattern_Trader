@@ -80,7 +80,7 @@ def append_events(conn: Any, events: Sequence[StructureEvent]) -> int:
     # ``structure_event_recorder.record_structure_events`` 的 docstring 明确写了
     # 「``append_events`` 写失败被吞，但本函数照样把算出的事件返回」：
     # 结构事件是**观测产物**，算出来了就返回，存不进去不该让快照 500。
-    # ⚠️ 代价：连接留在 aborted 态，调用方需自行 rollback。
+    # 调用方已按此契约在 except 分支补上 rollback（R45）。
     """
     if not events:
         return 0

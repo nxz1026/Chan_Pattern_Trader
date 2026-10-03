@@ -97,6 +97,14 @@ def record_structure_events(
 
     代价要说清：这些事件**没有**进事件流，跨重启的追溯里查不到。所以
     ``status`` 会出现「快照说有 created、库里没有」的状态。
+
+    ⚠️ R45 补：``append_events`` 是「吞异常」型（见其
+    ``# gate: allow-silent``），若它在语句上失败，连接会停在
+    ``current transaction is aborted`` 态 —— 而上面 except 分支**原来不
+    rollback**。自己开的连接走 ``_connection`` 的 ``finally: close()`` 没事，
+    但**调用方传进来复用的那条**会被留在 aborted 态，
+    调用方后面每一个操作都报 ``current transaction is aborted``。
+    所以 except 分支必须把「传进来的连接」救回来。
     """
     from cpt.domain.structure_events import diff_states, states_from_structures
     from cpt.storage.structure_event_store import append_events, current_states
@@ -130,6 +138,13 @@ def record_structure_events(
             return events
     except Exception as exc:  # noqa: BLE001 — 旁路失败不影响快照
         _LOG.warning("结构事件记录失败（不影响快照）: %s", exc)
+        # 传入的连接要救回来：``append_events`` 吞掉语句失败后，连接停在
+        # aborted 态，后续操作全废（自己开的那条由 _connection 的 close 兜住）。
+        if conn is not None:
+            try:
+                conn.rollback()
+            except Exception as rb_exc:  # noqa: BLE001 — 救不回来也不能带崩快照
+                _LOG.warning("结构事件 rollback 失败: %s", rb_exc)
         return ()
 
 

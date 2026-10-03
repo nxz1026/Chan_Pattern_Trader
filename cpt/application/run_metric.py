@@ -216,7 +216,21 @@ class MetricRecorder:
         row = metric_from_snapshot(
             snapshot, market=market, symbol=symbol, backend=backend, **counts
         )
-        append_metrics(self.conn, [row])  # 不 commit：边界归调用方
+        # 不 commit：边界归调用方。
+        #
+        # ⚠️ R45 补 rollback：``append_metrics`` 是「吞异常」型（见其
+        # ``# gate: allow-silent``），语句失败时它回 0 而不抛，连接就停在
+        # ``current transaction is aborted`` 态。这里原来既不 catch 也不
+        # rollback，而 ``record_and_commit`` 紧接着的 ``commit()`` 在 aborted
+        # 事务上**不抛、等于 ROLLBACK** ⇒ 一次写失败会静默变成「什么都没记」，
+        # 且这条连接后续全废。
+        wrote = append_metrics(self.conn, [row])
+        if not wrote:
+            try:
+                self.conn.rollback()
+            except Exception as exc:  # noqa: BLE001 — 救不回来也别带崩主流程
+                _LOG.warning("run_metric 落库失败后 rollback 也失败 %s/%s: %s",
+                             market, symbol, exc)
         return row
 
     def record_and_commit(self, snapshot: dict[str, Any], **kwargs: Any) -> RunMetric:

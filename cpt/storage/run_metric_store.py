@@ -46,6 +46,7 @@ __all__ = [
     "KIND_INSPECTION",
     "KIND_RUN",
     "RunMetric",
+    "RunMetricError",
     "append_metrics",
     "ensure_table",
     "latest_inspection",
@@ -54,6 +55,14 @@ __all__ = [
     "recent_metrics",
     "waterline_trend",
 ]
+
+class RunMetricError(RuntimeError):
+    """巡检/水位表**写与清理**失败（R45 新增）。
+
+    读路径的降级语义各不相同（见各函数 docstring），但「写不进���」与
+    「清不掉」一律抛 —— 两者都是**故障**，不是业务事实。
+    """
+
 
 KIND_RUN: Final[str] = "run"
 KIND_INSPECTION: Final[str] = "inspection"
@@ -143,9 +152,8 @@ def append_metrics(conn: Any, rows: Sequence[RunMetric]) -> int:
     """批量写入。返回写入行数。
 
     # gate: allow-silent: 观测/记账数据是**旁路**，写失败不该让主计算路径挂。
-    # 调用方 ``run_metric.RunMetricRecorder.record`` 不因此中断。
-    # ⚠️ 代价：连接会留在 aborted 态，调用方**必须**自己 rollback
-    #（``cpt/application/run_metric.py`` 目前没有做，属于待办）。
+    # 调用方 ``run_metric.RunMetricRecorder.record`` 不因此中断，
+    # 且已按此契约补上 rollback（R45）。
 
     **写入失败只记 warning、不抛** —— 观测数据丢了不该让计算路径跟着挂。
 
@@ -319,19 +327,49 @@ def waterline_trend(conn: Any, *, market: str, symbol: str, limit: int = 50) -> 
     }
 
 
-def prune(conn: Any, *, keep_days: int = 30) -> int:
+def prune(
+    conn: Any, *, keep_days: int = 30, kinds: Sequence[str] | None = None
+) -> int:
     """删掉 ``keep_days`` 之前的行，返回删除行数。**不 commit**。
 
     run 行是高频的（每轮一行），不留窗口就会长成第二份 ``daily_bar``。
+
+    ## R45：加 ``kinds`` 过滤
+
+    原来**不带任何 kind 条件**，一调用就把 ``inspection`` 行一起删了 ——
+    而巡检行正是「每天状态变化比对」的依据，窗口该比 run 行短得多，
+    混在一起按同一个窗口删会误伤。
+
+    2026-10-03 实测该表两类行：
+
+        run          3234 行  2026-10-02 ~ 2026-10-03
+        inspection      9 行  2026-10-02 ~ 2026-10-03
+
+    所以保留策略要能分开配：``kinds=[KIND_RUN]`` + 90 天，
+    ``kinds=[KIND_INSPECTION]`` + 更短的窗口。
+    ``kinds=None`` 保持原行为（全删），不破坏既有调用方。
+
+    ## R45：失败**抛**，不返回 0
+
+    原来失败时 ``return 0``，与「本来就没有过期行」**完全同值** ——
+    于是定时清理作业无法判断自己是「干完了」还是「一条都没删掉」，
+    慢性泄漏就会在日志里静悄悄地继续。
+
+    改成抛之后，调用方（``deploy/cron/run-metric-prune-daily.sh``）
+    catch → 打 ``!!!!! 清理未完成 !!!!!`` → **非零码退出**，
+    失败才真的可见。这与本层其他函数、以及 R45 建立的
+    「业务事实可以返回，**故障必须抛**」口径一致。
     """
+    params: list[Any] = [max(1, int(keep_days))]
+    where = "observed_at < now() - make_interval(days => %s)"
+    if kinds:
+        wanted = [str(k) for k in kinds]
+        where += " AND kind = ANY(%s)"
+        params.append(wanted)
     try:
         with conn.cursor() as cur:
-            cur.execute(
-                "DELETE FROM public.cpt_run_metric "
-                "WHERE observed_at < now() - make_interval(days => %s)",
-                (max(1, int(keep_days)),),
-            )
+            cur.execute(f"DELETE FROM public.cpt_run_metric WHERE {where}", tuple(params))
             return int(cur.rowcount or 0)
     except Exception as exc:  # noqa: BLE001
         _LOG.warning("cpt_run_metric 清理失败：%s: %s", type(exc).__name__, exc)
-        return 0
+        raise RunMetricError(f"cpt_run_metric 清理失败: {exc}") from exc
