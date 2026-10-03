@@ -67,9 +67,28 @@ def connection_kwargs(*, exc_type: type[BaseException] = DBConfigError) -> dict[
         raise exc_type(f"~/.dbconfig 缺失 $RDSHOST 或 $DB_PW。位置: {DB_CONFIG_FILE}")
     return {
         "host": cfg["$RDSHOST"],
-        "port": int(cfg.get("$DBPORT", "5432")),
+        "port": _port(cfg, exc_type),
         "dbname": cfg.get("$DBNAME", "longkonglong"),
         "user": cfg.get("$USER", "postgres"),
         "password": cfg["$DB_PW"],
         "connect_timeout": 15,
     }
+
+
+def _port(cfg: dict[str, str], exc_type: type[BaseException]) -> int:
+    """解析 ``$DBPORT``；**格式错也抛注入的 ``exc_type``**。
+
+    R45 修。原来直接 ``int(cfg.get("$DBPORT", "5432"))``：端口写成 ``"abc"``
+    会漏出 ``ValueError``，而调用方（``a_share_local`` / ``a_share_pool`` /
+    ``factor_backfill``）各自 ``except`` 的是**自己那个**异常类型
+    （``AShareLocalError`` / ``WatchlistError`` / ``SystemExit``）——
+    接不住，异常类型与本模块「异常由调用方注入」的契约直接对不上。
+    """
+    raw = (cfg.get("$DBPORT") or "5432").strip()
+    try:
+        port = int(raw)
+    except ValueError as exc:
+        raise exc_type(f"~/.dbconfig 的 $DBPORT 不是整数: {raw!r}") from exc
+    if not 1 <= port <= 65535:
+        raise exc_type(f"~/.dbconfig 的 $DBPORT 超出合法端口范围: {port}")
+    return port

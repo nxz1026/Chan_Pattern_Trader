@@ -256,6 +256,18 @@ def main(argv: list[str] | None = None) -> int:
             else:
                 ok = notify_problem(title, lines)
                 print(f"告警{'已发' if ok else '发送失败'}")
+                if not ok:
+                    # ⚠️ R45：本应发而没发出去，**不能**以 0 退出。
+                    #
+                    # ��与 R45 修的 ``factor_recompute`` 同一个病：「跑完了」与
+                    # 「该做的没做成」共用 rc=0，cron / 看门狗 / 外部监控全都看不出来。
+                    # 这里虽然已经打印了「发送失败」，但**只有人翻日志才知道** ——
+                    # 而告警通道坏掉的时候，恰恰最需要机器来发现。
+                    #
+                    # 用 3 而不是 1：与 factor_recompute 对齐，含义明确
+                    # 「巡检跑了，但告警没送出去」。
+                    print("[!] 巡检发现了问题，但告警未送达 —— 告警通道可能已失效", flush=True)
+                    return 3
         else:
             print("状态无变化且无问题 → 不打扰")
         return 0
