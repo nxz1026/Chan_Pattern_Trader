@@ -131,13 +131,29 @@ def analyse(cur: Any, code: str, ex_dates: Sequence[str]) -> CodeReport | None:
 
     ordered = [d for d, _ in prod]
     idx = {d: i for i, d in enumerate(ordered)}
+    new_by_date = dict(new)
     for d in ex_dates:
         i = idx.get(d)
         if i is None or i == 0 or prod[i - 1][1] == 0:
             continue
         pj = prod[i][1] / prod[i - 1][1]
-        nm = dict(new).get(d)
-        pm_prev = new[i - 1][1] if i - 1 < len(new) else None
+        nm = new_by_date.get(d)
+        # ⚠️⚠️ R44 修：这里**必须按日期查**，不能拿生产表的下标去索引暂存表。
+        #
+        # 原代码是 ``pm_prev = new[i - 1][1]``，而 ``i`` 是**生产表**里的下标。
+        # 两张表的行数/起点并不一致：
+        #     生产 800 行 2023-06-15~2026-09-30（旧 tx:fqkline 值，回溯得更早）
+        #     暂存 666 行 2024-01-02~2026-09-30（重算只覆盖有 bar 的区间）
+        # 于是 ``new[i-1]`` 取到的是暂存表第 i 行，与 ``prod[i-1]``
+        # **根本不是同一天** —— 实测 603259 的 2024-06-26 被配到了 2025-01-09。
+        #
+        # 后果：暂存台阶 = new[d] / new[另一天] ，没有物理意义，于是 13108 个
+        # 除权日里只有 10723 个「匹配」（81.8%），1223 只票被误判成
+        # 「台阶对不齐」。而按日期正确配对后，这些台阶是**逐个精确相等**的。
+        #
+        # 这就是 §8.3「独立判据第一次给出与预期相反的答案时先怀疑自己的实现」
+        # 的又一次实例：数据没错，是**报告**在算错。
+        pm_prev = new_by_date.get(ordered[i - 1])
         if nm is None or not pm_prev:
             continue
         nj = nm / pm_prev
