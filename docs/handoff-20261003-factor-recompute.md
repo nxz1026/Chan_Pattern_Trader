@@ -86,6 +86,20 @@
   —— 这是**正确**的行为（跳过早期台阶会让整段因子系统性偏小）。这 28 只在暂存表里
   没有行，切表不会碰到它们。
 
+> ⚠️ **R44 更正（2026-10-03 真机复核）**：暂存表实际是 **2255** 只，不是 2169。
+> 差的 86 只是 **R42 修好 `--scope` 之后，那次「3 分钟就死」的 placeholder 轮
+> 实际写进去的** —— 它不是死了一无所获，是**死之前已经算了几十只**。
+> 构成（实测）：
+>
+> | 来源 | 只数 |
+> |---|---|
+> | 原 `wired` 批次（生产 `source IS NOT NULL`） | 2169 |
+> | 那次 placeholder 轮的残留（生产 `source IS NULL`） | 97 |
+> | **合计** | **2266**（其中 11 只两桶都算过，去重后 2255） |
+>
+> 那 97 只里 **36 只因子恒定**（= 窗口内一次分红都没有，恒定是对的），
+> 另 61 只有真实台阶。**别把它们当脏数据清掉** —— 它们是有效产出。
+
 ### 3.3 对账报告（`scripts/factor_report.py`）—— 切表的唯一依据
 
 ```
@@ -202,6 +216,24 @@ if payload.get("success") is False:
   29 skipped / 808 passed**。15 条全是既存环境基线（14 条 `fcntl` Windows 不可导入
   + 2 条无浏览器 chromium）。判断「有没有打破契约」要 `git stash` 后跑一遍
   **逐条对比失败名单**，**不要数条数**。
+- ⚠️ **看板静态资源不在仓库目录，在 `/var/www/cpt-dashboard/`（R44 踩坑）**：
+  nginx 的 `location /cpt/ { alias /var/www/cpt-dashboard/; }`，那是**独立部署副本**，
+  与 `~/DSH/Chan_Pattern_Trader/dashboard/` **各改各的**。改完看板 JS 只 scp 到仓库
+  目录的话，线上**毫无变化**。
+  判据（别靠猜）：
+  ```bash
+  curl -sk -u admin:ndjack https://127.0.0.1/cpt/dashboard.js | grep -c '<你刚加的标识符>'
+  ```
+  返回 0 就是**没部署成功**，不是浏览器缓存。R44 为此白截了两张图才发现。
+- ⚠️ **无头浏览器截图**（Oracle 上有 chromium，仓库里没装 playwright 包）：
+  ```bash
+  CHROME=/home/ubuntu/.cache/ms-playwright/chromium-1243/chrome-linux-arm64/chrome
+  $CHROME --headless=new --no-sandbox --disable-gpu --ignore-certificate-errors \
+         --screenshot=/home/ubuntu/shots/x.png "https://admin:ndjack@127.0.0.1/cpt/"
+  ```
+  `--screenshot` 模式**抓不到控制台**，且容易被 GCM 注册请求拖到超时。
+  要看 console/网络得走 CDP（本轮用 `/home/ubuntu/cdp_shot.py`）。
+  自签名证书必须加 `--ignore-certificate-errors`，否则截出来是「您的连接不是私密连接」。
 
 ## 8. 工作纪律（这个项目一贯的做法，别跳过）
 
