@@ -600,6 +600,9 @@ def main(argv: list[str] | None = None) -> int:
 
     today = dt.date.today().isoformat()
     calls = 0
+    # ⚠️ R44：``state["stopped"]`` 会**留在进度文件里跨轮次**，所以不能用它判断
+    # 「本轮是否被打断」—— 必须用这个只在本轮存活的局部标志。
+    stopped_reason: str | None = None
     for code in todo:
         if calls >= args.max_calls:
             _LOG.info("到达本轮上限 %d 次调用，就此打住（下次续跑即可）", args.max_calls)
@@ -611,6 +614,7 @@ def main(argv: list[str] | None = None) -> int:
         except source.fatal_errors as exc:
             _LOG.warning("额度/通道不可用（%s），本轮停止：%s", type(exc).__name__, exc)
             state["stopped"] = {"reason": type(exc).__name__, "detail": str(exc)[:200]}
+            stopped_reason = type(exc).__name__
             save_state(state)
             break
         except Exception as exc:  # noqa: BLE001
@@ -638,12 +642,30 @@ def main(argv: list[str] | None = None) -> int:
 
     save_state(state)
     report(state)
-    if state.get("stopped"):
+
+    # ⚠️ R44：本轮**被打断**必须以非零码退出。
+    #
+    # 原来这里无条件 ``return 0``，于是 cron 里的
+    # ``===== 开始 ===== / ===== 结束 rc=0 =====`` 把一次「启动 3 分钟就死」
+    # 记录成一次**成功**的任务 —— 2026-10-02 13:47→13:50 那条日志就是这么来的。
+    # rc=0 意味着任何监控（cron 邮件、CI、外部看门狗）都看不出它死了。
+    #
+    # 用 3 而不是 1：1 常被脚本当成「一般错误」，3 明确表示
+    # 「任务未完成，进度已存盘，可续跑」，与「跑完了」区分得开。
+    if stopped_reason:
         print(
-            "\n  上次因 {} 提前停止；进度已存盘，下次直接续跑。".format(
-                state["stopped"].get("reason", "?")
+            "\n  ⚠️ 本轮因 {} 提前停止（退出码 3）—— 进度已存盘，下次可续跑。".format(
+                stopped_reason
             )
         )
+        return 3
+
+    # 本轮跑完 ⇒ 清掉上一轮遗留的 stopped 标记，否则它会永远挂在进度文件里，
+    # 让「早就修好了」这件事在报告里看不出来。
+    if state.get("stopped"):
+        _LOG.info("本轮未被打断，清除上一轮的 stopped 标记")
+        state.pop("stopped", None)
+        save_state(state)
     return 0
 
 
