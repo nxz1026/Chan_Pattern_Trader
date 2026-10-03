@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 from cpt.storage.llm_call_store import (
+    LLMCallError,
     STATUS_ERROR,
     STATUS_INTERRUPTED,
     STATUS_OK,
@@ -187,15 +188,34 @@ def test_enqueue_reports_false_when_conflict() -> None:
     assert enqueue_call(conn, row) is False
 
 
-def test_enqueue_swallows_db_error() -> None:
-    """落库失败不能让 HTTP 500 —— LLM 是旁路。"""
+def test_enqueue_raises_on_db_error() -> None:
+    """落库失败**抛**，不返回 ``False``（R45 改）。
+
+    原来这里断言「落库失败不能让 HTTP 500 —— LLM 是旁路」并检查
+    ``enqueue_call(...) is False``。诉求没错，**落点错了**：
+
+    - store 返回 ``False`` 与「重复提交」共用同一个值，于是调用方
+      ``explain_structure`` 对用户说「你已经问过了」，而真相是
+      **一条都没写、LLM 从未被调用**（本模块头的审计约束被静默违反）；
+    - 「别 500」的正确落点是**调用方**：
+      ``explain_structure`` catch ``LLMCallError`` → rollback →
+      回 ``{"available": false, "reason": "llm_audit_write_failed"}``，
+      HTTP 照样 200。
+
+    ⚠️ 外层的 ``llm_cases._write``（= ``fn()`` + ``commit()``）救不了：
+    实测 PostgreSQL 18.6，事务在 aborted 态下 ``COMMIT`` **不抛**、等于
+    ``ROLLBACK``，于是假 ``False`` 原样返回。那道防线只在 store 抛异常时有效。
+
+    回归见 ``tests/test_llm_store_write_semantics.py``。
+    """
 
     class Broken:
         def cursor(self) -> Any:
             raise RuntimeError("db down")
 
     row = call_row(purpose="explain_structure", subject_id="", request_hash_value="h")
-    assert enqueue_call(Broken(), row) is False  # type: ignore[arg-type]
+    with pytest.raises(LLMCallError):
+        enqueue_call(Broken(), row)  # type: ignore[arg-type]
 
 
 # --------------------------------------------------------------------------- #
@@ -383,14 +403,25 @@ def test_recent_calls_filters_by_subject() -> None:
     assert params == ("bi:1", 3)
 
 
-def test_recent_calls_degrades_to_empty() -> None:
-    """表不存在（迁移没跑）时返回空元组，不抛 —— 面板显示「暂无」而不是 500。"""
+def test_recent_calls_raises_on_db_error() -> None:
+    """表不存在（迁移没跑）时**抛**，不返回空元组（R45 改）。
+
+    原来断言「返回空元组，不抛 —— 面板显示『暂无』而不是 500」。诉求不错，
+    但那样面板拿到的是 ``{"available": true, "count": 0}``：
+    **把「库读不到」冒充成「确实没有调用过」**，UI 显示一个看起来正常的
+    空列表，排查的人完全看不出是 DB 挂了。
+
+    正确落点同样是**调用方**：``llm_cases.list_calls`` catch
+    ``LLMCallError`` → rollback → 回 ``available: false`` +
+    ``reason: llm_call_history_unavailable``，HTTP 照样 200。
+    """
 
     class Broken:
         def cursor(self) -> Any:
             raise RuntimeError("relation does not exist")
 
-    assert recent_calls(Broken(), limit=5) == ()  # type: ignore[arg-type]
+    with pytest.raises(LLMCallError):
+        recent_calls(Broken(), limit=5)  # type: ignore[arg-type]
 
 
 def test_time_columns_come_back_as_epoch_ms() -> None:

@@ -139,14 +139,29 @@ def test_build_ashare_snapshot_passes_correct_time_window():
 
 
 def test_provider_caches_snapshot_within_ttl():
-    """60s TTL 内多次调用只重建一次。"""
+    """60s TTL 内多次调用只重建一次。
+
+    ⚠️ R45 修：断言必须排除**所有**按墙上时钟算出来的字段。
+
+    原来只排除了 ``runtime.as_of_ms``，漏了 ``close_countdown`` ——
+    它由 ``a_share_snapshot._attach_close_countdown`` 用 ``date.today()`` +
+    当前时间算出（距 15:00 收盘的秒数）。两次调用若跨过一秒，
+    ``seconds_to_close`` 就差 1，快照就不相等了。
+
+    这个测试因此是**时钟依赖**的：机器空闲时两次调用在 1 秒内完成、一直绿；
+    一旦并发负载上来（CI 跑全量、或本机同时跑别的东西）就稳定跨秒 → 红。
+    实测 2026-10-03 在 Oracle 上正是这样：单跑时绿、跑全量时红。
+    """
     fake = _FakeClient(_bars_for("600519", n=30))
     snap1 = build_ashare_snapshot("600519", client=fake)
     snap2 = build_ashare_snapshot("600519", client=fake)
-    # 忽略 as_of_ms 时间戳字段，其余应一致
-    s1 = {**snap1, "runtime": {k: v for k, v in snap1["runtime"].items() if k != "as_of_ms"}}
-    s2 = {**snap2, "runtime": {k: v for k, v in snap2["runtime"].items() if k != "as_of_ms"}}
-    assert s1 == s2
+
+    def normalize(snap: dict) -> dict:
+        out = {k: v for k, v in snap.items() if k != "close_countdown"}
+        out["runtime"] = {k: v for k, v in snap["runtime"].items() if k != "as_of_ms"}
+        return out
+
+    assert normalize(snap1) == normalize(snap2)
 
 
 def test_dual_compare_uses_stubbed_realtime_not_live_network():
