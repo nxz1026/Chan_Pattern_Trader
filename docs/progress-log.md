@@ -5970,12 +5970,14 @@ R39 起默认源换成东财（免费、无额度），`--max-calls` 的唯一�
   建表来源**（`scripts/migrations/` 里没有对应迁移），**故意保留**：
   真正的债不是「这个函数死」，而是「这张表的 schema 没有迁移」。
 
-### 5. llm/（进行中）：已修 2 个
+### 5. llm/：全层审完（8 文件），已修 3 个
 
 | # | 位置 | 症状 |
 |---|---|---|
 | ① | `llm/config.py::load_config` | 为实现「传 dict 就只读这份 dict」而 `os.environ.clear()`，注释却写「不碰进程全局」。CPT 是多线程的，**任何线程在 clear/update 之间读环境变量都会拿到残缺环境**，含 `DB_PW` / 飞书 webhook。实测并发读者**有 520 次读不到 `DB_PW`** |
 | ② | `llm/structured.py::parse_structured` | `schema_failed` 标志初始化在第 3 步之前 ⇒ 「整段是合法 JSON 标量」被判成 `not_json`。而 `not_json` 的定义是「找不到任何能解析的候选」—— **它明明解析成功了**。归类撒谎会把排查引向「模型没吐 JSON」，真相是「吐了但形状不对」 |
+
+| ③ | `llm/__init__.py::get_queue` | 见到 `_QUEUE` 非空就**直接 return**，把后传的 `on_status` 静默丢弃。而 `llm_cases` 有两个调用点：`_bootstrap()` 要审计回调、`list_calls()` 不传 —— **谁先跑谁定**，而 `list_calls` 是 `GET /llm/calls` 的处理函数，**看板打开就轮询**。⇒ 用户先开过看板再点「解释结构」，队列带着**空回调**建好，`on_llm_status` 永不注册 ⇒ **LLM 跑完了但状态永远不落库，每条卡在 queued**。复现实测：修复前回调被调 **0 次**，修复后 2 次 |
 
 llm/ 这层**有几处本来就做对了**，一并记下：`api_key` 用 `field(repr=False)` 防止
 进 repr、`redacted()` 只回 `has_api_key`、**`queue._execute` 的
@@ -5992,10 +5994,23 @@ llm/ 这层**有几处本来就做对了**，一并记下：`api_key` 用 `field
 （本仓 `lint-imports` 一次就判定了 6 kept / 0 broken，比手写 AST 可靠）。
 另：改完 Python 记得清 `__pycache__`，否则会看到「修复没生效」的假象。
 
+### 5.1 llm/ 扫完最后三个文件：干净
+
+- `registry.py`（38 行）—— `build_client` 对未知 provider / 配置不全抛 `ValueError`，
+  调用方 `get_queue` 接住降级。末尾那个 `raise` 是「加了 provider 忘了加分支」的兜底，
+  看着像死代码，**故意留**。
+- `prompts.py`（113 行）—— fuzz 了 11 种畸形 `structure`（level 是 str/None/list/bool/
+  超大数、market 未知、围栏注入），**零崩溃**（`json.dumps(default=str)` 兜住）。
+- `levels.level_label` —— 未知 level 返回 `未标注级别（level=abc）`，**不编造**；
+  a_share 的 5 → `日线级别`（不是 5 分钟，R28-9 修过）、crypto 的 5 → `5 分钟级别`，
+  合法标签全部可区分。而系统提示词要求模型「照抄本级标签」—— 标签诚实才敢照抄。
+
 ### 遗留
 
-1. `llm/` 还剩 `__init__.py` / `registry.py` / `prompts.py` 未扫
-2. `adapters/` 尚未复盘（外部触点密度最高，31.6%）
+1. `adapters/` 尚未复盘（外部触点密度最高，31.6%）—— 下一层
+2. `prompts.py` 一个**低危**加固点：若 `structure` 的字符串值里含**奇数**个 ```
+   围栏，会把 user 消息里的 json 围栏撑破。实测危害有限（聊天模型仍读得到 JSON，
+   且 `structured.py` 本就防御式解析），记此备查。
 3. `application/`（漂移 +1307 行）/ `web/`（复盘后仍有漂移）/ `dashboard/` 待排期
 4. `cpt_run_metric` 的 schema 仍无迁移文件（见 §4）
 5. 切表后的口径纪元标记（`cpt_signal_event` 41 条旧口径信号）待处理
