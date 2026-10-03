@@ -77,7 +77,32 @@ def get_queue(
     """
     global _QUEUE
     with _QUEUE_LOCK:
+        callback = on_status if callable(on_status) else None
         if _QUEUE is not None:
+            # ⚠️ R45 修：**后来补传的 on_status 必须被接收**。
+            #
+            # 原来这里直接 ``return _QUEUE``，把新回调静默丢掉。而
+            # ``application/llm_cases`` 有**两个**调用点：
+            #     _bootstrap() → get_queue(on_status=on_llm_status)  ← 要审计回调
+            #     list_calls() → get_queue()                         ← 不传
+            # **谁先跑谁定回调**，而 ``list_calls`` 是
+            # ``GET /api/dashboard/llm/calls`` 的处理函数 —— **看板打开就会轮询它**
+            # （R45 真机 CDP 抓包：首屏即调 ``/llm/calls?limit=20``）。
+            #
+            # ⇒ 用户只要先打开过看板、再点「解释结构」，队列就已经带着一个
+            # **空回调**建好了，``on_llm_status`` 永远不被注册 ⇒
+            # LLM 调用跑完了但**状态永远不落库**，每条都停在 ``queued``。
+            # 实测：复现脚本里审计回调被调用 **0 次**。
+            #
+            # 修法：已有队列时**补注册**（后设的覆盖先设的，符合
+            # ``_bootstrap`` 是「真正的落库方」这一事实）。
+            #
+            # ⚠️ 顺序要紧：这一段必须在 ``load_config()`` **之前**。
+            #    队列已经存在就说明它是可用的；若此时环境变量被改成
+            #    ``CPT_LLM_ENABLED=0``，先读配置会返回 ``None``，
+            #    把**正在正常运行的队列**凭空藏起来。
+            if callback is not None:
+                _QUEUE.set_on_status(callback)
             return _QUEUE
 
         cfg = config or load_config()
@@ -92,7 +117,6 @@ def get_queue(
             _LOG.warning("LLM provider 构建失败：%s", exc)
             return None
 
-        callback = on_status if callable(on_status) else None
         _QUEUE = LLMQueue(client, cfg, on_status=callback)
         _LOG.info("LLM 队列就绪 provider=%s model=%s", cfg.provider, cfg.model)
         return _QUEUE

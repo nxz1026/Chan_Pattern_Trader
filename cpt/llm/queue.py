@@ -117,6 +117,8 @@ class LLMQueue:
         self._client = client
         self._config = config
         self._on_status = on_status or (lambda _id, _st, _detail, _res: None)
+        #: 保护 ``_on_status``：worker 线程读、HTTP 线程可能补注册（见 set_on_status）
+        self._callback_lock = threading.Lock()
         self._pending: queue.PriorityQueue[tuple[float, int, Job]] = queue.PriorityQueue()
         self._seq = 0
         self._seq_lock = threading.Lock()
@@ -126,6 +128,29 @@ class LLMQueue:
             thread = threading.Thread(target=self._run, name=f"cpt-llm-{index}", daemon=True)
             thread.start()
             self._threads.append(thread)
+
+    def set_on_status(self, callback: Callable[[str, str, str, LLMResult | None], None]) -> None:
+        """**补注册**状态回调（后设的覆盖先设的）。
+
+        R45 新增。存在的理由：``cpt.llm.get_queue`` 是进程内单例，而
+        ``application/llm_cases`` 有两个调用点 —— ``list_calls()`` 调
+        ``get_queue()``（不传回调，看板一打开就会走到）、
+        ``_bootstrap()`` 调 ``get_queue(on_status=on_llm_status)``（要落库）。
+        谁先跑谁定回调，于是先打开过看板的用户**永远注册不上审计回调**，
+        LLM 调用跑完但状态不落库、每条卡在 ``queued``。
+
+        **线程安全**：worker 线程会在 ``_execute`` 里读 ``_on_status``，
+        而这里可能由**另一个** HTTP 线程同时写。用 ``_stop`` 同款锁保护，
+        并让 worker 侧走 ``_emit()`` 取快照，避免「读到一半被换掉」。
+        """
+        with self._callback_lock:
+            self._on_status = callback
+
+    def _emit(self, call_id: str, status: str, detail: str, result: LLMResult | None) -> None:
+        """取回调快照再调 —— 避免持锁调用（回调会开 DB 连接，不能阻塞别���）。"""
+        with self._callback_lock:
+            callback = self._on_status
+        callback(call_id, status, detail, result)
 
     # ---------------------------------------------------------------- 公开
 
@@ -241,7 +266,7 @@ class LLMQueue:
                 # 尽力把这次调用标成失败：worker 活着但这次死了，不标的话
                 # 调用方会永远等一个不会来的结果。
                 try:
-                    self._on_status(
+                    self._emit(
                         job.call_id,
                         STATUS_ERROR,
                         f"worker_exception: {type(exc).__name__}",
@@ -251,12 +276,12 @@ class LLMQueue:
                     _LOG.warning("标记 worker 异常失败时又出错 %s: %s", job.call_id, status_exc)
 
     def _execute(self, job: Job) -> None:
-        self._on_status(job.call_id, STATUS_RUNNING, "", None)
+        self._emit(job.call_id, STATUS_RUNNING, "", None)
         try:
             result = self._client.complete(job.request)
         except LLMRateLimited as exc:
             if job.attempt + 1 >= self._config.max_attempts:
-                self._on_status(
+                self._emit(
                     job.call_id,
                     STATUS_ERROR,
                     f"rate_limited_exhausted: {exc}",
@@ -265,7 +290,7 @@ class LLMQueue:
                 return
             job.attempt += 1
             delay = self._backoff_delay(job.attempt)
-            self._on_status(
+            self._emit(
                 job.call_id,
                 STATUS_RATE_LIMITED,
                 f"retry_in={delay:.1f}s attempt={job.attempt}",
@@ -274,12 +299,12 @@ class LLMQueue:
             self._enqueue(job, delay=delay)
             return
         except LLMError as exc:
-            self._on_status(job.call_id, STATUS_ERROR, str(exc), None)
+            self._emit(job.call_id, STATUS_ERROR, str(exc), None)
             return
         except Exception as exc:  # noqa: BLE001 — worker 绝不能因为一个任务死掉
-            self._on_status(job.call_id, STATUS_ERROR, f"unexpected: {exc!r}", None)
+            self._emit(job.call_id, STATUS_ERROR, f"unexpected: {exc!r}", None)
             return
 
         # 结果整份传给回调：text 落 result_text 列，model / token 各有各的列
         # （architecture.md §4.1 约束 4：token 用量必须可审计）。
-        self._on_status(job.call_id, STATUS_OK, result.text, result)
+        self._emit(job.call_id, STATUS_OK, result.text, result)
