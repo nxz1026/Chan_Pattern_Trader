@@ -141,8 +141,25 @@ def test_load_previous_signal_returns_latest_signal() -> None:
     assert result.confirmed_time == expected_ms
 
 
-def test_load_previous_signal_db_error_degrades_gracefully() -> None:
-    """DB 报错时降级为 None（不抛异常），不把快照搞挂。"""
+def test_load_previous_signal_db_error_raises_instead_of_faking_empty() -> None:
+    """DB 报错时**抛**，不返回 ``None``（R45 改）。
+
+    原来这里断言「降级为 None，不抛」，把一个会放大故障的行为固化成了契约。
+    那个断言错在忽略了 PostgreSQL 的事务语义 —— 实测（PG 18.6）：
+
+        事务里一条语句失败后，同一连接的后续语句全部报
+        ``current transaction is aborted, commands ignored until end of
+        transaction block``
+
+    所以「返回 None 假装没有历史」不是降级，是**把一次局部失败放大成整页失败**：
+    连接留在 aborted 态，后面每一个查询都报错。调用方
+    （``a_share_snapshot``）为此专门写了 ``_rollback_quietly``，而那段防御在
+    旧行为下是**死代码**（函数先吞了异常，调用方的 ``except`` 永不触发）。
+
+    「不把快照搞挂」这个诉求仍然成立，但它的正确落点是**调用方**：
+    ``try/except`` 接住 + rollback + ``previous`` 保持 ``None``。
+    那条链路由 ``tests/test_a_share_rollback.py`` 覆盖。
+    """
 
     class ExplodingConn:
         def cursor(self) -> Any:
@@ -151,8 +168,8 @@ def test_load_previous_signal_db_error_degrades_gracefully() -> None:
         def commit(self) -> None:
             pass
 
-    result = load_previous_signal(ExplodingConn(), "first_buy:0:zs1")
-    assert result is None
+    with pytest.raises(SignalEventError):
+        load_previous_signal(ExplodingConn(), "first_buy:0:zs1")
 
 
 # --------------------------------------------------------------------------- #

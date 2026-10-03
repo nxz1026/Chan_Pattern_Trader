@@ -108,6 +108,29 @@ def load_previous_signal(conn: Any, signal_id: str) -> Signal | None:
 
     返回的 ``Signal`` 可直接作为 ``assess_first_buy(..., previous=...)`` 的入参。
     无事件 → ``None``（首次评估）。
+
+    ## R45 修：读失败必须**抛**，不能返回 ``None``
+
+    原实现在 ``except`` 里 ``return None``，理由是「事件流不是硬依赖」。但那个
+    理由只成立一半，漏了 PG 的事务语义：
+
+        实测（PostgreSQL 18.6）：事务里一条语句失败后，**同一连接**的后续语句
+        全部报 ``current transaction is aborted, commands ignored until end of
+        transaction block`` —— 连接进入 aborted 态，必须 ROLLBACK 才能再用。
+
+    调用方（``a_share_snapshot`` 第 456 / 538 行）为此专门写了
+    ``_rollback_quietly``，注释里就写着「冒出去会让整个快照 500，并且把连接留在
+    aborted 态连累后面所有查询」。**但那段防御是死代码** —— 函数自己先吞了异常，
+    调用方的 ``except`` 永远不会触发，连接就一直烂着，后面每一个查询都失败。
+
+    修法：与 :func:`latest_status` / :func:`load_signal_events` 保持一致，读失败
+    抛 :class:`SignalEventError`。调用方的 ``try/except`` 随即生效：rollback +
+    ``previous`` 保持 ``None``（降级为首次评估）—— 这才是它本来想要的语义。
+
+    ⚠️ ``tests/test_a_share_rollback.py::test_load_previous_signal_failure_does_not_propagate``
+    是 monkeypatch 掉本函数让它抛的，只证明了「调用方会兜底」，**证明不了真函数
+    会抛**。那种测法对 mock 有效、对真实路径无效 —— 真实路径当时恰恰是坏的。
+    回归见 ``tests/test_storage_failure_semantics.py``。
     """
     try:
         with conn.cursor() as cur:
@@ -123,10 +146,10 @@ def load_previous_signal(conn: Any, signal_id: str) -> Signal | None:
             row = cur.fetchone()
         return _row_to_signal(row) if row else None
     except Exception as exc:
-        # 事件流不是硬依赖：读失败时降级为首次评估（previous=None），
-        # 不把整个快照搞挂。但必须响亮地记日志，不能静默。
+        # 「库读不到」与「确实没有历史」是两件事，前者不能冒充后者。
+        # 必须抛 —— 吞掉会把连接留在 aborted 态（见上方实测），后续查询全废。
         _LOG.warning("加载信号历史失败 %s: %s", signal_id, exc)
-        return None
+        raise SignalEventError(f"加载信号历史失败: {exc}") from exc
 
 
 def record_signal_event(
