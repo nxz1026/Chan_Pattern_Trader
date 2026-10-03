@@ -396,3 +396,78 @@ tests/
 **不允许**用 mock 假装它在位。
 
 **门禁**见 `README.md`「质量门」—— 6 条全部在 CI（3.12 + 3.14 双版本）执行。
+
+---
+
+## 附录 A：§2.1 状态表的**核实结果**（R45，2026-10-03）
+
+那张表标着「2026-10-02 实测」，但**实际已过期**，且 §2.1 下方自己就写着
+「别照抄审计里的『未接线』清单，先用 AST 复核」—— 这条纪律同样适用于它自己。
+
+### A.1 文件数/行数：几乎每行都对不上（AST + `wc -l` 实测）
+
+| 层 | 表里声称 | 实测 | 差 |
+|---|---|---|---|
+| `storage/` | 5 文件 / 1,070 行 | 6 / 1,408 | +1 / +338 |
+| `llm/` | 7 / 1,092 | **8** / 1,240 | +1 / +148 |
+| `adapters/` | 16 / 4,519 | **19** / 5,524 | +3 / +1,005 |
+| `application/` | 29 / 4,182 | **32** / 5,170 | +3 / +988 |
+| `domain/` | 16 / 2,894 | 16 / 2,938 | 0 / +44 |
+| `web/` | 5 / 2,680 | 5 / 2,834 | 0 / +154 |
+
+**原因不是 R44/R45 改的**（那两轮合计约 +300 行）。是表由 commit `7791a5b` 写下后，
+**同一天**又落地了 `feishu.py`(10-02)、`run_metric.py` / `dashboard_parity.py` /
+`parity_reference.py`(10-02) 等文件，表没跟着更新。「2026-10-02 实测」实际只对到
+当天某个时间点 —— **这是个会误导人的标签**。
+
+### A.2 「下一层做 adapters/」这个**建议本身仍然成立**
+
+用 AST 扫外部系统触点（网络 / 进程 / DB）：
+
+| 层 | 外部触点 | 占比 | 行数 |
+|---|---|---|---|
+| **`adapters/`** | **6 / 19 文件** | **31.6%** | 5,524 |
+| `web/` | 1 / 5 | 20.0% | 2,834 |
+| `llm/` | 1 / 8 | 12.5% | 1,240 |
+| `application/` | 1 / 32 | 3.1% | 5,170 |
+| `domain/` `storage/` | 0 | 0% | — |
+
+`adapters/` 的外部触点密度**是第二名的 1.6 倍**，且触点数最多。§2.1 给的理由
+（外部契约漂移不会让任何测试变红）经核实成立。**所以结论不变，只是依据要换成实测数。**
+
+### A.3 分层依赖：AST 手写扫描**不可信**，以 import-linter 为准
+
+手写 AST 扫出 `domain → adapters`、`domain → application`、`storage → application`
+等**违反契约**的边。一开始以为真有架构腐化，**其实是假阳性** ——
+匹配时把**注释和 docstring 里的 `cpt.domain.` 字样**也算成了 import
+（与 `tests/test_dashboard_url_credentials.py` 踩的同一个坑）。
+
+项目自带的权威判定：
+
+```
+$ .venv/bin/lint-imports
+Analyzed 123 files, 559 dependencies.
+Domain has no third-party deps          KEPT
+Adapters do not leak into domain        KEPT
+Storage does not leak into domain       KEPT
+LLM does not leak into domain           KEPT
+LLM does not leak into storage          KEPT
+Layered architecture                    KEPT
+Contracts: 6 kept, 0 broken.
+```
+
+⇒ **分层依赖是干净的。** 手写 AST 扫描只适合做「量规模」这种粗活，
+**判断依赖是否合法一律用 `lint-imports`**。
+
+### A.4 R44/R45 对状态表的影响
+
+本轮改过的层内文件：`cpt/adapters/a_share_local.py`（仅模块 docstring 去快照化）、
+`dashboard/{dashboard,market_a_share}.js`（凭据 URL bug）。
+
+按 §2.1 自己的定义（「**不是被单点改动顺手碰过**」），这两个层的 ⚠️ 状态**不变**。
+`scripts/` 与 `deploy/` 不属于任何一层。
+
+### A.5 建议的修法（未执行）
+
+§2.1 的表要么按实测数更新，要么把「2026-10-02 实测」改成「截至 `7791a5b`」，
+**并加一行说明它需要复核** —— 否则下一个接手的人会像这次一样先信它、再被它坑一次。
