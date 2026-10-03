@@ -247,6 +247,9 @@ def parse_structured(
     if not raw.strip():
         return ParsedStructured(None, "", "empty", raw)
 
+    #: R45：置位标志必须在**三个候选之前**初始化。原实现把它放在第 3 步之前，
+    #: 于是「整段就是合法 JSON 但形状不对」的候选走不到置位那一步。
+    schema_failed = False
     seen_unclosed = False
 
     # 1) 整段
@@ -259,6 +262,7 @@ def parse_structured(
         if not bad:
             return ParsedStructured(parsed, "whole", "ok", raw)
         # 整段能解析但 schema 不符：记下来，继续试别的候选（真机用例 B）
+        schema_failed = True
 
     # 2) 围栏
     for fragment in _iter_fences(raw):
@@ -269,9 +273,9 @@ def parse_structured(
         bad = _validate(parsed, required, expect_object=expect_object)
         if not bad:
             return ParsedStructured(parsed, "fence", "ok", raw)
+        schema_failed = True
 
     # 3) 嵌入式配平容器
-    schema_failed = False
     for fragment, closed in _iter_braces(raw):
         if not closed:
             seen_unclosed = True
