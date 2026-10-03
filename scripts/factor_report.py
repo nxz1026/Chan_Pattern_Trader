@@ -44,6 +44,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import time
 from collections.abc import Sequence
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
@@ -52,7 +53,10 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cpt.adapters._dbconfig import connection_kwargs
-from cpt.adapters.eastmoney_actions import EastmoneyActionClient
+from cpt.adapters.eastmoney_actions import (
+    EastmoneyActionClient,
+    EastmoneyActionUnavailable,
+)
 
 #: 台阶对不齐的阈值。R40 实测修复后正常在 ±0.3% 内，所以 2% 足够宽松。
 STEP_MISMATCH_TOL = 0.02
@@ -171,19 +175,50 @@ def main(argv: list[str] | None = None) -> int:
         cur.execute("SELECT DISTINCT code FROM asel.ref_adjust_factor_v2 ORDER BY code")
         codes = [r[0] for r in cur.fetchall()]
 
-    print(f"逐票对账 {len(codes)} 只（暂存表 asel.ref_adjust_factor_v2）\n")
+    print(f"逐票对账 {len(codes)} 只（暂存表 asel.ref_adjust_factor_v2）\n", flush=True)
     # 公司行动**先批量取**再逐票分析：每只票一次 HTTP 在 2000+ 只上要跑很久，
     # 而这批数据在一次运行里是**不变**的，没必要反复取。
+    #
+    # ⚠️ R44：瞬时失败**必须重试**，且必须 `flush`。
+    #
+    # 1) 原来 `except` 直接把 ex_by_code[code] 置空，而那只票的
+    #    ``ex_dates`` 为空 ⇒ analyse() 里 ``rep.ex_dates = 0`` ⇒ 该票既不进
+    #    「台阶对不齐」也不参与匹配率统计 —— **一次网络抖动就让这只票从对账里
+    #    悄悄消失**，而报告照常打印，数字看起来完全正常。
+    #    实测 2026-10-03：000698 一次 read timeout 就被这样吞掉。
+    # 2) ``print`` 不带 flush，重定向到文件时是**块缓冲**：5000+ 只要跑一小时，
+    #    日志里却一行都看不到，无法判断是在跑还是卡死（本轮为此白等三轮）。
     ex_by_code: dict[str, list[str]] = {}
+    transient = 0
     for i, code in enumerate(codes, 1):
-        try:
-            ex_by_code[code] = sorted({a.ex_date for a in client.fetch_actions(code)})
-        except Exception as exc:  # noqa: BLE001 — 单只取不到不中断整批
-            print(f"    [warn] {code} 公司行动取数失败: {exc}", file=sys.stderr)
-            ex_by_code[code] = []
+        for attempt in range(3):
+            try:
+                ex_by_code[code] = sorted({a.ex_date for a in client.fetch_actions(code)})
+                break
+            except EastmoneyActionUnavailable as exc:
+                # 网络类：瞬时的，有界重试有意义（与 factor_recompute 同口径）
+                if attempt == 2:
+                    transient += 1
+                    print(
+                        f"    [warn] {code} 公司行动取数重试 3 次仍失败（已从对账中剔除）: {exc}",
+                        file=sys.stderr,
+                        flush=True,
+                    )
+                    ex_by_code[code] = []
+                time.sleep(1.5 * (attempt + 1))
+            except Exception as exc:  # noqa: BLE001 — 单只取不到不中断整批
+                print(f"    [warn] {code} 公司行动取数失败: {exc}", file=sys.stderr, flush=True)
+                ex_by_code[code] = []
+                break
         if i % 100 == 0:
-            print(f"  ... 公司行动 {i}/{len(codes)}")
-    print()
+            print(f"  ... 公司行动 {i}/{len(codes)}", flush=True)
+    if transient:
+        print(
+            f"\n  ⚠️ {transient} 只因网络问题被剔出对账 —— 它们**没有**计入任何结论，"
+            f"重跑本报告可补上。",
+            flush=True,
+        )
+    print(flush=True)
     reports: list[CodeReport] = []
     for i, code in enumerate(codes, 1):
         rep = analyse(cur, code, ex_by_code.get(code, ()))
@@ -191,7 +226,7 @@ def main(argv: list[str] | None = None) -> int:
             continue
         reports.append(rep)
         if i % 50 == 0:
-            print(f"  ... {i}/{len(codes)}")
+            print(f"  ... {i}/{len(codes)}", flush=True)
 
     if args.limit:
         reports = sorted(reports, key=lambda r: -r.mean_rel_dev)[: args.limit]
