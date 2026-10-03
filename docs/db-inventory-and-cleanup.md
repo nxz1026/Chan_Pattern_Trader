@@ -180,3 +180,43 @@ DROP INDEX CONCURRENTLY public.idx_cpt_llm_call_subject;
 
 `public.daily_bar` 有 **5221 次 DELETE**。行情表被删过 5221 行 ——
 如果那是 ingest 的"当天数据重写"，属正常；如果是误删，得查 ingest 日志确认。
+
+---
+
+## 10. 已执行：删除 2 个确认无用的索引（2026-10-03 19:00）
+
+```sql
+DROP INDEX CONCURRENTLY asel.idx_sm_board;                        -- 56 kB
+DROP INDEX CONCURRENTLY public.idx_cpt_dashboard_run_dataset_hash; -- 16 kB
+```
+
+索引数 **129 → 127**。用 `CONCURRENTLY`，不阻塞读写。**数据一行未动**
+（`ref_adjust_factor` 3,393,640 / `ref_adjust_factor_v2` 3,334,585 / `daily_bar` 3,393,640 均未变）。
+
+### 判定依据（不是只看 `idx_scan=0`）
+
+| 索引 | 结论 | 依据 |
+|---|---|---|
+| `idx_sm_board` | **删** | CPT 的查询是 `WHERE code = ANY(...)`，不带 board；emotion-core 全仓无 `security_master` 的 board 查询 |
+| `idx_cpt_dashboard_run_dataset_hash` | **删** | `dashboard_run_store` 只有 `WHERE run_id = ANY(...)`（走主键），**没有** `WHERE dataset_hash` |
+| `idx_cpt_llm_call_subject` | **保留** ⚠️ | `llm_call_store.recent_calls()` 里有 `WHERE subject_id = %s` —— **查询路径存在**，只是表里只有 6 行还没触发过 |
+
+> ⚠️ 第三条是本轮**推翻了初判**的地方：`idx_scan=0` 只说明"没被用过"，
+> 不说明"不会被用"。**零扫描索引要先查代码里有没有对应查询路径**，
+> 否则会把「还没跑到」误判成「不需要」。
+
+### 保留的（按约定）
+
+- `public.cpt_structure_event_id_backup_20261001` —— r27 迁移的**回滚依赖**，
+  `2026-10-06_r27_market_prefix_rollback.sql` 会读它。一个月后再评估。
+- `asel.ref_adjust_factor_v2` 整表 —— 每日 cron 的落点 + 再切表的数据来源。
+  按约定**保留 3 年**；当前只有 2.75 年（666 交易日），所以这条策略**今天是空操作**，
+  不需要任何定时任务。真要落地时点是约 2027-01，届时按 `computed_at` 清理。
+
+## 11. 一个复核时的坑（记下来）
+
+复核删索引后的数据时，我先拿 `pg_stat_user_tables.n_live_tup` 当"预期行数"，
+发现 `daily_bar` 3,393,640 vs 3,393,644 差 4 行，警报了半天。
+
+**`n_live_tup` 是 VACUUM 估算值，不是精确 count。** 判断数据有没有变，
+一律用 `SELECT count(*)`，别用 `pg_stat`。
