@@ -1011,7 +1011,7 @@
    */
   async function requestJson(url) {
     try {
-      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      const response = await fetch(safeFetchUrl(url), { headers: { Accept: "application/json" } });
       let body = null;
       try {
         body = await response.json();
@@ -3629,6 +3629,63 @@
     return state.snapshotUrl || root.dataset.snapshotUrl || new URLSearchParams(window.location.search).get("snapshot");
   }
 
+  /**
+   * 相对 ``window.location.href`` 解析出一个**可 fetch** 的绝对地址。
+   *
+   * ⚠️ R44 修：``new URL(endpoint, window.location.href)`` 会把 base URL 里的
+   * ``user:password@`` **继承**到结果里（URL 规范：相对解析保留 base 的凭据）。
+   * 而 ``fetch``/``Request`` 按规范**拒绝**带凭据的 URL，于是：
+   *
+   *     Failed to execute 'fetch' on 'Window': Request cannot be constructed
+   *     from a URL that includes credentials: /cpt/api/dashboard/snapshot
+   *
+   * 触发条件：页面 URL 里带凭据。看板挂在 nginx ``auth_basic`` 后面时，
+   * 用户若用 ``https://user:pwd@host/cpt/`` 这种形式打开（或任何中间层做
+   * 过一次带凭据的重定向/跳转），**整个看板静默退化成离线 demo**：
+   * K 线空白、盘口全空、结构详情全 `—`，只剩一条红色报错。
+   *
+   * 实测（2026-10-03 真机无头 Chrome，NDORACLE）：后端 ``/cpt/api/dashboard/snapshot``
+   * 明明返回 200 + 真实 BTCUSDT K 线，前端却显示「暂无数据」。
+   *
+   * 修法：解析后显式清空 ``username``/``password``。**不能**改用
+   * ``document.baseURI`` 之类的替代 base —— 凭据照样在。也不能靠 nginx 侧
+   * 改 rewrite 绕开：这是**客户端**的既成事实，任何来源的凭据都要防。
+   *
+   * 顺带：``replaceState`` 那两处（模式切换 / 画布切换）也用同一个 base，
+   * 会把凭据写回地址栏 —— 一并走这里，行为统一。
+   */
+  function resolveUrl(endpoint) {
+    const url = new URL(endpoint, window.location.href);
+    // 同源时保留会话 cookie 即可，URL 里带凭据既无必要也不安全。
+    if (url.username || url.password) {
+      url.username = "";
+      url.password = "";
+    }
+    return url;
+  }
+
+  /**
+   * **所有** ``fetch`` 出口的统一入口：把可能是相对路径、也可能带凭据的
+   * ``endpoint`` 解析成一个「可 fetch」的安全地址。
+   *
+   * ⚠️ 为什么必须是「统一出口」而不是逐个调用点修：
+   * 首屏加载走的是 ``loadSnapshot(root.dataset.snapshotUrl)`` —— 传的是
+   * ``index.html`` 里那个**裸相对路径** ``/cpt/api/dashboard/snapshot``，
+   * 它不经过 :func:`resolveUrl`，而是直接进 ``_fetchSnapshot`` 的 ``fetch``。
+   * 只修 :func:`refreshSelectedSnapshot` 的话，**首屏照样报错**（R44 实测：
+   * 改完重截一张图，报错一字未变 —— 因为压根不是那条路径）。
+   */
+  function safeFetchUrl(endpoint) {
+    try {
+      return resolveUrl(endpoint).toString();
+    } catch (error) {
+      // ``file://`` 下相对路径本来就无法解析成 http(s) URL；保持原值，
+      // 让调用方按「离线 demo / 取不到」处理，而不是在这里抛一个新异常。
+      void error;
+      return endpoint;
+    }
+  }
+
   function inspectEndpoint(barIndex) {
     const base = snapshotEndpoint();
     if (!base) return null;
@@ -3637,13 +3694,24 @@
     return `${trimmed}${separator}inspect?bar_index=${encodeURIComponent(String(barIndex))}`;
   }
 
+  /**
+   * 解析 inspect 端点。**同样要剥掉凭据**（见 :func:`resolveUrl`）——
+   * 它虽然是用字符串拼的，但 ``snapshotEndpoint()`` 本身可能就是绝对地址，
+   * 而相对拼接的 base 若来自 ``location.href`` 就会把 ``user:pwd@`` 带进来。
+   */
+  function resolveInspectUrl(barIndex) {
+    const endpoint = inspectEndpoint(barIndex);
+    if (!endpoint) return null;
+    return resolveUrl(endpoint);
+  }
+
   async function fetchInspect(barIndex) {
-    const url = inspectEndpoint(barIndex);
+    const url = resolveInspectUrl(barIndex);
     if (!url) {
       return { available: false, reason: "inspect_unavailable_no_endpoint" };
     }
     try {
-      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      const response = await fetch(safeFetchUrl(url), { headers: { Accept: "application/json" } });
       if (!response.ok) {
         return { available: false, reason: `http_${response.status}` };
       }
@@ -3659,7 +3727,7 @@
       setConnection("offline", "当前为离线 demo；切换仅更新本地选择状态");
       return Promise.resolve(null);
     }
-    const url = new URL(endpoint, window.location.href);
+    const url = resolveUrl(endpoint);
     const symbol = q("[data-testid=symbol-select]")?.value;
     const interval = q("[data-testid=interval-select]")?.value;
     if (symbol) url.searchParams.set("symbol", symbol);
@@ -3864,7 +3932,7 @@
         state.mode = button.dataset.modeAction === "watch" ? "watch" : "research";
         root.dataset.viewMode = state.mode;
         root.querySelectorAll("[data-mode-action]").forEach((item) => item.setAttribute("aria-pressed", item.dataset.modeAction === state.mode ? "true" : "false"));
-        const url = new URL(window.location.href);
+        const url = resolveUrl(window.location.href);
         url.searchParams.set("mode", state.mode);
         window.history.replaceState({}, "", url);
         root.dispatchEvent(new CustomEvent("cpt:mode-changed", { detail: { mode: state.mode } }));
@@ -4181,7 +4249,7 @@
   }
 
   async function _fetchSnapshot(url) {
-    const response = await fetch(url, { headers: { Accept: "application/json" } });
+    const response = await fetch(safeFetchUrl(url), { headers: { Accept: "application/json" } });
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     return await response.json();
   }
@@ -4532,7 +4600,7 @@
     state.canvasError = null;
     // URL 写回（照抄模式切换的 history.replaceState 范式）
     try {
-      const url = new URL(window.location.href);
+      const url = resolveUrl(window.location.href);
       url.searchParams.set("canvas", wanted);
       window.history.replaceState(null, "", url.toString());
     } catch (error) {
@@ -4601,7 +4669,7 @@
     const base = dashboardApiBase(snapshotEndpoint());
     let data = null;
     try {
-      const response = await fetch(`${base}/health`, { headers: { Accept: "application/json" } });
+      const response = await fetch(safeFetchUrl(`${base}/health`), { headers: { Accept: "application/json" } });
       if (response.ok) data = await response.json();
     } catch (error) {
       data = null;
@@ -4638,7 +4706,7 @@
     const url = `${base}/sources${refresh ? "?refresh=1" : ""}`;
     let data = null;
     try {
-      const response = await fetch(url, { headers: { Accept: "application/json" } });
+      const response = await fetch(safeFetchUrl(url), { headers: { Accept: "application/json" } });
       if (response.ok) data = await response.json();
     } catch (error) {
       data = null;

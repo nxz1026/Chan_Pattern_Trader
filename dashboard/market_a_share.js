@@ -85,8 +85,28 @@
       return `${state.base}/snapshot?code=${encodeURIComponent(state.code)}`;
     }
 
-    function syncUrl() {
+    /**
+     * 剥掉 URL 里的 ``user:password@``。
+     *
+     * ⚠️ R44 修：``new URL(window.location.href)`` 保留 base 的凭据，而看板挂在
+     * nginx ``auth_basic`` 后面时，用户用 ``https://user:pwd@host/cpt/`` 打开
+     * 就会把凭据带进地址栏 —— 既是安全问题，也会让后续 ``fetch`` 直接抛
+     * "Request cannot be constructed from a URL that includes credentials"。
+     * 详见 ``dashboard.js`` 里 :func:`resolveUrl` 的完整说明。
+     *
+     * 本模块是独立文件，拿不到 dashboard.js 的内部函数，故自带一份等价实现。
+     */
+    function safeLocationUrl() {
       const url = new URL(window.location.href);
+      if (url.username || url.password) {
+        url.username = "";
+        url.password = "";
+      }
+      return url;
+    }
+
+    function syncUrl() {
+      const url = safeLocationUrl();
       if (state.market === MARKET_A_SHARE) {
         url.searchParams.set("market", MARKET_A_SHARE);
         if (state.code) url.searchParams.set("code", state.code);
