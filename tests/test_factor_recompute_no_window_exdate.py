@@ -83,7 +83,8 @@ class _FakeClient:
         return self._conn
 
 
-def _install(monkeypatch: pytest.MonkeyPatch, *, bars: list[tuple[int, float]], anchor: float | None,
+def _install(monkeypatch: pytest.MonkeyPatch, *,
+             bars: list[tuple[int, float]], anchor: float | None,
              actions: list[CorporateAction], written: list[tuple]) -> Any:
     monkeypatch.setattr(fr, "load_recent_closes", lambda conn, code, limit=800: tuple(bars))
     monkeypatch.setattr(fr, "current_latest_factor", lambda conn, code: anchor)
