@@ -401,7 +401,8 @@ def test_pool_survives_corrupt_watchlist(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", lambda *a, **k: fake)
     payload = a_share_routes.pool_payload()
     assert payload["count"] == 1
-    assert "自选文件读取失败" in payload["watchlist_error"]
+    # R45：文案细分成「自选文件已损坏…未做任何修改」，这里断言**契约**而非措辞
+    assert "未做任何修改" in payload["watchlist_error"]
 
 
 # --------------------------------------------------------------------- 自选

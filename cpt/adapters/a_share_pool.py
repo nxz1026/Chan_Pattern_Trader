@@ -225,12 +225,40 @@ class WatchlistStore:
                 pass
             raise
 
-    def list(self) -> list[WatchlistEntry]:
+    def _read(self) -> list[dict[str, Any]]:
+        """读并解析自选文件。**损坏一律抛，绝不猜。**
+
+        R45 修。原来的三个方法对「文件损坏」有**三种不同反应**：
+
+            list()    → 抛 WatchlistError        ✅ 诚实
+            add()     → ``data = []`` 继续写       ❌ **静默清空整个自选股**
+            remove()  → ``return False``          ❌ 谎称「没删掉」
+
+        ``add`` 那条最严重：用户在文件损坏后加一只票，**原有的全部条目被静默
+        覆盖掉**，且没有日志、没有异常 —— 用户以为只是加了一票，实际丢了全部。
+        实测（2026-10-03）：损坏文件上 ``add("000002")`` 之后，文件里只剩
+        ``000002`` 一条。
+
+        「猜成空列表」在这里是**最坏**的降级：自选股是用户数据，猜错就是丢数据。
+        正确做法是响亮报错，让人去修文件（文件损坏通常来自手工编辑或外部工具）。
+        """
         try:
             data = json.loads(self._path.read_text(encoding="utf-8"))
-        except (json.JSONDecodeError, OSError) as e:
+        except json.JSONDecodeError as e:
+            raise WatchlistError(
+                f"自选文件已损坏（{self._path}）：{e}。"
+                f"**未做任何修改** —— 请先修好或移走该文件再试。"
+            ) from e
+        except OSError as e:
             raise WatchlistError(f"自选文件读取失败: {e}") from e
-        return [WatchlistEntry(**item) for item in data]
+        if not isinstance(data, list):
+            raise WatchlistError(
+                f"自选文件格式不对（{self._path}）：顶层应是数组，实得 {type(data).__name__}"
+            )
+        return data
+
+    def list(self) -> list[WatchlistEntry]:
+        return [WatchlistEntry(**item) for item in self._read()]
 
     def add(self, code: str, market: str) -> WatchlistEntry:
         entry = WatchlistEntry(
@@ -240,10 +268,7 @@ class WatchlistStore:
         )
         f = self._lock()
         try:
-            try:
-                data = json.loads(self._path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                data = []
+            data = self._read()
             # 幂等：已存在则返回原 entry
             for e in data:
                 if e.get("code") == code and e.get("market") == market:
@@ -263,10 +288,7 @@ class WatchlistStore:
     def remove(self, code: str, market: str) -> bool:
         f = self._lock()
         try:
-            try:
-                data = json.loads(self._path.read_text(encoding="utf-8"))
-            except json.JSONDecodeError:
-                return False
+            data = self._read()
             new_data = [
                 e for e in data if not (e.get("code") == code and e.get("market") == market)
             ]

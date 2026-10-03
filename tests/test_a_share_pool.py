@@ -249,11 +249,39 @@ def test_watchlist_persists_added_at(tmp_path: pathlib.Path):
 
 
 def test_watchlist_corrupt_file_raises(tmp_path: pathlib.Path):
+    """文件损坏 ⇒ 抛 ``WatchlistError``，**且不修改文件**。
+
+    R45：文案从「自选文件读取失败」细分成「已损坏…**未做任何修改**」，
+    所以断言改为匹配**契约**（异常类型 + 「未做任何修改」）而不是整句措辞 ——
+    措辞会变，契约不会。
+    """
     path = tmp_path / "watchlist.json"
     path.write_text("not json {", encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
     store = WatchlistStore(path)
-    with pytest.raises(WatchlistError, match="自选文件读取失败"):
+    with pytest.raises(WatchlistError, match="未做任何修改"):
         store.list()
+    assert path.read_text(encoding="utf-8") == before, "读取失败不该改动文件"
+
+
+def test_watchlist_corrupt_file_does_not_wipe_entries(tmp_path: pathlib.Path):
+    """R45 核心回归：文件损坏后 ``add()`` **不得**静默清空原有条目。
+
+    原实现 ``except json.JSONDecodeError: data = []`` 之后继续写 ⇒
+    用户在损坏文件上加一票，**原有全部条目被静默覆盖**，无异常无日志。
+    """
+    path = tmp_path / "watchlist.json"
+    store = WatchlistStore(path)
+    store.add("600519", "a_share")
+    store.add("000001", "a_share")
+
+    path.write_text('[{"code": "600519", "market": "a_sh', encoding="utf-8")  # 截断
+    with pytest.raises(WatchlistError, match="未做任何修改"):
+        store.add("000002", "a_share")
+
+    path.write_text("not json {", encoding="utf-8")
+    with pytest.raises(WatchlistError):
+        store.remove("600519", "a_share")
 
 
 def test_watchlist_creates_parent_directory(tmp_path: pathlib.Path):
