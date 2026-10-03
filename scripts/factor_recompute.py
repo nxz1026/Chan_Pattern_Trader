@@ -453,12 +453,50 @@ def process_code(
     bars = load_recent_closes(conn, code)
     if len(bars) < 30:
         return CodeResult(code, False, note="本地 K 线不足 30 根"), calls
-    if not actions:
-        return CodeResult(code, False, note=f"{source.name} 无公司行动记录"), calls
 
-    fmap = factor_from_actions(
-        actions, prev_closes=prev_closes_for(bars, [a.ex_date for a in actions])
+    ex_dates = [a.ex_date for a in actions]
+    first_bar = (
+        dt.datetime.fromtimestamp(bars[0][0] / 1000, tz=dt.UTC).date().isoformat() if bars else ""
     )
+
+    # ⚠️⚠️ R44 修：「从未在窗口内除权」不是失败，是**恒定因子**。
+    #
+    # 实测（2026-10-03，切表后仍占位的 177 只里）：
+    #   99 只  从未分红            → 恒定，正确
+    #   74 只  **全部**除权日 < 本地 bar 起点 2024-01-02 → 窗口内一次除权都没有
+    #   2 只   新上市，daily_bar 只有 3 根 → 数据不足（下面 30 根那道门槛拦住）
+    #
+    # 这 74 只原来被「无任何可用除权台阶」整只拒写，是**过度保守**：
+    # 除权日全在窗口之前 ⇒ 窗口内因子恒定，而恒定**就是正确答案**。
+    # 拒写的代价是它永远留在占位状态，而且 ``failed`` 不进 ``done`` ⇒
+    # 每天的定时重算都会把它重新查一遍（每天白烧 74 次东财调用，且永远失败）。
+    #
+    # ⚠️ 常数必须取 **anchor**（库里最新一根的值），不能取 1.0：
+    # ``anchor_scale`` 在 steps 为空时返回 1.0（见其 docstring 的
+    # ``if not steps ... return 1.0``），对占位票无所谓，但对**保留旧真值**的票
+    # 会把 199.4 写成 1.0 ⇒ 显示价格缩放两个数量级。
+    if not actions or all(d < first_bar for d in ex_dates):
+        anchor = current_latest_factor(conn, code)
+        if not actions:
+            return CodeResult(code, False, note=f"{source.name} 无公司行动记录"), calls
+        const = anchor if anchor else 1.0
+        rows = [
+            (
+                code,
+                dt.datetime.fromtimestamp(ms / 1000, tz=dt.UTC).date().isoformat(),
+                const,
+                f"{source.name}_events",
+                f"{source.name}:events steps=0 (窗口内无除权，最早除权日早于 "
+                f"bar 起点 {first_bar})",
+            )
+            for ms, _ in bars
+        ]
+        if write:
+            save_recompute_factors(conn, rows)
+        return CodeResult(code, True, rows=len(rows), steps=0,
+                          note="窗口内无除权事件，因子恒定"), calls
+
+    fmap = factor_from_actions(actions, prev_closes=prev_closes_for(bars, ex_dates))
     steps = sorted(fmap)
     if not steps:
         return CodeResult(code, False, note="无任何可用除权台阶（缺派息或除权前收盘）"), calls
