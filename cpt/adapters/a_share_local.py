@@ -5,21 +5,37 @@ OHLC，转为 :class:`~cpt.domain.models.CanonicalBar`。
 写暂存表）或 ``scripts/factor_backfill.py``（按需从腾讯补单只）维护 ——
 两者都不在 cpt 核心依赖里，避免把 akshare/psycopg 等拖进 ``dependencies = []``。
 
-## ⚠️ 当前生产因子表是**坏的**（2026-10-02 实测，R42）
+## ⚠️ 因子表有「口径纪元」，读之前必须知道
 
-读本模块之前必须知道，否则会把下面 3036 只票的结构结果当成正常的：
+``asel.ref_adjust_factor`` 里的值**不是一个恒定的真值** —— 它取决于「谁写的、
+什么时候写的」。跨口径直接比较（尤其是跟历史信号/快照比）会得出错误结论。
 
-- ``asel.ref_adjust_factor`` 里 5222 只票中，**3036 只是占位**（``source IS NULL``，
-  从未计算过；其中 3028 只算出来恰好恒为 1.0）；
-- 另有 **2125 只票的因子会向下跳**（``>0.1%`` 口径）—— 纯后复权因子必须单调不降，
-  所以那一列对它们**不是后复权因子**；2197 只「有真值」的票里 96.7% 中招。
+### 口径 A（2026-09 之前，tx:fqkline）
 
-后果很具体：占位票的 ``hfq_factor ≡ 1.0`` ⇒ **``CanonicalBar.open = raw_open``**，
-于是每个除权日的价格跳空被当成**真实下跌**喂给缠论 ⇒ 分型/笔端点位置偏。
+- 因子 = 腾讯「后复权收盘 ÷ 不复权收盘」的**逐日比值**，本身带漂移；
+- 当时实测 5222 只里 **3036 只是占位**（``source IS NULL``，恒为 1.0），
+  另有 **2125 只非单调** —— 纯后复权因子必须单调不降，所以那一列对它们
+  **不是后复权因子**；
+- 后果：占位票 ``hfq_factor ≡ 1.0`` ⇒ ``CanonicalBar.open = raw_open``，
+  除权日的跳空被当成**真实下跌**喂给缠论 ⇒ 分型/笔端点位置偏。
 
-重算只写暂存表 ``asel.ref_adjust_factor_v2``，**不碰生产表**（R37 起的纪律），
-切换与否见 ``scripts/factor_report.py`` 的逐票结论。详见
-``docs/known-traps.md`` 与 ``docs/progress-log.md`` R39~R42。
+### 口径 B（R44 起，eastmoney:events）
+
+- 由 `scripts/factor_recompute.py` 按**公司行动**重算，台阶匹配率实测 100%、
+  非单调 0 只、孤儿行 0；
+- 保留 205 只未覆盖的票（98 只东财确认从未分红 ⇒ 1.0 本来就对；
+  其余是除权日早于 bar 起点而**故意拒写**的，见 R44 交接文档）。
+
+### 跨口径比较时怎么办
+
+``public.cpt_signal_event`` 与 ``public.cpt_dashboard_run`` 里有**用旧口径算出来的
+price / snapshot**。切到口径 B 后它们**不会自动复现**（结构判定已变）——
+比较时必须按时间点区分，别把「信号消失」当成 bug 排查一轮。
+详见 ``docs/post-cutover-plan.md``。
+
+重算只写暂存表 ``asel.ref_adjust_factor_v2``，**不碰生产表**（R37 起的纪律）；
+切换与否见 ``scripts/factor_report.py`` 的逐票结论。
+详见 ``docs/known-traps.md`` 与 ``docs/progress-log.md`` R39~R44。
 
 ## 数据流
 - ``public.daily_bar``: ``code`` / ``date`` / OHLC / volume / amount（**不复权**，5,223 只）

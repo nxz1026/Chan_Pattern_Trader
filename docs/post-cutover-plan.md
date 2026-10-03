@@ -5,7 +5,53 @@
 
 ---
 
-## 0. 一句话
+## 0.5 ⚠️ 切表 SQL（**已演练验证**，28 秒，不用停服务）
+
+R44 在真库上做过**完整演练**（单事务 DELETE+INSERT 后 ROLLBACK，生产表一行未变），
+实测结果与预测**逐条一致**：
+
+```
+DELETE 3,289,217 行   6.5s
+INSERT 3,287,456 行  21.6s
+合计 28.1s
+断言：孤儿行 134 ✓   只数 5222 ✓   非单调 code 26 ✓
+非东财口径行 18,688（205 只保留票）✓
+回滚后 (3395330, 5222) 与基线一致 ✓
+```
+
+**注意：两表列结构不同**，生产表**没有** `basis` 列：
+
+| 生产表 `ref_adjust_factor` | 暂存表 `ref_adjust_factor_v2` |
+|---|---|
+| code, trade_date, hfq_factor, source | code, trade_date, hfq_factor, **basis**, source |
+| **source_url, source_ref, as_of, available_at, fetched_at** | **computed_at** |
+
+第一版 SQL 写了 `basis`，在真库上**直接报错**（演练抓到的，不是推演出来的）。
+正确版本：
+
+```sql
+BEGIN;
+DELETE FROM asel.ref_adjust_factor
+WHERE code IN (SELECT DISTINCT code FROM asel.ref_adjust_factor_v2);
+
+INSERT INTO asel.ref_adjust_factor (code, trade_date, hfq_factor, source)
+SELECT code, trade_date, hfq_factor, source
+FROM asel.ref_adjust_factor_v2;
+
+-- 断言：134 / 5222，不符就 ROLLBACK
+SELECT count(*) FROM asel.ref_adjust_factor p WHERE NOT EXISTS
+  (SELECT 1 FROM public.daily_bar b WHERE b.code=p.code AND b.date=p.trade_date);
+SELECT count(DISTINCT code) FROM asel.ref_adjust_factor;
+COMMIT;
+```
+
+生产侧独有列（`source_url` / `as_of` / `fetched_at` 等，腾讯链路的元数据）
+留 NULL —— 它们描述的是「从哪儿抓的」，重算值没有这个来源。实测无任何代码读它们。
+
+**不用停服务**：Postgres 是 MVCC，读者要么看到全旧、要么看到全新。
+**不用清缓存**：因子读取路径上没有任何缓存（已确认无 `lru_cache`/TTL）。
+
+---
 
 切表会**改变历史 K 线的形状**（偏差 0.8%~40%），但**不改变今天显示的价格**
 （重算锚定在生产最新值）。所以切完第一件事不是"看数据对不对"，
