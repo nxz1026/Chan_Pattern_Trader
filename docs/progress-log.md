@@ -5895,3 +5895,107 @@ R39 起默认源换成东财（免费、无额度），`--max-calls` 的唯一�
 2. 之后要按 `--scope placeholder` / `all` 补算 3036 只占位票 —— **这是 58% 的
    A 股宇宙**，优先级高于任何其他因子问题。
 3. 切表前按 GAP-3 定好「替换而非合并」，并决定孤儿行要不要留。
+
+---
+
+## R45 — 逐层复盘：storage/ 与 llm/
+
+日期：2026-10-03。起点 `259c671`（architecture §2.1 状态表）。R44 修完因子切表后，
+按 `architecture.md` §2.1 的建议开始**逐层复盘**。本轮做了 `storage/`（6 文件全审完）
+与 `llm/` 的一半。
+
+### 0. 起因：那张状态表自己是不准的
+
+被要求「下一步该哪层」时先核实了 §2.1，结果它**两个方向都错**：
+
+- **数字全旧**：声称 `storage` 5/1,070、`llm` 7/1,092、`adapters` 16/4,519、
+  `application` 29/4,182，实测分别是 6/1,408、8/1,240、19/5,524、32/5,170。
+  不是 R44/R45 改的（两轮合计约 +300 行），是表写下后**同一天**又落地了
+  `feishu.py` / `run_metric.py` / `dashboard_parity.py` / `parity_reference.py`。
+- **✅ 的含义错了**：`storage/` 与 `llm/` 的 ✅ 是「**建了 / 修过**」，
+  不是「**复盘过**」。翻 `progress-log.md` 章节标题：
+  `R24 · 恢复 storage 层`、`R25 · 独立 LLM 服务层` —— 都是建设，不是复盘。
+  真正做过复盘的只有 `R29 web` 与 `R30 domain`。
+
+这与那个已被推翻的「14 个 `dashboard_*` 模块未接线」是同一类错误 ——
+**用一个标记掩盖了没做过的事**。§2.1 已按实测重写，并加 §2.1.1 记录这条更正。
+
+### 1. storage/：2 个真 bug
+
+**根因是同一个：忽略 PostgreSQL 的事务语义。** 实测（PG 18.6）：
+
+    ① 语句失败:  UndefinedTable
+    ② 后续查询:  InFailedSqlTransaction: current transaction is aborted
+
+所以「catch 住 DB 异常再返回空值」不是降级，是把局部失败放大成整页失败。
+
+| # | 位置 | 症状 |
+|---|---|---|
+| ① | `signal_event_store.load_previous_signal` | 读失败 `return None`，而调用方**专门写了** `_rollback_quietly`（注释里就写着「连接留在 aborted 态连累后面所有查询」）—— **那段防御是死代码**，因为函数自己先吞了异常 |
+| ② | `llm_call_store.enqueue_call` | 写失败与「重复提交」**共用 `False`**。调用方于是对用户说「你已经问过了」，真相是**一条都没写、LLM 从未被调用**，静默违反审计约束 |
+
+顺带发现外层 `llm_cases._write`（`fn()` + `commit()`）**救不了**：实测 aborted 事务下
+`COMMIT` **不抛、等于 ROLLBACK**。那道「防忘记提交」（R23/R25 各漏过一次）的防线
+**只在 store 抛异常时有效**。
+
+### 2. 三个「固化错误契约 / 比错对象」的测试
+
+一天内撞见三次，全都是绿的、而它们锁住的行为是 bug：
+
+- `test_load_previous_signal_failure_does_not_propagate` —— monkeypatch 掉真函数
+  换成会抛的替身，**测 mock 不测真路径**；
+- `test_enqueue_swallows_db_error` / `test_recent_calls_degrades_to_empty` ——
+  断言「写失败回 False / 读失败回空元组」，**契约本身就是错的**；
+- `test_provider_caches_snapshot_within_ttl` —— 只排除了 `as_of_ms`，漏了同样按
+  墙钟算的 `close_countdown`，**负载相关**（空闲时绿、并发时红）。
+
+### 3. 门禁②：store 层失败语义（新增，已进 CI）
+
+`scripts/check_storage_failure_semantics.py` —— 用 **AST** 扫 storage/ 与 adapters/，
+找出「执行了 DB 语句、且 except 里不 raise 而返回空值/pass」的函数。
+豁免必须写 `# gate: allow-silent: <理由>`，理由进 docstring。
+
+当前 ✅ 全绿。已给 3 处合法降级加显式豁免，并**补齐了它们调用方缺失的 rollback**
+（`run_metric.MetricRecorder.record` 与 `structure_event_recorder` 的 except 分支）。
+
+### 4. 保留策略与死代码
+
+- `run_metric_store.prune` 实测**零调用方** ⇒ `cpt_run_metric` 从来没被清理过。
+  已接进 cron（`deploy/cron/run-metric-prune-daily.sh`，04:10 UTC）。
+  接的时候发现它**本身有 bug**：原 SQL 没有 kind 过滤，一调用就把 `inspection` 行
+  一起删了。已加 `kinds` 参数，两类分开配窗口。
+- `llm_call_store.find_by_id` —— AST 核实零引用，已删。
+  ⚠️ **vulture 看不见它**（在 `__all__` 里，vulture 认为「已导出即已用」）。
+- `run_metric_store.ensure_table` —— 零调用方，但它是 `cpt_run_metric` **唯一的
+  建表来源**（`scripts/migrations/` 里没有对应迁移），**故意保留**：
+  真正的债不是「这个函数死」，而是「这张表的 schema 没有迁移」。
+
+### 5. llm/（进行中）：已修 2 个
+
+| # | 位置 | 症状 |
+|---|---|---|
+| ① | `llm/config.py::load_config` | 为实现「传 dict 就只读这份 dict」而 `os.environ.clear()`，注释却写「不碰进程全局」。CPT 是多线程的，**任何线程在 clear/update 之间读环境变量都会拿到残缺环境**，含 `DB_PW` / 飞书 webhook。实测并发读者**有 520 次读不到 `DB_PW`** |
+| ② | `llm/structured.py::parse_structured` | `schema_failed` 标志初始化在第 3 步之前 ⇒ 「整段是合法 JSON 标量」被判成 `not_json`。而 `not_json` 的定义是「找不到任何能解析的候选」—— **它明明解析成功了**。归类撒谎会把排查引向「模型没吐 JSON」，真相是「吐了但形状不对」 |
+
+llm/ 这层**有几处本来就做对了**，一并记下：`api_key` 用 `field(repr=False)` 防止
+进 repr、`redacted()` 只回 `has_api_key`、**`queue._execute` 的
+`except LLMRateLimited` 排在 `except LLMError` 之前**（子类在前，躲过了 R40 的坑）、
+`openai_compatible.py` 的错误分类是按**真机抓包**定的。
+
+### 6. 一个反复出现的元教训
+
+**自制的验证工具，第一版基本都错**（本轮三次：AST 把注释当 import、
+`glob` 不递归漏子目录、引用来源漏了两层）。而且当天还有三次
+「测试绿着但没测到东西」。
+
+⇒ 验证工具的输出**必须用独立手段交叉验证**再采信；能��项目已有的权威工具就用
+（本仓 `lint-imports` 一次就判定了 6 kept / 0 broken，比手写 AST 可靠）。
+另：改完 Python 记得清 `__pycache__`，否则会看到「修复没生效」的假象。
+
+### 遗留
+
+1. `llm/` 还剩 `__init__.py` / `registry.py` / `prompts.py` 未扫
+2. `adapters/` 尚未复盘（外部触点密度最高，31.6%）
+3. `application/`（漂移 +1307 行）/ `web/`（复盘后仍有漂移）/ `dashboard/` 待排期
+4. `cpt_run_metric` 的 schema 仍无迁移文件（见 §4）
+5. 切表后的口径纪元标记（`cpt_signal_event` 41 条旧口径信号）待处理
