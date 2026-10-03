@@ -226,6 +226,12 @@ def build_ashare_snapshot(
     except Exception as exc:  # noqa: BLE001
         # DB 不可达 → 返回 degraded snapshot，**不静默成 OK**
         _LOG.warning("A 股 DB 拉取失败 %s: %s", code, exc)
+        # ⚠️ R45 补 rollback：走到这里说明**有一条 SQL 已经在事务里失败了**，
+        # 连接停在 aborted 态。``owns_client=False`` 时这是**共享连接**，
+        # 不救回来就会连锁毒掉后面所有查询（见 :func:`_rollback_quietly`
+        # 里记的实测：「一只查失败，后面几十只全部降级/skip」）。
+        if not owns_client:
+            _rollback_quietly(active_client, f"ashare_snapshot:{code}")
         return empty_ashare_snapshot(
             code, f"db_error:{type(exc).__name__}", name=security_name, board=security_board
         )
@@ -1047,8 +1053,19 @@ def _try_on_demand_factors(
         return None
     except AShareNoFactorError:
         pass  # 正是要补的情形
-    except Exception:  # noqa: BLE001 — DB 类问题不该在这里吞掉，交给外层
-        return None
+    # ⚠️ R45：这里**原来**是 ``except Exception: return None``，注释还写着
+    # 「DB 类问题不该在这里吞掉，交给外层」—— 而 ``return None`` 恰恰就是吞掉。
+    # 后果有三条：
+    #   1. 不记日志，DB 抖动完全不可见；
+    #   2. 返回 ``None`` → 调用方 ``_reason_for_failure(None)`` 报成 **no_factor**，
+    #      而本文件第 202 行的注释白纸黑字写着「必须与『没数据』和『DB 挂了』
+    #      分开报 —— 报成 db_error 会把排查方向带偏（实测踩过）」。自己违反自己；
+    #   3. **不 rollback** → 连接留在 aborted 态。``owns_client=False`` 时这是
+    #      **共享连接**，一条 SQL 失败会连锁毒掉后面所有查询
+    #      （见 :func:`_rollback_quietly` 的实测描述）。
+    #
+    # 修法：**不吞**，让异常冒到外层 ``except Exception`` —— 那里做的正是
+    # 对的事情（记 warning + 报 ``db_error:<类型>``）。
     else:
         if not _skipped_no_factor(result):
             return None
