@@ -59,7 +59,16 @@ _SCRIPT_RE: Final[re.Pattern[str]] = re.compile(
     r"<script\b[^>]*>.*?</script>", re.DOTALL | re.IGNORECASE
 )
 #: 任何 CDN 外链（离线验收要求 0 个）——出现即视为构建缺陷。
-_CDN_RE: Final[re.Pattern[str]] = re.compile(r"""(?:src|href)\s*=\s*["']https?://""", re.IGNORECASE)
+#:
+#: ⚠️ R45：**也匹配协议相对 URL**（``src="//cdn.example.com/x.js"``）。
+#: 原正则要求显式 ``https?://``，而 ``//host/path`` 同样是外链、同样会在断网时
+#: 拉不到 —— 只挡显式协议就等于给「模板升级引入外链」留了个后门，而这道正则
+#: 的存在意义正是响亮地拦住那种升级。
+#:
+#: 注意**不能**误伤同源绝对路径（``/vendor/x.js``）—— 那正是我们要注入的本地资源。
+_CDN_RE: Final[re.Pattern[str]] = re.compile(
+    r"""(?:src|href)\s*=\s*["'](?:https?:)?//""", re.IGNORECASE
+)
 
 
 class WbtUnavailableError(RuntimeError):
