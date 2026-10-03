@@ -26,7 +26,6 @@ __all__ = [
     "call_row",
     "enqueue_call",
     "finish_call",
-    "find_by_id",
     "mark_interrupted",
     "request_hash",
     "recent_calls",
@@ -227,31 +226,6 @@ def finish_call(
             )
     except Exception as exc:
         _LOG.warning("更新 LLM 调用状态失败 %s: %s", call_id, exc)
-
-
-def find_by_id(conn: Any, call_id: str) -> dict[str, Any] | None:
-    """按 ``call_id`` 取一行；**不存在** → ``None``。
-
-    R45：读失败**抛**，不返回 ``None`` —— 否则调用方无法区分
-    「查无此 id」与「查不到库」。
-
-    ⚠️ 本函数目前**全仓零调用方**（R45 用 AST 核实，排除注释/字符串假阳性；
-    只在 ``__all__`` 和定义处出现）。保留它是作为审计表的合理 CRUD 出口，
-    但要不要留着等真有调用方再说 —— 见 storage 复盘记录。
-    """
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                f"SELECT {', '.join(_COLUMNS)} FROM public.cpt_llm_call WHERE call_id = %s",
-                (call_id,),
-            )
-            row = cur.fetchone()
-    except Exception as exc:
-        _LOG.warning("读取 LLM 调用记录失败 %s: %s", call_id, exc)
-        raise LLMCallError(f"读取 LLM 调用记录失败: {exc}") from exc
-    return _row_to_dict(row) if row else None
-
-
 def recent_calls(
     conn: Any, *, limit: int = 20, subject_id: str | None = None
 ) -> tuple[dict[str, Any], ...]:
