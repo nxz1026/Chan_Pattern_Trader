@@ -20,6 +20,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 from typing import Final
 
@@ -32,12 +33,13 @@ SUPPORTED_PROVIDERS: Final[frozenset[str]] = frozenset({"openai_compatible"})
 _TRUE: Final[frozenset[str]] = frozenset({"1", "true", "yes", "on"})
 
 
-def _env_str(name: str, default: str = "") -> str:
-    return (os.getenv(name) or default).strip()
+def _env_str(name: str, default: str = "", source: Mapping[str, str] | None = None) -> str:
+    env = os.environ if source is None else source
+    return (env.get(name) or default).strip()
 
 
-def _env_int(name: str, default: int) -> int:
-    raw = _env_str(name)
+def _env_int(name: str, default: int, source: Mapping[str, str] | None = None) -> int:
+    raw = _env_str(name, source=source)
     if not raw:
         return default
     try:
@@ -46,8 +48,8 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
-def _env_float(name: str, default: float) -> float:
-    raw = _env_str(name)
+def _env_float(name: str, default: float, source: Mapping[str, str] | None = None) -> float:
+    raw = _env_str(name, source=source)
     if not raw:
         return default
     try:
@@ -56,8 +58,8 @@ def _env_float(name: str, default: float) -> float:
         return default
 
 
-def _env_bool(name: str, default: bool = False) -> bool:
-    raw = _env_str(name).lower()
+def _env_bool(name: str, default: bool = False, source: Mapping[str, str] | None = None) -> bool:
+    raw = _env_str(name, source=source).lower()
     if not raw:
         return default
     return raw in _TRUE
@@ -111,30 +113,43 @@ class LLMConfig:
         }
 
 
-def load_config(environ: dict[str, str] | None = None) -> LLMConfig:
+def load_config(environ: Mapping[str, str] | None = None) -> LLMConfig:
     """从环境变量装载配置。
 
-    :param environ: 覆盖用（测试注入）。传 dict 时**不读** ``os.environ``。
-    """
-    if environ is not None:
-        # 局部覆盖：把 environ 当作唯一来源（测试用，不碰进程全局）
-        previous = dict(os.environ)
-        os.environ.clear()
-        os.environ.update(environ)
-        try:
-            return load_config()
-        finally:
-            os.environ.clear()
-            os.environ.update(previous)
+    :param environ: 覆盖用（测试注入）。传 dict 时**只读这份 dict**，
+        **完全不碰** ``os.environ``。
 
+    ## R45 修：不再清空 / 改写进程环境
+
+    原实现为了「只读传入的 dict」，做的是::
+
+        previous = dict(os.environ)
+        os.environ.clear()          # ← 清空整个进程环境
+        os.environ.update(environ)
+        try: return load_config()
+        finally: os.environ.clear(); os.environ.update(previous)
+
+    注释写的是「不碰进程全局」，**而它字面上就在改进程全局**。两处真实风险：
+
+    1. **CPT 是多线程的**（``ThreadingHTTPServer`` + worker 线程）。任何一个
+       线程在 ``clear()`` 与 ``update()`` 之间读环境变量，都会拿到**残缺甚至
+       空**的环境 —— 包括 ``RDSHOST`` / ``DB_PW`` / 飞书 webhook。
+    2. 谁哪天在生产路径上用了 ``load_config(environ)``（现在只有
+       ``tests/test_llm_layer.py`` 用，但它是**公开函数**），整台服务的环境
+       会在那一瞬间消失，而异常路径下的 ``finally`` 也救不回来 ——
+       其它线程早就读过了。
+
+    改成把 ``source`` 一路传给解析函数，**从根上不碰全局**。
+    """
+    src = os.environ if environ is None else environ
     return LLMConfig(
-        enabled=_env_bool("CPT_LLM_ENABLED"),
-        provider=_env_str("CPT_LLM_PROVIDER", "openai_compatible"),
-        base_url=_env_str("CPT_LLM_BASE_URL"),
-        model=_env_str("CPT_LLM_MODEL"),
-        api_key=_env_str("CPT_LLM_API_KEY"),
-        timeout=_env_float("CPT_LLM_TIMEOUT", 30.0),
-        max_attempts=_env_int("CPT_LLM_MAX_ATTEMPTS", 5),
-        backoff_base=_env_float("CPT_LLM_BACKOFF_BASE", 2.0),
-        backoff_max=_env_float("CPT_LLM_BACKOFF_MAX", 60.0),
+        enabled=_env_bool("CPT_LLM_ENABLED", source=src),
+        provider=_env_str("CPT_LLM_PROVIDER", "openai_compatible", source=src),
+        base_url=_env_str("CPT_LLM_BASE_URL", source=src),
+        model=_env_str("CPT_LLM_MODEL", source=src),
+        api_key=_env_str("CPT_LLM_API_KEY", source=src),
+        timeout=_env_float("CPT_LLM_TIMEOUT", 30.0, source=src),
+        max_attempts=_env_int("CPT_LLM_MAX_ATTEMPTS", 5, source=src),
+        backoff_base=_env_float("CPT_LLM_BACKOFF_BASE", 2.0, source=src),
+        backoff_max=_env_float("CPT_LLM_BACKOFF_MAX", 60.0, source=src),
     )
