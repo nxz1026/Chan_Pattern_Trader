@@ -141,7 +141,24 @@ RunMetric = dict[str, Any]
 
 
 def ensure_table(conn: Any) -> None:
-    """建表 + 建索引（幂等）。**不 commit** —— 由调用方决定。"""
+    """建表 + 建索引（幂等）。**不 commit** —— 由调用方决定。
+
+    ⚠️ **本函数是 ``public.cpt_run_metric`` schema 的唯一来源。**
+    ``scripts/migrations/`` 里**没有**这张表的迁移文件（其他表都有），
+    所以：
+
+    - 删掉本函数 ⇒ 表一旦被 drop / 换库，代码里**没有任何东西能重建它**；
+    - 改 ``_DDL`` 的列之后，**必须在真机上执行一次**，否则代码与库会漂移
+      —— 而漂移不会让任何测试变红（表是 ``CREATE TABLE IF NOT EXISTS``，
+      已存在的表不会被改）。
+
+    R45 已核实（2026-10-03 真库）：当前 ``_DDL`` 与
+    ``emotion_core.public.cpt_run_metric`` **零漂移** —— 22 列、3 个索引、
+    21 条 NOT NULL 约束、``kind`` 取值全部对得上。
+
+    复核命令与「为什么还没转成迁移文件」的裁决见
+    ``docs/review-ensure-table.md``。
+    """
     with conn.cursor() as cur:
         cur.execute(_DDL)
         for stmt in _INDEX_DDL:
