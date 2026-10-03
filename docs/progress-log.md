@@ -6014,3 +6014,28 @@ llm/ 这层**有几处本来就做对了**，一并记下：`api_key` 用 `field
 3. `application/`（漂移 +1307 行）/ `web/`（复盘后仍有漂移）/ `dashboard/` 待排期
 4. `cpt_run_metric` 的 schema 仍无迁移文件（见 §4）
 5. 切表后的口径纪元标记（`cpt_signal_event` 41 条旧口径信号）待处理
+
+### 7. adapters/ 收口（19 文件全审完，3 个真 bug）
+
+| # | 位置 | 症状 |
+|---|---|---|
+| ① | `adapters/_dbconfig.py` | `$DBPORT` 格式错漏出 `ValueError`，破坏「异常类型由调用方注入」的契约，三个调用方都接不住 |
+| ② | `scripts/run_inspection.py` | 告警没送出去却 `rc=0`（与 R45 修的 `factor_recompute` 同病） |
+| ③ | `adapters/a_share_pool.py` | 自选文件损坏时 `add()` **静默清空全部条目**（实测复现） |
+
+**外部契约真机验证 5/5 成立**（新增 `scripts/verify_public_contracts.py`，
+刻意不进 CI —— 它依赖公网）。最有价值的是交叉校验：**腾讯 hfq 价与本地因子表
+算出的后复权价差 0.000%**，两条独立数据路径互相印证复权口径没漂。
+
+**全层自动扫描零命中**：门禁② 0 处、「收集了诊断却没人看」0 处、
+「except 返回 falsy 且无日志」1 处（`conn.close()`，无害）。
+
+**顺带更正 handoff 未解项的量级**：`daily_bar` 缺口实测 **623 只（11.9%）**、
+平均缺 7.4 天、最多 62 天（文档记的是 1~2% / 1~10 天），且缺口在
+`daily_bar` 而非 `derived_bar`。详见 `known-traps.md` #23。
+
+**三后端分叉风险休眠**：生产机 czsc/chanlun/chanlun_pro 均未安装、
+环境变量未设 ⇒ 走 `native`。本机无法做三后端对比（czsc 未装，
+`reference_chanlun` 只有 Protocol 与测试替身）。
+
+详见 `docs/review-adapters-layer-r45.md`。
