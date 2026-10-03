@@ -320,3 +320,96 @@ PowerShell 提前求值（`$(...)`、`$f` 被本地展开），要么被 GBK 解
 
 另外：**先 tar 备份再清**，并核对「备份里的文件数 == `git status --porcelain`
 的行数」，数量不符就中止。
+
+---
+
+## 18. PostgreSQL：事务里一条语句失败 ⇒ 同连接后续全部 aborted（R45 实测）
+
+**这是 R45 storage/ 复盘里两个真 bug 的共同根因。**
+
+实测（PostgreSQL 18.6，`emotion_core` 真库）：
+
+```
+① 语句失败:  UndefinedTable: relation "..." does not exist
+② 后续查询:  InFailedSqlTransaction: current transaction is aborted,
+              commands ignored until end of transaction block
+```
+
+**所以「catch 住 DB 异常并返回空值」不是降级，是把一次局部失败放大成整页失败** ——
+连接留在 aborted 态，这个连接上后面每一个操作都报错。
+
+### 两个由此派生的陷阱
+
+**① store 层吞异常 ⇒ 调用方的 rollback 防御成了死代码。**
+
+`signal_event_store.load_previous_signal` 原来在 `except` 里 `return None`，
+而调用方 `a_share_snapshot` **专门写了** `_rollback_quietly`，注释里就写着
+「连接留在 aborted 态连累后面所有查询」—— 但函数自己先吞了异常，
+调用方的 `except` 永不触发。
+
+**② `_write(fn) = fn() + conn.commit()` 救不了。**
+
+实测：事务在 aborted 态下 **`COMMIT` 不抛，等于 `ROLLBACK`**。所以只要 store
+吞掉异常，外层 commit 会静默回滚并原样返回那个假返回值。
+`llm_cases._write` 那道「防忘记提交」（R23/R25 各漏过一次）的防线，
+**只在 store 抛异常时有效**。
+
+### 纪律
+
+- 读失败**抛**；「库里没有」用 `None`/空元组表示，**两者不能共用返回值**。
+- 写失败**抛**；「重复提交」可以用 `False`，但**不能与写失败共用**。
+- 确实要降级的（旁路记账），函数 docstring 加 `# gate: allow-silent: <理由>`，
+  **且调用方必须自己 rollback**。
+- 判定命令（门禁已自动化）：
+  ```bash
+  python scripts/check_storage_failure_semantics.py
+  ```
+
+## 19. 失败的「reason」比粗糙的「reason」更有害（R45）
+
+`llm/structured.py` 的 docstring 写着「最危险的是 B（合法 JSON、形状全错），
+不是 D（压根不是 JSON）」。但 R45 之前，**另一族 B 被归成了 `not_json`**：
+
+```
+"just a bare string"   ->  not_json      真相：解析成功了，只是类型不对
+123 / null / true      ->  not_json      同上
+{"code":200,"data":{}} ->  schema_mismatch   用例 B，本来的对
+```
+
+`not_json` 的定义是「找不到任何能解析的 JSON 候选」—— **它明明解析成功了**。
+这个 reason 会落进审计表与 UI，把排查方向指向「模型没输出 JSON」，
+而真相是「输出的是 JSON，只是形状不对」。
+
+**纪律**：分类/状态码必须**说真话**。「粗略」只是信息少，「撒谎」会把人
+引向错误的假设 —— 后者更贵。判断一个归类对不对，要问「它的定义是什么」，
+而不是「它落在哪个分支」。
+
+## 20. 测试「绿」不等于测到了东西（R45 一天撞见三次）
+
+同一类错误，一天内出现三次，形态各不相同：
+
+| 形态 | 例子 | 为什么绿着 |
+|---|---|---|
+| **测 mock 不测真路径** | `test_load_previous_signal_failure_does_not_propagate` 把真函数 monkeypatch 成会抛的替身 | 证明「调用方会兜底」，而真函数根本不抛 ⇒ 那段防御是死代码 |
+| **断言的契约本身是错的** | `test_enqueue_swallows_db_error` 断言「写失败回 False」 | 名字叫 `_degrades_gracefully`、docstring 写「别 500」，**看起来在保护 UX**，实际把一个会撒谎的契约焊死了 |
+| **比较对象里混进了不该比的** | `test_provider_caches_snapshot_within_ttl` 只排除了 `as_of_ms`，漏了同样按墙钟算的 `close_countdown` | 机器空闲时两次调用在 1 秒内完成、一直绿；一有并发负载就跨秒 → 红 |
+
+**纪律**：
+- 判据要能**区分**「真路径」与「mock 路径」—— 尽可能走真函数；
+- 写「降级」类测试时先问：**降级后调用方看到的是真相还是谎言**；
+- 断言相等前先列一遍：哪些字段是**按墙钟/时间/随机数**算的？它们必须被排除，
+  否则测试结果取决于机器快慢。
+
+## 21. 自制的验证工具，第一版基本都错（R45 一天三次）
+
+| 工具 | 错在哪 | 给出的错误结论 |
+|---|---|---|
+| AST 扫层间依赖 | 匹配了**注释/docstring 里**的 `cpt.domain.` 字样 | 报「分层契约被破坏」 |
+| `glob("*.py")` 扫外部触点 | **不递归**，漏掉 `llm/providers/` | 「llm 层 0 网络触点」 |
+| AST 找死代码 | 引用来源只扫了 4 层，**漏了 `application/` 与 `web/`** | 「24 个死函数」（实际 3 个） |
+
+**纪律**：验证工具的第一个版本**必须用独立手段交叉验证**再采信。
+更稳的做法是**用项目已有的权威工具**（本仓的 `lint-imports` 就是 ——
+它一次就判定了分层契约 6 kept / 0 broken，比手写 AST 可靠得多）。
+
+另：改完 Python 记得清 `__pycache__`，否则会看到「修复没生效」的假象（R45 踩过）。
