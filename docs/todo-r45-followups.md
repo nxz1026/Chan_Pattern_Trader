@@ -192,3 +192,43 @@ Oracle 上没装只是因为**那是生产 venv**，只装了部分 dev 依赖�
 ```
 
 现在 `pytest --cov` 可用；`scripts/run_coverage.sh` 只依赖 `coverage` 本体。
+
+---
+
+## P0-3 抽公共入队骨架：**已完成**（2026-10-04 20:50）
+
+`explain_structure` 与 `summarize_recommendation` 曾**各抄一份**入队逻辑
+（**76 行 / 68 行**）。抄代码会连 bug 一起抄 ——
+「重复提交返回库里不存在的 `call_id`」那个 bug **两份各有一份**，
+且 `explain` 早就中招了，是补 summarize 的测试才发现。
+
+**只要骨架还是两份，下次改一边就还会漏另一边。**
+
+抽出 `_enqueue_and_submit(conn, request, subject_id=)`，两处各省 68~76 行。
+`purpose` 改为**从 `request.purpose` 取**，不由调用方传 ——
+传的话两个用例各写一遍，抄错就静默归错类目。
+
+### 门禁⑥ `scripts/check_enqueue_skeleton_unique.py`
+
+用 **AST** 锁住「只有一份」：`enqueue_call` 引用点、`queue.submit`、
+`_bootstrap`、`_existing_call_id` 各只允许 1 处，且**骨架外不得有入队调用**。
+
+### 这个判据我错了**两次**才做对
+
+1. `src.count("enqueue_call")` —— import 与注释也算进去（报 5）
+2. 排除 `#` 开头行 —— **docstring 里的提及不算注释**（报 4）；
+   而且 `enqueue_call` 是**函数引用**（`_write(conn, enqueue_call, row)`），
+   压根不是 `enqueue_call(...)` 形式，只看 `ast.Call` 会数出 0，
+   看着像「骨架没调用它」
+
+⇒ **「有没有第二份实现」是调用点问题，grep 不成立，只能用 AST。**
+写完判据必须**反过来验它**：造一个「多一份实现」的样本，确认它真报。
+
+## 顺带修掉门禁④自己的一个假阳性
+
+`__main__.py` **有两个**（`cpt/__main__.py` 与 `cpt/web/__main__.py`），
+行号索引取了第一个（24 行那个）⇒ 18 处 `__main__.py:NNN` 全被判越界。
+已改为**同名文件取最长行数**（最宽松），只有全部都短于引用行才算越界。
+
+⇒ 这是门禁④上线后**第一次自己报红**，报的还全是假的。
+**红着的门禁如果长期是假阳性，人就会开始忽略它** —— 那比没有门禁更糟。

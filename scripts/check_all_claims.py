@@ -317,11 +317,20 @@ def main(argv: list[str] | None = None) -> int:
                     if not hits:
                         _linecount[fn] = -1
                     else:
-                        try:
-                            _linecount[fn] = len(
-                                hits[0].read_text(encoding="utf-8").splitlines())
-                        except OSError:
-                            _linecount[fn] = -1
+                        # ⚠️ **同名文件不止一个**（`__main__.py` 就有
+                        # `cpt/__main__.py` 与 `cpt/web/__main__.py`）。
+                        # 第一版取 `hits[0]`，于是 24 行的那个把所有
+                        # `__main__.py:NNN` 引用全判成越界 ⇒ 18 处假阳性。
+                        # ⇒ 取**所有同名文件里最长的行数**（最宽松），
+                        #   只有全部都短于引用行才算越界。
+                        lens = []
+                        for h in hits:
+                            try:
+                                lens.append(len(
+                                    h.read_text(encoding="utf-8").splitlines()))
+                            except OSError:
+                                pass
+                        _linecount[fn] = max(lens) if lens else -1
                 n = _linecount[fn]
                 if n < 0:
                     continue

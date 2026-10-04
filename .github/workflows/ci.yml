@@ -74,6 +74,12 @@ jobs:
           # 而且完全不会让任何测试变红。
           - name: Doc counts
             run: python scripts/check_doc_counts.py
+          # 门禁⑥：LLM 入队骨架必须**唯一**。
+          # explain 与 summarize 曾各抄一份（76+68 行）⇒ 同一个 bug 抄了两份
+          # （「重复提交返回库里不存在的 call_id」在 explain 里早就在了，
+          #   是补 summarize 的测试才发现）。用 AST 锁住「只有一份」。
+          - name: Enqueue skeleton is unique
+            run: python scripts/check_enqueue_skeleton_unique.py
       - name: Dead-code audit (vulture)
         run: |
           # vulture==2.14 自 2026-09-25 起已在 requirements-dev.txt 锁文件里，

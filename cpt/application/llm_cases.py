@@ -165,82 +165,7 @@ def explain_structure(
         rules=rules,
         subject_id=subject_id,
     )
-    digest = request_hash(request.purpose, request.system, request.user)
-    row = call_row(
-        purpose=PURPOSE_EXPLAIN,
-        subject_id=subject_id,
-        request_hash_value=digest,
-    )
-    # R45：``enqueue_call`` 写失败会抛，不再和「重复」共用一个 False。
-    # 之前两种情况都回 ``same_request_in_flight_or_done`` —— DB 一抖就对用户
-    # 谎称「你���经问过了」，而真相是一条都没写、LLM 也没调、审计链断了一条。
-    try:
-        enqueued = _write(conn, enqueue_call, row)
-    except LLMCallError as exc:
-        _LOG.warning("LLM 入队落库失败 %s: %s", row["call_id"], exc)
-        _rollback_quietly(conn, f"enqueue:{row['call_id']}")
-        return {
-            "available": False,
-            "call_id": row["call_id"],
-            "status": "error",
-            "reason": "llm_audit_write_failed",
-        }
-
-    if not enqueued:
-        # ⚠️ R45 修：`row["call_id"]` 是**刚生成**的 id，而这一条**根本没进库**
-        # （被 ``ON CONFLICT DO NOTHING`` 挡掉了）⇒ 回给前端后，它拿这个 id
-        # 去轮询**永远查不到**，表现是「明明算过，刷新一下摘要就没了」。
-        # ⇒ 重复时回**已存在那条**的真实 call_id。
-        # ⚠️ **两处都有这个 bug**（explain + summarize），一起改。
-        return {
-            "available": False,
-            "call_id": _existing_call_id(conn, digest) or row["call_id"],
-            "status": "duplicate",
-            "reason": "same_request_in_flight_or_done",
-        }
-
-    queue = _bootstrap()
-    if queue is None:
-        _write(
-            conn,
-            finish_call,
-            row["call_id"],
-            status="error",
-            error_text="llm_unavailable",
-        )
-        return {
-            "available": False,
-            "call_id": row["call_id"],
-            "status": "error",
-            "reason": "llm_unavailable",
-        }
-
-    from cpt.llm.queue import Job  # noqa: PLC0415
-
-    submitted = queue.submit(
-        Job(request=request, call_id=row["call_id"], metadata={"digest": digest})
-    )
-    if not submitted.accepted:
-        _write(
-            conn,
-            finish_call,
-            row["call_id"],
-            status="error",
-            error_text=submitted.reason or "submit_rejected",
-        )
-        return {
-            "available": False,
-            "call_id": row["call_id"],
-            "status": "error",
-            "reason": submitted.reason or "submit_rejected",
-        }
-
-    return {
-        "available": True,
-        "call_id": row["call_id"],
-        "status": "queued",
-        "reason": "",
-    }
+    return _enqueue_and_submit(conn, request, subject_id=subject_id)
 
 
 def list_calls(conn: Any, *, limit: int = 20, subject_id: str | None = None) -> dict[str, Any]:
@@ -351,16 +276,47 @@ def summarize_recommendation(
         disclaimer=disclaimer,
         subject_id=subject_id,
     )
+    return _enqueue_and_submit(conn, request, subject_id=subject_id)
+
+
+def _enqueue_and_submit(
+    conn: Any,
+    request: Any,
+    *,
+    subject_id: str = "",
+) -> dict[str, Any]:
+    """LLM 请求的**公共入队骨架**（R45 P0-3 抽出来的）。
+
+    ## 为什么抽
+
+    之前 ``explain_structure`` 与 ``summarize_recommendation`` **各抄了一份**
+    完全相同的入队逻辑（76 行 / 68 行）。抄代码会连 bug 一起抄 ——
+    R45 那个「重复提交返回**库里不存在**的 ``call_id``」的 bug
+    **在两份里各有一份**，且 ``explain`` 早就中招了，是补 summarize 的测试
+    才发现的。**只要骨架还是两份，下次改一边就还会漏另一边。**
+
+    ## 骨架负责什么
+
+        1. 算 request_hash（幂等键）
+        2. 落库入队 —— **写失败要抛**，不能和「重复」共用一个 False
+        3. 重复 ⇒ 回**已存在那条**的真实 call_id
+        4. 拿队列（LLM 未启用/缺 key ⇒ 标终态并回 llm_unavailable）
+        5. 提交 Job（被拒 ⇒ 标终态并回原因）
+
+    :returns: ``{"available", "call_id", "status", "reason"}``。
+    """
     digest = request_hash(request.purpose, request.system, request.user)
     row = call_row(
-        purpose=PURPOSE_SUMMARIZE,
+        # ⚠️ purpose 从 **request 自己**取，不再由调用方传 ——
+        # 传的话两个用例各写一遍，抄错就静默归错类目。
+        purpose=request.purpose,
         subject_id=subject_id,
         request_hash_value=digest,
     )
     try:
         enqueued = _write(conn, enqueue_call, row)
     except LLMCallError as exc:
-        _LOG.warning("LLM 摘要入队落库失败 %s: %s", row["call_id"], exc)
+        _LOG.warning("LLM 入队落库失败 %s: %s", row["call_id"], exc)
         _rollback_quietly(conn, f"enqueue:{row['call_id']}")
         return {
             "available": False,
@@ -419,7 +375,6 @@ def summarize_recommendation(
         "status": "queued",
         "reason": "",
     }
-
 
 def _existing_call_id(conn: Any, digest: str) -> str | None:
     """按 ``request_hash`` 找出**已存在**那条调用的 ``call_id``；查不到返回 ``None``。
