@@ -477,24 +477,52 @@ def process_code(
     # 会把 199.4 写成 1.0 ⇒ 显示价格缩放两个数量级。
     if not actions or all(d < first_bar for d in ex_dates):
         anchor = current_latest_factor(conn, code)
-        if not actions:
-            return CodeResult(code, False, note=f"{source.name} 无公司行动记录"), calls
+        # ⚠️ R45：这里原来对 `not actions` 直接 `return CodeResult(code, False, ...)` ——
+        # **只记 note、不写任何行**，于是这些票永远留在占位状态。
+        #
+        # 而它**上面那段注释**恰恰写着这个代价有多坏：
+        #     「拒写的代价是它永远留在占位状态，而且 ``failed`` 不进 ``done``
+        #       ⇒ 每天的定时重算都会把它重新查一遍（每天白烧 74 次东财调用，
+        #         且永远失败）」
+        # —— 作者修好了 ``all(d < first_bar)`` 这一支（会写恒定行），
+        # 却把**语义完全相同**的 ``not actions`` 这一支留在旧行为上。
+        #
+        # ## 为什么现在可以安全地写
+        #
+        # 因为**上游已经把「查无记录」和「接口故障」分开了**
+        # （``cpt/adapters/eastmoney_actions.py``）：
+        # 只有 ``_is_no_data`` 命中（东财明说 ``code=9201 返回数据为空``）
+        # 才返回空元组；任何其它失败都 raise 成 ``EastmoneyActionError`` → fatal。
+        # 它的判据写得很克制：「宁可漏判（退回 fatal、旧行为）也不误判
+        # （把接口故障当成『没分过红』而静默写进暂存表）」。
+        #
+        # ⇒ 走到这一行时，``not actions`` 是**已确认的「没有公司行动」**，
+        #    不是「不知道」。窗口内因子恒定**就是正确答案**，
+        #    与 ``all(d < first_bar)`` 同理，应当写入。
+        #
+        # ⚠️ 常数必须取 **anchor**（库里最新一根的值），不能取 1.0 ——
+        # 对「保留旧真值」的票，写 1.0 会让显示价格缩放两个数量级。
         const = anchor if anchor else 1.0
+        detail = (
+            f"{source.name}:events steps=0 (窗口内无除权，最早除权日早于 "
+            f"bar 起点 {first_bar})"
+            if actions
+            else f"{source.name}:events steps=0 (东财确认无公司行动记录)"
+        )
         rows = [
             (
                 code,
                 dt.datetime.fromtimestamp(ms / 1000, tz=dt.UTC).date().isoformat(),
                 const,
                 f"{source.name}_events",
-                f"{source.name}:events steps=0 (窗口内无除权，最早除权日早于 "
-                f"bar 起点 {first_bar})",
+                detail,
             )
             for ms, _ in bars
         ]
         if write:
             save_recompute_factors(conn, rows)
         return CodeResult(code, True, rows=len(rows), steps=0,
-                          note="窗口内无除权事件，因子恒定"), calls
+                          note="无公司行动/因子恒定"), calls
 
     fmap = factor_from_actions(actions, prev_closes=prev_closes_for(bars, ex_dates))
     steps = sorted(fmap)
