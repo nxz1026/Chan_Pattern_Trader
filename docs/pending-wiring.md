@@ -173,7 +173,7 @@ R22 的 9 个接线点（路由与调用方均已 grep 复核）：
 
 | 模块 | 行数 | 处境 | 功能 / roadmap 位置 | 前端消费 |
 |---|---:|---|---|---:|
-| ~~`cpt/application/dashboard_parity.py`~~ | ~~83~~ | **已删除（R20）** | Phase 2「Oracle 对比」——oracle 参照 R13 已删，永久未启用 | 28 处（空面板保留） |
+| `cpt/application/dashboard_parity.py` | 222 | **已复活并重写（R35b）** ⚠️ R45 更正 | Phase 2「Oracle 对比」—— 原判「oracle 参照已删，永久未启用」**这个前提已经不成立**：参照侧改成 **czsc 优先 / 回落腾讯**（`parity_reference.py:155` 惰性 import `build_parity_snapshot`），本模块从 83 行重写成 246 行 | 28 处（空面板保留） |
 | ~~`dashboard_signal_history.py`~~ | ~~47~~ | **已删除（R21）** | Phase 4/6 — 依赖 `Signal` 域对象，生产线不产出，留了也是假希望 | — |
 | ~~`dashboard_event_audit.py`~~ | ~~42~~ | **已删除（R21）** | Phase 5 — 依赖 `StructureEvent` 域对象，生产线不产出，留了也是假希望 | — |
 | ~~`dashboard_levels.py`~~ | ~~40~~ | **已接线（R22）** | Phase 5 P1 级别递归树 | v2 `level_tree` + C2 `/levels` |

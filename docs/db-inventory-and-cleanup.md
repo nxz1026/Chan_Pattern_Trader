@@ -137,15 +137,31 @@ public.cpt_llm_call.idx_cpt_llm_call_subject                      16 kB
 
 ## 7. 建议的执行顺序（如果你要动手）
 
+> ### ✅ 执行状态（R45 回填，2026-10-04，生产库实测）
+>
+> | 项 | 建议 | 实际 |
+> |---|---|---|
+> | `asel.idx_sm_board` | 删 | ✅ **已删** |
+> | `public.idx_cpt_dashboard_run_dataset_hash` | 删 | ✅ **已删** |
+> | `public.idx_cpt_llm_call_subject` | 删 | ⛔ **保留** |
+> | `VACUUM FULL asel.ref_adjust_factor_v2` | 做 | ❌ 未做（要低峰窗口） |
+> | v2 暂存表保留策略 | 待你定保留天数 | ❌ 未定 |
+> | `cpt_structure_event_id_backup_20261001` | 一个月后评估 | ⏳ 未到评估时点 |
+>
+> **`idx_cpt_llm_call_subject` 保留的理由**：有真实的
+> `WHERE subject_id` 查询路径（`llm_call_store` 的单主体回查），
+> 属于「反范式化冗余索引」，不是零扫描索引。
+> ⇒ 下面 SQL 块里的第 2 步**只删前两条**。
+
 ```sql
 -- 1) 低风险：回收死元组。VACUUM FULL 会持 ACCESS EXCLUSIVE 锁，
 --    期间该表读写全阻塞 —— 要在低峰做。
 VACUUM FULL ANALYZE asel.ref_adjust_factor_v2;   -- ~20MB, 锁 ~1min
 
--- 2) 低风险：删零扫描索引（省 88 kB，基本没意义，看你嫌不嫌烦）
-DROP INDEX CONCURRENTLY asel.idx_sm_board;
-DROP INDEX CONCURRENTLY public.idx_cpt_dashboard_run_dataset_hash;
-DROP INDEX CONCURRENTLY public.idx_cpt_llm_call_subject;
+-- 2) 低风险：删零扫描索引（省 88 kB）—— ⚠️ R45 已删前两条，第三条**故意保留**
+DROP INDEX CONCURRENTLY asel.idx_sm_board;                            -- ✅ 已删
+DROP INDEX CONCURRENTLY public.idx_cpt_dashboard_run_dataset_hash;    -- ✅ 已删
+-- DROP INDEX CONCURRENTLY public.idx_cpt_llm_call_subject;  ⛔ 不删：有 WHERE subject_id 查询路径
 
 -- 3) 暂存表保留策略（需要你先定「保留几天」）
 --    DELETE FROM asel.ref_adjust_factor_v2
@@ -220,3 +236,35 @@ DROP INDEX CONCURRENTLY public.idx_cpt_dashboard_run_dataset_hash; -- 16 kB
 
 **`n_live_tup` 是 VACUUM 估算值，不是精确 count。** 判断数据有没有变，
 一律用 `SELECT count(*)`，别用 `pg_stat`。
+
+---
+
+## 8. R45 新增表：`cpt_factor_epoch`（2026-10-03 建）
+
+本文写作时生产库没有这张表，它是因子**口径切换**用的。R45 复盘时
+`information_schema` 实测确认 7 张 `cpt_` 表，这是漏掉的一张。
+
+| 表 | 用途 | 行数 |
+|---|---|---|
+| `cpt_factor_epoch` | 记录复权因子口径的切换点（单行） | 1 |
+
+**为什么用单行表而不是给 `cpt_signal_event` 增列**：
+口径切换本质是**一个时间点**，不是每行一个属性。
+`created_at < switched_at` 即旧口径 —— 这样
+**历史回填**（往表里插旧 `created_at` 的行）和**新写入**不会造成新旧混态，
+而按行加 `factor_version` 列做不到这一点（回填的旧行天然带旧版本，
+但「写入时刻」和「数据口径」会脱钩）。
+
+用途：看板 API 的 `summary.factor_epoch` 字段暴露切换点，
+供前端区分「这条信号是哪个口径下的」。
+
+- 建表脚本：`scripts/migrations/2026-10-03_r45_factor_epoch.sql`
+- 存取层：`cpt/storage/factor_epoch_store.py`
+- 切表实测：两次，`2026-10-03T09:55:46Z` / `2026-10-03T10:34:24Z`
+
+> ⚠️ 顺带一条本文的**方法论教训**：`information_schema.tables` 才是
+> 「有哪些表」的判据，靠 `grep -rhoE "cpt_[a-z_]+" cpt/**/*.py` 反推会
+> **漏掉没有代码常量的表**（本例：`cpt_factor_epoch` 的表名只在 SQL 里出现，
+> 代码侧只 import store 类）—— 也**会多出索引名**（`idx_` 前缀被 grep 吃掉，
+> 把 `idx_cpt_llm_call_subject` 误读成一张表）。
+> 本轮两份文档都被这个假阳性/假阴性咬到。

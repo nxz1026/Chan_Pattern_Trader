@@ -159,12 +159,55 @@ def check_endpoints() -> list[str]:
     return bad
 
 
+# ------------------------------------------------- E 「已删除 / 从未存在」声明
+#: R45 实测到的最贵一类漂移：文档说某样东西**不存在**（已整层删除 / 从未有过代码），
+#: 而它后来又被加回来了，但没人回来改文档。
+#: 实测两次，且都发生在 architecture.md —— §3.4 说 storage「已整层删除」
+#: （R24 恢复后第 3 天仍这么写，与同文 §2.1、§5 自相矛盾）；
+#: §4 说 `cpt/llm/`「从未有过代码」（R25 落地后不成立，README 里同一句也错了）。
+#: ⇒ 单看一处只是过时，**两处以上会互相矛盾**，读者无法判断该信哪个。
+GONE_CLAIMS = re.compile(
+    r"(?P<subject>(?:cpt/)?[\w./-]+)"
+    r"[^\n]{0,24}?\*\*(?:\*\*)?(?:已(?:整层)?删除|从未有过代码|尚未实现|还没实现)"
+)
+
+
+def check_existence() -> list[str]:
+    section("E. 存在性漂移：文档说「已删除 / 从未有过」 vs 实际存在")
+    bad = []
+    for p in sorted((ROOT / "docs").glob("*.md")):
+        lines = p.read_text(encoding="utf-8").splitlines()
+        for i, line in enumerate(lines, 1):
+            # 跳过**自我更正**的句子（R45 加的「原文说 X，其实是 Y」）。
+            # ⚠️ 必须看**上文窗口**，不能只看本行 —— 实测踩过：更正说明写在
+            # 前一行（「R45 更正：」），被引用的原句在下一行，单行判断抓不到，
+            # 于是把自己的更正又报成漂移。
+            window = "\n".join(lines[max(0, i - 4):i])
+            if any(k in line + window for k in ("更正", "已作废", "R45", "原文写着", "曾经")):
+                continue
+            m = GONE_CLAIMS.search(line)
+            if not m:
+                continue
+            subj = m.group("subject").rstrip("`/（(")
+            # 只对能定位到仓库路径的声明判真假
+            for cand in (ROOT / subj, ROOT / "cpt" / subj, ROOT / "docs" / subj):
+                if cand.exists():
+                    bad.append(
+                        f"  ❌ {p.name}:{i} 声称「{m.group(0)[:34]}…」，"
+                        f"但 {cand.relative_to(ROOT)} **实际存在**")
+                    break
+    if not bad:
+        print("  ✅ 无「声称已删除但实际存在」的声明")
+    return bad
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.parse_args(argv)
     print("R45 第二轮：文档 ↔ 代码 漂移扫描")
     allbad = []
-    for fn in (check_counts, check_status, check_params, check_endpoints):
+    for fn in (check_counts, check_status, check_params, check_endpoints,
+               check_existence):
         allbad += fn()
     print()
     print("=" * 92)
