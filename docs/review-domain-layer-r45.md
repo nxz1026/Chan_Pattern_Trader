@@ -217,3 +217,65 @@ CI 是**全新 checkout，没有 git history**，任何依赖「上一次是什�
 **明确报出缺哪个**，不假装做了对比。第三个后端（`InMemoryChanlunBackend`）是
 仓内**测试占位**，脚本刻意不把它算进「三方对比」，并解释计数差异**不代表**
 后端不可互换。
+
+---
+
+## 8. 补：`min_bi_len` 根本没作用在生产后端上（R45 实测，**未修**）
+
+起因是三后端对比里那个反常：**配置写 `min_bi_len=6`，native 的笔中位只有 3 根。**
+
+### 根因
+
+``min_bi_len`` **只喂给 czsc**：
+
+    cpt/adapters/backend_factory.py:133  if min_bi_len is None: ... CzscChanlunBackend(min_bi_len=...)
+    cpt/adapters/czsc_chanlun.py:212    czsc.CZSC(..., min_bi_len=self._min_bi_len)
+    cpt/adapters/native_chanlun.py      min_bi_len 出现 0 次
+
+而 4 个调用点（``a_share_snapshot.py:284``、``web/__main__.py:260/540``、
+``web/a_share.py:63``）都写成 ``resolve_backend(DEFAULT_BACKEND, min_bi_len=RulesConfig().min_bi_len)`` ——
+``DEFAULT_BACKEND`` 是 ``native``，于是这个参数**被静默丢弃**。
+
+而 ``cpt/domain/bi.py:101-102`` 明说 native **有意不做**最小跨度：
+
+    只做端点交替与同类极端保留：**不做最小跨度 /「至少 5 根K线」门槛**
+
+所以**代码内部是自洽的**（native 就是没有门槛），不一致的是**声明**：
+``RulesConfig.min_bi_len`` 的 docstring 写「底层笔最少跨度，量纲＝去包含后 K
+线根数」，读起来像一条**全局口径**，实际只是 czsc 的适配参数。典型的
+「声明比实际强」。
+
+### 这对准确性有实质影响（实测 40 只票）
+
+| 笔跨度（含两端） | native 笔数 | 占比 |
+|---|---:|---:|
+| 2 根（两分型共用一根 K 线） | 240 | **17.6%** |
+| 3 根 | 240 | 17.6% |
+| 4 根 | 320 | 23.5% |
+| **退化笔合计（<4 根）** | **480** | **35.3%** |
+
+czsc 同一批输入：退化笔 **0%**（最短 10 根）。且 **40 只票每一只**的
+退化笔占比都 > 30%。
+
+**为什么这不只是"配置没生效"**：缠论标准里，笔要求顶底分型之间**至少有 1 根
+独立 K 线**（跨度 ≥ 4 根）。跨度 2 根的分型对**中间没有可回撤空间**，
+而力度度量（``power_price`` = 两端分型价格差、``power_volume``、``length``）
+正是**一买/一卖背驰比较的输入**（``divergence_compare="area"`` 用 MACD 柱面积）。
+笔太细 ⇒ 力度碎在 2 根 K 线上 ⇒ 背驰判定的分母不稳。
+
+### 为什么 R45 **没有直接修**
+
+把门槛接到 native 会**改动全部结构**：现有 41 条信号、`cpt_run_metric` 的
+水位/指纹历史、缓存的 run 全部作废。而且那等于把生产口径**向 czsc 靠拢** ——
+而 R16-4 恰恰是**刻意**把默认留在 native 的。
+
+⇒ 这是一个**口径决策**，不是能顺手修的 bug。两条路：
+
+- **A. 接上门槛**（native 也要求 ≥4 根）：结构变干净，但**所有历史作废**，
+  且等于部分倒向 czsc 的笔划分；
+- **B. 保持现状 + 把声明改准**（R45 已做的）：``RulesConfig.min_bi_len``
+  的 docstring 明确写成「**仅 czsc 后端生效**，native 按 ``bi.py`` 的
+  「不做最小跨度」执行」，并加门禁防止有人再以为它是全局口径。
+
+**需要 owner 决定 A 还是 B。** B 是本轮已做的默认值；A 的代价很大，
+但如果目标是「严格符合缠论标准笔定义」，那 A 才是对的。
