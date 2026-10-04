@@ -650,3 +650,58 @@ if i_date is None:
 ⚠️ 同文件另外四个 `i_pre` / `i_post` / `i_bonus` / `i_transfer` 是
 **直接赋值**，所以索引 0 对它们没问题 ⇒ **只有日期这一列中招**。
 这也说明「抄四遍同一模式」时，**错的那一遍要单独找出来**。
+
+### 全仓扫过一遍，同类只有这一处（R45）
+
+```bash
+grep -rnE "(index|idx|col|pos|offset|ix)\w* *= *[a-z_]+\([^)]*\) +or " cpt/
+```
+
+其余命中全是**良性**的，因为左边压根不会是 0：
+
+| 位置 | 形态 | 为何良性 |
+|---|---|---|
+| `reference_backend:386-390` | `int(f.get("x", 0) or 0)` | 两边都是 0，收敛成默认值本就正确 |
+| `a_share_factor:552` | `getattr(act,"share_ratio",0.0) or 0.0` | 同上（None → 0.0 是有意的） |
+| `app.py:871` | `find_run(run_id) or _index_row_from_body(...)` | `find_run` 返回 **dict 或 None**；非空 dict 恒为真，None 才回落 ⇒ 正确 |
+
+⇒ **判据不是「用了 `or`」，而是「左边函数的返回值合法地包含 0 / "" / []」**。
+这条 grep 只能**筛出候选**，逐个看清左边是什么才算结论。
+
+---
+
+## 27. 装饰性查询放在 `try` **外面** ⇒ 它坏了会带崩主功能（R45 修）
+
+**症状**：`a_share_routes._signal_history`（推荐卡的「信号历史」区，R45 当天新加）
+构造客户端时写在 `try` **之前** ⇒ 构造一抛就穿出去。
+
+**后果比看上去大**：调用方 `build_recommendation` 的兜底会把**整个推荐**降级
+⇒ 「信号历史」这个**装饰**坏掉，会让**「动作 + 参考价」一起消失**。
+
+```python
+# ❌ 原来
+client = AShareLocalClient()      # ← 抛了就穿出去
+try:
+    ...
+except Exception:
+    return {"available": False, ...}
+
+# ✅ R45
+client = None
+try:
+    client = AShareLocalClient()
+    ...
+except Exception:
+    return {"available": False, ...}
+finally:
+    if client is not None:
+        client.close()
+```
+
+**判据**：**可选 / 装饰性的东西，它的失败路径要包在它自己的 `try` 里**，
+不能指望调用方的兜底 —— 调用方的兜底粒度通常比它粗
+（这里就是「整个推荐」而不是「历史这一块」）。
+
+⚠️ 这条是 `tests/test_signal_history_fallbacks.py` 的最后一条用例逼出来的，
+而那条用例只是**顺手**把 `AShareLocalClient` 换成会抛的假对象。
+**假对象越"坏"，越容易照出真问题。**

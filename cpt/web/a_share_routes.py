@@ -172,8 +172,14 @@ def _signal_history(code: str) -> dict[str, Any]:
         load_signal_events,
     )
 
-    client = AShareLocalClient()
+    # ⚠️ R45 修：**client 构造必须在 try 里面**。
+    # 原来它写在 try 之前 ⇒ 构造一抛就**穿出去**，而调用方
+    # `build_recommendation` 的兜底会把**整个推荐**降级 ——
+    # 可「信号历史」只是**装饰**（今天 R45 自己加的），
+    # 它坏了不该让「动作 + 参考价」一起没。
+    client = None
     try:
+        client = AShareLocalClient()
         conn = client._get_conn()  # noqa: SLF001
         epoch_ms = None
         try:
@@ -191,7 +197,8 @@ def _signal_history(code: str) -> dict[str, Any]:
         return {"available": False, "reason": "signal_history_error",
                 "detail": f"{type(exc).__name__}: {exc}", "count": 0, "items": []}
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 def submit_llm_summarize(code: str, rec: dict[str, Any]) -> dict[str, Any]:
