@@ -615,7 +615,22 @@ def parse_corporate_actions(data: Mapping[str, Any]) -> tuple[CorporateAction, .
     if not columns or not rows:
         return ()
 
-    i_date = _pick_column(columns, "除权除息日") or _pick_column(columns, "分红红股上市日")
+    # ⚠️ R45 修：原来写成 `A or B` —— `_pick_column` 返回**列索引**，
+    # 而日期列常常正好是**第 0 列**，`0 or B` 在 Python 里是 `B`
+    # ⇒ **索引 0 被当成「没找到」**。
+    #
+    # 后果不是报错，是**静默返回空元组**（i_date 退化成 None ⇒ 早退），
+    # 上层报「Wind 无公司行动记录」—— 一个**看起来像数据缺失**的错误，
+    # 而真实数据就在那儿。
+    #
+    # 为什么难发现：同一份 docstring 明写「**列集合按标的、甚至按次而变**」，
+    # 所以「日期列是不是第 0 个」本身**随输入而变** —— 有的标的正常，
+    # 有的标的静默返回空，**取决于 Wind 那次返回的列顺序**。
+    #
+    # ⇒ 必须显式判 `is None`，不能用真值判断。
+    i_date = _pick_column(columns, "除权除息日")
+    if i_date is None:
+        i_date = _pick_column(columns, "分红红股上市日")
     if i_date is None:
         i_date = next((i for i, n in enumerate(columns) if "分红" in n and "日" in n), None)
     if i_date is None:
