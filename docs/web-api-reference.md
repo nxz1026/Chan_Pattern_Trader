@@ -7,7 +7,7 @@
 > 2026-09-23 的**计划**，其中 `/candles`、`/events` 从未作为独立接口实现
 > （数据已并入 `/api/dashboard/snapshot`），`/api/dashboard/stats` 代码里没有。
 
-共 **25** 个接口，全部可达（状态码 2xx/4xx 均表示路由存在且按契约应答）。
+共 **27** 个接口（R45 新增 `a-share/recommendation` 与 `a-share/llm/summarize`），全部可达（状态码 2xx/4xx 均表示路由存在且按契约应答）。
 
 ## 接口一览
 

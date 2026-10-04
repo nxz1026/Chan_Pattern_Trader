@@ -1,6 +1,13 @@
 # R44 切表完成记录（2026-10-03 09:55:46 UTC）
 
-> 计划见 `post-cutover-plan.md`；执行脚本 `do_cutover.py`（Oracle `/tmp`）。
+> 计划见 `post-cutover-plan.md`
+> ### ⚠️ 本文只记录**第一次**切表（2026-10-03 09:55:46Z）
+>
+> R45 当天又切了 **3 次**（10:03 10:34:24Z、10-04 05:17:26Z、10-04 05:47:41Z），
+> 逐步把 106 只占位降到 **0**、legacy 28 只改用东财重算补回。
+> 最终态 **5206 票 / 3,339,427 行**，`cpt_factor_epoch.switched_at` = 最后一次。
+> 完整清单见 `docs/todo-r45-followups.md`；当前库状态以 `docs/db-inventory-and-cleanup.md` 为准。
+；执行脚本 `do_cutover.py`（Oracle `/tmp`）。
 > 方案 B：**只替换暂存表已覆盖的 code**，205 只未覆盖的票原样保留。
 
 ---

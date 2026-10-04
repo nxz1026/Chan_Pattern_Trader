@@ -185,10 +185,28 @@ Wind 路径（`--source wind`）保留作交叉校验，但要积分 —— 实�
 | `docs/implementation-plan.md` | 实施计划（M0–M6 垂直切片里程碑 + M-LLM 独立线） |
 | `docs/reference-audit.md` | 参考仓库许可证与复用边界 |
 | `docs/progress-log.md` | 逐轮进度日志（R13 起；更早见 `docs/archive/`） |
-| `docs/known-traps.md` | 已知陷阱与非缺陷清单（17 条"像 bug 其实不是"，每条附**判定命令**） |
+| `docs/known-traps.md` | 已知陷阱与非缺陷清单（**27 条**"像 bug 其实不是"，每条附**判定命令**） |
+| `docs/web-api-reference.md` | 看板 HTTP 接口清单（路径 / 参数 / 返回形状，含 `llm/explain`、`llm/summarize`） |
+| `docs/db-inventory-and-cleanup.md` | 生产库表与索引清单 + 清理执行状态 |
 | `docs/pending-wiring.md` | 尚未接线模块清单（是产品决策，不是死代码） |
 | `docs/dashboard-product-roadmap.md` | 看板产品路线（Phase 1–5） |
-| `deploy/README.md` | Nginx / systemd / 静态看板部署说明（含权限坑） |
+| `docs/todo-r45-followups.md` | **R45 收尾清单**（做掉的 / 明确不做的 / 剩下按什么顺序补） |
+| `deploy/README.md` | Nginx / systemd / cron / 静态看板部署说明（含权限坑） |
+
+### R45 复盘记录（2026-10-04，五轮）
+
+想了解「最近改了什么、为什么这么改」时按这个顺序读：
+
+| 文档 | 内容 |
+|---|---|
+| `docs/review-domain-layer-r45.md` | domain 层复盘 + 冻结口径门禁 + reference 后端 |
+| `docs/review-adapters-layer-r45.md` | adapters 层复盘 + 外部契约真机验证 |
+| `docs/review-application-layer-r45.md` | application 层复盘（DB 故障被当成"缺因子"等） |
+| `docs/review-storage-layer-r45.md` | storage 层复盘（失败必须抛，附 `prune` 补测） |
+| `docs/review-llm-layer-r45.md` | llm 层复盘（3 个真 bug） |
+| `docs/review-web-layer-r45.md` | web 层复盘 |
+| `docs/review-dashboard-r45.md` | 看板**无头浏览器**实测（画布 D 空白真根因、parity 配色） |
+| `docs/review-deploy-r45.md` | deploy 层复盘（env 模版漏告警键、crontab 直连仓内） |
 
 ### 运维脚本
 

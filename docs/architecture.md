@@ -256,53 +256,67 @@ class LLMClient(Protocol):
 
 ## 5. 目录结构
 
-**按 2026-09-25 的仓库实况重写**（原树写的是 `src/cpt/`，而实际根目录直接是 `cpt/`；
+**按 2026-10-04 的仓库实况重写**（R45 全量扫描后）（原树写的是 `src/cpt/`，而实际根目录直接是 `cpt/`；
 且列着 `engine/`、`storage/`、`llm/` 三个不存在的包与 `tests/unit|oracle|e2e` 四个
 不存在的子目录 —— 那是 v0.1 的规划树，不是实况）：
 
 ```text
 cpt/
-├── domain/         纯算法与领域模型（13 个模块，零第三方依赖）
+├── domain/         纯算法与领域模型（16 个模块，零第三方依赖）
 │   types.py  models.py  config.py  bi.py  fractal.py  contain.py
 │   zhongshu.py  trend_type.py  recursion.py  signal.py  first_buy.py
-│   a_share_rules.py  containment_trace.py
-├── adapters/       外部接入（15 个模块）
+│   a_share_rules.py  containment_trace.py  structure_events.py  levels.py
+├── adapters/       外部接入（20 个模块）
 │   binance_futures.py  ccxt_source.py  wind_source.py  a_share_public.py
 │   a_share_local.py  a_share_pool.py  a_share_factor.py  strategy_signal.py
 │   validators.py  reference_chanlun.py  native_chanlun.py  czsc_chanlun.py
-│   source_registry.py  backend_factory.py  _dbconfig.py
-├── application/    用例编排（27 个模块；**不出现 SQL**）
+│   reference_backend.py ← R45：**参照侧一等后端**（czsc→腾讯两级回落）
+│   corporate_actions.py  eastmoney_actions.py  feishu.py  source_registry.py
+│   backend_factory.py  _dbconfig.py
+├── application/    用例编排（33 个模块；**不出现 SQL**）
 │   replay.py  export.py  dashboard.py  dashboard_snapshot_v2.py
 │   multi_level.py  a_share_snapshot.py  first_buy_bridge.py  canvas_wbt.py
-│   dashboard_runs.py  dashboard_*.py（另有 17 个面板投影，全部有生产引用）  _bar_dict.py
+│   recommendation.py  ← R45：结构判断摘要（**买卖与价格纯确定性，
+│                          刻意不经 LLM**）；dashboard_runs.py
+│   llm_cases.py  parity_reference.py
+│   dashboard_*.py（另有 19 个面板投影，全部有生产引用）
 ├── storage/        CPT 自有持久化（R24 恢复；SQL 只许在这里和 adapters）
 │   signal_event_store.py   → public.cpt_signal_event（R21）
 │   dashboard_run_store.py  → public.cpt_dashboard_run（R23）
-│   factor_epoch_store.py    → public.cpt_factor_epoch（R45：复权因子口径切换点）
-    reference_backend.py  ← R45 新增：**参照侧一等后端**（czsc→腾讯两级回落）
-    recommendation.py     ← R45 新增：结构判断摘要（**买卖与价格纯确定性，不经 LLM**）
-└── web/            HTTP 入口（4 个模块 + __init__）
+│   factor_epoch_store.py   → public.cpt_factor_epoch（R45：复权因子口径切换点）
+│   llm_call_store.py  run_metric_store.py  structure_event_store.py
+├── llm/            LLM 服务层（R25 落地，8 个文件含 providers/ 子目录）
+│   base.py  config.py  prompts.py  queue.py  registry.py  structured.py
+│   providers/openai_compatible.py
+└── web/            HTTP 入口（5 个模块 + __init__）
     __main__.py  app.py  a_share.py  a_share_routes.py
 
 scripts/            运维入口（不在包内，但已在 CI 门禁覆盖范围内）
     factor_backfill.py  factor_recompute.py  factor_report.py
-    snapshot_a_share_batch.py  fetch_references.sh
+    snapshot_a_share_batch.py  golden_set.py  fetch_references.sh
     compare_chanlun_backends.py   ← native vs czsc 真机对比
     verify_public_contracts.py    ← 腾讯/新浪契约真机验证
-    check_sql_layering.py             ← 门禁①，已进 CI
-    check_storage_failure_semantics.py ← 门禁②，已进 CI
-    check_doc_drift.py                ← 门禁③，已进 CI（R45 新增）
-    scan_doc_claims.py                ← 文档「未兑现承诺」候选抽取（R45 新增）
-    migrations/（R20 / R21 / R23 三份幂等 SQL + R45 的 cpt_factor_epoch）
+    check_sql_layering.py              ← 门禁①（分层内容）
+    check_storage_failure_semantics.py  ← 门禁②（store 失败语义）
+    check_doc_drift.py                  ← 门禁③（文档↔代码漂移）
+    check_all_claims.py                ← 门禁④（全量文档断言，1890 条）
+    check_doc_counts.py                ← 门禁⑤（文档里的计数断言）
+    check_enqueue_skeleton_unique.py   ← 门禁⑥（LLM 入队骨架唯一）
+    check_job_poll_unique.py           ← 门禁⑦（前端轮询唯一）
+    selftest_gates.py                  ← **门禁自检**，必须排在 ①~⑦ 之前
+    scan_doc_claims.py                 ← 「未兑现承诺」候选抽取（只报不判）
+    report_coverage_gaps.py  run_coverage.sh  ← 覆盖率 + 「生产路径未测透」清单
+    migrations/（8 份幂等 SQL，R20 → R27）
 
 dashboard/          前端静态产物（Nginx 从 /var/www/cpt-dashboard 提供，非包内）
     url_safety.js  ← ⚠️ **必须第一个 defer 加载**：凭据消毒的**唯一实现**
-tests/              扁平布局：104 个 test_*.py 直接放 tests/ 下，仅一个 fixtures/ 存放
+    cpt_job.js     ← ⚠️ **必须第二个加载**：异步轮询的**唯一实现**
+tests/              扁平布局：117 个 test_*.py 直接放 tests/ 下，仅一个 fixtures/
                     人工构造案例；**没有** unit/ oracle/ e2e 子目录（见 §11）
-docs/               rules.md  architecture.md  implementation-plan.md  progress-log.md
-                    pending-wiring.md  duplication-triage.md  export-schema-v1.md
-                    known-traps.md  audit/  archive/
-deploy/             nginx/  systemd/  env/  README.md
+docs/               38 份（rules.md / architecture.md / progress-log.md /
+                    known-traps.md / web-api-reference.md / todo-r45-followups.md /
+                    review-*-r45.md 各一份 / audit/ / archive/ …）
+deploy/             nginx/  systemd/  cron/  env/  golden/  README.md
 references/         czsc @ 701e480a（可选 extra `chan`）  wbt @ 39bb1e8a（仅可视化参考）
                     ⚠️ 「参照侧」= **czsc**，不是 references/ 里的某个独立实现
 ```

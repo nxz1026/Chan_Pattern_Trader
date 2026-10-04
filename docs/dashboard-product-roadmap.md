@@ -3,6 +3,21 @@
 版本：v1.0 · 2026-09-23
 依据：`cpt-feature-review-combined.md`
 
+> ## R45 新增（2026-10-04）：结构判断摘要卡
+>
+> 本文是 2026-09-23 的产品路线图，但下面这块是**现状**、不写在这里就无处可查。
+>
+> | | |
+> |---|---|
+> | 接口 | `GET /api/dashboard/a-share/recommendation?code=&level=` |
+> | 逻辑 | `cpt/application/recommendation.py` —— **买卖与价格纯确定性**，不经 LLM |
+> | LLM 摘要 | `POST /api/dashboard/a-share/llm/summarize`（只喂那三行事实） |
+> | 信号历史 | 同一响应里的 `history`，按因子口径分「旧 / 新」 |
+> | 数据质量 | K 线不足 30 根 ⇒ 显示「数据不足」，**不与「无信号」混淆** |
+> | 真机复盘 | `docs/review-dashboard-r45.md` |
+>
+> 完整字段见 `docs/web-api-reference.md`。
+
 ## 产品形态
 
 一个 Dashboard 外壳、两种模式：

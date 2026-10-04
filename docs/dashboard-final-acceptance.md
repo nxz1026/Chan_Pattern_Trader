@@ -3,6 +3,21 @@
 日期：2026-09-25
 状态：**历史快照** —— 下列能力清单与验收数字均为当时实况，保留仅为溯源。
 
+> ## R45 新增（2026-10-04）：结构判断摘要卡
+>
+> 本文是 2026-09-25 的验收快照，但下面这块是**现状**、不写在这里就无处可查。
+>
+> | | |
+> |---|---|
+> | 接口 | `GET /api/dashboard/a-share/recommendation?code=&level=` |
+> | 逻辑 | `cpt/application/recommendation.py` —— **买卖与价格纯确定性**，不经 LLM |
+> | LLM 摘要 | `POST /api/dashboard/a-share/llm/summarize`（只喂那三行事实） |
+> | 信号历史 | 同一响应里的 `history`，按因子口径分「旧 / 新」 |
+> | 数据质量 | K 线不足 30 根 ⇒ 显示「数据不足」，**不与「无信号」混淆** |
+> | 真机复盘 | `docs/review-dashboard-r45.md` |
+>
+> 完整字段见 `docs/web-api-reference.md`。
+
 > ## ⚠️ 不要再把本文当现状
 >
 > 1. **原文件头写的日期是 2026-10-23，比它自己最后被修改的时间还晚三周**，
@@ -93,7 +108,7 @@ vulture cpt --min-confidence 60 whitelist.py
 
 - 多级别真实叠加已通过递归链（classify_trend → map_trend_types → detect_fractals → build_bis/build_zhongshus）端到端跑通；最小级别由 `RulesConfig.levels[0]` 驱动，高级级别是递归链产出（target_level 由调用方传入）。默认 `RulesConfig.levels = (5, 30)` → 多级别返回 `{5: {...}, 30: {...}}`。
 - HTTP adapter 的**只读 GET 路由**至少包含 snapshot、health、reproducibility、runs、market-24h、engine-state、inspect
-（⚠️ R45 实测：这是当时的快照，**当前共 25 个接口**，含 2 个写接口。完整清单见 `docs/web-api-reference.md`）；snapshot 支持 `level` 查询参数触发多级别重算。
+（⚠️ R45 实测：这是当时的快照，**当前共 27 个接口**，含 2 个写接口。完整清单见 `docs/web-api-reference.md`）；snapshot 支持 `level` 查询参数触发多级别重算。
 - 已安装 Chromium 153.0.8010.12 ARM64 至 `$HOME/.local/bin/chromium`；真实 headless dump-dom smoke 已通过。
 - vulture 已接入 GitHub Actions CI（min-confidence 60，whitelist.py 逐条登记）；dead-code 审计进入持续门禁。
 - `cpt/llm/` 死代码已删除（审计 A1 处置）；架构文档保留 LLM 层蓝图但标注"预留，未实现"。
