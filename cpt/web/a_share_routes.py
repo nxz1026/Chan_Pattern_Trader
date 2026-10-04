@@ -153,6 +153,37 @@ def build_recommendation(code: str, *, level: str | None = None) -> dict[str, An
     return out
 
 
+def submit_llm_summarize(code: str, rec: dict[str, Any]) -> dict[str, Any]:
+    """提交「给推荐配人话」的 LLM 请求。**入队即返回**，不等模型。
+
+    ⚠️ 传的**只有** :func:`cpt.application.recommendation` 算出的那几行
+    （动作 / 结论 / 依据 / 参考价）—— **不含结构明细**。
+    模型因此没有机会产出与确定性结果**矛盾**的判断。
+    看板上「卡片」与「人话」并排显示，两者矛盾时没人知道该信哪个。
+
+    LLM 不可用 / 未启用 / 重复提交 → 返回 ``available: False``，
+    前端照常显示确定性结果，**只把摘要那一行藏起来**。
+    """
+    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+    from cpt.application.llm_cases import summarize_recommendation  # noqa: PLC0415
+
+    client = AShareLocalClient()
+    try:
+        names = _names([code])
+        return summarize_recommendation(
+            client._get_conn(),
+            code=code,
+            name=names.get(code, ""),
+            action_label=str(rec.get("action_label") or ""),
+            headline=str(rec.get("headline") or ""),
+            reason=str(rec.get("reason") or ""),
+            price=rec.get("raw_close") if rec.get("raw_close") is not None else rec.get("price"),
+            disclaimer=str(rec.get("disclaimer") or ""),
+        )
+    finally:
+        client.close()
+
+
 def _raw_close(code: str) -> float | None:
     """不复权收盘价（``public.daily_bar.close``，未复权）。
 

@@ -86,6 +86,9 @@
       //: 请求覆盖，用户就再也看不到"这次没保存"了 —— 而这正是要修的坑。
       saveError: null,
       base: aShareBase(root.dataset.snapshotUrl),
+      // R45：`/api/dashboard/llm/calls` **不在** a-share 前缀下。
+      // 用显式字段，别靠 `state.base.replace(...)` 反推 —— 那是巧合式依赖。
+      apiRoot: aShareBase(root.dataset.snapshotUrl).replace(/\/a-share$/, ""),
     };
 
     function snapshotUrl() {
@@ -336,6 +339,7 @@
     };
 
     async function loadRecommendation() {
+      delete root.dataset.recCallId;   // 换标的 ⇒ 上一次的摘要不再适用
       const actionEl = q('[data-testid="rec-action"]');
       const priceEl = q('[data-testid="rec-price"]');
       const headEl = q('[data-testid="rec-headline"]');
@@ -367,6 +371,7 @@
         headEl.textContent = rec.headline || "";
         if (reasonEl) reasonEl.textContent = rec.reason || "";
         root.dataset.recAvailable = rec.available ? "1" : "0";
+        if (rec.available) loadLlmSummary(rec);
       } catch (error) {
         actionEl.textContent = "—";
         actionEl.dataset.action = "";
@@ -377,6 +382,84 @@
         }
         root.dataset.recAvailable = "0";
       }
+    }
+
+    /**
+     * 给结构判断配一段人话。**入队即返回**，不等模型。
+     *
+     * ⚠️ 三条纪律：
+     *  1. 失败 / 未启用 / 重复提交 ⇒ **只把摘要行藏起来**，
+     *     上面的确定性结果照常显示（LLM 是锦上添花，不是主路径）；
+     *  2. 轮询有上限，**不无限等** —— 用户可能已经切走了；
+     *  3. 传给后端的是**后端已经算好的那几行**，前端不自己编内容。
+     */
+    async function loadLlmSummary(rec) {
+      const box = q('[data-testid="rec-llm"]');
+      if (!box) return;
+      const callId = root.dataset.recCallId;
+      if (callId) return;                 // 同一张卡不重复提交
+      box.hidden = true;
+      box.textContent = "";
+      try {
+        // ⚠️ 必须带 code —— 路由用它查标的名称（`code_required` 400）。
+        // 第一版漏了，摘要行静默不显示，只在 console 留一条 400。
+        const url = `${state.base}/llm/summarize?code=${encodeURIComponent(state.code)}`;
+        const response = await fetch(safeUrl(url), {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Accept: "application/json" },
+          body: JSON.stringify({
+            action_label: rec.action_label,
+            headline: rec.headline,
+            reason: rec.reason,
+            raw_close: rec.raw_close,
+            price: rec.price,
+            disclaimer: rec.disclaimer,
+          }),
+        });
+        if (!response.ok) return;
+        const out = await response.json();
+        if (!out || !out.call_id) return;
+        root.dataset.recCallId = out.call_id;
+        // ⚠️ `duplicate` 也要轮询：入队是**幂等**的（同样的事实 ⇒ 同样的
+        // request_hash ⇒ 拒绝重复提交），所以刷新页面拿到的是 duplicate。
+        // 此时**之前那次的结果就在库里** —— 直接不显示，等于「明明算过
+        // 却让用户以为没算」。只有「没启用 / 落库失败」才真的没有结果。
+        if (out.available !== true && out.reason !== "same_request_in_flight_or_done") {
+          return;
+        }
+        pollLlmSummary(out.call_id, box, 0);
+      } catch (error) {
+        /* 摘要拿不到就算了 —— 上面那张卡才是结论 */
+      }
+    }
+
+    async function pollLlmSummary(callId, box, tries) {
+      if (tries > 40 || root.dataset.recCallId !== callId) return;   // 上限 40 次
+      await new Promise((resolve) => setTimeout(resolve, 1500));
+      let out = null;
+      try {
+        // ⚠️ `safeUrl(...)` 必须**内联在 fetch 的同一行** ——
+        // 门禁 `test_dashboard_url_credentials` 的判据是「含 `fetch(` 的那
+        // 一行是否也含 `safeUrl`」，它看不穿变量中转。
+        // 我试过 `const listUrl = safeUrl(...); fetch(listUrl)` —— 被判成
+        // 「绕过凭据消毒」。这是本仓既定写法，别引入间接层。
+        const response = await fetch(safeUrl(`${state.apiRoot}/llm/calls?limit=20`), { headers: { Accept: "application/json" } });
+        if (!response.ok) return;
+        const body = await response.json();
+        const hit = (body.calls || body.items || []).find((c) => c.call_id === callId);
+        if (!hit) { pollLlmSummary(callId, box, tries + 1); return; }
+        out = hit;
+      } catch (error) {
+        return;
+      }
+      const text = (out && (out.result_text || out.output_text || out.text)) || "";
+      if (!text) {
+        if (out && ["done", "error", "failed"].includes(out.status)) return;  // 失败就藏起来
+        pollLlmSummary(callId, box, tries + 1);
+        return;
+      }
+      box.textContent = text;
+      box.hidden = false;
     }
 
     async function loadPool() {

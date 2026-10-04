@@ -26,7 +26,12 @@ from typing import Any
 
 from cpt.llm import get_queue
 from cpt.llm.base import LLMResult
-from cpt.llm.prompts import PURPOSE_EXPLAIN, explain_request
+from cpt.llm.prompts import (
+    PURPOSE_EXPLAIN,
+    PURPOSE_SUMMARIZE,
+    explain_request,
+    summarize_request,
+)
 from cpt.storage.llm_call_store import (
     STATUS_OK,
     LLMCallError,
@@ -47,6 +52,7 @@ _PROCESS_START = datetime.now(UTC)
 
 __all__ = [
     "explain_structure",
+    "summarize_recommendation",
     "list_calls",
     "on_llm_status",
     "recover_interrupted",
@@ -181,9 +187,14 @@ def explain_structure(
         }
 
     if not enqueued:
+        # ⚠️ R45 修：`row["call_id"]` 是**刚生成**的 id，而这一条**根本没进库**
+        # （被 ``ON CONFLICT DO NOTHING`` 挡掉了）⇒ 回给前端后，它拿这个 id
+        # 去轮询**永远查不到**，表现是「明明算过，刷新一下摘要就没了」。
+        # ⇒ 重复时回**已存在那条**的真实 call_id。
+        # ⚠️ **两处都有这个 bug**（explain + summarize），一起改。
         return {
             "available": False,
-            "call_id": row["call_id"],
+            "call_id": _existing_call_id(conn, digest) or row["call_id"],
             "status": "duplicate",
             "reason": "same_request_in_flight_or_done",
         }
@@ -307,3 +318,127 @@ def recover_interrupted() -> int:
         return 0
     finally:
         client.close()
+
+
+def summarize_recommendation(
+    conn: Any,
+    *,
+    code: str,
+    name: str,
+    action_label: str,
+    headline: str,
+    reason: str,
+    price: float | None = None,
+    disclaimer: str = "",
+    subject_id: str = "",
+) -> dict[str, Any]:
+    """提交一次「给推荐配人话」的请求，**立刻返回**，不等模型。
+
+    与 :func:`explain_structure` 同样的入队骨架（幂等 / 审计 / 预算 / 落库），
+    差别只在**喂给模型的东西**：这里只给
+    :func:`cpt.application.recommendation` 算出的三行事实，**不给结构明细** ——
+    模型没有机会算出与确定性结果矛盾的判断。
+
+    :returns: ``{"available", "call_id", "status", "reason"}``，语义同 explain。
+    """
+    request = summarize_request(
+        code=code,
+        name=name,
+        action_label=action_label,
+        headline=headline,
+        reason=reason,
+        price=price,
+        disclaimer=disclaimer,
+        subject_id=subject_id,
+    )
+    digest = request_hash(request.purpose, request.system, request.user)
+    row = call_row(
+        purpose=PURPOSE_SUMMARIZE,
+        subject_id=subject_id,
+        request_hash_value=digest,
+    )
+    try:
+        enqueued = _write(conn, enqueue_call, row)
+    except LLMCallError as exc:
+        _LOG.warning("LLM 摘要入队落库失败 %s: %s", row["call_id"], exc)
+        _rollback_quietly(conn, f"enqueue:{row['call_id']}")
+        return {
+            "available": False,
+            "call_id": row["call_id"],
+            "status": "error",
+            "reason": "llm_audit_write_failed",
+        }
+
+    if not enqueued:
+        # ⚠️ R45 修：`row["call_id"]` 是**刚生成**的 id，而这一条**根本没进库**
+        # （被 ``ON CONFLICT DO NOTHING`` 挡掉了）⇒ 回给前端后，它拿这个 id
+        # 去轮询**永远查不到**，表现是「明明算过，刷新一下摘要就没了」。
+        # ⇒ 重复时回**已存在那条**的真实 call_id。
+        # ⚠️ **两处都有这个 bug**（explain + summarize），一起改。
+        return {
+            "available": False,
+            "call_id": _existing_call_id(conn, digest) or row["call_id"],
+            "status": "duplicate",
+            "reason": "same_request_in_flight_or_done",
+        }
+
+    queue = _bootstrap()
+    if queue is None:
+        _write(conn, finish_call, row["call_id"], status="error",
+               error_text="llm_unavailable")
+        return {
+            "available": False,
+            "call_id": row["call_id"],
+            "status": "error",
+            "reason": "llm_unavailable",
+        }
+
+    from cpt.llm.queue import Job  # noqa: PLC0415
+
+    submitted = queue.submit(
+        Job(request=request, call_id=row["call_id"], metadata={"digest": digest})
+    )
+    if not submitted.accepted:
+        _write(
+            conn,
+            finish_call,
+            row["call_id"],
+            status="error",
+            error_text=submitted.reason or "submit_rejected",
+        )
+        return {
+            "available": False,
+            "call_id": row["call_id"],
+            "status": "error",
+            "reason": submitted.reason or "submit_rejected",
+        }
+
+    return {
+        "available": True,
+        "call_id": row["call_id"],
+        "status": "queued",
+        "reason": "",
+    }
+
+
+def _existing_call_id(conn: Any, digest: str) -> str | None:
+    """按 ``request_hash`` 找出**已存在**那条调用的 ``call_id``；查不到返回 ``None``。
+
+    为什么需要它：``enqueue_call`` 在重复时返回 ``False``，而调用方手里的
+    ``row["call_id"]`` 是**新生成**的、库里根本不存在。直接回给前端，
+    前端轮询时永远查不到 ⇒「明明算过，刷新就没了」。
+
+    ⚠️ R45 补这个时才发现：**explain_structure 早就带着同一个 bug** ——
+    同一段代码抄了两份，bug 也抄了两份。
+    """
+    from cpt.storage.llm_call_store import recent_calls  # noqa: PLC0415
+
+    try:
+        rows = recent_calls(conn, limit=50)
+    except LLMCallError:
+        return None
+    for item in rows:
+        if item.get("request_hash") == digest:
+            call_id = item.get("call_id")
+            return str(call_id) if call_id else None
+    return None

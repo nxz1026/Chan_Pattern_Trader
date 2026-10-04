@@ -111,3 +111,73 @@ def explain_request(
         temperature=0.2,
         subject_id=subject_id,
     )
+
+
+# ── R45 新增：结构判断摘要 ──────────────────────────────────────
+PURPOSE_SUMMARIZE = "summarize_recommendation"
+
+#: 摘要用例的 system 提示词。**关键：它只被允许复述，不被允许推理。**
+_SUMMARY_SYSTEM = (
+    "你是缠论结构看板的旁白。用**不超过 3 句话**把给定的结构判断说成人话："
+    "它在讲什么、依据是什么、接下来该看什么。"
+    "\n\n"
+    "硬性约束：\n"
+    "1. **只能使用给定事实**，不得引入任何未给出的价格、数值、指标或结论；\n"
+    "2. 不得给出买卖建议、不得预测涨跌、不得使用「建议」「必涨」「稳赚」等措辞；\n"
+    "3. 若给定事实里写着「非投资建议」，你也必须在结尾带上这句；\n"
+    "4. 事实与常识冲突时，以给定事实为准，不要「纠正」它。"
+)
+
+
+def summarize_request(
+    *,
+    code: str,
+    name: str,
+    action_label: str,
+    headline: str,
+    reason: str,
+    price: float | None = None,
+    disclaimer: str = "",
+    subject_id: str = "",
+    max_tokens: int = 220,
+) -> Any:
+    """构造「给推荐配人话」的 :class:`~cpt.llm.base.LLMRequest`。
+
+    :param action_label: 确定性算出的动作词（``买入结构`` / ``观望`` …）。
+    :param headline: 确定性算出的结论。
+    :param reason: 确定性算出的依据。
+    :param price: **不复权**参考价（可挂单的那个），不是后复权价。
+
+    ## 为什么提示词里**只有这三行**
+
+    买卖与价格由 :mod:`cpt.application.recommendation` **纯确定性**算出。
+    这里的输入**只有那个结果** —— 不含分型/笔/中枢/背驰明细。
+
+    ⇒ 模型**没有机会编造**：它看不到原始结构数据，也就无从算出别的结论。
+    如果把结构明细一起给它「让它结合数据说得更准」，
+    那等于让它有机会产出与确定性结果**矛盾**的判断，
+    而看板上两个数字并排显示时，没人知道该信哪个。
+
+    这条约束是本用例存在的全部意义，**不要为了「更聪明」而放宽**。
+    """
+    from cpt.llm.base import LLMRequest
+
+    lines = [
+        f"标的：{name or code}（{code}）",
+        f"结构判断：{action_label}",
+        f"结论：{headline}",
+    ]
+    if price is not None:
+        lines.append(f"参考价（不复权）：{price:.2f}")
+    if reason:
+        lines.append(f"依据：{reason}")
+    if disclaimer:
+        lines.append(f"附注：{disclaimer}")
+    user = "请把下面这个结构判断用不超过 3 句话说成人话。\n\n" + "\n".join(lines)
+    return LLMRequest(
+        purpose=PURPOSE_SUMMARIZE,
+        system=_SUMMARY_SYSTEM,
+        user=user,
+        max_tokens=max_tokens,
+        subject_id=subject_id,
+    )

@@ -1122,6 +1122,7 @@ def make_handler(
             if path.path not in (
                 "/api/dashboard/a-share/watchlist",
                 "/api/dashboard/a-share/llm/explain",
+                "/api/dashboard/a-share/llm/summarize",
             ):
                 return False
             # 审计 M1：写接口无鉴权（单用户看板经 nginx 暴露）。至少要求
@@ -1144,6 +1145,26 @@ def make_handler(
             code = (query.get("code") or [""])[0].strip()
             if not code:
                 self._write_json_error(HTTPStatus.BAD_REQUEST, "code_required", "缺少 code 参数")
+                return True
+
+            if path.path == "/api/dashboard/a-share/llm/summarize":
+                # R45：给结构判断配人话。**入队即返回**，不等模型。
+                # 与 explain 不同的是它**只吃推荐那几行**，不含结构明细 ——
+                # 模型因此没有机会产出与确定性结果**矛盾**的判断
+                # （两个数字并排显示时，没人知道该信哪个）。
+                if method != "POST":
+                    self._write_json_error(
+                        HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed", "仅支持 POST"
+                    )
+                    return True
+                rec = self._read_json_body() or {}
+                if not isinstance(rec, dict) or not rec:
+                    self._write_json_error(
+                        HTTPStatus.BAD_REQUEST, "recommendation_required",
+                        "recommendation 不能为空",
+                    )
+                    return True
+                self._write_json(a_share_routes.submit_llm_summarize(code, rec))
                 return True
 
             if path.path == "/api/dashboard/a-share/llm/explain":
