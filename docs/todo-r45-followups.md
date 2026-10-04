@@ -133,3 +133,38 @@
 | `deploy/dashboard-sync.sh:33` 硬编码默认口令 | **只记录**（owner 明确不轮换） |
 | `/var/www/cpt-dashboard/*.bak-r44` | **已清**（移到 /tmp 留 24h） |
 | 真正的第三方 reference 后端 | 已用 czsc 落地；`references/` 里的 wbt 是**可视化**参考，非算法对照 |
+
+---
+
+## P0-1 覆盖率：**已跑第一次，有基线了**（2026-10-04 20:10）
+
+**总行覆盖 5757/7143 = 80.6%** —— 单看这个数会觉得还行，
+所以问题全在**分母之外**：它把两类东西抹平了。
+
+`scripts/run_coverage.sh` + `scripts/report_coverage_gaps.py`（**只报告，不阻断**）
+把 169 个「**生产会调用**但覆盖不足」的函数挑了出来。
+
+### 最该先补的（我今天碰过的）
+
+| 函数 | 覆盖 | 为什么贵 |
+|---|---:|---|
+| `llm_cases._bootstrap` | 37.5% | **我今天的摘要功能就建在它上面**；两条未覆盖分支都是故障路径 |
+| `a_share_routes._names` | 45.5% | `submit_llm_summarize` 每次都调它；**失败返回空字典**那条没测 |
+| `app._read_json_body` | 36.8% | 我新加的 POST 路由就走它 |
+| `web/__main__._run` | **15.4%** | **服务入口**，20/25 行未覆盖 —— 最刺眼的一个 |
+| `app._latest_signal_statuses` | 38.5% | 信号状态汇总，看板上天天显示 |
+
+已补 `tests/test_llm_enqueue_failure_paths.py`（4 例）：
+`_bootstrap` 的失败不挡启动 / 异常路径也关连接 / `queue is None` 要报不可用
+/ **重复提交回已存在那条的 call_id**（守住今天那个真 bug）。
+
+### 一个方法论结论
+
+**总覆盖率不是目标，「生产路径上有没有没跑过的分支」才是。**
+80.6% 里可能藏着 169 个坑，也可能是 169 个无关紧要的边角 ——
+必须靠「被生产代码引用」这个判据把两者分开。
+
+### 依赖提醒
+
+`coverage` 是在 Oracle venv 里手工装的。**没进 `requirements-dev.txt`** ——
+因为那会给 CI 加一个包，需要 owner 同意。要接 CI 的话先定这个。
