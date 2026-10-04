@@ -1,6 +1,16 @@
 #!/usr/bin/env python3
 """chanlun 三后端对比（R45）。
 
+## 怎么跑
+
+⚠️ **czsc 要在 Oracle 上装**，沙箱装不上（PyPI 对 pip 重置、crates.io 403、
+且 czsc 是 Rust 扩展需 cargo）::
+
+    ~/DSH/Chan_Pattern_Trader/.venv/bin/pip install "czsc==1.0.1"
+
+装它**不会**改变生产用的后端 —— ``DEFAULT_BACKEND`` 硬编码为 ``native``，
+不依赖 czsc 是否安装（``auto`` 模式的静默切换隐患早被 R16-4 堵住）。
+
 ## 为什么需要它
 
 `architecture.md` §2.1 记着一个真陷阱：``backend_factory`` 的 ``auto`` 模式
