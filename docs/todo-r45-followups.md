@@ -78,18 +78,41 @@
 
 **验收**：`python scripts/check_X.py --self-test` 全绿才算这个检查器可信。
 
-## P1-3 `reference` 后端腾讯路：实际不能用
+## P1-3 `reference` 后端腾讯路：**已完成**（2026-10-04 21:20）
 
-**问题**：`_try_tencent` 返回的是**已归一化的 dict**，`BiRaw.start_bar` 全是 0
-（dict 里是 `start_time`，量纲不同，我当初硬转过、后来改成不转）。
-⇒ 那条路作为**独立后端**是残的，只是借道给 parity 用。
+选了 (b)：**响亮拒绝，而不是静默交出残缺结果**。
 
-**做**：二选一 ——
-(a) 给 dict 路也补上 bar 索引（需要 bars + 时间→索引映射）；
-(b) 明确它只服务 parity，在 docstring 写清「不是完整后端实现」，
-    并让 `compute_structures` 在走腾讯路时**显式标注**结果不完整。
+`_try_tencent` 返回的是**已归一化的 dict**（`start_time`/`end_time`，毫秒），
+而 `ChanlunResult` 的 `BiRaw`/`ZsRaw` 要的是 **bar 索引** —— **量纲不同**。
+第一版硬转，`start_bar` 全设 0 ⇒ 后端**看起来能用**，实际交出没有时间锚点的数据。
 
-**我倾向 (b)**：腾讯路是数据链路对照，不是算法对照，硬凑成后端反而误导。
+现在走腾讯路直接抛新异常 `IncompleteReferenceError`，并与
+`ReferenceUnavailableError` 分开：
+
+| 异常 | 含义 | 调用方该 |
+|---|---|---|
+| `ReferenceUnavailableError` | **环境不支持**（czsc 没装 / 腾讯取不到） | 回落另一条路 |
+| `IncompleteReferenceError` | **形状不对**（只有 parity 语义） | 换接口，回落救不了 |
+
+混成一个 ⇒ 调用方会以为「再试一次就好」。
+
+### 真机跑又抓出 `_as_canonical` 两个**潜伏 bug**
+
+这段在测试里**从没被执行过**（假实现全直接返回 `CanonicalBar`）：
+
+1. `from cpt.domain.models import OHLCV` —— **该符号不存在**且根本没用到
+2. 少传 5 个**必填**字段 ⇒ 修好 1 之后紧接着 TypeError
+
+修完又暴露第三层：`getattr(dict, "open_time", 0)` 恒为 0 ⇒
+**传 dict 进来全部字段静默变成 0**，czsc 随后报「中位间隔 0 ms」这种
+看不出根因的错。现在 dict/对象都支持，且**缺 `open_time` 响亮失败**。
+
+> ⚠️ 守卫第一版写 `if not open_ms`，把 `open_time=0` 也当缺失 ——
+> 真机跑时它把 i=0 那根正常构造的 K 线误判了。**判据必须是「键在不在」
+> 而不是「值是不是 0」**。
+
+⇒ 教训：**测试里走不到的分支就是没测过**。「契约允许 dict」不等于
+「实现支持 dict」。这条只有**真机跑**才暴露。
 
 ## P2-1 历史回看
 

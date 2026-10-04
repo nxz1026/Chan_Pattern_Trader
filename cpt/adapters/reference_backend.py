@@ -55,6 +55,7 @@ _LOG = logging.getLogger(__name__)
 
 __all__ = [
     "ReferenceChanlunBackend",
+    "IncompleteReferenceError",
     "ReferenceUnavailableError",
     "REFERENCE_SOURCE_CZSC",
     "REFERENCE_SOURCE_TENCENT",
@@ -71,6 +72,20 @@ class ReferenceUnavailableError(RuntimeError):
     ⚠️ 与 :class:`~cpt.adapters.backend_factory.UnknownBackendError` 区分：
     那个是「**档位名写错了**」，这个是「**名字对、但环境不支持**」。
     两者混成一个异常，会让「配置错误」和「依赖缺失」在日志里长得一样。
+    """
+
+
+class IncompleteReferenceError(RuntimeError):
+    """参照侧走到了**只有 parity 语义**的那条路，不满足后端契约。
+
+    与 :class:`ReferenceUnavailableError` 的区别很重要：
+
+    - ``ReferenceUnavailableError`` = **环境不支持**（czsc 没装、腾讯取不到）⇒
+      可以回落到另一条路；
+    - ``IncompleteReferenceError`` = **这条路能出数据，但形状不满足契约**
+      ⇒ 回落也救不了，只能换接口。
+
+    混成一个异常，会让调用方以为「再等等就好」或「再试一次就好」。
     """
 
 
@@ -113,12 +128,32 @@ class ReferenceChanlunBackend:
     def compute_structures(
         self, bars: list[BarLike], config: ReferenceChanlunConfig
     ) -> ChanlunResult:
-        """算参照结构。两条路都拿不到就抛 :class:`ReferenceUnavailableError`。
+        """算参照结构（**契约方法**）。两条路都拿不到就抛 :class:`ReferenceUnavailableError`。
 
         ⚠️ 这里**不静默回落**到 native —— 参照侧回落到生产侧等于**自己跟自己
         比**，那是对照面板最没意义的一种「通过」。宁可报「没参照」。
+
+        ## ⚠️ 走腾讯那一级时**直接抛**，不给残缺结果（R45 P1-3）
+
+        腾讯路返回的是**已归一化的 dict**（字段是 ``start_time``/``end_time``，
+        毫秒），而 :class:`ChanlunResult` 的 ``BiRaw``/``ZsRaw`` 要的是
+        **bar 索引**（``start_bar``/``end_bar``）—— **两者量纲不同**。
+
+        第一版硬转，把 ``start_bar`` 全设成 0，于是这个后端**看起来能用**，
+        实际交出去的是**没有时间锚点的数据**。拿它画图或做点选定位都会静默错位。
+
+        ⇒ 宁可**响亮拒绝**。要走腾讯对照，用
+        :meth:`compute_domain_structures`（parity 层走的就是那条），
+        它返回领域对象、不经过这层有损转换。
         """
-        return _from_domain(self.compute_domain_structures(bars, config))
+        triples = self.compute_domain_structures(bars, config)
+        if self.source == REFERENCE_SOURCE_TENCENT:
+            raise IncompleteReferenceError(
+                "腾讯回落路只服务 parity 对照：它给的是时间锚点（毫秒），"
+                "而 ChanlunResult 要的是 bar 索引，硬转会丢锚点。"
+                "请改用 compute_domain_structures()（parity 层就走那条）。"
+            )
+        return _from_domain(triples)
 
     # ── 领域对象三元组（parity 层直接用，**不丢时间锚点**）────────
     def compute_domain_structures(
@@ -210,18 +245,66 @@ class ReferenceChanlunBackend:
 
 # ── 转换辅助：把两条路各自的数据形状统一成 ChanlunResult ──────────────
 def _as_canonical(bar: BarLike) -> CanonicalBar:
+    """把任意 ``BarLike`` 转成 :class:`CanonicalBar`。
+
+    :class:`ChanlunBackend` 契约只说「典型为 ``CanonicalBar``」，
+    所以非 ``CanonicalBar`` 的输入是**允许的**。
+
+    ⚠️ R45 真机跑抓到两个**潜伏 bug**（这段在测试里从没被执行过 ——
+    假实现全都直接返回 ``CanonicalBar``）：
+
+    1. ``from cpt.domain.models import OHLCV`` —— **该符号不存在**，
+       而且**根本用不到**（我写的时候误加了）⇒ 一旦传入非 CanonicalBar
+       就 ImportError。
+    2. 少传 5 个**必填**字段（``quote_volume`` / ``trade_count`` /
+       ``taker_buy_base_volume`` / ``taker_buy_quote_volume`` /
+       ``is_closed``）⇒ 修好 1 之后紧接着 TypeError。
+
+    ⇒ 教训与今天第 N 次相同：**测试里走不到的分支就是没有测过**，
+    「契约允许」不等于「实现支持」。
+    """
     if isinstance(bar, CanonicalBar):
         return bar
-    from cpt.domain.models import OHLCV  # noqa: PLC0415
+
+    # ⚠️ **dict 也要能读**：``getattr(dict, "open_time", 0)`` 恒为 0 ——
+    # 真机跑实测：传 dict 进来，全部字段静默变成 0，czsc 随后报
+    # 「中位间隔 0 ms」这种**看不出根因**的错。⇒ 两种取法都支持。
+    def _get(name: str, default: object = None) -> object:
+        if isinstance(bar, dict):
+            return bar.get(name, default)
+        return getattr(bar, name, default)
+
+    def _f(name: str, default: float = 0.0) -> float:
+        v = _get(name, default)
+        return float(v) if v is not None else default
+
+    def _i(name: str, default: int = 0) -> int:
+        v = _get(name, default)
+        return int(v) if v is not None else default
+
+    # ⚠️ 判「**键在不在**」而不是「值是不是 0」—— 第一版写 `if not open_ms`
+    # 会把 ``open_time=0`` 也当缺失。真机跑时它把 i=0 那根正常构造的 K 线
+    # 误判成「缺 open_time」。
+    if _get("open_time", None) is None:
+        # 宁可炸也不要交出全 0 的 K 线 —— 那会让下游算出「间隔 0ms」之类的谜之错。
+        raise ValueError(f"bar 缺少 open_time：{bar!r:.120}")
+    open_ms = _i("open_time")
 
     return CanonicalBar(
-        open_time=int(getattr(bar, "open_time", 0)),
-        close_time=int(getattr(bar, "close_time", 0)),
-        open=float(getattr(bar, "open", 0.0)),
-        high=float(getattr(bar, "high", 0.0)),
-        low=float(getattr(bar, "low", 0.0)),
-        close=float(getattr(bar, "close", 0.0)),
-        volume=float(getattr(bar, "volume", 0.0) or 0.0),
+        open_time=open_ms,
+        # close_time 必须**严格大于** open_time（CanonicalBar.__post_init__ 会查），
+        # 而多数 BarLike 只带 open_time ⇒ 缺省 +1ms。
+        close_time=_i("close_time") if _get("close_time", None) is not None else open_ms + 1,
+        open=_f("open"),
+        high=_f("high"),
+        low=_f("low"),
+        close=_f("close"),
+        volume=_f("volume"),
+        quote_volume=_f("quote_volume"),
+        trade_count=_i("trade_count"),
+        taker_buy_base_volume=_f("taker_buy_base_volume"),
+        taker_buy_quote_volume=_f("taker_buy_quote_volume"),
+        is_closed=bool(_get("is_closed", True)),
     )
 
 
