@@ -136,3 +136,41 @@ owner 指示「先解开冻结，对齐功能 + 修 bug」。逐条查了仓里�
   `SCHEMA_VERSION` 或 `docs/rules.md` §9」。
 
 **两者都有代价，属产品决策，本轮不动。**
+
+---
+
+## 6. 补：方案 (b) 落地 —— 冻结变更门禁
+
+owner 选定 (b)：CI 断言「改了口径参数就必须同时升版本 + 同步 `docs/rules.md` §9」。
+
+### 为什么不能写成「和上次提交比 diff」
+
+CI 是**全新 checkout，没有 git history**，任何依赖「上一次是什么」的判断都跑不了。
+所以做成**自包含的钉子**：把 14 个字段与默认值钉在
+`tests/test_domain_frozen_contract.py::FROZEN_V0`，改了字段/默认值就红。
+
+### 这道门禁当场逮到一个真文档缺陷
+
+首次运行就红：
+
+    这些冻结参数在 docs/rules.md 里查不到：
+    ['contain_direction', 'zs_level_count', 'macd_fast', 'macd_slow',
+     'macd_signal', 'divergence_compare', 'levels']
+
+**7 个冻结参数从未被记录进规则文档** —— 而 `config.py` 明写「字段语义详见
+`docs/rules.md` §9」。这与 web 层那三个幽灵接口、注释与代码不一致，
+是同一类问题：**声明比实际强**。
+
+已补 `docs/rules.md` §9.9（全字段一览）/ §9.10（`levels` 单位随市场而异）/
+§9.11（`config_version` 守的是回放入口）。
+
+### 门禁的四条
+
+| 用例 | 拦什么 |
+|---|---|
+| `test_frozen_config_matches_pinned_snapshot` | 改了字段/默认值却没走升级流程（报错里写清三步） |
+| `test_every_frozen_param_is_documented_in_rules_md` | **新增参数忘了写进规则文档**（本次就靠它逮到 7 个） |
+| `test_schema_version_is_pinned_and_matches_snapshot` | `SCHEMA_VERSION` 与钉子漂移（否则回放守卫永远误伤或永远失效） |
+| `test_config_version_cannot_be_overridden_by_data` | fixture 自称 `v99` 绕过 v0 契约 |
+
+第 2 条是关键：**「同步文档」也不靠自觉，而是被机械检查**。

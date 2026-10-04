@@ -515,3 +515,66 @@ source_revision
   甚至嵌套的中枢，破坏该前提并重复计入同一笔。
 - **交叉验证**：修正后 CPT 中枢的区间宽与纳入笔数在 3 个真实 fixture 上与 czsc
   一致（含 fixture1 的 `[151.0, 66.5, 17.2]` / `[38, 6, 5]` 逐项相同）。
+
+### 9.9 `RulesConfig` 字段一览（R45 补）
+
+`cpt/domain/config.py::RulesConfig` 的**全部字段与默认值**。此前本文只零散提到
+其中 4 个（`zs_wzgx` / `divergence_compare` / `min_elements_for_higher_bi` /
+`min_bi_len`），**另外 7 个从未落进文档**，而 `config.py` 声称「字段语义详见本文 §9」——
+属于**声明比实际强**（与 web 层的幽灵接口、R45 那批「注释与代码不一致」同类）。
+R45 由 `tests/test_domain_frozen_contract.py` 的门禁逮出并补齐。
+
+| 字段 | 默认 | 含义 | 备注 |
+|---|---|---|---|
+| `contain_direction` | `forward` | 包含处理的方向（向后 vs 向前） | 与 czsc `包含处理` 对齐 |
+| `fx_qy_middle` | `True` | 分型取**中间** K 线 | |
+| `fx_qj_ck` | `True` | 分型间做穿越检查 | |
+| `bi_type_new` | `True` | 用「**新笔**」口径（非老笔） | |
+| `zs_wzgx` | `"zgd"` | 中枢位置关系：高点比 `zg`、低点比 `zd` | §9.5 |
+| `zs_level_count` | `1` | 中枢级别数 | |
+| `min_elements_for_higher_bi` | `5` | 高级别新笔最少**低级别结构元素**数 | §9.7，量纲≠下面那个 |
+| `min_bi_len` | `6` | 底层笔最少跨度，量纲＝**去包含后 K 线根数** | §9.8，与上面**不可混用** |
+| `macd_fast` | `12` | MACD 快线 | |
+| `macd_slow` | `26` | MACD 慢线 | |
+| `macd_signal` | `9` | MACD 信号线 | |
+| `divergence_compare` | `"area"` | 背驰比较：MACD **柱面积** | §9.6 |
+| `levels` | `(5, 30)` | 级别链 | ⚠️ **单位按市场而异**，见下 |
+| `config_version` | `"v0"` | 口径版本号，**只跟随代码** | 见下 |
+
+### 9.10 `levels` 的单位按市场而异（最容易讲错的一条）
+
+`levels` 的元素**不是**一律分钟数：
+
+- **加密侧**：单位是**分钟**。`levels=(5, 30)` 即「5 分钟级别 / 30 分钟级别」。
+- **A 股侧**：数据源是**日线**（`public.daily_bar`），`levels=(5, 30)` 读作
+  **「日线级别 / 日线之上的高级别」**。
+
+⚠️ 把 A 股的 `level=5` 讲成「5 分钟级别」是 R28-9 **真实发生过并已上生产**的 bug：
+域内计算只比较 level 的相对大小，`5` 在两个市场都能跑通，**测试与 CI 全绿**，
+错的只有标签 —— 而错误的标签会被 LLM 当成结论讲给人。R28-9 修了消费端
+（`domain/levels.py` + 提示词），`tests/test_domain_semantic_contract.py`
+是它的回归守卫。
+
+**给「级别」下标签时一律走 `cpt.domain.levels.level_label(market, level)`，不要自己换算。**
+
+### 9.11 `config_version` 守的是回放入口，不是全局版本闸门（R45 更正）
+
+`RulesConfig` 的「冻结」实际由**三套互不交叉**的机制分担：
+
+| 机制 | 守什么 | 谁在读 |
+|---|---|---|
+| `config_version` | **回放 fixture** 反序列化时拒收异版本 | 仅 `from_dict`（`replay.py`） |
+| `reproducibility.config_hash` | 运行历史的「换参数了」比对 | `run_metric` |
+| `reproducibility.rules_version` | 快照元数据对外展示 | 前端 |
+
+两点必须知道：
+
+1. **在线快照的顶层 `config` 是空的**（只有 `empty_ashare_snapshot` 会填）。
+   所以 `config_version` 根本不在线上快照里，只在回放这条路上有意义。
+2. `SCHEMA_VERSION` 硬编码且 `from_dict` 会 `pop` 掉数据里传入的同名字段 ⇒
+   **这个版本号永远不会变**。改了参数而不同步它，旧 fixture 照样通过校验被回放，
+   **没有任何提示**。
+
+**所以「改参数必须升版本」这条纪律是被门禁强制的，不是靠自觉** ——
+见 `tests/test_domain_frozen_contract.py`：改了字段/默认值而不同步
+`SCHEMA_VERSION` + 本节 + 该钉子，CI 会红并说明三步该做什么。
