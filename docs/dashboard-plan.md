@@ -9,6 +9,11 @@
 
 Dashboard 默认只读，不实现：
 
+> ⚠️ **R45 更正**：本节「默认只读」已**不成立** —— R20 之后增加了两个
+> **写接口**（A 股自选增删、LLM 规则解释提交）。
+> `docs/dashboard-final-acceptance.md:13` 早已记过这件事，本文漏了同步。
+> 当前写接口及其约束见 `docs/web-api-reference.md`。
+
 - 下单、撤单、交易指令；
 - 账户余额、杠杆和持仓管理；
 - 浏览器端 API Key / Secret 管理；
