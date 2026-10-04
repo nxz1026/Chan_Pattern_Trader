@@ -320,3 +320,42 @@ def test_ashare_module_has_its_own_credential_stripper() -> None:
     body = body[: body.find("\n    }") + 6]
     assert 'url.username = ""' in body
     assert 'url.password = ""' in body
+
+
+def test_every_fetch_exit_goes_through_safe_url() -> None:
+    """**所有** fetch 出口都必须过 ``safeFetchUrl`` / ``safeUrl``。
+
+    R45 补的回归：首次修复只覆盖了 ``dashboard.js`` 里的 5 个出口，
+    漏了 4 个 —— ``canvas_d``（画布 D）、``inspection_panel``（巡检面板）、
+    ``market_a_share`` ×2（热门池 / 自选增删），以及 ``dashboard.js`` 自己的
+    LLM explain POST。实测在带凭据的页面上这 4 个会各自抛
+    "Request cannot be constructed from a URL that includes credentials"。
+    """
+    import re
+
+    offenders: list[str] = []
+    for name in ("dashboard.js", "canvas_d.js", "inspection_panel.js", "market_a_share.js"):
+        text = (ROOT / "dashboard" / name).read_text(encoding="utf-8")
+        for line_no, line in enumerate(text.splitlines(), 1):
+            if "fetch(" not in line or line.lstrip().startswith(("*", "//", ".")):
+                continue
+            if "safeFetchUrl" in line or "safeUrl" in line:
+                continue
+            offenders.append(f"  dashboard/{name}:{line_no}: {line.strip()[:80]}")
+    assert not offenders, "有 fetch 出口绕过了凭据消毒：\n" + "\n".join(offenders)
+
+
+def test_other_files_can_reach_the_shared_helper() -> None:
+    """另外三个文件必须能拿到 ``safeFetchUrl``，且拿不到时有自算的兜底。
+
+    它们是独立的 ``<script defer>``，执行顺序不保证在 ``dashboard.js`` 之后，
+    所以不能假设 ``window.CPTDashboard`` 一定就绪。
+    """
+    for name in ("canvas_d.js", "inspection_panel.js", "market_a_share.js"):
+        text = (ROOT / "dashboard" / name).read_text(encoding="utf-8")
+        assert "CPTDashboard && window.CPTDashboard.safeFetchUrl" in text, (
+            f"dashboard/{name} 没有尝试复用 dashboard.js 的 safeFetchUrl"
+        )
+        assert 'url.username = ""' in text, f"dashboard/{name} 缺少自算兜底"
+    dash = (ROOT / "dashboard" / "dashboard.js").read_text(encoding="utf-8")
+    assert "safeFetchUrl," in dash, "safeFetchUrl 没有暴露到 window.CPTDashboard"

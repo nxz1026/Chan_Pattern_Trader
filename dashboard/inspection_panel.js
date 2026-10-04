@@ -28,6 +28,24 @@
     return `${(m2 && m2[1]) || ""}/api/dashboard`;
   }
 
+  // ⚠️ R45：与 dashboard.js 的 safeFetchUrl 同源。dashboard.js 是 defer 脚本，
+  // 本文件可能先于它执行，所以拿不到时**自己算一遍**（规则与那边一致：
+  // 解析后清空 username/password），而不是退回裸 fetch。
+  function safeUrl(endpoint) {
+    const shared = window.CPTDashboard && window.CPTDashboard.safeFetchUrl;
+    if (typeof shared === "function") return shared(endpoint);
+    try {
+      const url = new URL(endpoint, window.location.href);
+      if (url.username || url.password) {
+        url.username = "";
+        url.password = "";
+      }
+      return url.toString();
+    } catch (error) {
+      return endpoint;
+    }
+  }
+
   const API = `${apiBase()}/inspection?limit=60`;
   let lastKey = null;
 
@@ -162,7 +180,9 @@
 
   async function loadInspection() {
     try {
-      const resp = await fetch(API, { headers: { Accept: "application/json" } });
+      // ⚠️ R45：走 safeFetchUrl。相对路径在**带凭据的页面**上会继承 URL 里的
+      // user:pwd@，而 ``fetch`` 按规范拒绝带凭据的 URL ⇒ 整块巡检面板降级。
+      const resp = await fetch(safeUrl(API), { headers: { Accept: "application/json" } });
       const body = await resp.json();
       renderInspection(body);
     } catch (err) {

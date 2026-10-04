@@ -63,6 +63,24 @@
     return `${base}/a-share`;
   }
 
+  // ⚠️ R45：与 dashboard.js 的 safeFetchUrl 同源。相对路径在**带凭据的页面**上
+  // 会继承 URL 里的 user:pwd@，而 ``fetch`` 按规范拒绝带凭据的 URL
+  // ⇒ 热门池与自选增删静默降级（R45 首次修复漏了这两个出口）。
+  function safeUrl(target) {
+    const shared = window.CPTDashboard && window.CPTDashboard.safeFetchUrl;
+    if (typeof shared === "function") return shared(target);
+    try {
+      const url = new URL(target, window.location.href);
+      if (url.username || url.password) {
+        url.username = "";
+        url.password = "";
+      }
+      return url.toString();
+    } catch (error) {
+      return target;
+    }
+  }
+
   function install(dashboard) {
     const root = q("[data-testid=dashboard-root]");
     if (!root) return null;
@@ -313,7 +331,9 @@
 
     async function loadPool() {
       try {
-        const response = await fetch(`${state.base}/pool`, { headers: { Accept: "application/json" } });
+        const response = await fetch(safeUrl(`${state.base}/pool`), {
+          headers: { Accept: "application/json" },
+        });
         if (!response.ok) throw new Error(`HTTP ${response.status}`);
         state.pool = await response.json();
       } catch (error) {
@@ -338,7 +358,7 @@
       const verb = method === "POST" ? "保存" : "移除";
       const url = `${state.base}/watchlist?code=${encodeURIComponent(code)}`;
       try {
-        const response = await fetch(url, {
+        const response = await fetch(safeUrl(url), {
           method,
           // 服务端（审计 M1）要求 application/json：声明 json 的跨站请求会触发
           // CORS 预检，抬高 CSRF 门槛。

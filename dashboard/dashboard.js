@@ -1353,7 +1353,7 @@
 
     const button = q("[data-testid=llm-explain-selected]");
     if (button) button.disabled = true;
-    return fetch(`${DASHBOARD_BASE()}/a-share/llm/explain?code=${encodeURIComponent(symbol)}`, {
+    return fetch(safeFetchUrl(`${DASHBOARD_BASE()}/a-share/llm/explain?code=${encodeURIComponent(symbol)}`), {
       method: "POST",
       headers: { "Content-Type": "application/json", Accept: "application/json" },
       body: JSON.stringify(selection.raw),
@@ -4847,6 +4847,11 @@
     canvasList,
     setCanvas,
     redraw: drawChart,
+    // ⚠️ R45 补暴露：另外三个文件（canvas_d / inspection_panel / market_a_share）
+    // 的 fetch 也必须走 safeFetchUrl —— 相对路径在**带凭据的页面**上会继承
+    // URL 里的 user:pwd@，撞 "Request cannot be constructed from a URL that
+    // includes credentials"。这次修复漏了它们，统一出口在这里。
+    safeFetchUrl,
   };
 
   boot();

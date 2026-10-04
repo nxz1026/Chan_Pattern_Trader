@@ -52,6 +52,26 @@
     return String(raw).replace(/\/dashboard\/snapshot.*$/, "/canvas/wbt");
   }
 
+  // ⚠️ R45：与 dashboard.js 的 safeFetchUrl 同源。相对路径在**带凭据的页面**上
+  // 会继承 URL 里的 user:pwd@，而 ``fetch`` 按规范拒绝带凭据的 URL
+  // ⇒ 画布 D 直接报 "Request cannot be constructed from a URL that includes
+  // credentials"。dashboard.js 是 defer 脚本，可能晚于本文件，所以拿不到
+  // CPTDashboard 时自己算一遍，而不是退回裸 fetch。
+  function safeUrl(target) {
+    const shared = window.CPTDashboard && window.CPTDashboard.safeFetchUrl;
+    if (typeof shared === "function") return shared(target);
+    try {
+      const url = new URL(target, window.location.href);
+      if (url.username || url.password) {
+        url.username = "";
+        url.password = "";
+      }
+      return url.toString();
+    } catch (error) {
+      return target;
+    }
+  }
+
   // A 股模式必须把 code 透给服务端：本路由是服务端取数的，不带 code 就会拿
   // 加密快照 —— 结果是 A/B/C 画 A 股、D 画 BTCUSDT（R17-3 审计实测 579 vs 123）。
   function marketQuery() {
@@ -271,7 +291,7 @@
 
     const url = `${endpoint()}?start_ms=${view.windowStart}&end_ms=${view.windowEnd}${marketQuery()}`;
     window
-      .fetch(url)
+      .fetch(safeUrl(url))
       .then((response) => (response.ok ? response.json() : Promise.reject(new Error(`HTTP ${response.status}`))))
       .then((payload) => {
         if (node.dataset.canvasToken !== token) return; // 已被下一次重绘取代
