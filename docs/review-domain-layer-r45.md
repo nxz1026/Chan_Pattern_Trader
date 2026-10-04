@@ -81,3 +81,58 @@ LLM 读到的就是错的）。
 
 R30 立的 `tests/test_domain_semantic_contract.py`（5 个用例）仍在，
 本轮未新增测试 —— 因为**没找到需要新增覆盖的缺陷**。
+
+---
+
+## 5. 补：R45 第二轮 —— 「冻结」到底护住了什么
+
+owner 指示「先解开冻结，对齐功能 + 修 bug」。逐条查了仓里两处**契约级**冻结
+（`@dataclass(frozen=True)` 是不可变数据类，属另一回事，不算），
+结论是：**冻结没有挡住任何修复，但它的声明高估了自己的保护范围。**
+
+### 两处契约冻结的现状
+
+| 契约 | 声称 | 核查结果 |
+|---|---|---|
+| `RulesConfig` v0 | 「与 `docs/rules.md` §9 冻结，改动走 v0.x 流程」 | 四个参数与 rules.md **逐条一致**；`SCHEMA_VERSION="v0"` 硬编码 |
+| export schema v1 | 「冻结，三方契约」 | `schema_version` 前后端一致（都是 `dashboard.v2`）；export 自身是 `v1` |
+
+### 但「冻结」实际由**三套互不交叉**的机制分担
+
+| 机制 | 守什么 | 谁在读 |
+|---|---|---|
+| `SCHEMA_VERSION` | **回放 fixture** 反序列化时拒收异版本 | 仅 `from_dict`（`replay.py:126`） |
+| `reproducibility.config_hash` | 运行历史的「换参数了」比对 | `run_metric.py:94` **确实在比对** |
+| `reproducibility.rules_version` | 快照元数据对外展示 | 前端 |
+
+### 两个实测发现（已写进 `config.py` docstring）
+
+1. **在线快照的顶层 `config` 是空的**（`None`）。`config` 只由
+   `empty_ashong_snapshot` 填，**真实有数据的路径不填**。所以
+   `config_version` 根本不在线上快照里，它只在回放这条路上有意义。
+2. **`SCHEMA_VERSION` 永远不会变** —— 硬编码 `"v0"`，且 `from_dict` 会
+   `pop` 掉传入的同名字段。于是「改参数必须升版本」这条纪律**没有任何机制强制**：
+   改了参数、版本号还是 `v0`，旧 fixture 照样通过校验被回放，无任何提示。
+
+### 因此 R45 的动作是「**把冻结说准**」，不是拆掉它
+
+**没有证据支持解除任何一处冻结** —— 真正检测漂移的 `config_hash` 在正常工作，
+拆掉 `from_dict` 的守卫只会**减少**安全性。改成把声明改准确：
+
+> `config_version` 是**回放入口的单点守卫**，不是全局版本闸门。
+> 改参数时**必须手工**同步 `config_version`，否则回放静默用旧口径。
+
+这与 web 层那三个幽灵接口是同一类问题（**声明比实际强**），
+也与 R30 立文档断言门禁的动机一致。
+
+### 一个建议（未做，需要 owner 决定）
+
+`config_version` 恒为 `"v0"` 让这道守卫**永远不会触发**。若要让「升版本」这条
+纪律真正被强制，可选：
+
+- 从 `RulesConfig` 的**字段与取值**派生一个版本（改任一参数即变）——
+  改动小，但会让 fixture 因参数微调而全部失效；
+- 或保持现状，改为在 CI 里断言「改了 `RulesConfig` 字段就必须同时改
+  `SCHEMA_VERSION` 或 `docs/rules.md` §9」。
+
+**两者都有代价，属产品决策，本轮不动。**
