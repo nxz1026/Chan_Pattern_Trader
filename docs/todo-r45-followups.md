@@ -168,3 +168,27 @@
 
 `coverage` 是在 Oracle venv 里手工装的。**没进 `requirements-dev.txt`** ——
 因为那会给 CI 加一个包，需要 owner 同意。要接 CI 的话先定这个。
+
+---
+
+## 依赖：`coverage` —— 一段**我自己搞错了又纠正**的插曲
+
+owner 同意加覆盖率，于是我去查锁文件。第一眼
+`grep -n "pytest" requirements-dev.txt | head -8` 只看到一堆
+`# via pytest-cov` 注释 ⇒ 我断定「**`pytest-cov` 没被 pin，锁文件与 .in 不一致**」，
+并且**把这句错的判断写进了 `requirements-dev.txt` 的注释**。
+
+实际上 `pytest-cov==7.1.0` 就在文件第 74 行。**锁文件完全正常** ——
+Oracle 上没装只是因为**那是生产 venv**，只装了部分 dev 依赖。
+
+⇒ 我从**截断的输出**下了结论，又一次。
+**已经撤回那段注释**（`git diff requirements-dev.txt` 为空）。
+
+真正的修法是**把 dev 依赖装齐**，不是改锁文件：
+
+```bash
+.venv/bin/pip install "pytest-cov==7.1.0"    # 已在 Oracle 装好
+.venv/bin/pip install "coverage[toml]==7.16.1"  # 与锁文件对齐
+```
+
+现在 `pytest --cov` 可用；`scripts/run_coverage.sh` 只依赖 `coverage` 本体。

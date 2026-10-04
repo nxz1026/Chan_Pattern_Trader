@@ -2107,3 +2107,21 @@ noscript p {
 .cpt-rec-llm { margin: 8px 0 0; padding: 8px 10px; border-left: 3px solid var(--color-accent);
   background: var(--color-accent-soft); font-size: 12px; border-radius: 0 4px 4px 0; }
 .cpt-rec-disc { margin: 8px 0 0; font-size: 11px; color: var(--color-text-muted); opacity: .8; }
+/* 数据不足态（R45 P0-2）：「观望」在两种情况下含义完全不同 ——
+   「没数据」和「确实没信号」不能长得一样。用**斜纹底 + 灰字**区分。 */
+.cpt-rec-action[data-action="unknown"] {
+  color: var(--color-text-muted);
+  background-image: repeating-linear-gradient(45deg,
+    transparent 0 5px, rgba(110, 119, 129, 0.16) 5px 10px);
+  border-radius: 4px; padding: 0 6px;
+}
+.cpt-rec-headline[data-quality="insufficient"] { color: var(--color-degraded); }
+/* 数据不足态（R45 P0-2）：「观望」在两种情况下含义完全不同 ——
+   「没数据」和「确实没信号」不能长得一样。用**斜纹底 + 灰字**区分。 */
+.cpt-rec-action[data-action="unknown"] {
+  color: var(--color-text-muted);
+  background-image: repeating-linear-gradient(45deg,
+    transparent 0 5px, rgba(110, 119, 129, 0.16) 5px 10px);
+  border-radius: 4px; padding: 0 6px;
+}
+.cpt-rec-headline[data-quality="insufficient"] { color: var(--color-degraded); }

@@ -33,12 +33,18 @@ from cpt.application.recommendation import (  # noqa: E402
 )
 
 
+#: 真实 A 股快照**总是**带 candles（本仓下限 30 根）。R45 加数据质量位之后，
+#: 早期那些「只放 signal 不放 candles」的夹具全被判成「数据不足」——
+#: 那是**夹具不真实**，不是代码错：真实路径上 candles 不会缺。
+#: ⇒ 默认给足 120 根，测信号逻辑的用例就不受数据质量位干扰；
+#:    测数据质量位的用例显式传自己的根数。
+_ENOUGH = [{"close": 1.0}] * 120
+
+
 def snap(signal: dict | None, candles: list | None = None) -> dict:
-    out: dict = {"schema_version": 1}
+    out: dict = {"schema_version": 1, "candles": list(candles if candles is not None else _ENOUGH)}
     if signal is not None:
         out["signal"] = signal
-    if candles is not None:
-        out["candles"] = candles
     return out
 
 
@@ -94,10 +100,12 @@ def test_divergence_is_surfaced() -> None:
 
 # ── 价格回退链 ────────────────────────────────────────────────
 def test_price_falls_back_to_last_close() -> None:
+    # ⚠️ 蜡烛**给足 120 根**（第一版只给 2 根，被数据质量位判成「不足」而拿不到价）
+    bars = [{"close": 10.0}] * 119 + [{"close": 12.5}]
     out = build_recommendation(
-        snap({"status": "confirmed", "signal_type": "first_buy"},
-             candles=[{"close": 10.0}, {"close": 12.5}])
+        snap({"status": "confirmed", "signal_type": "first_buy"}, candles=bars)
     )
+    assert out["data_quality"]["sufficient"] is True
     assert out["price"] == 12.5
 
 
@@ -131,6 +139,14 @@ def test_degrades_never_raises(bad) -> None:
     assert out["reason"]
 
 
+def test_snapshot_without_candles_is_insufficient() -> None:
+    """一条 candles 都没有 ⇒ 连「不足 N 根」都说不清，直接判不足。"""
+    out = build_recommendation(snap(None, []))
+    assert out["available"] is False
+    assert out["data_quality"]["bars"] == 0
+    assert out["data_quality"]["sufficient"] is False
+
+
 def test_non_dict_snapshot_degrades() -> None:
     assert build_recommendation([])["available"] is False  # type: ignore[arg-type]
 
@@ -140,3 +156,44 @@ def test_every_result_has_disclaimer() -> None:
     for s in (snap({"status": "confirmed", "signal_type": "first_buy", "price": 1.0}),
               snap(None)):
         assert "非投资建议" in build_recommendation(s)["disclaimer"]
+
+
+# ── 数据质量位：把「不知道」和「没有」分开（R45 P0-2）────────────
+def test_too_few_bars_says_data_insufficient_not_no_signal() -> None:
+    """⚠️ 核心：**K 线不足**时不能说「暂无明确结构信号」。
+
+    Oracle 上有 17 只新股落在 20 根这个区间 —— 它们原本和
+    「这只票确实没信号」显示**一字不差**，用户分不出「系统不知道」
+    和「系统知道没有」，而这两件事该有的动作完全不同。
+    """
+    out = build_recommendation(snap(None, candles=[{"close": 1.0}] * 20))
+    assert out["available"] is False
+    assert out["headline"] == "数据不足，暂无法判断"
+    assert "20 根" in out["reason"] and "30 根" in out["reason"]
+    assert out["data_quality"]["sufficient"] is False
+    assert out["data_quality"]["bars"] == 20
+
+
+def test_signal_present_but_bars_short_still_says_insufficient() -> None:
+    """**顺序不能反**：K 线不足时本来就不可能有可信信号，
+    先报「没有信号」等于把「不知道」说成「知道没有」。"""
+    out = build_recommendation(snap(
+        {"status": "confirmed", "signal_type": "first_buy", "price": 10.0},
+        candles=[{"close": 1.0}] * 5,
+    ))
+    assert out["headline"] == "数据不足，暂无法判断"
+    assert out["available"] is False
+
+
+def test_enough_bars_no_signal_says_no_signal() -> None:
+    """对照组：数据**够**但确实没信号 ⇒ 才说「暂无明确结构信号」。"""
+    out = build_recommendation(snap(None, candles=[{"close": 1.0}] * 120))
+    assert out["headline"] == "暂无明确结构信号"
+    assert out["data_quality"]["sufficient"] is True
+
+
+def test_exactly_min_bars_is_enough() -> None:
+    """边界：正好 30 根算够（与 factor_recompute 的门槛一致）。"""
+    out = build_recommendation(snap(None, candles=[{"close": 1.0}] * 30))
+    assert out["data_quality"]["sufficient"] is True
+    assert out["headline"] == "暂无明确结构信号"

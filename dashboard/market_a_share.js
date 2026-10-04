@@ -370,6 +370,16 @@
         }
         headEl.textContent = rec.headline || "";
         if (reasonEl) reasonEl.textContent = rec.reason || "";
+        // 数据质量位（R45 P0-2）：bars 不足时用**警示色**把动作词标出来 ——
+        // 「观望」在「没数据」和「确实没信号」两种情况下含义完全不同。
+        const q = rec.data_quality || {};
+        if (q.sufficient === false) {
+          actionEl.dataset.action = "unknown";
+          headEl.dataset.quality = "insufficient";
+        } else {
+          delete headEl.dataset.quality;
+        }
+        root.dataset.recBars = String(q.bars == null ? "" : q.bars);
         root.dataset.recAvailable = rec.available ? "1" : "0";
         if (rec.available) loadLlmSummary(rec);
       } catch (error) {

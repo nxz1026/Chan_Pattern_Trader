@@ -26,6 +26,7 @@ from __future__ import annotations
 from typing import Any, Final, Literal
 
 __all__ = [
+    "MIN_BARS",
     "ACTION_BUY",
     "ACTION_SELL",
     "ACTION_WATCH",
@@ -35,6 +36,12 @@ __all__ = [
 ]
 
 Action = Literal["buy", "sell", "watch", "hold"]
+
+#: 低于这么多根 K 线就**判不了结构** —— 与 ``factor_recompute`` 的 30 根门槛同源。
+#: R45 实测：Oracle 上有 **17 只**新股落在这个区间，它们在推荐卡上原本显示
+#: 「观望 / 暂无明确结构信号」—— 与「这只票确实没信号」**一字不差**。
+#: 用户无法区分「系统不知道」和「系统知道没有」，而这两件事该有的动作完全不同。
+MIN_BARS: Final[int] = 30
 
 ACTION_BUY: Final[str] = "buy"
 ACTION_SELL: Final[str] = "sell"
@@ -83,9 +90,20 @@ def build_recommendation(snapshot: dict[str, Any]) -> dict[str, Any]:
     if not isinstance(snapshot, dict):
         return _degraded("快照不是对象")
 
+    # ⚠️ **先看数据够不够，再谈有没有信号。**
+    # 顺序不能反：K 线不足时本来就不可能有可信信号，
+    # 先报「没有信号」会把「不知道」说成「知道没有」。
+    quality = _data_quality(snapshot)
+    if not quality["sufficient"]:
+        return _degraded(
+            f"K 线仅 {quality['bars']} 根，不足 {MIN_BARS} 根 —— "
+            "数据不足，暂无法判断结构",
+            quality=quality,
+        )
+
     signal = snapshot.get("signal")
     if not isinstance(signal, dict) or not signal:
-        return _degraded("当前没有信号")
+        return _degraded("当前没有信号", quality=quality)
 
     status = str(signal.get("status") or "").strip()
     sig_type = str(signal.get("signal_type") or "").strip()
@@ -101,13 +119,15 @@ def build_recommendation(snapshot: dict[str, Any]) -> dict[str, Any]:
     if status == "invalidated":
         # ⚠️ 也要带 price —— 失效**发生在某个价位**上，那个价是有用的上下文
         # （补测试时发现这里把 price 漏了，界面上会显示「—」而不是价位）。
-        return _build(
+        out = _build(
             ACTION_HOLD,
             "信号已失效",
             f"{_label(sig_type)}已失效（不取反方向）—— 之前的结构判断不再成立。",
             price=_num(signal.get("price")) or _last_close(snapshot),
             status=status, signal_type=sig_type, divergence=divergence,
         )
+        out["data_quality"] = _data_quality(snapshot)
+        return out
 
     action = _TYPE_TO_ACTION[sig_type]
     rank = _STATUS_RANK[status]
@@ -128,10 +148,23 @@ def build_recommendation(snapshot: dict[str, Any]) -> dict[str, Any]:
     if price is not None:
         reasons.append(f"参考价 {price:.2f}")
 
-    return _build(
+    out = _build(
         action, headline, _join(reasons), price=price,
         status=status, signal_type=sig_type, divergence=divergence,
     )
+    out["data_quality"] = _data_quality(snapshot)
+    return out
+
+
+def _data_quality(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """数据够不够算结构。**「不知道」和「没有」必须能分开。**"""
+    candles = snapshot.get("candles")
+    n = len(candles) if isinstance(candles, list) else 0
+    return {
+        "bars": n,
+        "min_bars": MIN_BARS,
+        "sufficient": n >= MIN_BARS,
+    }
 
 
 def _last_close(snapshot: dict[str, Any]) -> float | None:
@@ -170,20 +203,23 @@ def _build(
         "status": status,
         "signal_type": signal_type,
         "divergence_status": divergence,
+        "data_quality": {"bars": 0, "min_bars": MIN_BARS, "sufficient": True},
         "disclaimer": "结构状态翻译，非投资建议",
     }
 
 
-def _degraded(why: str) -> dict[str, Any]:
+def _degraded(why: str, *, quality: dict[str, Any] | None = None) -> dict[str, Any]:
     return {
         "available": False,
         "action": ACTION_HOLD,
         "action_label": ACTIONS[ACTION_HOLD],
-        "headline": "暂无明确结构信号",
+        "headline": "数据不足，暂无法判断" if (quality or {}).get("sufficient") is False
+        else "暂无明确结构信号",
         "reason": why,
         "price": None,
         "status": "",
         "signal_type": "",
         "divergence_status": "",
+        "data_quality": quality or _data_quality({}),
         "disclaimer": "结构状态翻译，非投资建议",
     }
