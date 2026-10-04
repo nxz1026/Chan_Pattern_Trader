@@ -2357,16 +2357,25 @@
       const target = q(`[data-testid=parity-chart-${side}]`);
       if (!target) return;
       target.replaceChildren();
-      const svg = createSvg("svg", { class: "cpt-parity-svg", viewBox: "0 0 640 150", role: "img", "aria-label": `${side} parity elements` });
+      // ⚠️ viewBox 高度原先**写死 150**，而布局是 24 列 × 35 行距 + 半径 7：
+      // 元素超过 72 个（3 行）时第 4 行 cy=150，圆心+半径=157 **越界 7px 被裁掉**。
+      // 实测 Oracle 上 CPT 侧 84 个点 ⇒ 第 4 行正好被切一半（R45 截图抓到）。
+      // ⇒ 高度按实际行数算，别写死。
+      const PER_ROW = 24;
+      const ROW_H = 35;
+      const R = 7;
+      const visible = series.filter((item) => item[side] !== null && item[side] !== undefined);
+      const rows = Math.max(1, Math.ceil(visible.length / PER_ROW));
+      const vbH = 45 + rows * ROW_H + R;
+      const svg = createSvg("svg", { class: "cpt-parity-svg", viewBox: `0 0 640 ${vbH}`, role: "img", "aria-label": `${side} parity elements` });
       const title = createSvg("text", { x: 8, y: 18, class: "cpt-parity-title" }, side.toUpperCase());
       svg.appendChild(title);
-      const visible = series.filter((item) => item[side] !== null && item[side] !== undefined);
       visible.forEach((item, index) => {
         const ref = item[side] || {};
-        const x = 12 + (index % 24) * 26;
-        const y = 45 + Math.floor(index / 24) * 35;
+        const x = 12 + (index % PER_ROW) * 26;
+        const y = 45 + Math.floor(index / PER_ROW) * ROW_H;
         const status = item.status || "matched";
-        const node = createSvg("circle", { cx: x, cy: y, r: 7, class: `parity-${status}`, tabindex: "0", role: "button", "data-parity-kind": item.kind, "data-parity-status": status });
+        const node = createSvg("circle", { cx: x, cy: y, r: R, class: `parity-${status}`, tabindex: "0", role: "button", "data-parity-kind": item.kind, "data-parity-status": status });
         const selectParity = () => {
           root.dataset.paritySelection = `${item.kind}:${status}:${JSON.stringify(ref)}`;
           const detail = q("[data-testid=parity-selection]");
@@ -2388,6 +2397,33 @@
         svg.appendChild(node);
       });
       target.appendChild(svg);
+      // 图例：三个状态色是 R45 补的样式（原先三态全是默认黑，等于没配色），
+      // 但**没有图例的话颜色是歧义的** —— 观者无从知道红点代表「缺」还是「多」。
+      // 放在最后一个图后面，且**同时统计真实数量** —— 数字比颜色更有用。
+      // 四态，别只数三个 —— 漏一个就等于「有出入的元素数量对不上」
+      // （实测 Oracle 上 mismatched 真有值，R45 第一次只写了三个）。
+      const counts = { matched: 0, missing: 0, extra: 0, mismatched: 0 };
+      visible.forEach((item) => {
+        const key = item.status || "matched";
+        if (key in counts) counts[key] += 1;
+      });
+      const legend = document.createElement("div");
+      legend.className = "cpt-parity-legend";
+      [
+        ["matched", "一致"],
+        ["mismatched", "有出入"],
+        ["missing", "ORACLE 缺"],
+        ["extra", "ORACLE 多"],
+      ].forEach(([key, label]) => {
+        const chip = document.createElement("span");
+        chip.className = "cpt-parity-legend-item";
+        const dot = document.createElement("i");
+        dot.className = `parity-${key}`;
+        chip.appendChild(dot);
+        chip.appendChild(document.createTextNode(`${label} ${counts[key]}`));
+        legend.appendChild(chip);
+      });
+      target.appendChild(legend);
     });
   }
 

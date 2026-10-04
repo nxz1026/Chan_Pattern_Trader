@@ -148,10 +148,32 @@
       `<script>window.__cptPhase=${JSON.stringify(phase || "report")};` +
       DIAG_SCRIPT +
       "</script>" +
-      // bootstrap：wbt 模板用了 .container / .nav-tabs / .table / .bi 图标，
+      // bootstrap：wbt 模板用了 .container / .nav-tabs / .table，
       // 它的 CDN 链接被服务端剥掉了，这里补本地副本（离线可用）。
       `<link rel="stylesheet" href="${base}bootstrap.min.css" onerror="parent.postMessage({__cptD:1,kind:'vendor-fail',phase:window.__cptPhase,name:'bootstrap.min.css',msg:'CSS 加载失败'},'*')">` +
-      `<link rel="stylesheet" href="${base}bootstrap-icons.css" onerror="parent.postMessage({__cptD:1,kind:'vendor-fail',phase:window.__cptPhase,name:'bootstrap-icons.css',msg:'CSS 加载失败'},'*')">` +
+      // ⚠️ **这里原来还引了 `bootstrap-icons.css`，现已删除**（R45 无头浏览器实测）。
+      //
+      // 那行是**双重无用**，而且每渲染一次画布 D 就产生 4 条 console 错误：
+      //
+      // 1. **加载不成功**：本 iframe 是 `sandbox="allow-scripts"`，
+      //    按 R28-11 的设计**刻意不带** `allow-same-origin`（旧组合有已知逃逸：
+      //    帧内脚本能 `frameElement.removeAttribute("sandbox")` 再重载，
+      //    从而拿到父页 origin）。所以 srcdoc 文档的 origin 是**不透明源 `"null"`**，
+      //    而**字体是 CORS 受限资源** ⇒ 每次都被拦：
+      //      Access to font at '.../bootstrap-icons.woff2' from origin 'null'
+      //      has been blocked by CORS policy
+      //    + 两条 `Failed to load resource: net::ERR_FAILED`。
+      //
+      // 2. **就算能加载也没人用**：对 `references/wbt/` 全量 grep，
+      //    `bi-*` 图标类出现数为 **0**。原注释写的「wbt 模板用了 … .bi 图标」
+      //    对当前锁定的 wbt 0.9.1 **不成立**。
+      //
+      // ⇒ 留着它是有害的：它**看起来**像「图标能用」，实际永远不能。
+      //
+      // ⚠️ 如果将来 wbt 模板真的开始用图标字体，**不能**把
+      // `allow-same-origin` 加回去（那是 R28-11 堵掉的逃逸），
+      // 正确做法是把字体**内联成 `data:` URI** 塞进 CSS ——
+      // data: URI 不受 CORS 约束。
       `<style>${LOCAL_CSS}</style>` +
       (css ? `<style>${css}</style>` : "") +
       vendorScript(`${base}plotly-finance.min.js`, "plotly") +
@@ -209,7 +231,20 @@
       : message.kind;
     const text = `${mark} ${message.name || ""}${message.msg ? " — " + message.msg : ""}`;
     node.dataset.canvasDiag = (node.dataset.canvasDiag ? node.dataset.canvasDiag + " | " : "") + text;
-    let box = q("[data-testid=canvas-d-diag]");
+    // ⚠️ 这里原来写成 `q("[data-testid=canvas-d-diag]")`，而**本文件从头到尾没有
+    // 定义过 `q`**（另外三个前端文件各自有本地的 `q` 助手，本文件没有）
+    // ⇒ 每次诊断到达都抛 `ReferenceError`。
+    //
+    // **后果不是「诊断偶尔不显示」，而是「诊断永远不显示」**：上一行
+    // `node.dataset.canvasDiag` 确实写进去了，但这一行就抛了，
+    // 下面的 `createElement` / `appendChild` / `textContent` 永远到不了。
+    // 而这正是「wbt 的 vendor 脚本加载失败」时唯一会把原因显示到屏幕上的路径 ——
+    // 报错信息被自己的 ReferenceError 吞掉了（R45 无头浏览器实测抓到）。
+    //
+    // 用 `node.querySelector` 而不是 `document.querySelector`：
+    // 框是 append 到 `node` 上的，查找范围应当和 append 目标一致，
+    // 否则页面上有多个画布节点时，第一个的框会被第二个抢走。
+    let box = node.querySelector("[data-testid=canvas-d-diag]");
     if (!box) {
       box = document.createElement("pre");
       box.className = "cpt-d-diag";

@@ -1729,6 +1729,42 @@ noscript p {
 .mode-switch button[aria-pressed="true"] { color: var(--color-text); border-color: var(--color-accent); background: var(--color-accent-soft); }
 .cpt-parity-svg [data-parity-selected="true"] { stroke: var(--color-accent); stroke-width: 3; }
 .cpt-chart-hit[data-parity-anchor="true"] { stroke: var(--color-accent); stroke-width: 2; }
+
+/* ------------------------------------------------- CPT / ORACLE 差异点配色
+ *
+ * ⚠️ **R45 无头浏览器实测补的**：`dashboard.js` 里每个结构元素画一个可点击圆点，
+ * class 是 `parity-${status}`，status 取值就是
+ * `matched` / `missing` / `extra`（`cpt/application` 侧产出的三态）。
+ *
+ * 但**这三条 CSS 规则一直不存在** —— 只有上面那条 `[data-parity-selected]`
+ * 有样式。于是所有圆点都用 SVG 的**默认填充黑**渲染，
+ * **匹配 / 缺失 / 多余长得完全一样**。
+ *
+ * ⇒ 后果不是「配色不好看」，而是**这个面板传达不了任何信息**：
+ * 它的全部意义就是一眼看出 CPT 和 ORACLE 哪儿对不上，
+ * 而现在 60 个点和 3 个点、0 个差异和 30 个差异**看起来一模一样**。
+ * 点还是能点（交互没坏），所以它**看起来是好的** ——
+ * 这比直接报错更难发现。
+ *
+ * 用既有的语义色变量，不引入新色：matched 走 muted（不是错误，不该抢眼），
+ * missing 走 error（真缺），extra 走 degraded（有出入但不是错）。
+ */
+.cpt-parity-svg .parity-matched { fill: var(--color-text-muted); stroke: var(--color-text-muted); }
+.cpt-parity-svg .parity-missing { fill: var(--color-error); stroke: var(--color-error); }
+.cpt-parity-svg .parity-extra { fill: var(--color-degraded); stroke: var(--color-degraded); }
+/* ⚠️ **第四态，别漏**：status 实际是**四**个值
+ * （`cpt/application/dashboard_parity.py:44`：`matched | missing | extra | mismatched`）。
+ * 我第一版只按 grep 到的三个值写了样式，`mismatched` 的点落回 SVG 默认黑 ——
+ * 而它恰恰是**最值得看的一类**（两边都有，但字段对不上）。
+ * 舍入级差异按该模块的容差逻辑**不算** mismatched，所以它一出现就是真出入。
+ */
+.cpt-parity-svg .parity-mismatched { fill: var(--color-accent); stroke: var(--color-accent); }
+/* 三态的 title 也要可读：空心圈在深色下也要有边框 */
+.cpt-parity-svg .parity-title { fill: var(--color-text); font: 12px var(--font-mono); }
+.cpt-parity-svg circle[data-parity-kind] { cursor: pointer; }
+.cpt-parity-svg circle[data-parity-kind]:hover { opacity: 0.75; }
+.cpt-parity-svg circle[data-parity-kind]:focus-visible { outline: 2px solid var(--color-accent); }
+
 .cpt-crosshair-tooltip { position: absolute; z-index: 10; pointer-events: none; padding: 6px 8px; color: var(--color-text); background: var(--color-panel-strong); border: 1px solid var(--color-border); border-radius: 4px; font: 11px var(--font-mono); white-space: nowrap; }
 
 /* ------------------------------------------------- 时间范围选择（历史区间） */
@@ -2007,3 +2043,12 @@ noscript p {
   font-family: var(--font-mono);
   font-size: var(--font-size-xs);
 }
+
+/* CPT / ORACLE 差异图例（R45）—— 颜色 + 真实计数，比只上色多一层信息 */
+.cpt-parity-legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 6px 8px 0; font: 11px var(--font-mono); color: var(--color-text-muted); }
+.cpt-parity-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+.cpt-parity-legend-item i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
+.cpt-parity-legend-item i.parity-matched { background: var(--color-text-muted); }
+.cpt-parity-legend-item i.parity-missing { background: var(--color-error); }
+.cpt-parity-legend-item i.parity-extra { background: var(--color-degraded); }
+.cpt-parity-legend-item i.parity-mismatched { background: var(--color-accent); }
