@@ -214,3 +214,43 @@ plotly 于是按 0 宽容器绘制；而 iframe 内的补救逻辑
 ⇒ 下一步该做的是往这条通道补三个信号
 （`plot-ok` / `plot-throw` / `plot-size`），而不是盲改样式。
 **本轮不做** —— 它改的是 iframe 通信契约，值得单独一轮。
+
+---
+
+## 追加：帧内探针的**失败尝试**（已回退，记录以免重踩）
+
+**做法**：往 srcdoc 里追加一段探针脚本，包一层 `Plotly.newPlot`，
+用 `postMessage` 回报 `plot-throw` / `plot-size` / `plot-blank` / `plot-miss`。
+动机是对的 —— iframe 是不透明源，父页**读不到** `contentDocument`，
+不新增这条通道就永远说不清「图为什么没画」。
+
+**结果：直接把生产搞坏了。** 追加探针后：
+- 页面抛 `TypeError`，`str(e)` 就是**探针脚本全文**；
+- **画布 D 的标签按钮整个消失**（`A/B/C` 三个还在，`dMention: false`）。
+
+**处置**：`git checkout -- dashboard/canvas_d.js` 回到 `ff6f775`，
+重新部署，D 按钮恢复，console 归零。**生产当前是好的。**
+
+### 两件必须说清楚的事
+
+**1. 我没有定位到 TypeError 的确切原因 —— 不猜。**
+已排除：探针 JS 语法正确（`node --check` 过）、
+无提前闭合的 `</script`、无 `${}` 被父页模板提前求值、
+`url_safety.js` 不抛、message 监听只有一处。
+`name='TypeError'` 而 message 是整段脚本源码，这个组合我没见过，
+**没有可靠解释就不写成结论** —— 今天已经因为「拿猜的原因当结论」栽过两次。
+
+**2. 第一版探针的信号本身是错的（这个查清了）。**
+它数 `.nsewdrag` 当「图元数」并报「图元 220」——
+而 `.nsewdrag` 是 plotly **每个**图 div 都有的 resize 手柄，
+只要 `newPlot` 走到过就必然 ≥1。
+⇒ 「220 个图元」**不能证明 K 线画出来了**，而实测画面确实是白的。
+已改成数 `path.point-plot`（蜡烛）并报 SVG 尺寸 —— 但因上面那个 TypeError
+**未能实测验证**，所以这条改动没有保留。
+
+### 下次要做的话，方向
+
+不要再往 `srcdoc` 里塞**第 N+1 段**内联脚本。
+更稳的路子是：把探针逻辑**并进已有的片段脚本**（`inline` 那一段），
+或让 `reportDiag` 的既有通道复用已存在的 vendor `onload` 回调，
+而不是新增独立 `<script>`。**先在一份离线 srcdoc 上复现，再上生产。**
