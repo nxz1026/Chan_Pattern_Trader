@@ -6039,3 +6039,26 @@ llm/ 这层**有几处本来就做对了**，一并记下：`api_key` 用 `field
 `reference_chanlun` 只有 Protocol 与测试替身）。
 
 详见 `docs/review-adapters-layer-r45.md`。
+
+### 8. application/ 收口（32 文件全审完，3 个真 bug）
+
+| # | 位置 | 症状 |
+|---|---|---|
+| ① | `a_share_snapshot._try_on_demand_factors` | 注释写「DB 类问题不该在这里吞掉，交给外层」，代码却是 `return None` ⇒ **同一文件别处明文禁止的「把 DB 挂了报成缺因子」** |
+| ② | `a_share_snapshot` 补因子后重读失败 | 同上，且走到这里时因子已成功落库 ⇒ 失败几乎必然是 DB 问题 |
+| ③ | `canvas_wbt` 的 CDN 护栏 | 只认显式协议，**协议相对 URL**（`//cdn/x.js`）漏过去；而画布 D 正是「断网可用」的验收对象。且 `grep tests/` **零覆盖** |
+
+①② 两处的调用方**都没有 rollback** —— 共享连接会留在 aborted 态
+（`owns_client=False` 时是复用连接，一条 SQL 失败连锁毒掉后面所有查询）。
+
+**两轮模式化扫描对其余 27 个文件零命中**。确认干净的几处值得记：
+`_ensure_factors_and_persist` 自建 client + `finally` close（失败连接一次性）；
+`canvas_wbt` 进 HTML 的值全是数值/枚举、symbol 过了 `html.escape`；
+`dashboard_runs` 的 200MB 是**最坏预算**（实测进程 RSS 仅 75MB）。
+
+**我在这层错了两次**，比任何 bug 都值得记（`known-traps.md` #24）：
+1. `except` 块**内部**抛出的异常不会被兄弟 handler 接住 —— 我第一版修法
+   让异常直接逃出 `build_ashare_snapshot`，比原来更糟；
+2. **scp 静默失败**导致三轮「改完测试不对」，真因是远端跑的还是旧文件。
+
+详见 `docs/review-application-layer-r45.md`。

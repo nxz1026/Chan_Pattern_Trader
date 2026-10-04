@@ -77,7 +77,7 @@
 |---|---|
 | `_ensure_factors_and_persist` | 自建 client + `finally` close ⇒ 失败连接是一次性的，不需要 rollback。**设计得好** |
 | `MetricRecorder` 处的 except | 已被 R45 那轮修的 `run_metric.MetricRecorder.record`（写失败时 rollback）覆盖 |
-| `canvas_wbt` 的 HTML 注入 | 进 HTML 的值全是数值/枚举（`_num`/`_stamp`/"向上"），symbol/kind 过了 `html.escape(quote=True)` ⇒ **注入面处理正确** |
+| `canvas_wbt` 的 HTML 注入 | 进 HTML 的值全是数值/枚举，symbol/kind 过了 `html.escape(quote=True)` ⇒ **注入面正确** |
 | `dashboard_runs` 的 200MB 预算 | 注释里明说是「显式预算」；实测进程 RSS 仅 **75MB**（ring 未满），机器尚有 12GB 可用 ⇒ 现状无压力 |
 | 20~40 行的 `dashboard_*` 小文件 | 只读投影薄层，标注「已接线」，无可修逻辑 |
 | `build_ashare_snapshot` 其余 except | `:201`/`:223` 是**业务异常**（缺因子/无行情），`:247` 是纯计算校验 ⇒ 均不需要 rollback |
