@@ -76,3 +76,30 @@ python scripts/verify_public_contracts.py    # 外部契约（adapters 层）
   `/var/www/cpt-dashboard/` 提供，**不经** Python。改前端要同步那个目录，
   用 `deploy/dashboard-sync.sh`（带三层校验：仓库→部署目录→线上 HTTP）。
 - **认证**由 nginx `auth_basic` 做（`/etc/nginx/.htpasswd`），应用层不做认证。
+
+---
+
+## 附：四画布一致性契约的实测（2026-10-03）
+
+`dashboard/canvas_registry.js` 与 `dashboard.js` 写明「四个画布必须一致：
+结构元素数量两两相等」（R16-5 验收项）。R45 用 CDP 直连 chromium 实测（BTCUSDT）：
+
+| 画布 | library | candles | fractals | bis | zhongshus | trendTypes |
+|---|---|---:|---:|---:|---:|---:|
+| A 手写 SVG | — | 180 | 63 | 63 | 8 | 5 |
+| B | `lightweight-charts` | 180 | 63 | 63 | 8 | 5 |
+| C | `plotly-finance` | 180 | 63 | 63 | 8 | 5 |
+| D | `wbt.report.HtmlReportBuilder` | 180 | 63 | 63 | 8 | 5 |
+
+⇒ **五项共享计数四画布完全一致，契约成立。**
+
+两个必须知道的读法陷阱：
+
+1. **画布计数 ≠ API 计数**。API 侧 `/snapshot` 返回 `candles=600 / fractals=222 /
+   bis=221 / zhongshus=21 / trendTypes=9`，而画布侧是 `180 / 63 / 63 / 8 / 5`。
+   差额来自**可视窗口过滤**（`applyZoomWindow`，R16-5 加的）——
+   只画与当前窗口相交的结构。**两者本就不该相等**，脚本别拿它们互相比。
+2. **画布 D 多两个字段**：`pending` 与 `library`。D 是**异步渲染**（先取 wbt 报告
+   再写 iframe），`draw()` 在异步完成前就返回计数，所以带 `pending: true`。
+   `canvas_d.js` 里有注释记着为此踩过一次（`Object.assign` 把这两个字段混进
+   `counts`，首轮审计里 D 的计数多了两项）。审计脚本**必须只挑那五个键**。
