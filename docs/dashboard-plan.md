@@ -60,11 +60,23 @@ DashboardSnapshot
 
 ```text
 GET /api/dashboard/snapshot
-GET /api/dashboard/candles
-GET /api/dashboard/events
+GET /api/dashboard/candles     ← ⚠️ 未实现，已并入 /snapshot
+GET /api/dashboard/events      ← ⚠️ 未实现，已并入 /snapshot
 GET /api/dashboard/health
 GET /api/dashboard/export
 ```
+
+> ⚠️ **R45 核实更正（2026-10-03）**：上面这份接口清单是 **D0 阶段的计划**，
+> 与实现已经**不一致**，别拿它当现状读：
+>
+> - `/candles` 与 `/events` **从未作为独立接口存在**，两者的数据都并在
+>   `/api/dashboard/snapshot` 的顶层（实测该响应有 19 个顶层键，含
+>   `candles` / `events` / `overlays` / `parity` / …）。
+> - `/api/dashboard/stats` 出现在本文档的另一处，但**代码里没有**，
+>   `progress-log.md` R? 节记过一次「猜错 `/api/dashboard/stats` 路径得到 404」。
+>
+> **当前真实接口清单（27 条，R45 从 `cpt/web/` 实测抽取）见
+> `docs/web-api-reference.md`。**
 
 若仓库没有现成 HTTP 服务，D1 先交付可被 HTTP 层调用的 snapshot application service，不擅自引入完整 Web 框架。
 
