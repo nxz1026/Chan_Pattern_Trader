@@ -1,5 +1,14 @@
 # 交接文档：遗留问题修复（2026-09-25）
 
+> ## ✅ 本轮修复已完成并上线（R45 补记，2026-10-04）
+>
+> 本文的 A–E 五项修复均已落地。§3「剩余待办」里的 **F3-② 已随重构消失**
+> —— `grep _bar_to_dict cpt/` 现在零命中，两个实现合并了。
+> 其余去重项的现状统一看 `docs/duplication-triage.md`（**活文档**），
+> 本文不再承担该职责。
+>
+> ⚠️ 本文正文的代码/行号是 **2026-09-25 的快照**，后续已变；读结论别读数字。
+
 > **给下一个 AI 的一句话起手**：仓库 `/home/ubuntu/work/Chan_Pattern_Trader`（branch
 > `main`，HEAD `7676f3c`）的**工作区里有 13 改 + 2 新未提交**，是本轮"遗留问题都要修"
 > 的成果，**门禁与全量测试已全绿（460 passed / ruff 干净 / mypy 干净 / lint-imports 3
@@ -352,8 +361,10 @@ with psycopg.connect(**connection_kwargs()) as c, c.cursor() as cur:
 
 - `docs/audit/cpt-code-audit-20260925.md` —— 原始审核报告
 - `docs/audit/` 下另有验证报告（v2）与 `audit.json` 原始产物
-- `docs/pending-wiring.md` —— 待接线清单（16 个模块 / 981 行，**设计如此，不是缺陷**；
-  原写 919 是混用了"总行数"与"非空行数"两种口径，2026-09-25 排查已统一为 `wc -l`）
+- `docs/pending-wiring.md` —— 待接线清单（**R45 更正**：本文写作时是
+  16 个模块 / 981 行，但 **R22（2026-09-30）已接掉 9 个模块 + 3 个函数**，
+  R41 复核确认**现在只剩 1 项** —— `a_share_rules.py::t_plus_one_purchase_allowed`
+  仍无生产调用方。**别再按「16 个模块都是设计如此」来理解它。**）
 - `docs/audit/cpt-feature-review-and-deadcode-audit.md` —— 从仓库根目录移入，
   头部加了"历史快照"横幅（原先落后 65 个提交且位置扎眼，易被误当现状）
 - `docs/export-schema-v1.md` —— 本轮新增
