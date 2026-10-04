@@ -428,3 +428,55 @@ P0-1 还有 **160+ 个**生产路径函数覆盖率不足（`app._read_json_body
 `a_share_routes._names`、`adapters/a_share_factor.hot_pool_codes`、
 `app._latest_signal_statuses` …）。**这是量，不是质** ——
 建议按「生产 cron / HTTP 入口 / 外部接口」三类分批补，不要一次铺开。
+
+---
+
+## P0-1 补测第二、三批（2026-10-04 22:40）
+
+按「HTTP 入口 / 外部接口」两类补完。测试文件 **104 → 113**。
+
+### 第二批：HTTP 入口（8 例，`test_web_post_body_contract.py`）
+
+`app._read_json_body` 原本 36.8% —— 它是**所有 POST 路由的入口**，
+R45 新加的 `/a-share/llm/summarize` 就走它。
+
+5 条分支里 4 条是**拒绝**（长度非法 / 为零 / 超上限 / body 畸形），
+这类分支的特点是**正常路径天天跑、异常路径没人跑**。
+
+**不硬造 handler**（`BaseHTTPRequestHandler` 要 socket），
+而是沿用仓里已有的 `tests/conftest.py::served` —— **起真 server 打真请求**，
+与「测行为不 grep 源码」一致。
+
+⚠️ 顺带记一个**设计上的歧义**（不是 bug）：畸形 JSON 与空 body
+**回同一个错误码** `recommendation_required`。这是
+`_read_json_body` docstring 明确写的（「读不到或解析失败返回 None，
+调用方据此回自己的 400」）⇒ 契约保证的是**状态码**不是**错误码**。
+后果是客户端发垃圾会看到「recommendation 不能为空」，**误导**。
+本测试只钉状态码，歧义记在 docstring 里。
+
+### 第三批：外部接口（7 例，`test_external_lookups.py`）
+
+`a_share_routes._names`（45.5%，**我今天的摘要功能每次都调**）
+与 `a_share_factor.hot_pool_codes`（29.2%）。
+
+⚠️ **第一版我按「查不到要降级为空」给 `hot_pool_codes` 写测试 ——
+那是我的假设，不是它的契约。** 读完实现才发现它**根本没有异常处理**，
+DB 错误直接往上抛。
+
+而这是**对的**：它只被 `factor_recompute` / `golden_set` 两个**脚本**调用，
+脚本要靠它决定处理范围；DB 挂了却静默返回空池 = **只处理 0 只票却报「成功」**，
+那比崩掉糟得多。
+
+⇒ 钉的是「**去重 + 剥 `.SH`/`.SZ` 后缀 + 限量 + 出错不静默**」。
+
+> 这一条又是一次「**我以为的机制 vs 真实机制**」。
+> 如果我跳过读实现直接提交，就会「修」一个不存在的降级缺陷 ——
+> 把该抛异常的地方改成静默返回，**制造一个真 bug**。
+
+## 剩余
+
+`app._latest_signal_statuses`（38.5%）、
+`binance_futures._http_error_detail`（15.4%）、
+`wind_source.parse_corporate_actions`（42.9%）、`a_share_factor` 一批…
+**建议下一批只做「生产 cron」那一类**（3 个脚本的失败路径），
+它对线上影响最直接，外部接口的可以慢慢补。
