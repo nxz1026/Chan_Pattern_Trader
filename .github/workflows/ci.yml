@@ -75,6 +75,11 @@ jobs:
           # 这个管「**是不是还对得上**」—— 路径、符号、接口、表名、配置键、行号。
           # 第五轮全量扫描实测它一次抓到 1 处真漂移（architecture 说 72 个测试
           # 文件、实际 104）+ 1 个**零测试覆盖的生产 cron 作业**。
+          # 门禁⑧：看板 bundle 必须与源文件同步（R45 拆分）。
+          # 改了任何一个 dash-*.js 而忘了重跑构建器 ⇒
+          # **线上跑的是旧代码，而仓库里是新代码**，且没有任何东西会报警。
+          - name: Dashboard bundle in sync
+            run: python scripts/build_dashboard_bundle.py --check
           - name: Doc claims (full sweep)
             run: python scripts/check_all_claims.py
           # 门禁⑤：文档里的**计数**断言。计数是最容易悄悄腐坏的一类，

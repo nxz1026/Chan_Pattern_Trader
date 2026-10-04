@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tests.conftest import dashboard_js
 
 ROOT = Path(__file__).parents[1]
 
 
 def test_browser_contract_contains_accessible_parity_selection_and_readonly_http() -> None:
     html = (ROOT / "dashboard/index.html").read_text(encoding="utf-8")
-    js = (ROOT / "dashboard/dashboard.js").read_text(encoding="utf-8")
+    js = dashboard_js()
     http = (ROOT / "cpt/web/app.py").read_text(encoding="utf-8")
     assert 'data-testid="parity-selection"' in html
     assert 'data-testid="parity-chart-cpt"' in html

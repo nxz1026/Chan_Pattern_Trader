@@ -10,12 +10,13 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from tests.conftest import dashboard_js
 
 DASHBOARD = Path(__file__).resolve().parents[1] / "dashboard"
 
 CANVAS_MODULES = ("canvas_b.js", "canvas_c.js", "canvas_d.js")
 A_SHARE_JS = DASHBOARD / "market_a_share.js"
-DASHBOARD_JS = DASHBOARD / "dashboard.js"
+DASHBOARD_JS_TEXT = dashboard_js()   # R45 拆分：读全部模块，不再绑死单文件
 INDEX_HTML = DASHBOARD / "index.html"
 CSS = DASHBOARD / "dashboard.css"
 
@@ -53,7 +54,7 @@ def test_market_module_loads_before_dashboard(index_source: str) -> None:
     tags = [line for line in index_source.splitlines() if "<script" in line and "src=" in line]
     names = [line.split('src="', 1)[1].split('"', 1)[0] for line in tags]
     assert "./market_a_share.js" in names
-    assert names.index("./market_a_share.js") < names.index("./dashboard.js")
+    assert names.index("./market_a_share.js") < names.index("./dashboard.bundle.js")
 
 
 def test_no_absolute_api_path_in_market_module(a_share_source: str) -> None:
@@ -106,7 +107,7 @@ def test_canvas_d_only_forwards_market_context() -> None:
 
 
 def test_a_share_mode_disables_polling() -> None:
-    source = DASHBOARD_JS.read_text(encoding="utf-8")
+    source = DASHBOARD_JS_TEXT
     assert 'root.dataset.market === "a_share"' in source
     start = source.index("function startPolling(")
     body = source[start : start + 400]
@@ -127,7 +128,7 @@ def test_degraded_reasons_cover_ashare_failures() -> None:
 
     否则会被显示成"无法连接行情上游（Binance）"—— 把排查方向带偏（实测踩到）。
     """
-    source = DASHBOARD_JS.read_text(encoding="utf-8")
+    source = DASHBOARD_JS_TEXT
     assert "no_factor:" in source
     assert "no_data:" in source
     assert "invalid_code:" in source
@@ -198,7 +199,7 @@ def test_name_is_not_a_data_field_binding(index_source: str, a_share_source: str
     它必须由 ``renderChrome`` 显式判空后隐藏。
     """
     assert 'data-field="market.name"' not in index_source
-    source = DASHBOARD_JS.read_text(encoding="utf-8")
+    source = DASHBOARD_JS_TEXT
     assert 'setText("[data-testid=topbar-security-name]", securityName)' in source
     assert "nameNode.hidden = securityName" in source
 
@@ -265,7 +266,7 @@ def test_manual_entry_can_be_removed(a_share_source: str) -> None:
 
 def test_document_title_includes_symbol_and_name() -> None:
     """多标签页时"看岔"发生在标签栏：标题要带标的，且名称在前（先被看到）。"""
-    source = DASHBOARD_JS.read_text(encoding="utf-8")
+    source = DASHBOARD_JS_TEXT
     assert "document.title" in source
     assert "`${securityName} ${titleSymbol} · CPT`" in source
 

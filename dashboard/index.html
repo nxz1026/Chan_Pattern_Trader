@@ -133,7 +133,7 @@
         role="status"
         aria-live="polite"
       >
-        未连接 · 离线 demo（等待 ./dashboard.js 注入真实状态）
+        未连接 · 离线 demo（等待 ./dashboard.bundle.js 注入真实状态）
       </p>
     </header>
 
@@ -586,7 +586,7 @@
     </noscript>
 
     <!-- R16-5 四画布：注册表必须最先加载（defer 按文档顺序执行），
-         画布模块次之，dashboard.js 最后 —— 它 boot() 时要读到完整注册表。
+         画布模块次之，dashboard.bundle.js 最后 —— 它 boot() 时要读到完整注册表。
          vendor 资产全部本地内联，无任何 CDN 请求（总计划决策 E2）。 -->
     <!-- ⚠️ R45：必须最先加载。凭据消毒的唯一实现，canvas_* / market_a_share /
          inspection_panel 都在它之前用 window.CPT_URL.safe。 -->
@@ -599,12 +599,18 @@
     <script src="./canvas_c.js" defer></script>
     <script src="./canvas_d.js" defer></script>
     <script src="./market_a_share.js" defer></script>
-    <!-- R38：运行巡检与水位面板（自带轮询，不依赖 dashboard.js 的内部状态）。
-         ⚠️ 必须排在 dashboard.js **之前** —— 契约
+    <!-- R38：运行巡检与水位面板（自带轮询，不依赖 dashboard.bundle.js 的内部状态）。
+         ⚠️ 必须排在 dashboard.bundle.js **之前** —— 契约
          tests/test_dashboard_canvas_contract.py::test_canvas_scripts_load_in_registration_order
-         要求 `./dashboard.js` 是最后一个 script（boot() 要读到完整画布注册表）。
+         要求 `./dashboard.bundle.js` 是最后一个 script（boot() 要读到完整画布注册表）。
          本面板自取数自轮询，放前面照样工作。 -->
     <script src="./inspection_panel.js" defer></script>
-    <script src="./dashboard.js" defer></script>
+    <!-- R45 拆分：原 dashboard.js（4925 行）按功能拆成 7 个**源**文件
+         （dashboard/dash-*.js），构建时拼成**一个** dashboard.bundle.js。
+         ⚠️ 为什么不直接发 7 个 script：跨模块调用有 **88 处**，
+         拆成 7 个独立 IIFE 会**全部断掉**（实测 startPolling is not defined）。
+         一个请求对缓存与首屏也更好。
+         改任何一个 dash-*.js 后跑：python scripts/build_dashboard_bundle.py -->
+    <script src="./dashboard.bundle.js" defer></script>
   </body>
 </html>

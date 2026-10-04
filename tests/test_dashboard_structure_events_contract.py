@@ -25,9 +25,10 @@ import re
 from pathlib import Path
 
 import pytest
+from tests.conftest import dashboard_js
 
 ROOT = Path(__file__).resolve().parents[1]
-DASHBOARD_JS = ROOT / "dashboard" / "dashboard.js"
+DASHBOARD_JS_TEXT = dashboard_js()   # R45 拆分：读全部模块
 INDEX_HTML = ROOT / "dashboard" / "index.html"
 CSS = ROOT / "dashboard" / "dashboard.css"
 APP_PY = ROOT / "cpt" / "web" / "app.py"
@@ -35,7 +36,7 @@ APP_PY = ROOT / "cpt" / "web" / "app.py"
 
 @pytest.fixture(scope="module")
 def js() -> str:
-    return DASHBOARD_JS.read_text(encoding="utf-8")
+    return DASHBOARD_JS_TEXT
 
 
 def test_cumulative_stream_calls_new_route(js: str) -> None:

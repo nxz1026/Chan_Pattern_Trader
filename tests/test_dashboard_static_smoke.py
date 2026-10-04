@@ -1,13 +1,14 @@
 from __future__ import annotations
 
 from pathlib import Path
+from tests.conftest import dashboard_js
 
 ROOT = Path(__file__).parents[1]
 
 
 def test_dashboard_static_smoke_contract() -> None:
     html = (ROOT / "dashboard/index.html").read_text(encoding="utf-8")
-    javascript = (ROOT / "dashboard/dashboard.js").read_text(encoding="utf-8")
+    javascript = dashboard_js()
     css = (ROOT / "dashboard/dashboard.css").read_text(encoding="utf-8")
     assert 'data-testid="dashboard-root"' in html
     assert 'data-testid="mode-switch"' in html

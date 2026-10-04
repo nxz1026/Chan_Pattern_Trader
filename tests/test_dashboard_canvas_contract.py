@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
+from tests.conftest import dashboard_js
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = REPO_ROOT / "dashboard"
@@ -43,7 +44,7 @@ EXPECTED_SCRIPT_ORDER = [
     "./canvas_b.js",
     "./canvas_c.js",
     "./canvas_d.js",
-    "./dashboard.js",
+    "./dashboard.bundle.js",
 ]
 
 
@@ -82,7 +83,7 @@ def test_canvas_scripts_load_in_registration_order() -> None:
     positions = [sources.index(name) for name in EXPECTED_SCRIPT_ORDER]
     assert positions == sorted(positions), f"画布脚本顺序错误：{sources}"
     # dashboard.js 必须最后（boot() 要读到完整注册表）
-    assert sources[-1] == "./dashboard.js"
+    assert sources[-1] == "./dashboard.bundle.js"
 
 
 def test_canvas_switch_container_present() -> None:
@@ -123,7 +124,7 @@ def test_canvas_modules_use_vendored_libraries_not_cdn() -> None:
 
 
 def test_dashboard_dispatches_through_registry() -> None:
-    source = (DASHBOARD / "dashboard.js").read_text(encoding="utf-8")
+    source = dashboard_js()
     for token in (
         "function drawChartA(view)",
         "function drawChart()",
@@ -143,7 +144,7 @@ def test_snapshot_query_param_overrides_attribute() -> None:
     原顺序让 ``?snapshot=`` 完全失效 —— 属性在 index.html 里恒非空，离屏审计
     无法把页面指到一份固定快照上。
     """
-    source = (DASHBOARD / "dashboard.js").read_text(encoding="utf-8")
+    source = dashboard_js()
     # R17-3 起显式分了两步：先取参数（A 股模式判断也要用它），再让参数优先。
     # 断言语义不变，同时钉住"参数必须先于属性被求值"。
     explicit = 'const explicitSnapshot = params.get("snapshot");'
@@ -155,7 +156,7 @@ def test_snapshot_query_param_overrides_attribute() -> None:
 
 def test_window_filtering_is_applied_to_all_structure_kinds() -> None:
     """四个画布共用同一份窗口内结构：过滤必须发生在 buildCanvasView 里。"""
-    source = (DASHBOARD / "dashboard.js").read_text(encoding="utf-8")
+    source = dashboard_js()
     assert "const inWindow = (item) => {" in source
     for key in ("fractals", "bis", "zhongshus", "trend_types"):
         assert f"{key}: rawOverlays.{key}.filter(inWindow)" in source, (

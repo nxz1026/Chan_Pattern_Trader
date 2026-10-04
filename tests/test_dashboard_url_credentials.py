@@ -37,6 +37,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+from tests.conftest import dashboard_js
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -64,7 +65,7 @@ def _node() -> str:
 
 def _helper_source() -> str:
     """从 dashboard.js 里原样抠出 resolveUrl / safeFetchUrl 两个函数体。"""
-    js = (ROOT / "dashboard/dashboard.js").read_text(encoding="utf-8")
+    js = dashboard_js()
     out: list[str] = []
     for name in (_HELPER, _SAFE):
         marker = f"function {name}("
@@ -228,15 +229,23 @@ def test_every_fetch_exit_goes_through_safe_fetch_url() -> None:
     因为首屏走 ``loadSnapshot(root.dataset.snapshotUrl)``，那条路径不经过它。
     这个断言就是为了防止「下次又只改一处」。
     """
-    js = _code_without_comments((ROOT / "dashboard/dashboard.js").read_text(encoding="utf-8"))
+    js = _code_without_comments(dashboard_js())
     bare = []
     for line_no, line in enumerate(js.splitlines(), 1):
         if "await fetch(" not in line:
             continue
-        if "safeFetchUrl(" in line:
+        # ⚠️ 也要容忍 ``safeUrl``：它是 ``market_a_share.js`` 里的**委托包装**
+        # （``(window.CPT_URL.safe || 恒等)(target)``），同样是消毒出口。
+        #
+        # 拆分前本测试只读 ``dashboard.js``，而那个文件里**只有** safeFetchUrl；
+        # 改成读**全部**模块后，market_a_share 的 safeUrl 第一次进入视野 ——
+        # 于是测试**无改动却变严了**。
+        # 姊妹测试 ``test_every_fetch_exit_goes_through_safe_url`` 本来就容忍它
+        # ⇒ 两个姊妹测试判据不一致，**这里对齐**。
+        if "safeFetchUrl(" in line or "safeUrl(" in line:
             continue
-        bare.append(f"  dashboard.js:{line_no}: {line.strip()[:90]}")
-    assert not bare, "有 fetch 出口没走 safeFetchUrl（凭据会泄漏进去）：\n" + "\n".join(bare)
+        bare.append(f"  <看板 JS 拼接>:{line_no}: {line.strip()[:90]}")
+    assert not bare, "有 fetch 出口没走凭据消毒（凭据会泄漏进去）：\n" + "\n".join(bare)
 
 
 def _code_without_comments(js: str) -> str:
@@ -284,13 +293,14 @@ def test_no_unguarded_location_url_survives_for_state_writes() -> None:
     （那是唯一能拿到当前 origin 的地方）。所以这里找的是**裸露**用法：
     赋值给变量后**没有**紧跟凭据清空的那一处。
     """
-    for rel, fn in (
-        ("dashboard/dashboard.js", "resolveUrl"),
-        ("dashboard/market_a_share.js", "safeLocationUrl"),
-    ):
-        js = _code_without_comments((ROOT / rel).read_text(encoding="utf-8"))
+    # ⚠️ 拆分后 ``resolveUrl`` 会住在某个 ``dash-*.js`` 里，不再是固定文件 ——
+    # 所以这里**遍历全部模块**，而不是按 (文件, 函数) 配死。
+    # （第一版硬编码 dashboard.js，拆分后会「找不到」⇒ 测试变成静默通过。）
+    for fn in ("resolveUrl", "safeLocationUrl"):
+        js = _code_without_comments(dashboard_js())
         start = js.find(f"function {fn}(")
-        assert start >= 0, f"{rel} 缺少 {fn}()"
+        assert start >= 0, f"全部看板模块里缺少 {fn}()"
+        rel = "<全部看板模块>"
         depth, i = 0, js.find("{", start)
         for j in range(i, len(js)):
             if js[j] == "{":
@@ -340,7 +350,12 @@ def test_every_fetch_exit_goes_through_safe_url() -> None:
     "Request cannot be constructed from a URL that includes credentials"。
     """
     offenders: list[str] = []
-    for name in ("dashboard.js", "canvas_d.js", "inspection_panel.js", "market_a_share.js"):
+    # ⚠️ 名单按「**真的发请求**」列，不按文件名列。
+    #   dash-chart.js / dash-alert.js **一次 fetch 都没有**（纯 SVG 绘制 /
+    #   Notification API），要求它们「委托 window.CPT_URL」本身是错的判据。
+    for name in ("canvas_d.js", "inspection_panel.js", "market_a_share.js",
+                 "dashboard.bundle.js", "dash-core.js", "dash-ops.js",
+                 "dash-signal.js", "dash-chrome.js", "dash-structure.js"):
         text = (ROOT / "dashboard" / name).read_text(encoding="utf-8")
         for line_no, line in enumerate(text.splitlines(), 1):
             if "fetch(" not in line or line.lstrip().startswith(("*", "//", ".")):
@@ -364,22 +379,45 @@ def test_credential_stripping_has_a_single_implementation() -> None:
     assert 'url.username = ""' in shared and 'url.password = ""' in shared, (
         "url_safety.js 必须自己清空 username 与 password"
     )
-    for name in ("dashboard.js", "canvas_d.js", "inspection_panel.js",
-                 "market_a_share.js"):
+    # ⚠️ R45 拆分后**不能再按文件名列表**遍历 —— dashboard.js 已经不存在，
+    # 而拆出来的 7 个 dash-*.js 是**函数分布**、不是「谁该有第二份实现」。
+    # ⇒ 统一走 dashboard_js()（它按加载顺序拼**全部**看板 JS）。
+    # ⚠️ 名单按「**真的发请求**」列。``dash-chart.js``（纯 SVG 绘制）、
+    #    ``dash-alert.js``（Notification API）**一次 fetch 都没有**，
+    #    要求它们「委托 window.CPT_URL」本身是错的判据。
+    for name in ("canvas_d.js", "inspection_panel.js", "market_a_share.js",
+                 "dashboard.bundle.js", "dash-core.js", "dash-ops.js",
+                 "dash-signal.js", "dash-chrome.js", "dash-structure.js"):
         text = (ROOT / "dashboard" / name).read_text(encoding="utf-8")
         if name == "url_safety.js":
             continue
         # 允许「委托前的本地兜底」出现，但不允许独立的第二份实现
         clean = _strip_js_comments(text)
         n = clean.count('url.username = ""')
-        if name == "dashboard.js":
-            assert n <= 1, f"dashboard.js 有 {n} 份凭据清空实现"
+        # ⚠️ R45 拆分后规则要跟着调整：
+        # 旧 `dashboard.js` 允许**至多 1 处**「委托前的本地兜底」，
+        # 拆出来的 dash-*.js 与 bundle **是同一份代码**，所以同一条规则适用。
+        # 若还按「其余文件必须 0」判，就会把**唯一那份合法兜底**判成「第二份实现」。
+        if name.startswith("dash-") or name == "dashboard.bundle.js":
+            assert n <= 1, (
+                f"dashboard/{name} 有 {n} 份凭据清空实现 —— "
+                f"本仓只允许 1 处本地兜底，多出来就是副本漂移"
+            )
         else:
             assert n == 0, (
                 f"dashboard/{name} 自己实现了一遍凭据清空 —— 必须委托 url_safety.js，"
                 f"否则副本会与唯一实现漂移"
             )
-        assert "CPT_URL" in clean, f"dashboard/{name} 没有委托 window.CPT_URL"
+        # ⚠️ 「字面出现 CPT_URL」这条判据只在**定义方**成立。
+        # 拆分前所有代码在一个文件里，所以「每个文件都该出现 CPT_URL」看着合理；
+        # 拆分后：``window.CPT_URL`` 只出现在**定义 resolveUrl/safeFetchUrl 的那个模块**
+        # （dash-core.js / bundle），其余模块调的是那个模块的**本地包装** ``safeFetchUrl``。
+        # ⇒ 判据改成「**定义方**必须真的委托 window.CPT_URL」。
+        if name in ("dash-core.js", "dashboard.bundle.js"):
+            assert "CPT_URL" in clean, (
+                f"dashboard/{name} 定义了 safeFetchUrl/resolveUrl，"
+                f"却没有真的委托 window.CPT_URL"
+            )
 
 
 def test_url_safety_loads_before_every_consumer() -> None:
@@ -389,12 +427,14 @@ def test_url_safety_loads_before_every_consumer() -> None:
     会静默退回 ``(t) => t``（即不做消毒）—— 那正是 R45 修的那个 bug。
     """
     html = (ROOT / "dashboard" / "index.html").read_text(encoding="utf-8")
-    order = re.findall(r'<script src="\./([a-z_]+\.js)" defer', html)
+    # ⚠️ 正则原为 ``[a-z_]+`` ⇒ **匹配不到** ``dash-core.js``（带连字符），
+    # 拆分后会静默漏掉新模块。⇒ 加上 ``-``。
+    order = re.findall(r'<script src="\./([a-z_-]+\.js)" defer', html)
     assert "url_safety.js" in order, "index.html 没有加载 url_safety.js"
     first_use = min(
         (i for i, n in enumerate(order)
-         if n in ("dashboard.js", "canvas_d.js", "inspection_panel.js",
-                  "market_a_share.js")),
+         if n in ("canvas_d.js", "inspection_panel.js",
+                  "market_a_share.js", "dashboard.bundle.js")),
         default=None,
     )
     assert order.index("url_safety.js") < first_use, (

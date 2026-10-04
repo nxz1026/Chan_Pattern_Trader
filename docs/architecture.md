@@ -311,6 +311,15 @@ scripts/            运维入口（不在包内，但已在 CI 门禁覆盖范�
 dashboard/          前端静态产物（Nginx 从 /var/www/cpt-dashboard 提供，非包内）
     url_safety.js  ← ⚠️ **必须第一个 defer 加载**：凭据消毒的**唯一实现**
     cpt_job.js     ← ⚠️ **必须第二个加载**：异步轮询的**唯一实现**
+    dash-core.js   ← ⚠️ R45 拆分：核心 + boot()，**7 个 dash-*.js 里第一个**
+    dash-chrome.js  dash-structure.js  dash-signal.js
+    dash-chart.js   dash-alert.js  dash-ops.js
+                      ※ 上面 7 个是**源**文件（按功能分开，维护用）；
+                        页面实际只加载 **dashboard.bundle.js** 一个
+                        （构建时拼接，见 scripts/build_dashboard_bundle.py）。
+                        为什么不发 7 个请求：跨模块调用有 **88 处**，
+                        拆成 7 个独立 IIFE 会**全部断掉**（实测
+                        `startPolling is not defined`）。
 tests/              扁平布局：117 个 test_*.py 直接放 tests/ 下，仅一个 fixtures/
                     人工构造案例；**没有** unit/ oracle/ e2e 子目录（见 §11）
 docs/               38 份（rules.md / architecture.md / progress-log.md /
