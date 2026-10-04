@@ -165,3 +165,52 @@ status ∈ matched | missing | extra | mismatched
   （`admin:ndjack`）—— 可被 `CPT_BASIC_AUTH` 覆盖，但默认值躺在仓里。
   owner 已明确表示不轮换口令，此处**只记录**。
 - `/var/www/cpt-dashboard/dashboard.js.bak-r44` 仍在线上（等 owner 点头删）。
+
+---
+
+## 追加：画布 D 主区**始终空白**（已定位到边界，未修）
+
+上一轮我把它列在「不是问题的」里（以为是等 plotly 加载的时间不够）。
+**那个判断是错的** —— 等到 12 秒仍然空白。修正如下。
+
+### 排除掉的东西（都实测过）
+
+| 怀疑 | 实测 | 结论 |
+|---|---|---|
+| wbt 没装 | `import wbt.report` 成功 | 排除 |
+| payload 造不出来 | `available: True`，`source: wbt.report.HtmlReportBuilder@0.9.1` | 排除 |
+| K 线数据是空 | `counts: {candles: 122, fractals: 39, bis: 38, zhongshus: 7}` | 排除 |
+| **plotly `x` 轴全是 null** | 真实快照下 **122 项全非 null**，日期 `2026-04-07…` 起 | 排除 |
+| vendor 加载失败 | 诊断框报 `OK plotly \| OK bootstrap.bundle`；直连 `/cpt/vendor/*` 三个文件均 200 | 排除 |
+| 图表 div 不存在 / 高度为 0 | `<div style="height:520px">` + 内部 `height:100%`，外层 `tab-pane fade show active` | 排除 |
+
+> ⚠️ 中间踩了一次自己的坑：我第一版测试快照把日期字段写成 `dt`，
+> 而真实快照是 **`open_time`**（字符串毫秒）。于是我造出了一份
+> 「`x` 全是 null」的假证据，差点当成真 bug 报上去。
+> ⇒ **判据必须用真实 API 响应，不能用自己拼的样本。**
+> 这是今天第 N 次「我造的证据」反过来骗我。
+
+### 已知的真正约束
+
+`contentDocument` **跨域不可读** —— iframe 是 `sandbox="allow-scripts"`，
+origin 是不透明源。这是 R28-11 的**安全设计**，不是缺陷。
+⇒ 父页**无法**从外部判断 iframe 内的 plotly 到底画没画。
+
+### 剩下的最可能原因（未验证）
+
+`srcdoc` 执行时 iframe 可能**尚未被父页定宽**（父页在 load 之后才设尺寸），
+plotly 于是按 0 宽容器绘制；而 iframe 内的补救逻辑
+（`resizeActivePanes()`，跑在 `DOMContentLoaded` / `window.load`）
+**同样发生在定宽之前**，于是没有任何后续动作把它重画回来。
+父页切到画布 D 时也**没有**向 iframe 发 resize 消息。
+
+### 为什么这条值得单列：诊断通道本身有缺口
+
+`reportDiag` 只报 `vendor-ok` / `vendor-fail` ——
+**它不报 `newPlot` 是否执行、是否抛异常、渲染出的容器是几乘几**。
+所以修复 #1 让诊断框能用了之后，诊断框只能告诉我
+「vendor 加载成功」，**恰恰说不出「图为什么没画出来」**。
+
+⇒ 下一步该做的是往这条通道补三个信号
+（`plot-ok` / `plot-throw` / `plot-size`），而不是盲改样式。
+**本轮不做** —— 它改的是 iframe 通信契约，值得单独一轮。
