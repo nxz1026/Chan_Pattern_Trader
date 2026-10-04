@@ -492,7 +492,7 @@ R45 修了它「本该发而没发 ⇒ rc=3」，`factor_recompute` 那次有测
 `tests/test_run_inspection_exit_code.py` 钉住：无问题且状态未变 ⇒ 0、
 `--print` ⇒ 0、**告警没送达 ⇒ 3**、送达 ⇒ 0、无论发不发得出**都要落库**。
 
-## ⚠️ 顺带挖出一个「只改了一半」的地方（待 owner 决定）
+## ⚠️ 顺带挖出一个「只改了一半」的地方（owner 已确认，改掉）
 
 `run_inspection.main()` 里有两条「本该发而没发」：
 
@@ -526,3 +526,16 @@ owner 若决定改成 3，那条断言会失败并提醒同步。
 3. 编了个 `prev.state_key="same"` ⇒ 与真算的 `_state_key(report)` 必然不等
    ⇒ 判定「状态变了」⇒ 去告警 ⇒ 拿到 3。
    ⇒ **别编 key，用同一个 report 算。**
+
+### ✅ 已改（owner 确认）：未配通道 ⇒ rc=3
+
+`scripts/run_inspection.py` 的「压根没配 `CPT_FEISHU_WEBHOOK`」那一支
+现在也 `return 3`，并打印一行
+`[!] 巡检发现了问题，但告警通道未配置（CPT_FEISHU_WEBHOOK）—— 告警能力不可用`。
+
+**代价**：本地开发机（有意不配）每天退 3。内容**照样打印到日志**，排查不受影响。
+**收益**：「告警静默失效」能被机器发现，而不是要人翻日志。
+
+**生产上当前不受影响** —— 实测 Oracle 的 `deploy/env/cpt-dashboard.env`
+里 `CPT_FEISHU_WEBHOOK` 有非空值（1 行），走的是另一条分支。
+这条路径只在**配置丢失**时触发，而那正是需要它报出来的时刻。

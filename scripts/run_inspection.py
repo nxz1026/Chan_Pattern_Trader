@@ -250,9 +250,28 @@ def main(argv: list[str] | None = None) -> int:
                 else f"巡检：{len(report['degraded'])} 降级（状态有变化）"
             )
             if not webhook_configured():
+                # ⚠️ R45：这一支原来只打印、**仍返回 0** —— 于是
+                # 「配了但发送失败」报 3、而「压根没配」报 0，
+                # **更严重的那种反而更安静**。
+                #
+                # 同一个函数里那条兄弟分支的注释原话是
+                # 「告警通道坏掉的时候，恰恰最需要机器来发现」——
+                # 而「没配」比「配了但发失败」**更彻底**（压根没有通道）。
+                #
+                # 为什么这条可达而不是理论情况：``deploy/env/cpt-dashboard.env``
+                # **被 gitignore**，R45 才把它补进 ``.example``
+                # （就是因为照模版部署会静默失去所有告警）
+                # ⇒ 部署出来没配 webhook 是**现实状态**。
+                #
+                # 代价：本地开发机（有意不配）每天退 3。
+                # 权衡：内容**照样打印到日志**，排查不受影响；
+                # 换来的是「告警静默失效」被机器发现。owner 已确认取后者。
                 print(f"[未配置 {ENV_WEBHOOK}] 本应发送的告警：")
                 for line in lines:
                     print("   ", line)
+                print(f"[!] 巡检发现了问题，但告警通道未配置（{ENV_WEBHOOK}）"
+                      " —— 告警能力不可用")
+                return 3
             else:
                 ok = notify_problem(title, lines)
                 print(f"告警{'已发' if ok else '发送失败'}")

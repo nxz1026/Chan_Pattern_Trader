@@ -140,32 +140,21 @@ def test_alert_not_delivered_returns_3(monkeypatch) -> None:
     assert ri.main(["--force"]) == 3, "告警没送达却退 0 ⇒ 监控看不见"
 
 
-def test_webhook_not_configured_currently_returns_0(monkeypatch) -> None:
-    """⚠️ **现状是 0，而且我认为这可能是漏改的一半** —— 钉住现状，等 owner 决定。
+def test_webhook_not_configured_also_returns_3(monkeypatch) -> None:
+    """⚠️ **压根没配 webhook** ⇒ 同样 **rc=3**（R45 与 owner 确认后改）。
 
-    R45 修的是 ``notify_problem`` 返回 False 那条 ⇒ rc=3。
-    但「**压根没配 webhook**」这条只把内容打印到日志，**仍返回 0**。
+    原来这里只打印、仍返回 0 —— 于是「配了但发送失败」报 3、
+    而「压根没配」报 0，**更严重的那种反而更安静**。
 
-    为什么它可能同样是病：
-      - 问题确实发现了，只是送不出去 ⇒ cron / 看门狗看到的是「今天正常」；
-      - 同一个函数里那条兄弟分支的注释原话是
-        「**告警通道坏掉的时候，恰恰最需要机器来发现**」——
-        而「没配」比「配了但发失败」**更严重**；
-      - ``deploy/env/cpt-dashboard.env`` **是 gitignore 的**
-        （R45 才把它补进 ``.example``，就是因为照模版部署会静默失去所有告警）
-        ⇒ 部署出来没配是**可达状态**，不是理论情况。
+    可达性不是理论问题：``deploy/env/cpt-dashboard.env`` **被 gitignore**
+    （R45 才把它补进 ``.example``，就是因为照模版部署会静默失去所有告警）。
 
-    为什么可能是有意的：
-      - 未配置的机器也许就是本地开发机，本来就不该指望告警；
-      - 告警内容**已打印到日志**，不完全静默。
-
-    ⇒ **不改代码、不改测试断言**，只把现状与理由钉在这里。
-    owner 决定要不要让这条也返回 3（我的建议：要）。
+    代价：本地开发机（有意不配）每天退 3。内容**照样打印到日志**，
+    排查不受影响；换来「告警静默失效」能被机器发现。
     """
     _install(monkeypatch, problems=["水位断了"], degraded=[],
              notified=False, webhook=False)
-    assert ri.main(["--force"]) == 0, \
-        "现状是 0；若 owner 决定改为 3，这条断言会失败并提醒同步"
+    assert ri.main(["--force"]) == 3
 
 
 def test_alert_delivered_returns_zero(monkeypatch) -> None:

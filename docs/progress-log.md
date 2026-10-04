@@ -6464,7 +6464,7 @@ DB 错误直接往上抛。而这是**对的**：它只被脚本调用，
 `factor_recompute` 那次有测试，这边没有。补 `test_run_inspection_exit_code.py`（6 例）。
 
 **顺带挖出「只改了一半」**：R45 修了「配了 webhook 但发失败 ⇒ rc=3」，
-但「**压根没配 webhook**」那条只打印、仍 rc=0。倾向它也该 3
+但「**压根没配 webhook**」那条只打印、仍 rc=0。owner 确认**改成 3**
 （问题确实发现了只是送不出去；而 env 文件是 gitignore 的，
 「没配」比「发失败」更严重）。**没改代码**，只把现状与理由写进测试
 docstring，owner 决定。
