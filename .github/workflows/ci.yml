@@ -37,6 +37,13 @@ jobs:
             tail -n 40 pytest-output.log | sed 's/^/::error::/'
             exit 1
           }
+      # ⚠️ **必须排在所有门禁之前**（R45 P1-2）：
+      # 先验「这些门禁真能抓到它们该抓的错」，再让它们跑。
+      # 顺序反了的话，一个恒返回 0 的门禁会把整条链伪装成绿的 ——
+      # R45 那天就有一个门禁恒返回 0，「全绿」只是它什么都没查。
+      - name: Gates self-test
+        run: python scripts/selftest_gates.py
+
       - name: Static quality gates
         run: |
           # `scripts/` 也纳入：它是 364 行的运维入口（cron 跑 backfill），

@@ -103,7 +103,14 @@ def _gitignore_matches(relpath: str) -> bool:
     global _GI_PATTERNS
     if _GI_PATTERNS is None:
         _GI_PATTERNS = []
-        for raw in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines():
+        gi = ROOT / ".gitignore"
+        # ⚠️ **没有 .gitignore 不能崩** —— R45 自检时用临时仓库跑本门禁，
+        # 那里没有 .gitignore，直接 FileNotFoundError 崩掉（自检套件报的
+        # 「自检本身崩了」就是它）。判据应当是「有没有被忽略」，
+        # 不是「.gitignore 存不存在」。
+        if not gi.exists():
+            return False
+        for raw in gi.read_text(encoding="utf-8").splitlines():
             line = raw.strip()
             if not line or line.startswith("#"):
                 continue

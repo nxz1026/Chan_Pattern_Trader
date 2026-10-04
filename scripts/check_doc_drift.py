@@ -206,9 +206,16 @@ def main(argv: list[str] | None = None) -> int:
     ap.parse_args(argv)
     print("R45 第二轮：文档 ↔ 代码 漂移扫描")
     allbad = []
-    for fn in (check_counts, check_status, check_params, check_endpoints,
-               check_existence):
-        allbad += fn()
+    for fn in (check_counts, check_status, check_params, check_endpoints, check_existence):
+        # ⚠️ **一类崩了不能连累后面所有类**（R45 自检时撞到）：
+        # ``check_params`` 里 ``from cpt.domain.config import RulesConfig``
+        # 在缺该模块时直接抛 ⇒ 后面 3 类**根本没跑**却看不出异常，
+        # 只看到一个非零退出码。⇒ 逐类隔离，崩了单独报。
+        try:
+            allbad += fn()
+        except Exception as exc:  # noqa: BLE001
+            print(f"  💥 {fn.__name__} 崩了: {type(exc).__name__}: {exc}")
+            allbad.append(f"{fn.__name__} 未能执行（{type(exc).__name__}）")
     print()
     print("=" * 92)
     if allbad:
