@@ -2346,6 +2346,27 @@
     }
   }
 
+  /**
+   * 差异面板两侧的**可读标签**（R45）。
+   *
+   * 参照侧原来叫 "ORACLE"，有两个问题：
+   *   1. **和生产机器同名** —— 看板上看到这标签，第一反应是
+   *      「拿本仓和这台机器对比？」，而参照侧**跟那台机器毫无关系**；
+   *   2. **不准确** —— 参照侧实际是 **czsc**（腾讯兜底），
+   *      payload 写得明明白白：
+   *        {"source": "czsc",
+   *         "detail": "同批 K 线、czsc 后端 vs 生产后端 NativeChanlunBackend"}
+   * ⇒ 名字**取自 payload**：降级到腾讯时标签自己变，不用改代码。
+   * 这比在两处硬编码「参照」更准确 —— 硬编码只是把一个错误换成一个笼统词。
+   */
+  function sideLabel(side, snapshot) {
+    if (side === "cpt") return "本仓 Native";
+    const ref = snapshot && snapshot.parity && snapshot.parity.reference;
+    const src = ref && typeof ref.source === "string" ? ref.source.trim() : "";
+    if (!src || src === "none") return "参照（未启用）";
+    return `参照 ${src}`;
+  }
+
   function renderParityCharts(snapshot) {
     const chart = q("[data-testid=parity-chart]");
     if (!chart || !snapshot || !isObject(snapshot.parity)) return;
@@ -2353,6 +2374,9 @@
       const value = snapshot.parity[kind];
       return isObject(value) && Array.isArray(value.items) ? value.items.map((item) => ({ ...item, kind })) : [];
     });
+    // 面板主标题也用真实参照名，别写死
+    const head = q("#parity-heading");
+    if (head) head.textContent = `本仓 Native vs ${sideLabel("oracle", snapshot)}`;
     ["cpt", "oracle"].forEach((side) => {
       const target = q(`[data-testid=parity-chart-${side}]`);
       if (!target) return;
@@ -2368,7 +2392,7 @@
       const rows = Math.max(1, Math.ceil(visible.length / PER_ROW));
       const vbH = 45 + rows * ROW_H + R;
       const svg = createSvg("svg", { class: "cpt-parity-svg", viewBox: `0 0 640 ${vbH}`, role: "img", "aria-label": `${side} parity elements` });
-      const title = createSvg("text", { x: 8, y: 18, class: "cpt-parity-title" }, side.toUpperCase());
+      const title = createSvg("text", { x: 8, y: 18, class: "cpt-parity-title" }, sideLabel(side, snapshot));
       svg.appendChild(title);
       visible.forEach((item, index) => {
         const ref = item[side] || {};
@@ -2402,6 +2426,7 @@
       // 放在最后一个图后面，且**同时统计真实数量** —— 数字比颜色更有用。
       // 四态，别只数三个 —— 漏一个就等于「有出入的元素数量对不上」
       // （实测 Oracle 上 mismatched 真有值，R45 第一次只写了三个）。
+      const refName = (sideLabel("oracle", snapshot).replace(/^参照\s*/, "") || "参照");
       const counts = { matched: 0, missing: 0, extra: 0, mismatched: 0 };
       visible.forEach((item) => {
         const key = item.status || "matched";
@@ -2412,8 +2437,8 @@
       [
         ["matched", "一致"],
         ["mismatched", "有出入"],
-        ["missing", "ORACLE 缺"],
-        ["extra", "ORACLE 多"],
+        ["missing", `${refName} 缺`],
+        ["extra", `${refName} 多`],
       ].forEach(([key, label]) => {
         const chip = document.createElement("span");
         chip.className = "cpt-parity-legend-item";
@@ -2434,7 +2459,7 @@
       chart.hidden = !parityPresent;
       ["cpt", "oracle"].forEach((side) => {
         const target = q(`[data-testid=parity-chart-${side}]`);
-        if (target) target.textContent = parityPresent ? `${side.toUpperCase()} overlay ready` : "";
+        if (target) target.textContent = parityPresent ? `${sideLabel(side, snapshot)} overlay ready` : "";
       });
     }
     const panel = q("[data-testid=event-panel]");
@@ -2445,7 +2470,7 @@
       section.dataset.testid = "parity-panel";
       section.className = "cpt-parity-panel";
       const heading = document.createElement("h3");
-      heading.textContent = "Oracle 对比";
+      heading.textContent = "本仓 vs 参照结构";
       section.appendChild(heading);
       panel.appendChild(section);
     }
@@ -2458,7 +2483,7 @@
       return;
     }
     if (parity.available === false) {
-      summary.textContent = `Oracle 对比未启用：${parity.reason || "unavailable"}`;
+      summary.textContent = `参照结构对比未启用：${parity.reason || "unavailable"}`;
       section.appendChild(summary);
       return;
     }

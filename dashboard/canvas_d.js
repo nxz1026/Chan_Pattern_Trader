@@ -120,9 +120,65 @@
    * ``<script>`` 挂 onload/onerror，谁成功、谁失败、HTTP 什么状态，一目了然，
    * 且不依赖任何聚合事件。
    */
+  /**
+   * 画布 D 的诊断探针。
+   *
+   * ## 它要解决什么
+   *
+   * iframe 是 `sandbox="allow-scripts"`，origin 是不透明源 `"null"`
+   * ⇒ 父页**读不到** `contentDocument`（R28-11 的安全设计，不是缺陷）。
+   * 而 `reportDiag` 只能报 `vendor-ok` / `vendor-fail` ——
+   * **恰恰说不出「图为什么没画」**。R45 实测就卡在这：
+   * payload 完全正确（x 轴 122 项全非 null、div 在、tab 是 active、容器 520px），
+   * vendor 也确实 `OK`，可画面就是白的。
+   *
+   * ## ⚠️ 为什么是「改已有 onload」而不是「再插一段 <script>」
+   *
+   * 第一版是把探针当成**独立的第 N+1 段 `<script>`** 追加到 srcdoc 末尾。
+   * 结果直接**把生产搞坏**：页面抛 `TypeError`（message 是探针脚本全文），
+   * **画布 D 的标签按钮整个消失**。
+   * 确切原因当时没定位到 —— 已排除语法错误、提前闭合的 `</script`、
+   * 模板插值被父页求值、`url_safety.js`、message 监听；
+   * `name=TypeError` + `message=整段脚本` 这个组合没有可靠解释。
+   * ⇒ 那条路**整体放弃**，别再试。
+   *
+   * 现在改成：把探针**塞进 plotly vendor 那个 `<script src>` 已有的
+   * `onload` 属性**里。理由：
+   *   - 不新增任何 `<script>` 元素 ⇒ 不碰那条已知的雷区；
+   *   - `onload` 本来就在跑（发 `vendor-ok`），只是多干一件事；
+   *   - 属性值用 `>` 包裹，内部**只用单引号**，不产生嵌套双引号。
+   *
+   * 探针要等片段脚本（`newPlot`）跑完才有意义，所以用 `setTimeout` 推迟。
+   */
+  const PLOT_PROBE_FN = `try{setTimeout(function(){` +
+    `var el=document.getElementById('cpt-canvas-d-chart');` +
+    `function s(k,m){try{parent.postMessage({__cptD:1,kind:k,phase:window.__cptPhase,` +
+    `name:'newPlot',msg:m||''},'*')}catch(e){}};` +
+    `if(!el){s('plot-miss','no #cpt-canvas-d-chart');return}` +
+    `var w=el.clientWidth||0,h=el.clientHeight||0;` +
+    `if(!w||!h){s('plot-blank','0-size '+w+'x'+h);return}` +
+    `var svg=el.querySelector('svg.main-svg');` +
+    `var wick=el.querySelectorAll('path.point-plot').length;` +
+    `var sw=svg?(svg.getAttribute('width')||'?'):'nosvg';` +
+    `var sh=svg?(svg.getAttribute('height')||'?'):'?';` +
+    // R45 实测发现 candles=0 ⇒ 不是「没画」，是「**画了但没数据**」。
+    // 再报 plotly **实际收到**的东西：trace 数、x 长度/非 null 数、
+    // open 首值、xaxis range —— 一条就能定位是数据空还是范围错位。
+    `var d=(el.data||[]);` +
+    `var t0=d[0]||{};` +
+    `var xs=t0.x||[];` +
+    `var nn=0;for(var i=0;i<xs.length;i++){if(xs[i]!==null&&xs[i]!==undefined)nn++}` +
+    `var rng='';try{rng=JSON.stringify(el.layout.xaxis.range)}catch(e){}` +
+    `s('plot-size','box '+w+'x'+h+', svg '+sw+'x'+sh+', candles '+wick` +
+    `+', traces '+d.length+', x '+xs.length+'/nn '+nn` +
+    `+', open '+(t0.open?t0.open.length:'-')+'='+(t0.open?t0.open[0]:'-')` +
+    `+', type '+(t0.type||'-')+', range '+rng)` +
+    `},1200)}catch(e){}`;
+
   const vendorScript = (url, name) =>
     `<script src="${url}" onload="parent.postMessage({__cptD:1,kind:'vendor-ok',phase:window.__cptPhase,` +
-    `name:'${name}'},'*')" onerror="parent.postMessage({__cptD:1,kind:'vendor-fail',phase:window.__cptPhase,` +
+    `name:'${name}'},'*');${name === "plotly" ? PLOT_PROBE_FN : ""}" ` +
+    `onerror="parent.postMessage({__cptD:1,kind:'vendor-fail',phase:window.__cptPhase,` +
     `name:'${name}',msg:'加载失败（401？路径不对？）'},'*')"></script>`;
 
   /**
@@ -226,9 +282,17 @@
     // 占位文档（"正在请求…"）的诊断没有意义 —— 它本来就不该有 plotly。
     // 只显示**报告阶段**的，否则会拿占位阶段的结论当报告的（第一版栽在这）。
     if (message.phase !== "report") return;
-    const mark = message.kind === "vendor-ok" ? "OK"
-      : message.kind === "vendor-fail" ? "★失败"
-      : message.kind;
+    // 可读标签：除了 vendor 的两种，再加 R45 的 **newPlot 探针**信号 ——
+    // 没有它们，父页只知道「vendor 加载成功」，**恰恰说不出「图为什么没画」**
+    //（iframe 是不透明源，父页读不到 contentDocument，这是 R28-11 的安全设计）。
+    const MARKS = {
+      "vendor-ok": "OK",
+      "vendor-fail": "★失败",
+      "plot-size": "图已出",
+      "plot-blank": "★0尺寸",
+      "plot-miss": "★找不到div",
+    };
+    const mark = MARKS[message.kind] || message.kind;
     const text = `${mark} ${message.name || ""}${message.msg ? " — " + message.msg : ""}`;
     node.dataset.canvasDiag = (node.dataset.canvasDiag ? node.dataset.canvasDiag + " | " : "") + text;
     // ⚠️ 这里原来写成 `q("[data-testid=canvas-d-diag]")`，而**本文件从头到尾没有

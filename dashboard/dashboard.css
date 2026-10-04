@@ -1727,7 +1727,8 @@ noscript p {
 .mode-switch { display: inline-flex; gap: 4px; margin-left: auto; }
 .mode-switch button { border: 1px solid var(--color-border); background: var(--color-panel); color: var(--color-text-muted); padding: 4px 10px; border-radius: 4px; cursor: pointer; }
 .mode-switch button[aria-pressed="true"] { color: var(--color-text); border-color: var(--color-accent); background: var(--color-accent-soft); }
-.cpt-parity-svg [data-parity-selected="true"] { stroke: var(--color-accent); stroke-width: 3; }
+/* 选中态改「换描边」而不是换填充色 —— 换色会和四种状态色打架 */
+.cpt-parity-svg [data-parity-selected="true"] { stroke: var(--color-text); stroke-width: 3; }
 .cpt-chart-hit[data-parity-anchor="true"] { stroke: var(--color-accent); stroke-width: 2; }
 
 /* ------------------------------------------------- CPT / ORACLE 差异点配色
@@ -1749,18 +1750,27 @@ noscript p {
  * 用既有的语义色变量，不引入新色：matched 走 muted（不是错误，不该抢眼），
  * missing 走 error（真缺），extra 走 degraded（有出入但不是错）。
  */
-.cpt-parity-svg .parity-matched { fill: var(--color-text-muted); stroke: var(--color-text-muted); }
-.cpt-parity-svg .parity-missing { fill: var(--color-error); stroke: var(--color-error); }
-.cpt-parity-svg .parity-extra { fill: var(--color-degraded); stroke: var(--color-degraded); }
+.cpt-parity-svg .parity-matched {
+  /* 一致 = **空心**：本来就该退到背景；这样不靠颜色也能认出来 */
+  fill: var(--color-panel); stroke: var(--color-text-muted); stroke-width: 2;
+}
+.cpt-parity-svg .parity-missing { fill: #cf222e; stroke: #cf222e; }   /* 参照缺 */
+.cpt-parity-svg .parity-extra { fill: #0969da; stroke: #0969da; }     /* 参照多 */
 /* ⚠️ **第四态，别漏**：status 实际是**四**个值
  * （`cpt/application/dashboard_parity.py:44`：`matched | missing | extra | mismatched`）。
  * 我第一版只按 grep 到的三个值写了样式，`mismatched` 的点落回 SVG 默认黑 ——
  * 而它恰恰是**最值得看的一类**（两边都有，但字段对不上）。
  * 舍入级差异按该模块的容差逻辑**不算** mismatched，所以它一出现就是真出入。
  */
-.cpt-parity-svg .parity-mismatched { fill: var(--color-accent); stroke: var(--color-accent); }
+.cpt-parity-svg .parity-mismatched { fill: #8250df; stroke: #8250df; } /* 有出入 */
 /* 三态的 title 也要可读：空心圈在深色下也要有边框 */
 .cpt-parity-svg .parity-title { fill: var(--color-text); font: 12px var(--font-mono); }
+/* ⚠️ 第二版换色相，**理由是色觉障碍**（R45）：
+ * 第一版用语义色变量时 missing(红 #cf222e) 与 extra(琥珀 #9a6700)
+ * 正好是红绿色盲最难分的一对（约 8% 男性），而这些点**只有颜色一个通道**。
+ * ⇒ 现用 红(缺) / 蓝(多) / 紫(有出入) / 灰(一致·空心)：红+蓝 走非红绿通道，
+ * 色觉障碍下最稳，紫色与两者都不共线。空心/实心是**形状冗余**，
+ * 图例又同时给文字+数字 —— 认不出颜色也能读懂结论。 */
 .cpt-parity-svg circle[data-parity-kind] { cursor: pointer; }
 .cpt-parity-svg circle[data-parity-kind]:hover { opacity: 0.75; }
 .cpt-parity-svg circle[data-parity-kind]:focus-visible { outline: 2px solid var(--color-accent); }
@@ -2048,7 +2058,31 @@ noscript p {
 .cpt-parity-legend { display: flex; flex-wrap: wrap; gap: 12px; margin: 6px 8px 0; font: 11px var(--font-mono); color: var(--color-text-muted); }
 .cpt-parity-legend-item { display: inline-flex; align-items: center; gap: 5px; }
 .cpt-parity-legend-item i { display: inline-block; width: 9px; height: 9px; border-radius: 50%; }
-.cpt-parity-legend-item i.parity-matched { background: var(--color-text-muted); }
-.cpt-parity-legend-item i.parity-missing { background: var(--color-error); }
-.cpt-parity-legend-item i.parity-extra { background: var(--color-degraded); }
-.cpt-parity-legend-item i.parity-mismatched { background: var(--color-accent); }
+.cpt-parity-legend-item i.parity-matched { background: var(--color-panel); box-shadow: inset 0 0 0 2px var(--color-text-muted); }
+.cpt-parity-legend-item i.parity-missing { background: #cf222e; }
+.cpt-parity-legend-item i.parity-extra { background: #0969da; }
+.cpt-parity-legend-item i.parity-mismatched { background: #8250df; }
+
+/* ------------------------------------------------- 画布 D 的 wbt 报告 iframe
+ *
+ * ⚠️ **R45 无头浏览器实测定位的「画布 D 空白」根因**：
+ * 这个类**一直没有 CSS 定义**，iframe 于是落回 **HTML 默认尺寸 300×150**
+ * （实测 304×154 含边框），而父容器 `#chart-canvas` 是 924×933。
+ *
+ * ⇒ 报告其实**渲染了**（报告头、图例、结构预警、指标块、笔明细表、plotly 图
+ * 全都在），只是被塞进一个 304px 宽的窄柱，plotly 只分到 251px ——
+ * 从外面看就是「一片空白」。**不是没画，是画了但挤成一团看不见。**
+ *
+ * 这也解释了前几轮为什么查不出来：payload 全对、vendor 报 OK、console 干净、
+ * 请求全成功 —— **唯一异常是「尺寸」，而尺寸没有任何检查覆盖**。
+ * `display:block` 顺带消掉 inline 元素的下边缘空隙。
+ */
+.cpt-canvas-d-frame {
+  display: block;
+  width: 100%;
+  height: 100%;
+  min-height: 880px;   /* 报告正文实测约 880px 高；给下限避免双层滚动条 */
+  border: 1px solid var(--color-border);
+  border-radius: 4px;
+  background: var(--color-panel);
+}
