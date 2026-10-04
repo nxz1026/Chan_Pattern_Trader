@@ -43,7 +43,7 @@ for arg in "$@"; do
 done
 
 FILES=(index.html dashboard.css dashboard.js canvas_b.js canvas_c.js canvas_d.js
-       canvas_registry.js market_a_share.js inspection_panel.js)
+       canvas_registry.js market_a_share.js inspection_panel.js url_safety.js)
 
 [ -d "$SRC" ] || { echo "仓库里没有 $SRC" >&2; exit 1; }
 [ -d "$DEST" ] || { echo "部署目录不存在: $DEST" >&2; exit 1; }

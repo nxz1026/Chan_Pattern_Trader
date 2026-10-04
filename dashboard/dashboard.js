@@ -3655,8 +3655,15 @@
    * 会把凭据写回地址栏 —— 一并走这里，行为统一。
    */
   function resolveUrl(endpoint) {
-    const url = new URL(endpoint, window.location.href);
     // 同源时保留会话 cookie 即可，URL 里带凭据既无必要也不安全。
+    // 消毒委托给 url_safety.js（唯一实现）；它返回 null 时保持旧行为：抛出去，
+    // 由调用方在 try/catch 里降级。
+    const shared = window.CPT_URL;
+    if (shared && typeof shared.urlObject === "function") {
+      const url = shared.urlObject(endpoint);
+      if (url) return url;
+    }
+    const url = new URL(endpoint, window.location.href);
     if (url.username || url.password) {
       url.username = "";
       url.password = "";
@@ -3676,14 +3683,13 @@
    * 改完重截一张图，报错一字未变 —— 因为压根不是那条路径）。
    */
   function safeFetchUrl(endpoint) {
-    try {
-      return resolveUrl(endpoint).toString();
-    } catch (error) {
-      // ``file://`` 下相对路径本来就无法解析成 http(s) URL；保持原值，
-      // 让调用方按「离线 demo / 取不到」处理，而不是在这里抛一个新异常。
-      void error;
-      return endpoint;
-    }
+    // ⚠️ R45：凭据消毒的**全站唯一实现**在 url_safety.js。这里只做委托 ——
+    // 本仓今天反复吃「多份实现漂移」的亏（R45 首次修复就漏了 4 个出口），
+    // 所以不再在 dashboard.js 里自己算一遍。
+    const shared = window.CPT_URL;
+    if (shared && typeof shared.safe === "function") return shared.safe(endpoint);
+    const url = resolveUrl(endpoint);
+    return url ? url.toString() : endpoint;
   }
 
   function inspectEndpoint(barIndex) {

@@ -566,6 +566,9 @@
     <!-- R16-5 四画布：注册表必须最先加载（defer 按文档顺序执行），
          画布模块次之，dashboard.js 最后 —— 它 boot() 时要读到完整注册表。
          vendor 资产全部本地内联，无任何 CDN 请求（总计划决策 E2）。 -->
+    <!-- ⚠️ R45：必须最先加载。凭据消毒的唯一实现，canvas_* / market_a_share /
+         inspection_panel 都在它之前用 window.CPT_URL.safe。 -->
+    <script src="./url_safety.js" defer></script>
     <script src="./canvas_registry.js" defer></script>
     <script src="./vendor/lightweight-charts.standalone.production.js" defer></script>
     <script src="./vendor/plotly-finance.min.js" defer></script>

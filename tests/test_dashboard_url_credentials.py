@@ -31,6 +31,7 @@ grep ``"username = \"\""`` 只能证明**代码里写了那句话**，证明不�
 from __future__ import annotations
 
 import json
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -309,17 +310,24 @@ def test_no_unguarded_location_url_survives_for_state_writes() -> None:
                 )
 
 
-def test_ashare_module_has_its_own_credential_stripper() -> None:
-    """A 股模块是独立文件，拿不到 dashboard.js 的内部函数 —— 自带一份。
+def test_ashare_module_delegates_credential_stripping() -> None:
+    """A 股模块**委托** ``url_safety.js``，不再自带一份实现。
 
-    这里断言它**真的清空**了 username/password，而不是只判断存在。
+    R45 更正：这条断言原来要求「自带一份」（``assert 'url.username = ""'``），
+    锁住的恰恰是要消灭的坏模式 —— 副本会与唯一实现漂移。
     """
     js = _code_without_comments((ROOT / "dashboard/market_a_share.js").read_text(encoding="utf-8"))
-    assert "safeLocationUrl" in js
+    assert "safeLocationUrl" in js, "replaceState 仍需要 URL 对象版本"
     body = js[js.find("function safeLocationUrl(") :]
     body = body[: body.find("\n    }") + 6]
-    assert 'url.username = ""' in body
-    assert 'url.password = ""' in body
+    assert "CPT_URL.urlObject" in body, "safeLocationUrl 没有委托唯一实现"
+    assert 'url.username = ""' not in body, "又留了一份本地实现 —— 会与唯一实现漂移"
+
+
+def _strip_js_comments(text: str) -> str:
+    """剥掉 // 与 /* */ 注释，避免注释里的代码片段干扰计数。"""
+    text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+    return re.sub(r"^\s*//.*$", "", text, flags=re.M)
 
 
 def test_every_fetch_exit_goes_through_safe_url() -> None:
@@ -331,8 +339,6 @@ def test_every_fetch_exit_goes_through_safe_url() -> None:
     LLM explain POST。实测在带凭据的页面上这 4 个会各自抛
     "Request cannot be constructed from a URL that includes credentials"。
     """
-    import re
-
     offenders: list[str] = []
     for name in ("dashboard.js", "canvas_d.js", "inspection_panel.js", "market_a_share.js"):
         text = (ROOT / "dashboard" / name).read_text(encoding="utf-8")
@@ -345,17 +351,52 @@ def test_every_fetch_exit_goes_through_safe_url() -> None:
     assert not offenders, "有 fetch 出口绕过了凭据消毒：\n" + "\n".join(offenders)
 
 
-def test_other_files_can_reach_the_shared_helper() -> None:
-    """另外三个文件必须能拿到 ``safeFetchUrl``，且拿不到时有自算的兜底。
+def test_credential_stripping_has_a_single_implementation() -> None:
+    """凭据消毒必须**只有一份实现**，且它加载在所有使用者之前。
 
-    它们是独立的 ``<script defer>``，执行顺序不保证在 ``dashboard.js`` 之后，
-    所以不能假设 ``window.CPTDashboard`` 一定就绪。
+    R45 踩过的坑：第一次修复只覆盖了 ``dashboard.js`` 的 5 个出口、漏了 4 个；
+    若当时把同样逻辑复制进另外三个文件，就埋下「改了主副本、副本静默漂移」的地雷
+    —— 而「多份实现漂移」正是本仓反复吃的那类亏。
+
+    所以：``url_safety.js`` 是唯一实现，其余文件一律**委托**。
     """
-    for name in ("canvas_d.js", "inspection_panel.js", "market_a_share.js"):
+    shared = (ROOT / "dashboard" / "url_safety.js").read_text(encoding="utf-8")
+    assert 'url.username = ""' in shared and 'url.password = ""' in shared, (
+        "url_safety.js 必须自己清空 username 与 password"
+    )
+    for name in ("dashboard.js", "canvas_d.js", "inspection_panel.js",
+                 "market_a_share.js"):
         text = (ROOT / "dashboard" / name).read_text(encoding="utf-8")
-        assert "CPTDashboard && window.CPTDashboard.safeFetchUrl" in text, (
-            f"dashboard/{name} 没有尝试复用 dashboard.js 的 safeFetchUrl"
-        )
-        assert 'url.username = ""' in text, f"dashboard/{name} 缺少自算兜底"
-    dash = (ROOT / "dashboard" / "dashboard.js").read_text(encoding="utf-8")
-    assert "safeFetchUrl," in dash, "safeFetchUrl 没有暴露到 window.CPTDashboard"
+        if name == "url_safety.js":
+            continue
+        # 允许「委托前的本地兜底」出现，但不允许独立的第二份实现
+        clean = _strip_js_comments(text)
+        n = clean.count('url.username = ""')
+        if name == "dashboard.js":
+            assert n <= 1, f"dashboard.js 有 {n} 份凭据清空实现"
+        else:
+            assert n == 0, (
+                f"dashboard/{name} 自己实现了一遍凭据清空 —— 必须委托 url_safety.js，"
+                f"否则副本会与唯一实现漂移"
+            )
+        assert "CPT_URL" in clean, f"dashboard/{name} 没有委托 window.CPT_URL"
+
+
+def test_url_safety_loads_before_every_consumer() -> None:
+    """``url_safety.js`` 必须在所有使用它的 ``<script defer>`` **之前**。
+
+    ``defer`` 脚本按文档顺序执行，顺序错了使用者就拿不到 ``CPT_URL``，
+    会静默退回 ``(t) => t``（即不做消毒）—— 那正是 R45 修的那个 bug。
+    """
+    html = (ROOT / "dashboard" / "index.html").read_text(encoding="utf-8")
+    order = re.findall(r'<script src="\./([a-z_]+\.js)" defer', html)
+    assert "url_safety.js" in order, "index.html 没有加载 url_safety.js"
+    first_use = min(
+        (i for i, n in enumerate(order)
+         if n in ("dashboard.js", "canvas_d.js", "inspection_panel.js",
+                  "market_a_share.js")),
+        default=None,
+    )
+    assert order.index("url_safety.js") < first_use, (
+        f"url_safety.js 必须先于使用者加载；当前顺序: {order}"
+    )

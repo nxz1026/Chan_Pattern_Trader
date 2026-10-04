@@ -28,23 +28,10 @@
     return `${(m2 && m2[1]) || ""}/api/dashboard`;
   }
 
-  // ⚠️ R45：与 dashboard.js 的 safeFetchUrl 同源。dashboard.js 是 defer 脚本，
-  // 本文件可能先于它执行，所以拿不到时**自己算一遍**（规则与那边一致：
-  // 解析后清空 username/password），而不是退回裸 fetch。
-  function safeUrl(endpoint) {
-    const shared = window.CPTDashboard && window.CPTDashboard.safeFetchUrl;
-    if (typeof shared === "function") return shared(endpoint);
-    try {
-      const url = new URL(endpoint, window.location.href);
-      if (url.username || url.password) {
-        url.username = "";
-        url.password = "";
-      }
-      return url.toString();
-    } catch (error) {
-      return endpoint;
-    }
-  }
+  // ⚠️ R45：凭据消毒走**全站唯一实现** ``window.CPT_URL.safe``
+  // （url_safety.js，必须先于本文件加载）。
+  const safeUrl = (target) =>
+    (window.CPT_URL && window.CPT_URL.safe ? window.CPT_URL.safe : (t) => t)(target);
 
   const API = `${apiBase()}/inspection?limit=60`;
   let lastKey = null;

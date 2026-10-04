@@ -63,23 +63,12 @@
     return `${base}/a-share`;
   }
 
-  // ⚠️ R45：与 dashboard.js 的 safeFetchUrl 同源。相对路径在**带凭据的页面**上
-  // 会继承 URL 里的 user:pwd@，而 ``fetch`` 按规范拒绝带凭据的 URL
-  // ⇒ 热门池与自选增删静默降级（R45 首次修复漏了这两个出口）。
-  function safeUrl(target) {
-    const shared = window.CPTDashboard && window.CPTDashboard.safeFetchUrl;
-    if (typeof shared === "function") return shared(target);
-    try {
-      const url = new URL(target, window.location.href);
-      if (url.username || url.password) {
-        url.username = "";
-        url.password = "";
-      }
-      return url.toString();
-    } catch (error) {
-      return target;
-    }
-  }
+  // ⚠️ R45：凭据消毒走**全站唯一实现** ``window.CPT_URL.safe``
+  // （url_safety.js，必须先于本文件加载）。``window.CPTDashboard`` 是
+  // dashboard.js 的入口，而它加载在**最后**（index.html），所以这里不能用它 ——
+  // 那正是「重复实现」的路子：主副本改了、副本静默漂移。
+  const safeUrl = (target) =>
+    (window.CPT_URL && window.CPT_URL.safe ? window.CPT_URL.safe : (t) => t)(target);
 
   function install(dashboard) {
     const root = q("[data-testid=dashboard-root]");
@@ -115,12 +104,12 @@
      * 本模块是独立文件，拿不到 dashboard.js 的内部函数，故自带一份等价实现。
      */
     function safeLocationUrl() {
-      const url = new URL(window.location.href);
-      if (url.username || url.password) {
-        url.username = "";
-        url.password = "";
-      }
-      return url;
+      // ⚠️ R45：委托给 url_safety.js 的**唯一实现**（replaceState 需要 URL 对象）。
+      // 刻意**不留**本地兜底：留一份就等于埋下「改了 url_safety.js、本文件静默
+      // 漂移」的地雷 —— 而「多份实现漂移」正是本仓反复吃的那类亏
+      // （R45 第一次修凭据 URL 就漏了 4 个出口）。url_safety.js 挂在
+      // index.html 的**第一个** script，拿不到是加载顺序被破坏，那时该红。
+      return window.CPT_URL.urlObject(window.location.href);
     }
 
     function syncUrl() {
