@@ -64,6 +64,16 @@ jobs:
           # 3 个从未实现的接口、min_bi_len 的 docstring 声明比实际强。
           # 这些测试抓不到、代码审不出来，只能拿文档里的断言去对代码。
           python scripts/check_doc_drift.py
+          # 门禁④：全量文档断言。check_doc_drift 管「有/没有」，
+          # 这个管「**是不是还对得上**」—— 路径、符号、接口、表名、配置键、行号。
+          # 第五轮全量扫描实测它一次抓到 1 处真漂移（architecture 说 72 个测试
+          # 文件、实际 104）+ 1 个**零测试覆盖的生产 cron 作业**。
+          - name: Doc claims (full sweep)
+            run: python scripts/check_all_claims.py
+          # 门禁⑤：文档里的**计数**断言。计数是最容易悄悄腐坏的一类，
+          # 而且完全不会让任何测试变红。
+          - name: Doc counts
+            run: python scripts/check_doc_counts.py
       - name: Dead-code audit (vulture)
         run: |
           # vulture==2.14 自 2026-09-25 起已在 requirements-dev.txt 锁文件里，

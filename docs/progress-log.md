@@ -1978,7 +1978,7 @@ hfq 被调连续（002594 `raw -67%` / `hfq ±0`）；腾讯退化 = raw 正常�
 
 ### 一、信号事件持久化
 
-**新建 `cpt/application/signal_event_store.py`（152 行）**：
+**新建 `cpt/application/signal_event_store.py`（R45 后已搬到 `cpt/storage/signal_event_store.py`）（152 行）**：
 - `load_previous_signal(conn, signal_id)` 从 `public.cpt_signal_event` 查最新事件重建 Signal（无事件降级 None，DB 报错降级 None 不搞挂快照）
 - `record_signal_event(conn, signal, prev_status, code, event_time)` 只在 status 变时 append（同 status 返回 False 不碰 DB），event_time=0 兜底墙钟 now()
 
@@ -2212,7 +2212,7 @@ C3 `/compare` 与 C4 `/multi-run` 才有入参。但它是**进程级**的：重
    **5 列**：`run_id` PK / `dataset_hash` / `generated_at` / `body_recorded` / `snapshot` jsonb。
    12 列方案被明确叫停（`symbol`/`interval_ms`/`bar_count`/`config_hash`/`source`/`created_at`
    全部能从 jsonb 现抽，冗余列带来一致性问题）。
-2. **存储层** — `cpt/application/dashboard_run_store.py`：`upsert_run` / `get_snapshots` /
+2. **存储层** — `cpt/application/dashboard_run_store.py`（R45 后已搬到 `cpt/storage/dashboard_run_store.py`）：`upsert_run` / `get_snapshots` /
    `recent_runs` + `DashboardRunError`。按 R21 `signal_event_store` 的套路：
    零 psycopg 依赖、连接由调用方传入、**不 commit**（事务边界归调用方）。
 3. **接线** — `cpt/web/app.py`：
@@ -2312,8 +2312,8 @@ adapters，不搬进 storage。
 
 搬迁（`git mv`，保留历史）：
 
-- `cpt/application/signal_event_store.py` → `cpt/storage/`
-- `cpt/application/dashboard_run_store.py` → `cpt/storage/`
+- `cpt/application/signal_event_store.py`（R45 后已搬到 `cpt/storage/signal_event_store.py`） → `cpt/storage/`
+- `cpt/application/dashboard_run_store.py`（R45 后已搬到 `cpt/storage/dashboard_run_store.py`） → `cpt/storage/`
 - 新增 `storage/__init__.py`：写清边界 + **store 层不 commit** 的约定
 
 下沉到 adapters（查的是共享枢纽，属「接外部数据源」）：
@@ -4505,7 +4505,7 @@ R32 的路由抽取、R33 的日志）都是同一形状：**工具对了，位�
 ### 二、顺带挖出一个更严重的问题：linux7 这个包本身是坏的
 
 R31 我说「照抄 `run6.sh` 做 `run7.sh` 会挂，因为 linux7 里没有
-`scripts/collector_linux.sh`」—— 对，但那是症状。**根因在包本身**：
+linux6 包内的 `scripts/collector_linux.sh`（不在本仓）」—— 对，但那是症状。**根因在包本身**：
 
     linux7 的 scripts/scheduler.py:35   RUNNER = HERE / "collector_linux.sh"
     而 linux7 的包里没有这个文件（linux6 有；两个包的 scheduler.py 逐字节相同）

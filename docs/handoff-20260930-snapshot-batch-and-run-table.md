@@ -257,8 +257,10 @@ COMMIT;
 
 ### 5.4 任务清单（按 R21 `signal_event_store` 套路）
 
-1. `scripts/migrations/2026-10-XX_r23_dashboard_run.sql` — 用上面 5 列定义。
-2. `cpt/application/dashboard_run_store.py` — `upsert_run(row, body)` /
+1. `scripts/migrations/2026-10-02_r23_dashboard_run.sql` — 用上面 5 列定义。
+   > ⚠️ R45 更正：原文这里写的是占位名 `2026-10-XX_…`，该文件名**从未存在过**，
+   > 真实落地的文件名如上（已按 `ls scripts/migrations/` 核对）。
+2. `cpt/application/dashboard_run_store.py`（R45 后已搬到 `cpt/storage/`）— `upsert_run(row, body)` /
    `get_snapshots(run_ids: list[str]) -> dict[str, dict | None]` /
    `recent_runs(limit) -> tuple[dict, ...]` 三函数（按 R21 风格纯函数 +
    psycopg 连接传参 + 模块内自定义异常类 `DashboardRunError`）。

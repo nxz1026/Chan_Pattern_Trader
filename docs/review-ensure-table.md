@@ -68,7 +68,7 @@ R45 实测：表是**手工**建出来的（`deploy/README.md:269` 提到"手工
 | | 做法 | 优点 | 代价 |
 |---|---|---|---|
 | **A. 保持现状**（倾向） | 函数继续当 schema 源，补一句 docstring 说明"迁移请手动跑一次" | 零改动、零风险；DDL 已核实与真库一致 | 与仓里其他表的 schema 管理方式不一致；新人不看代码就不知道表是怎么来的 |
-| B. 抽成迁移文件 | 建 `scripts/migrations/xxxx_cpt_run_metric.sql`，`ensure_table` 改为读并执行它 | 与其他表统一；schema 变更可走 review | 要改部署路径；`ensure_table` 变成文件读取器，多一层间接 |
+| B. 抽成迁移文件 | 建 `scripts/migrations/<日期>_cpt_run_metric.sql`（**尚未创建** —— 这是方案 B 的设想，不是现存文件），`ensure_table` 改为读并执行它 | 与其他表统一；schema 变更可走 review | 要改部署路径；`ensure_table` 变成文件读取器，多一层间接 |
 | C. 删掉 | —— | —— | ❌ **表无法重建** —— 不考虑 |
 
 **我的建议是 A**，理由：DDL 已核实与真库零漂移，函数本身是幂等且正确的；

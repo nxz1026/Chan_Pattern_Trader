@@ -215,7 +215,10 @@ R20 补了索引行数据源，但 `dashboard_snapshot_v2.py:62` 的硬编码 `v
 `run_body(run_id)`(:158，返回深拷) 与 `find_run(run_id)`(:173)。C3/C4 由此才有入参。
 
 **R23 把「只对本进程活过的 run 可比」这个遗留口径消掉了**：新增
-`cpt/application/dashboard_run_store.py` + 表 `public.cpt_dashboard_run`（5 列：
+`cpt/application/dashboard_run_store.py`
+> ⚠️ **R45 更正**：该文件后来随 storage 层恢复**搬到了 `cpt/storage/dashboard_run_store.py`** ——
+> 本文记录的是 R23 当时的位置，跟着路径找会扑空。
++ 表 `public.cpt_dashboard_run`（5 列：
 `run_id` PK / `dataset_hash` / `generated_at` / `body_recorded` / `snapshot` jsonb），
 `record_run(..., on_recorded=...)` 在**真正 append 之后**同步双写（best-effort，
 写失败不反噬 HTTP），`/compare`、`/multi-run`、`/runs` 三条路由改成
