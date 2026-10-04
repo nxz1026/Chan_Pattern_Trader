@@ -16,13 +16,28 @@
 # 混了两类（``KIND_RUN`` / ``KIND_INSPECTION``），巡检行是每天状态变化比对的
 # 依据，窗口短得多。所以按 kind 过滤，且 retention 分开配。
 #
-# 安装（oracle，用户级 crontab）：
-#   install -m 755 deploy/cron/run-metric-prune-daily.sh /home/ubuntu/bin/
+# 安装（oracle，用户级 crontab）—— **不需要复制脚本**：
 #   ( crontab -l | grep -v run-metric-prune-daily.sh; \
-#   ( crontab -l | grep -v run-metric-prune-daily.sh; \
+#     echo '10 4 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/run-metric-prune-daily.sh >> /home/ubuntu/logs/run-metric-prune.log 2>&1' ) | crontab -
 #
-# 04:10 UTC = 北京时间 12:10，刻意排在 02:20 因子重算与 03:40 巡检**之后** ——
-# 巡检刚写完的行不会被马上删掉。
+# ## 为什么不复制到 /home/ubuntu/bin/（R45 决策）
+#
+# 原来这里写的是 ``install -m 755 <脚本> /home/ubuntu/bin/``，crontab 指向那份**副本**。
+# 问题不在能不能跑（当时两份是一致的），而在**没有任何机制保证它们继续一致** ——
+# 改了仓内脚本而忘了 scp，线上就跑旧版，**且没有任何检查会报警**。
+# 「两份文件靠人记得同步」本身就是这个问题的根源。
+#
+# 现在 crontab **直接指向仓内路径**：
+#   - 仓内脚本是 git 跟踪的（``git clean`` 只删未跟踪文件，删不掉它们）；
+#   - 三个脚本都自带 ``cd "$REPO"``，**不依赖 cron 给的 CWD**（cron 给的是 ``$HOME``）；
+#   - 解释器走仓内 ``.venv/bin/python``，与手动跑完全一致。
+#
+# ⚠️ **代价**（明说，别以为没有）：仓被 ``git checkout`` 到旧提交时，
+# 跑的就是旧脚本 —— 但这本来就是 git 该有的行为，而且**改代码却不同步线上**
+# 本来就不该发生。相比「默默跑一个过期副本」，这个代价小得多。
+#
+# ⚠️ git 里必须带执行位（``100755``）—— cron 不经过 shell，
+# 权限不对会直接 ``Permission denied``。R45 实测：另两个脚本当时是 ``100644``。
 set -uo pipefail
 
 REPO=/home/ubuntu/DSH/Chan_Pattern_Trader

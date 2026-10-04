@@ -263,19 +263,35 @@ DELETE FROM public.cpt_dashboard_run
 
 ## cron（用户级 crontab，**R43 补**）
 
-两个每天跑的作业。它们此前**只存在于 oracle 的 `/home/ubuntu/bin/`**、既不在仓里、
+每天跑的作业。它们此前**只存在于 oracle 的 `/home/ubuntu/bin/`**、既不在仓里、
 也没写进本文 —— 照本文重建一台机器，这两个作业会静默消失（2026-10-02 实测：
 `run_inspection.py` 从 R38 建好到 R43 之前**从未被调度过**，
 `cpt_run_metric.kind='inspection'` 只有手工验证时那 6 行、相隔 66 秒）。
 
-脚本在 `deploy/cron/`，安装：
+脚本在 `deploy/cron/`，**直接跑仓内路径，不要复制**（R45 决策）：
 
 ```bash
-install -m 755 deploy/cron/run-inspection-daily.sh   /home/ubuntu/bin/
-install -m 755 deploy/cron/factor-recompute-daily.sh /home/ubuntu/bin/
+REPO=/home/ubuntu/DSH/Chan_Pattern_Trader
 ( crontab -l | grep -v run-inspection-daily.sh; \
-  echo '40 3 * * * /home/ubuntu/bin/run-inspection-daily.sh >> /home/ubuntu/logs/run-inspection.log 2>&1' ) | crontab -
+  echo "40 3 * * * $REPO/deploy/cron/run-inspection-daily.sh >> /home/ubuntu/logs/run-inspection.log 2>&1" ) | crontab -
+( crontab -l | grep -v factor-recompute-daily.sh; \
+  echo "20 2 * * * $REPO/deploy/cron/factor-recompute-daily.sh >> /home/ubuntu/logs/factor-recompute.log 2>&1" ) | crontab -
+( crontab -l | grep -v run-metric-prune-daily.sh; \
+  echo "10 4 * * * $REPO/deploy/cron/run-metric-prune-daily.sh >> /home/ubuntu/logs/run-metric-prune.log 2>&1" ) | crontab -
 ```
+
+> **为什么不再 `install -m 755` 复制到 `/home/ubuntu/bin/`**：
+> 复制之后，仓内与 `/home/ubuntu/bin/` 就是**两份文件**，
+> 靠「人记得 scp」保持一致 —— 忘了就静默跑旧版，**没有任何检查会报警**。
+> 直连仓内只有一份，git 就是唯一真相源。
+>
+> 直连的前提（R45 已逐项验过）：脚本是 **git 跟踪**的（`git clean` 只删未跟踪文件）、
+> 都自带 `cd "$REPO"`（不依赖 cron 给的 `$HOME`）、解释器走仓内 `.venv`。
+>
+> ⚠️ **git 里必须带执行位**（`100755`）—— cron 不经过 shell，
+> 权限不对直接 `Permission denied`。R45 实测：另两个脚本当时是 `100644`，
+> 被 `install -m 755` 掩盖了；改成直连仓内就会当场暴露。
+> 改脚本后用 `git ls-files -s deploy/cron/` 确认模式。
 
 | 时间(UTC) | 作业 | 作用 | 写不写库 |
 |---|---|---|---|

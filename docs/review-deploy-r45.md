@@ -131,14 +131,73 @@ CPT_FEISHU_WEBHOOK
 **未改动**（核实后确认无问题）：3 个 systemd unit、3 个 cron 脚本、
 nginx 模板、前端产物 —— 仓内与线上逐项一致。
 
+## 6. 结构性缺口已修：crontab 直接指向仓内（owner 选 A）
+
+**问题**：crontab 指向 `/home/ubuntu/bin/` 的**副本**，不是仓内文件。
+两份内容当时一致，但**没有任何机制保证它们继续一致** ——
+改了仓内脚本忘了 scp，线上就跑旧版，**且没有任何检查会报警**。
+「两份文件靠人记得同步」本身就是问题的根源。
+
+**方案 A（owner 选定）**：crontab 直接跑仓内路径。
+
+### 实施前验掉的那个风险
+
+A 的前提是「仓内路径不会被误删」。**不是靠推测，是查的**：
+
+| 检查 | 结果 |
+|---|---|
+| 三个脚本是否 git 跟踪 | ✅ 全是（`git clean` 只删**未跟踪**文件，删不掉它们） |
+| 脚本是否 CWD 无关 | ✅ 都自带 `cd "$REPO" || exit 1`，不依赖 cron 给的 `$HOME` |
+| 解释器 | ✅ 走仓内 `.venv/bin/python`，与手动跑一致 |
+
+`known-traps` #17 记的那个 `git clean -x` 风险**与此无关** ——
+它针对的是 `.gitignore` 挡住的 `deploy/env/cpt-dashboard.env`，
+不是跟踪文件。
+
+### ⚠️ 实施时差点翻车：git 模式是 `100644`
+
+| 脚本 | 改之前 |
+|---|---|
+| `factor-recompute-daily.sh` | `100644` ❌ |
+| `run-inspection-daily.sh` | `100644` ❌ |
+| `run-metric-prune-daily.sh` | `100755` ✅ |
+
+**cron 不经过 shell，没有执行位就是 `Permission denied`。**
+两个脚本当天是 `install -m 755` 复制到 `/home/ubuntu/bin/` 时才拿到执行位的，
+**git 索引里一直没记** —— 一旦 crontab 指向仓内，立刻就会炸。
+`chmod +x` 后三个都是 `100755`。
+
+> 这是「A 方案比看起来更值得验证」的一个例子：
+> 原方案（A 之前）**恰好**被 `install -m 755` 掩盖了这个缺失。
+> 换成直连仓内，隐藏的假设才暴露出来。
+
+### 端到端验证（不是「看着对」）
+
+按 cron 的**真实调用方式**跑了一遍：
+
+```bash
+env -i HOME=/home/ubuntu PATH=/usr/bin:/bin   /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/run-metric-prune-daily.sh
+```
+
+`env -i` 清空全部环境、CWD 是 `$HOME` —— 与 cron 一致。
+结果 **rc=0，日志 1 → 2 条**，新记录 `2026-10-04T02:40:12Z`。
+
+**从 crontab 换了 3 行，diff 与备份逐行核对，除这 3 行外无任何改动。**
+（切换前先 `crontab -l > /tmp/crontab.bak` 备份。）
+
+### 顺带修好一处坏掉的文档
+
+`run-metric-prune-daily.sh` 的安装说明**本身是坏的** ——
+`crontab` 那行重复了两次、括号和反引号都没闭合（另两个脚本是完整的）。
+照着抄会直接失败。三个脚本的安装段已重写，顺带写清了 A 的**代价**：
+
+> 仓被 `git checkout` 到旧提交时跑的就是旧脚本 ——
+> 但这本来就是 git 该有的行为，而且**改代码却不同步线上**本来就不该发生。
+> 相比「默默跑一个过期副本」，这个代价小得多。
+
 ## 还没做的
 
-- **`run-metric-prune` 的第一次真实 cron 触发**（等 04:10 UTC 后的回执）
+- **`run-metric-prune` 的第一次真实 cron 触发**（等 04:10 UTC 后的回执；
+  端到端接线已验证，只差「调度器真的会来」这一下）
 - **清掉 `/var/www/cpt-dashboard/dashboard.js.bak-r44`**（低优先，
   需要用户确认 —— 线上文件删除我一般不自己动手）
-- **`deploy/cron/` → `/home/ubuntu/bin/` 的同步步骤**：
-  crontab 指向的是 `/home/ubuntu/bin/` 的**副本**，不是仓内文件。
-  现在两份内容一致，但**没有任何机制保证它们继续一致** ——
-  下次改了仓内脚本而忘了 scp，线上就会跑旧版，且**没有任何检查会报警**。
-  ⇒ 这是本轮发现的**唯一结构性缺口**，需要决定：
-  改 crontab 直接指向仓内路径（但仓可能被 `git clean`）、还是加一个同步脚本 + 门禁。
