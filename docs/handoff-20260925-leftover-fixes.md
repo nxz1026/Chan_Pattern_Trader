@@ -369,7 +369,7 @@ with psycopg.connect(**connection_kwargs()) as c, c.cursor() as cur:
   头部加了"历史快照"横幅（原先落后 65 个提交且位置扎眼，易被误当现状）
 - `docs/export-schema-v1.md` —— 本轮新增
 - `docs/known-traps.md` —— 2026-09-25 坑排查新增：把"看起来像 bug 其实是设计/环境"
-  的 8 类集中记下（CI 的 28 个 skip、`dependencies = []` 是刻意的、`daily_bar_raw.source`
+  的类目集中记下（R45 已增至 **24 条**；CI 的 28 个 skip、`dependencies = []` 是刻意的、`daily_bar_raw.source`
   真多源别去合并、前端字符串断言、chromium 测试红绿取决于环境、`deploy/env/*.env`
   故意不入库、pre-commit 找不到可执行文件、pending-wiring 是产品决策），每条附判定命令
 - `docs/progress-log.md` —— 活文档，每轮都要追加
