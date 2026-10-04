@@ -161,23 +161,38 @@ def build_parity_snapshot_for(
         "zhongshus": _normalize(zhongshus, "zhongshu"),
     }
 
-    ref = _czsc_structures(bars, cfg)
-    source, detail = "czsc", f"同批 K 线、czsc 后端 vs 生产后端 {type(production_backend).__name__}"
-    if ref is None:
-        # 参照侧必须与本地**同窗口**：本地 122 根无缺口，腾讯 800 根含节假日缺口。
-        window = (bars[0].open_time, bars[-1].open_time) if len(bars) >= 2 else (0, 0)
-        ref = _tencent_structures(code, cfg, window)
-        source = "tencent_hfq"
-        detail = (
-            f"本地库结构 vs 腾讯 hfq 同窗口序列"
-            f"（{window[1] and len(bars)} 根，生产后端 {type(production_backend).__name__}）"
+    # R45：**委派给 reference 后端**，不再在本模块里自己走那两条路。
+    # 此前参照侧是这里的两个私有函数，而它同时又不是一个后端
+    # （``BACKEND_CHOICES`` 里没有它），于是「参照侧到底是哪套算法」
+    # 只能靠读 application 层的私有代码回答，且存在**两份实现漂移**的风险
+    # （parity 走 czsc、离线导出走腾讯）。
+    # ⇒ 现在只有一份实现，且**实际用了哪一级由后端如实报告**。
+    from cpt.adapters.backend_factory import resolve_backend  # noqa: PLC0415
+    from cpt.adapters.reference_backend import (  # noqa: PLC0415
+        ReferenceUnavailableError,
+    )
+    from cpt.adapters.reference_chanlun import ReferenceChanlunConfig  # noqa: PLC0415
+
+    backend = resolve_backend("reference")
+    try:
+        backend.compute_structures(
+            list(bars), ReferenceChanlunConfig(min_bi_len=cfg.min_bi_len)
         )
-    if ref is None:
+    except ReferenceUnavailableError as exc:
         return build_parity_snapshot(
             available=False,
             reason="reference_unavailable",
             reference="none",
-            reference_detail="czsc 未安装，且腾讯 hfq 取数失败",
+            reference_detail=str(exc),
+        )
+    source = backend.source or "none"
+    if source == "czsc":
+        detail = f"同批 K 线、czsc 后端 vs 生产后端 {type(production_backend).__name__}"
+    else:
+        # 参照侧必须与本地**同窗口**：本地 122 根无缺口，腾讯 800 根含节假日缺口。
+        detail = (
+            f"本地库结构 vs 腾讯 hfq 同窗口序列"
+            f"（{len(bars)} 根，生产后端 {type(production_backend).__name__}）"
         )
     return build_parity_snapshot(
         fractals=cpt_side["fractals"],

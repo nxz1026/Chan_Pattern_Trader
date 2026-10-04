@@ -279,3 +279,78 @@ czsc 同一批输入：退化笔 **0%**（最短 10 根）。且 **40 只票每�
 
 **需要 owner 决定 A 还是 B。** B 是本轮已做的默认值；A 的代价很大，
 但如果目标是「严格符合缠论标准笔定义」，那 A 才是对的。
+
+---
+
+## 追加：`reference` 后端落地（R45）
+
+### 之前的状态
+
+参照侧**不是一个后端**：
+
+- `BACKEND_CHOICES` 只有 `("auto", "czsc", "native")`；
+- 它的实现私藏在 `cpt/application/parity_reference.py` 的两个私有函数
+  `_czsc_structures` / `_tencent_structures` 里；
+- 仓内唯一的"第三个实现"是 `InMemoryChanlunBackend` ——
+  **测试占位**，只做"bar 局部极值 + 相邻异类连线"，不追求真实缠论精度。
+
+⇒ 想回答「参照侧到底是哪套算法、跑了哪份数据、为什么降级」，
+只能去读 application 层的私有代码；想把它**当成后端跑一遍**（离线导出做人工比对）
+根本做不到。
+
+### 落地
+
+新增 `cpt/adapters/reference_backend.py`（一等后端），并把
+`parity_reference.build_parity_snapshot_for` 改为**委派**给它
+—— 参照侧从此只有**一份**实现，不会出现「parity 走 czsc、离线导出走腾讯」的漂移。
+
+| 项 | 值 |
+|---|---|
+| 回落链 | czsc（实现对照）→ 腾讯 hfq（数据链路对照）→ 抛 `ReferenceUnavailableError` |
+| 用了哪一级 | `backend.source` / `backend.detail` **如实报告**（此前只有 application 层知道） |
+| 默认档 | **不变**，仍是 `native` |
+
+**刻意不做的事**：参照侧**不静默回落 native** ——
+参照侧回落到生产侧等于**自己跟自己比**，那是对照面板最没意义的一种「通过」。
+宁可报「没参照」。
+
+**新异常 `ReferenceUnavailableError`** 与 `UnknownBackendError` 分开：
+后者是「**档位名写错了**」，前者是「**名字对、但环境不支持**」。
+混成一个，会让「配置错误」和「依赖缺失」在日志里长得一样。
+
+### 一处设计上的真问题（实测撞出来的）
+
+`ChanlunBackend` 契约只传 `bars`，而腾讯那条路需要**标的代码** ——
+但 **`CanonicalBar` 根本没有 `code` 字段**（实测
+`CanonicalBar.__init__() got an unexpected keyword argument 'code'`）。
+
+⇒ 代码只能作为**后端级属性**显式传：`ReferenceChanlunBackend(code="600519")`，
+工厂侧 `resolve_backend("reference", code=...)`。
+留 `None` 时走到腾讯那级直接判不可用（**不猜代码**）——
+与 `factor_from_actions`「宁可少一个台阶，也不用猜的值」同一个原则。
+
+### 真机验证（2026-10-04，Oracle）
+
+```
+取到 300 根 K 线（600519）
+✓ 参照结构算出来了
+  source = czsc | detail = czsc 实现对照
+  分型 99 / 笔 21 / 中枢 2
+```
+
+### 一处**语义分歧**的处理（不是 bug）
+
+翻转 `not actions` 那支时，撞到 R44 刻意立的守卫
+`test_no_actions_at_all_still_reports_no_record`
+—— R44 整套测试就是为「窗口内无除权该写、查无记录该报」这个**区分**存在的。
+
+**没有为了变绿就删断言。** 做法是：保留它的价值，改成钉住新意图 ——
+断言「恒定值取自 `anchor`（199.4）而不是 1.0」。
+这正是「正确写入」与「把接口故障洗成数据」的分界线。
+
+并补了一条**对照**测试：K 线不足 30 根仍必须拒写。
+两条并置说明分界线是「**有没有确定答案**」，而不是「东财说不说」。
+
+### 回归
+
+全量 `pytest tests/` = **2 个失败，与基线逐条相同**。

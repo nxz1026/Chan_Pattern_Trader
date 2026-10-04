@@ -61,8 +61,30 @@ def _zigzag_bars(n: int = 120) -> list[CanonicalBar]:
 
 
 def test_choices_and_default_are_consistent() -> None:
-    assert BACKEND_CHOICES == ("auto", "czsc", "native")
+    # R45 新增 "reference"：把**参照侧**从 application 层的私有函数提成一等后端。
+    # ⚠️ DEFAULT_BACKEND 刻意**仍是** "native" —— 加一个可选项不等于改默认档
+    # （R36 的教训：谁装了 extra 就静默切后端，正是要堵的那类风险）。
+    assert BACKEND_CHOICES == ("auto", "czsc", "native", "reference")
     assert DEFAULT_BACKEND in BACKEND_CHOICES
+    assert DEFAULT_BACKEND == "native"
+
+
+def test_reference_backend_is_resolvable_and_distinct() -> None:
+    """``reference`` 必须能解析，且**不是** native 的别名。
+
+    这一条钉的是「参照侧真的成了后端」而不是只加了个名字 ——
+    如果哪天它悄悄回落到 native，对照面板就变成「自己跟自己比」，
+    而那恰恰是最没意义的一种「通过」。
+    """
+    from cpt.adapters.backend_factory import resolve_backend
+    from cpt.adapters.reference_backend import ReferenceChanlunBackend
+
+    backend = resolve_backend("reference", code="600519")
+    assert isinstance(backend, ReferenceChanlunBackend)
+    assert backend.code == "600519"
+    # ⚠️ 比**类型**而不是 isinstance(instance) —— resolve_backend 返回的是实例，
+    # isinstance 的第二参必须是类。
+    assert type(backend) is not type(resolve_backend("native"))
 
 
 def test_native_is_forced_backend() -> None:

@@ -279,6 +279,7 @@ cpt/
 │   signal_event_store.py   → public.cpt_signal_event（R21）
 │   dashboard_run_store.py  → public.cpt_dashboard_run（R23）
 │   factor_epoch_store.py    → public.cpt_factor_epoch（R45：复权因子口径切换点）
+    reference_backend.py  ← R45 新增：**参照侧一等后端**（czsc→腾讯两级回落）
 └── web/            HTTP 入口（4 个模块 + __init__）
     __main__.py  app.py  a_share.py  a_share_routes.py
 
@@ -302,6 +303,7 @@ docs/               rules.md  architecture.md  implementation-plan.md  progress-
                     known-traps.md  audit/  archive/
 deploy/             nginx/  systemd/  env/  README.md
 references/         czsc @ 701e480a（可选 extra `chan`）  wbt @ 39bb1e8a（仅可视化参考）
+                    ⚠️ 「参照侧」= **czsc**，不是 references/ 里的某个独立实现
 ```
 
 > `engine/` 已于 2026-09-25 整层删除（生产零导入），见 §2。

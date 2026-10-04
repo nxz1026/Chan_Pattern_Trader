@@ -174,15 +174,61 @@ def test_still_refuses_when_ex_date_inside_window_has_no_prev_close(
     assert not written, "拒写时不该有任何行落库"
 
 
-def test_no_actions_at_all_still_reports_no_record(monkeypatch: pytest.MonkeyPatch) -> None:
-    """完全没有公司行动 ⇒ 保持原有文案（这是「查无此记录」，不是「窗口内无除权」）。"""
+def test_no_actions_at_all_now_writes_constant(monkeypatch: pytest.MonkeyPatch) -> None:
+    """东财确认「无公司行动」⇒ **写恒定因子**（R45 翻转了 R44 的这一条）。
+
+    ## 为什么翻转
+
+    R44 刻意让这一支保持「报无记录、整只拒写」，与
+    ``all(d < first_bar)`` 那一支区别对待。当时的理由是「查无此记录」
+    像个**不确定**的答案，不像「窗口内确认没有除权」。
+
+    R45 查了上游，结论是**它其实很确定**：
+    ``cpt/adapters/eastmoney_actions._is_no_data`` 只在东财**明说**
+    ``code=9201 / 返回数据为空`` 时才返回空元组，其余一律 raise 成
+    ``EastmoneyActionError`` → fatal。该函数的注释写得很克制：
+
+        「宁可漏判（退回 fatal、旧行为）也不误判
+          （把接口故障当成『没分过红』而静默写进暂存表）」
+
+    ⇒ 走到 ``not actions`` 时，那是**已确认的「没有公司行动」**。
+    窗口内因子恒定**就是正确答案** —— 与 R44 已经修好的那一支同理。
+
+    ## 为什么这条必须钉住（而不是删掉）
+
+    「接口故障被当成「没分过红」而静默写进表」是**真实的**风险：
+    一旦上游的判据被改松，失败的标的会被写成恒定 1.0，
+    而 1.0 在后复权口径下**看起来完全正常** ⇒ 静默污染。
+    所以本条继续存在，改为断言**恒定值取自 anchor 而不是 1.0** ——
+    这正是「洗成数据」与「正确写入」的分界。
+    """
     written: list[tuple] = []
-    src = _install(monkeypatch, bars=_bars(), anchor=1.0, actions=[], written=written)
+    src = _install(monkeypatch, bars=_bars(), anchor=199.4, actions=[], written=written)
+
+    res, _ = fr.process_code(_client(199.4), src, "001239", write=True, retries=0)
+
+    assert res.ok, res.note
+    assert res.steps == 0
+    assert "无公司行动" in res.note
+    assert written, "确认无公司行动 ⇒ 应当写入恒定行"
+    # 关键：常数取 anchor(199.4) 而不是 1.0
+    assert {row[2] for row in written} == {199.4}
+    assert "东财确认无公司行动" in written[0][4]
+
+
+def test_too_few_bars_still_rejected_keeps_uncertainty(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**对照**：K 线不足 30 根仍必须拒写。
+
+    与上一条并置，说明分界线是「**有没有确定答案**」而不是「东财说不说」：
+    缺数据时**没有**确定答案，此时拒写是诚实的。
+    """
+    written: list[tuple] = []
+    src = _install(monkeypatch, bars=_bars()[:5], anchor=1.0, actions=[], written=written)
 
     res, _ = fr.process_code(_client(1.0), src, "001239", write=True, retries=0)
 
     assert not res.ok
-    assert "无公司行动记录" in res.note
+    assert "30 根" in res.note
     assert not written
 
 

@@ -64,7 +64,7 @@ __all__ = [
 ]
 
 #: ``--backend`` 的合法取值（顺序＝帮助信息里的展示顺序）。
-BACKEND_CHOICES: Final[tuple[str, ...]] = ("auto", "czsc", "native")
+BACKEND_CHOICES: Final[tuple[str, ...]] = ("auto", "czsc", "native", "reference")
 
 #: 未显式指定时的默认档。
 #:
@@ -83,11 +83,17 @@ def resolve_backend(
     name: str = DEFAULT_BACKEND,
     *,
     min_bi_len: int | None = None,
+    code: str | None = None,
 ) -> ChanlunBackend:
     """把档位名字解析成后端实例。
 
     Args:
-        name: ``"auto"`` / ``"czsc"`` / ``"native"``（大小写不敏感）。
+        name: ``"auto"`` / ``"czsc"`` / ``"native"`` / ``"reference"``
+            （大小写不敏感）。``"reference"`` 是**参照侧**，走 czsc→腾讯两级回落，
+            两条都拿不到时抛 :class:`ReferenceUnavailableError`（**不**静默回落 native ——
+            参照侧回落到生产侧等于自己跟自己比）。
+        code: 标的代码，**只有 ``"reference"`` 档用得上**（腾讯回落那条路
+            需要它；``CanonicalBar`` 没有 ``code`` 字段，取不到就得显式传）。
         min_bi_len: 传给 czsc 后端的笔门槛（去包含后 K 线根数）。``None``
             时用 czsc 上游默认 6。**native 后端忽略本参数**——它的笔口径由
             ``cpt/domain/bi.py`` 决定，不接受该门槛（量纲不同的
@@ -108,6 +114,18 @@ def resolve_backend(
 
     if normalized == "native":
         return NativeChanlunBackend()
+
+    if normalized == "reference":
+        # R45 新增：把**参照侧**从 application 层的私有函数提成一等后端。
+        # 它有自己的两级回落（czsc → 腾讯 hfq）与自己的失败异常
+        # ``ReferenceUnavailableError``，与「档位名写错」的
+        # ``UnknownBackendError`` 是两回事 —— 混成一个会让
+        # 「配置错误」和「依赖缺失」在日志里长得一样。
+        from cpt.adapters.reference_backend import (  # noqa: PLC0415
+            ReferenceChanlunBackend,
+        )
+
+        return ReferenceChanlunBackend(code=code)
 
     # 延迟导入：czsc 是可选依赖，``auto`` 档在未安装时必须能回落而不是
     # 在 import 期就炸掉整个 web 服务。
