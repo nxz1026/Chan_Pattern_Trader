@@ -398,6 +398,7 @@ def build_ashare_snapshot(
     _attach_t_plus_one(snapshot, active_client)
     _attach_close_countdown(snapshot, active_client)
     _attach_signal_change(snapshot, active_client)
+    _attach_factor_epoch(snapshot, active_client)   # R45：口径纪元随快照下发
     _attach_dual_compare(snapshot, code, active_client)
     _attach_calendar_gaps(snapshot, active_client)
     # R38：A 股侧也落「运行水位 + 算法指纹」。加密侧那行在"只有走到这里才算成功
@@ -816,6 +817,43 @@ def _attach_signal_change(snapshot: dict[str, Any], client: Any) -> None:
         _rollback_quietly(client, "signal_change")
         snapshot["summary"]["signal_changed"] = False
         snapshot["summary"]["signal_change_type"] = None
+
+
+def _attach_factor_epoch(snapshot: dict[str, Any], client: Any) -> None:
+    """把因子口径纪元挂到 ``summary.factor_epoch``（R45）。
+
+    ## 为什么前端需要这个
+
+    2026-10-03 切表后，**切表前**记录的信号里有 29 条从 ``structure_ready``
+    变成 ``invalidated``。那不是「信号失败了」，而是「结构在换口径后重算，
+    与旧口径判断不一致」。
+
+    **两件事在没有标记时长得一模一样** —— 用户/排查者看到「信号突然失效」，
+    合理推断是系统坏了。没有这个字段就无法证伪。
+
+    契约：``known=False`` 表示「本仓尚未登记切换点」，此时前端**不要**显示
+    任何口径提示，而不是显示「旧口径」（那会凭空把一切说成旧口径）。
+    """
+    getter = getattr(client, "_get_conn", None)
+    conn = getter() if callable(getter) else None
+    payload: dict[str, Any] = {"known": False}
+    if conn is not None:
+        from cpt.storage.factor_epoch_store import current_epoch  # noqa: PLC0415
+
+        ep = current_epoch(conn)
+        payload = {
+            "known": ep.known,
+            "switched_at": ep.switched_at.isoformat() if ep.switched_at else None,
+            "old_source": ep.old_source,
+            "new_source": ep.new_source,
+            "old_match_rate": (
+                float(ep.old_match_rate) if ep.old_match_rate is not None else None
+            ),
+            "new_match_rate": (
+                float(ep.new_match_rate) if ep.new_match_rate is not None else None
+            ),
+        }
+    snapshot["summary"]["factor_epoch"] = payload
 
 
 def _attach_dual_compare(snapshot: dict[str, Any], code: str, client: Any) -> None:
