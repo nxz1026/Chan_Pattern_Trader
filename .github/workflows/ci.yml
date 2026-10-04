@@ -58,6 +58,12 @@ jobs:
           # PostgreSQL 里「事务中一条语句失败 ⇒ 同一连接后续全部 aborted」，
           # 所以 catch 住 DB 异常再返回空值，不是降级，是把局部失败放大成整页失败。
           python scripts/check_storage_failure_semantics.py
+          # 门禁③：文档 ↔ 代码**漂移**。前两道门禁查的是代码自己，
+          # 查不到「文档在骗人」—— 而 R45 第一轮实测到 6 处，全是文档问题：
+          # architecture §2.1 的 ✅ 标错 2 层且行数全偏低、dashboard-plan 写了
+          # 3 个从未实现的接口、min_bi_len 的 docstring 声明比实际强。
+          # 这些测试抓不到、代码审不出来，只能拿文档里的断言去对代码。
+          python scripts/check_doc_drift.py
       - name: Dead-code audit (vulture)
         run: |
           # vulture==2.14 自 2026-09-25 起已在 requirements-dev.txt 锁文件里，
