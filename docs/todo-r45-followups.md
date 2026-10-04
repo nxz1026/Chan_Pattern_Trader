@@ -480,3 +480,49 @@ DB 错误直接往上抛。
 `wind_source.parse_corporate_actions`（42.9%）、`a_share_factor` 一批…
 **建议下一批只做「生产 cron」那一类**（3 个脚本的失败路径），
 它对线上影响最直接，外部接口的可以慢慢补。
+
+---
+
+## 第四批：生产 cron 的退出码契约（6 例，2026-10-04 22:55）
+
+三个 cron 里 `run-inspection-daily.sh`（03:40 UTC）**改了语义但没钉住** ——
+R45 修了它「本该发而没发 ⇒ rc=3」，`factor_recompute` 那次有测试
+（`test_factor_recompute_exit_code.py`），**这边没有**。
+
+`tests/test_run_inspection_exit_code.py` 钉住：无问题且状态未变 ⇒ 0、
+`--print` ⇒ 0、**告警没送达 ⇒ 3**、送达 ⇒ 0、无论发不发得出**都要落库**。
+
+## ⚠️ 顺带挖出一个「只改了一半」的地方（待 owner 决定）
+
+`run_inspection.main()` 里有两条「本该发而没发」：
+
+| 情形 | 现状 |
+|---|---|
+| 配了 webhook，但 `notify_problem` 返回 False | **rc=3** ✅ R45 已修 |
+| **压根没配 `CPT_FEISHU_WEBHOOK`** | **rc=0** ❌ 只把内容打印到日志 |
+
+我倾向它该也返回 3：
+
+- 问题确实发现了，只是送不出去 ⇒ cron / 看门狗看到的是「今天正常」；
+- 同一个函数里那条兄弟分支的注释原话是
+  「**告警通道坏掉的时候，恰恰最需要机器来发现**」—— 而「没配」比
+  「配了但发失败」**更严重**；
+- `deploy/env/cpt-dashboard.env` **是 gitignore 的**（R45 才把它补进
+  `.example`，就是因为照模版部署会静默失去所有告警）⇒ 部署出来没配
+  是**可达状态**。
+
+反方：未配置的机器也许就是本地开发机；且内容**已打印到日志**，不完全静默。
+
+⇒ **我没改代码**，只把现状与理由写进测试 docstring
+（`test_webhook_not_configured_currently_returns_0`），
+owner 若决定改成 3，那条断言会失败并提醒同步。
+
+## 写这批测试时踩的三个坑（都是**夹具不全**，不是代码问题）
+
+1. `build_report` 的返回有 **10 个键**，我给了 5 个 ⇒ `KeyError: 'sources'`。
+   漏一个键的报错指向 KeyError，而不是「你的夹具不全」。
+2. `RunMetric = object` 接不住 kwargs（`object() takes no arguments`）
+   ⇒ 假类也得**有形状**。
+3. 编了个 `prev.state_key="same"` ⇒ 与真算的 `_state_key(report)` 必然不等
+   ⇒ 判定「状态变了」⇒ 去告警 ⇒ 拿到 3。
+   ⇒ **别编 key，用同一个 report 算。**

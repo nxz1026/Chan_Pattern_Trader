@@ -6455,3 +6455,23 @@ DB 错误直接往上抛。而这是**对的**：它只被脚本调用，
 
 ⇒ 又一次「我以为的机制 vs 真实机制」。跳过读实现直接提交，
 就会「修」一个不存在的降级缺陷，**制造一个真 bug**。
+
+---
+
+## R45 P0-1 补测第四批：生产 cron 退出码契约（2026-10-04 22:55）
+
+`run-inspection-daily.sh`（03:40 UTC）今天改过退出码语义但**没钉住** ——
+`factor_recompute` 那次有测试，这边没有。补 `test_run_inspection_exit_code.py`（6 例）。
+
+**顺带挖出「只改了一半」**：R45 修了「配了 webhook 但发失败 ⇒ rc=3」，
+但「**压根没配 webhook**」那条只打印、仍 rc=0。倾向它也该 3
+（问题确实发现了只是送不出去；而 env 文件是 gitignore 的，
+「没配」比「发失败」更严重）。**没改代码**，只把现状与理由写进测试
+docstring，owner 决定。
+
+**写测试时三个坑都是夹具不全**：`build_report` 有 10 个键我给了 5 个；
+`RunMetric = object` 接不住 kwargs；编了个 `prev.state_key` 与真算的
+`_state_key(report)` 不等 ⇒ 误判「状态变了」⇒ 拿到 3。
+**别编 key，用同一个 report 算。**
+
+测试文件 113 → 114；全量 pytest 2 个失败 = 基线。
