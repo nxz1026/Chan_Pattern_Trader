@@ -23,10 +23,12 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import Any, Final, Literal
 
 __all__ = [
     "MIN_BARS",
+    "build_history",
     "ACTION_BUY",
     "ACTION_SELL",
     "ACTION_WATCH",
@@ -222,4 +224,49 @@ def _degraded(why: str, *, quality: dict[str, Any] | None = None) -> dict[str, A
         "divergence_status": "",
         "data_quality": quality or _data_quality({}),
         "disclaimer": "结构状态翻译，非投资建议",
+    }
+
+
+def build_history(
+    events: Sequence[dict[str, Any]], *, epoch_ms: int | None = None
+) -> dict[str, Any]:
+    """把信号事件压成**可回看**的摘要（R45 P2）。
+
+    ## 为什么要这个
+
+    因子表在 R45 一天内切了 **4 次**、口径变过 2 次，但推荐是**当天才有的** ——
+    「切表前推荐长什么样」这个问题，**当时没有答案**。
+    幸而 ``cpt_signal_event`` 一直在记信号状态变迁（49 行 / 40 只票），
+    配合 ``cpt_factor_epoch.switched_at`` 就能分清**旧口径 / 新口径**。
+
+    ⇒ 至少让「这只票的判断在切表前后变没变」变成**看得见**的，
+    而不是只能推断。
+
+    :param events: :func:`cpt.storage.signal_event_store.load_signal_events` 的产物。
+    :param epoch_ms: 口径切换点的毫秒时间戳；``None`` 表示不分组。
+    """
+    rows: list[dict[str, Any]] = []
+    before = after = 0
+    for e in events:
+        t = e.get("transition_time")
+        t_ms = int(t) if isinstance(t, int | float) else None
+        legacy = bool(epoch_ms and t_ms and t_ms < epoch_ms)
+        if epoch_ms and t_ms:
+            before += 1 if legacy else 0
+            after += 0 if legacy else 1
+        rows.append({
+            "at_ms": t_ms,
+            "status": e.get("status") or "",
+            "signal_type": e.get("signal_type") or "",
+            "price": _num(e.get("price")),
+            "divergence_status": e.get("divergence_status") or "",
+            "legacy": legacy,
+        })
+    return {
+        "available": bool(rows),
+        "count": len(rows),
+        "items": rows,
+        "epoch_ms": epoch_ms,
+        "legacy_count": before,
+        "current_count": after,
     }

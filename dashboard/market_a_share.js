@@ -383,6 +383,8 @@
         }
         root.dataset.recBars = String(q.bars == null ? "" : q.bars);
         root.dataset.recAvailable = rec.available ? "1" : "0";
+        renderHistory(rec.history);
+        renderHistory(rec.history);
         if (rec.available) loadLlmSummary(rec);
       } catch (error) {
         actionEl.textContent = "—";
@@ -471,6 +473,46 @@
       );
     }
 
+    /** 渲染信号历史（R45 P2）。
+     *
+     * ⚠️ 口径（legacy）与**新口径**用**文字标签**区分，不只靠颜色 ——
+     * 口径一旦看错，整段对照就作废了。颜色只能辅助。
+     */
+    function renderHistory(hist) {
+      const box = q('[data-testid="rec-history"]');
+      const list = q('[data-testid="rec-history-list"]');
+      const split = q('[data-testid="rec-history-split"]');
+      if (!box || !list) return;
+      if (!hist || !hist.available || !(hist.items || []).length) { box.hidden = true; return; }
+      box.hidden = false;
+      if (split) {
+        split.textContent = `旧口径 ${hist.legacy_count || 0} · 新口径 ${hist.current_count || 0}`;
+      }
+      list.replaceChildren();
+      hist.items.slice(0, 8).forEach((it) => {
+        const li = document.createElement("li");
+        if (it.legacy) li.dataset.legacy = "1";
+        const t = document.createElement("span");
+        t.className = "t";
+        t.textContent = it.at_ms ? new Date(it.at_ms).toISOString().slice(0, 16).replace("T", " ") : "—";
+        const st = document.createElement("span");
+        st.className = "st";
+        st.textContent = `${it.signal_type || "—"} ${it.status || "—"}`;
+        const px = document.createElement("span");
+        px.className = "px";
+        // ⚠️ 必须 toFixed(2) —— 直接 String(45.913000008999994) 会把
+        // double 的浮点噪声原样印在界面上（信号表的 price 是 double precision）。
+        px.textContent = it.price == null ? "" : formatPrice(it.price);
+        li.appendChild(t); li.appendChild(st); li.appendChild(px);
+        if (it.legacy) {
+          const tag = document.createElement("span");
+          tag.className = "tag";
+          tag.textContent = "旧口径";
+          li.appendChild(tag);
+        }
+        list.appendChild(li);
+      });
+    }
     async function loadPool() {
       try {
         const response = await fetch(safeUrl(`${state.base}/pool`), {

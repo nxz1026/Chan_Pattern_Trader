@@ -150,7 +150,48 @@ def build_recommendation(code: str, *, level: str | None = None) -> dict[str, An
     # ⇒ 补一个**不复权收盘价**（raw_close）作为可执行参考价，
     #    后复权价保留在 raw 里以备核对。
     out["raw_close"] = _raw_close(_normalize(code))
+    out["history"] = _signal_history(_normalize(code))
     return out
+
+
+def _signal_history(code: str) -> dict[str, Any]:
+    """信号历史 + **口径分组**（R45 P2）。
+
+    因子表 R45 一天切了 4 次，而推荐是当天才有的 ⇒ 「切表前推荐长什么样」
+    当时**没有答案**。``cpt_signal_event`` 一直在记状态变迁，
+    配合 ``cpt_factor_epoch.switched_at`` 就能分清旧口径 / 新口径。
+
+    读失败**降级为不可用**，但不假装「确实没有历史」——
+    与 ``load_signal_events`` 自己抛 ``SignalEventError`` 的口径一致。
+    """
+    from cpt.application.recommendation import build_history  # noqa: PLC0415
+    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+    from cpt.storage.factor_epoch_store import current_epoch  # noqa: PLC0415
+    from cpt.storage.signal_event_store import (  # noqa: PLC0415
+        SignalEventError,
+        load_signal_events,
+    )
+
+    client = AShareLocalClient()
+    try:
+        conn = client._get_conn()  # noqa: SLF001
+        epoch_ms = None
+        try:
+            ep = current_epoch(conn)
+            epoch_ms = int(ep.switched_at.timestamp() * 1000)
+        except Exception:  # noqa: BLE001 — 没有纪元就不分组，不该因此丢掉历史
+            epoch_ms = None
+        try:
+            events = load_signal_events(conn, days=90, code=code)
+        except SignalEventError as exc:
+            return {"available": False, "reason": "signal_history_unavailable",
+                    "detail": str(exc), "count": 0, "items": []}
+        return build_history(events, epoch_ms=epoch_ms)
+    except Exception as exc:  # noqa: BLE001 — 历史是锦上添花，不能带崩推荐
+        return {"available": False, "reason": "signal_history_error",
+                "detail": f"{type(exc).__name__}: {exc}", "count": 0, "items": []}
+    finally:
+        client.close()
 
 
 def submit_llm_summarize(code: str, rec: dict[str, Any]) -> dict[str, Any]:

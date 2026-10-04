@@ -2125,3 +2125,18 @@ noscript p {
   border-radius: 4px; padding: 0 6px;
 }
 .cpt-rec-headline[data-quality="insufficient"] { color: var(--color-degraded); }
+
+/* 信号历史（R45 P2）：让「切表前后判断变了没」变成看得见的。
+ * ⚠️ **旧口径/新口径用不同标记**，不是只靠颜色 —— 口径这件事
+ * 一旦看错，整段对照就作废了，所以必须有文字标签。 */
+.cpt-rec-history { margin-top: 10px; border-top: 1px solid var(--color-border); padding-top: 8px; }
+.cpt-rec-history-title { font-size: 11px; color: var(--color-text-muted); display: flex; gap: 8px; align-items: baseline; }
+.cpt-rec-history-split { font: 10px var(--font-mono); opacity: .85; }
+.cpt-rec-history-list { list-style: none; margin: 6px 0 0; padding: 0; display: flex; flex-direction: column; gap: 3px; }
+.cpt-rec-history-list li { font: 11px var(--font-mono); color: var(--color-text-muted); display: flex; gap: 6px; align-items: center; }
+.cpt-rec-history-list .t { min-width: 132px; }
+.cpt-rec-history-list .st { font-weight: 600; color: var(--color-text); }
+.cpt-rec-history-list .px { margin-left: auto; }
+.cpt-rec-history-list li[data-legacy="1"] .st { color: var(--color-degraded); }
+.cpt-rec-history-list .tag { font-size: 10px; border: 1px solid currentColor; border-radius: 3px; padding: 0 3px; opacity: .8; }
+.cpt-rec-history-list li[data-legacy="1"] .tag { color: var(--color-degraded); }

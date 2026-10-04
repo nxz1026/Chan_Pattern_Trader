@@ -123,6 +123,9 @@ GET /api/dashboard/a-share/recommendation?code=600519[&level=1d]
 | `reason` | 依据（信号状态 / 背驰 / 参考价） |
 | `price` | **后复权价**（与快照同口径，用于核对结构） |
 | `raw_close` | **不复权收盘价** —— 前端显示的「参考价」用这个 |
+| `history` | 信号历史 + **口径分组**（`legacy_count` / `current_count`）。
+  数据来自 `cpt_signal_event`（R45 实测 49 行 / 40 只票 / 切表前 43 · 切表后 6）。
+  口径切换点取自 `cpt_factor_epoch.switched_at` |
 | `disclaimer` | 恒为「结构状态翻译，非投资建议」 |
 
 **为什么需要 `raw_close`**：快照里的 K 线是**后复权价**（茅台会显示 8886，
