@@ -85,9 +85,17 @@ class ReferenceChanlunBackend:
         detail: 给人看的一句话说明（可直接进 payload）。
     """
 
-    def __init__(self, *, code: str | None = None) -> None:
+    def __init__(
+        self, *, code: str | None = None, min_bi_len: int | None = None
+    ) -> None:
         """
         Args:
+            min_bi_len: 笔的最小跨度，**只喂 czsc 那一级**。
+                ⚠️ 它**不属于** :class:`ReferenceChanlunConfig` ——
+                实测（R45 补测试时撞见）传 ``ReferenceChanlunConfig(min_bi_len=…)``
+                会直接 ``TypeError``，因为那个 dataclass 没有这个字段。
+                理由与 ``code`` 同源：两者都是**标的/口径级**信息，
+                而 :class:`ChanlunBackend` 契约只传 ``bars``。
             code: 标的代码。**只腾讯那条路需要它** —— :class:`CanonicalBar`
                 **没有 ``code`` 字段**（R45 实测：``CanonicalBar.__init__``
                 不接受该 kwarg），所以不能从 bars 里挖。
@@ -97,6 +105,7 @@ class ReferenceChanlunBackend:
                 与 ``factor_from_actions``「宁可少一个台阶，也不用猜的值」同原则。
         """
         self.code = code
+        self.min_bi_len = min_bi_len
         self.source: str | None = None
         self.detail: str = "尚未运行"
 
@@ -109,20 +118,41 @@ class ReferenceChanlunBackend:
         ⚠️ 这里**不静默回落**到 native —— 参照侧回落到生产侧等于**自己跟自己
         比**，那是对照面板最没意义的一种「通过」。宁可报「没参照」。
         """
+        return _from_domain(self.compute_domain_structures(bars, config))
+
+    # ── 领域对象三元组（parity 层直接用，**不丢时间锚点**）────────
+    def compute_domain_structures(
+        self, bars: list[BarLike], config: ReferenceChanlunConfig
+    ) -> tuple[list[Any], list[Any], list[Any]]:
+        """返回 ``(fractals, bis, zhongshus)``。
+
+        ⚠️ **为什么另开一个方法**而不是让调用方从 :class:`ChanlunResult` 反推：
+        ``BiRaw`` / ``ZsRaw`` 存的是 **bar 索引**，而 parity 层要的是
+        ``start_time`` / ``end_time``（毫秒时间戳）。
+        两者**量纲不同** —— 我第一版硬转，结果把时间锚点全丢了
+        （``start_bar=0``），parity 面板的「点选高亮到对应位置」就废了。
+        ⇒ 参照侧把领域对象原样透出，转换交给需要它的那一层。
+        """
         canonical = [b if isinstance(b, CanonicalBar) else _as_canonical(b) for b in bars]
-        result = self._try_czsc(canonical, config)
-        if result is not None:
+        triples = self._try_czsc(canonical, config)
+        if triples is not None:
             self.source = REFERENCE_SOURCE_CZSC
             self.detail = "czsc 实现对照"
-            return result
-        result = self._try_tencent(canonical, config)
-        if result is not None:
+            return triples
+        triples = self._try_tencent(canonical, config)
+        if triples is not None:
             self.source = REFERENCE_SOURCE_TENCENT
             self.detail = "腾讯 hfq 同窗口数据链路对照"
-            return result
+            return triples
         self.source = None
         self.detail = "czsc 未安装且腾讯 hfq 取不到"
         raise ReferenceUnavailableError(self.detail)
+
+    def _min_bi_len(self, config: ReferenceChanlunConfig) -> int | None:
+        """后端级 ``min_bi_len`` 优先；没给就退回 config（如果有这个字段）。"""
+        if self.min_bi_len is not None:
+            return self.min_bi_len
+        return _rules_cfg(config).min_bi_len
 
     def _log_debug_no_code(self) -> None:
         """没给 code 就走到腾讯那一级 —— **降为 debug**：这是调用方没传参数，
@@ -132,7 +162,7 @@ class ReferenceChanlunBackend:
     # ── 第一级：czsc（实现对照）─────────────────────────────────
     def _try_czsc(
         self, bars: list[CanonicalBar], config: ReferenceChanlunConfig
-    ) -> ChanlunResult | None:
+    ) -> tuple[list[Any], list[Any], list[Any]] | None:
         """czsc 不可用返回 ``None``（由调用方决定回落）。
 
         ⚠️ 降为 **debug**：这是**配置状态**（czsc 没装）而不是事件，
@@ -145,19 +175,17 @@ class ReferenceChanlunBackend:
 
         try:
             backend = resolve_backend(
-                "czsc", min_bi_len=_rules_cfg(config).min_bi_len
+                "czsc", min_bi_len=self._min_bi_len(config)
             )
         except (CzscNotInstalledError, CzscVersionError) as exc:
             _LOG.debug("参照侧 czsc 不可用，回落腾讯：%s", exc)
             return None
-        return _from_domain(
-            compute_domain_structures(bars, _rules_cfg(config), backend)
-        )
+        return tuple(compute_domain_structures(bars, _rules_cfg(config), backend))
 
     # ── 第二级：腾讯 hfq（数据链路对照）────────────────────────
     def _try_tencent(
         self, bars: list[CanonicalBar], config: ReferenceChanlunConfig
-    ) -> ChanlunResult | None:
+    ) -> tuple[list[Any], list[Any], list[Any]] | None:
         """腾讯取不到返回 ``None``。
 
         腾讯那条路需要**标的代码**，而 :class:`ChanlunBackend` 契约只传
@@ -177,8 +205,7 @@ class ReferenceChanlunBackend:
         triples = _tencent_structures(code, _rules_cfg(config), window)
         if triples is None:
             return None
-        fractals, bis, zhongshus = triples
-        return _from_normalized(fractals, bis, zhongshus)
+        return triples  # 已是 dict 三分组，_normalize 直接吃
 
 
 # ── 转换辅助：把两条路各自的数据形状统一成 ChanlunResult ──────────────

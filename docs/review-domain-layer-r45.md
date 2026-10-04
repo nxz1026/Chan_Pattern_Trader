@@ -354,3 +354,80 @@ czsc 同一批输入：退化笔 **0%**（最短 10 根）。且 **40 只票每�
 ### 回归
 
 全量 `pytest tests/` = **2 个失败，与基线逐条相同**。
+
+---
+
+## 追加：R45 自己引入的 3 个生产 bug，被补测试当场抓住（R45 第五轮）
+
+第五轮代码侧全量扫描（孤儿模块 / 零引用符号 / 零测试覆盖）撞见
+**`cpt/application/parity_reference.py` 零测试覆盖** —— 而它**正是 R45 当天
+刚被我重构过的**。补测试后连续炸出 3 个真 bug。
+
+### 1. `min_bi_len` 塞错了地方 → 每张 A 股快照都抛
+
+```python
+backend.compute_structures(bars, ReferenceChanlunConfig(min_bi_len=cfg.min_bi_len))
+# TypeError: ReferenceChanlunConfig.__init__() got an unexpected keyword argument
+```
+
+`ReferenceChanlunConfig` 只有 `use_fx_*` / `zs_wzgx` / `macd_*` / `fixed_commit`。
+而 `TypeError` **不在** `except ReferenceUnavailableError` 里 ⇒ 直接穿出去。
+
+**修**：`min_bi_len` 是**后端级**参数（与 `code` 同源 —— 契约只传 `bars`），
+改走 `resolve_backend("reference", min_bi_len=...)`。
+
+### 2. 引用了被重构掉的局部变量 `ref` → `NameError`
+
+函数末尾仍写着 `ref_fractals=ref[0]` —— `ref` 是旧实现里的局部变量，
+委派之后已经不存在了。
+
+### 3. 硬转 `ChanlunResult` 丢掉了时间锚点
+
+`BiRaw` / `ZsRaw` 存的是 **bar 索引**，parity 层要的是
+`start_time` / `end_time`（毫秒时间戳）—— **两者量纲不同**。
+我第一版硬转，把 `start_bar` 全设成 0 ⇒ 面板「点选高亮到对应位置」会废。
+
+**修**：后端另开 `compute_domain_structures()` 返回**领域对象三元组**，
+parity 层沿用原来的 `_normalize`（它同时吃 dataclass 和 dict）。
+
+## 既存的：docstring 承诺「永不抛异常」，代码只接一种异常
+
+```python
+"""算出 A 股快照的 parity 块（**永不抛异常**）。"""
+...
+except ReferenceUnavailableError as exc:   # ← 只接这一种
+```
+
+后端抛任何别的异常（czsc 内部炸、腾讯超时、字段缺失）都会**穿出去**，
+把整张 A 股快照带崩。**这句话从来没被兑现过，也从来没被测过。**
+
+**为什么这里该宽泛捕获，而 storage 层坚持「失败必须抛」——不矛盾**：
+
+| | 返回值的地位 | 失败该怎么办 |
+|---|---|---|
+| storage 的因子/信号 | **就是业务事实** | 不能伪装成空，必须抛 |
+| parity 块 | **可选的交叉验证** | 失败不该带崩主流程，但**必须如实报告** |
+
+所以宽泛捕获 + `available=False` + **写明异常类型与消息**，
+而不是静默吞掉。
+
+## 最重要的教训：我又漏了「改完要真机验证」
+
+**这三个 bug 里，#1 会让每次 A 股快照都抛。**
+
+而我今天**测过 parity 面板**（czsc 标签、四色配色、27/55/17 计数）——
+**但那是在这次重构之前**。改完我直接提交了，**没再打开面板看一眼**。
+
+⇒ 与今天早些时候「画布 D 塞了独立 `<script>` 就上线」是**同一个错**：
+**把「我验证过上一个版本」当成了「我验证过这个版本」**。
+
+补测试之所以有价值，不在于新测试本身，
+而在于它**强制重新走一遍那条路径** —— 哪怕是离线跑，
+也会立刻炸在这三处。
+
+## 验证
+
+- 补的 16 个测试全过（parity 降级 5 + feishu 6 + prune 5）
+- **真机 snapshot**：`available: True`、`source: czsc`、
+  47 分型 / 42 笔 / 7 中枢，逐条对上
+- 全量 `pytest tests/` = **2 个失败，与基线逐条相同**

@@ -125,7 +125,7 @@ def resolve_backend(
             ReferenceChanlunBackend,
         )
 
-        return ReferenceChanlunBackend(code=code)
+        return ReferenceChanlunBackend(code=code, min_bi_len=min_bi_len)
 
     # 延迟导入：czsc 是可选依赖，``auto`` 档在未安装时必须能回落而不是
     # 在 import 期就炸掉整个 web 服务。

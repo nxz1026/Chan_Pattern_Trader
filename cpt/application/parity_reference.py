@@ -173,17 +173,42 @@ def build_parity_snapshot_for(
     )
     from cpt.adapters.reference_chanlun import ReferenceChanlunConfig  # noqa: PLC0415
 
-    backend = resolve_backend("reference")
+    # ⚠️ R45 修：**min_bi_len 不属于 ReferenceChanlunConfig**。
+    # 原写法 `ReferenceChanlunConfig(min_bi_len=cfg.min_bi_len)` 直接
+    # ``TypeError``（该 dataclass 只有 use_fx_*/zs_wzgx/macd_*/fixed_commit），
+    # 而 TypeError **不在** `except ReferenceUnavailableError` 里 ⇒ 抛穿出去。
+    # ⇒ 它是**后端级**参数（同 code），走 resolve_backend。
+    backend = resolve_backend("reference", min_bi_len=cfg.min_bi_len)
     try:
-        backend.compute_structures(
-            list(bars), ReferenceChanlunConfig(min_bi_len=cfg.min_bi_len)
-        )
+        # ⚠️ 用 ``compute_domain_structures`` 而不是契约方法 ``compute_structures``：
+        # 后者返回 ``ChanlunResult``（存 **bar 索引**），而本层要的是带
+        # ``start_time``/``end_time`` 的领域对象 —— 两者量纲不同，
+        # 硬转会把时间锚点全丢（``start_bar=0``），面板「点选高亮」就废了。
+        ref = backend.compute_domain_structures(list(bars), ReferenceChanlunConfig())
     except ReferenceUnavailableError as exc:
         return build_parity_snapshot(
             available=False,
             reason="reference_unavailable",
             reference="none",
             reference_detail=str(exc),
+        )
+    except Exception as exc:  # noqa: BLE001
+        # ⚠️ R45 补：本函数 docstring 第一句是「**永不抛异常**」，
+        # 而原来**只**接 ``ReferenceUnavailableError`` ——
+        # 后端抛任何别的异常（czsc 内部炸、腾讯超时、归一化字段缺失…）
+        # 都会**直接穿出去**，把整张 A 股快照带崩。
+        #
+        # 为什么这里该宽泛捕获，而 storage 层却坚持「失败必须抛」：
+        #   storage 的返回值**就是业务事实**（因子/信号）⇒ 失败不能伪装成空；
+        #   parity 是**可选的交叉验证块** ⇒ 它失败不该影响主流程，
+        #   但也**不能静默** —— ���是 ``available=False`` + 写明异常类型与消息。
+        # 两者不矛盾，差别在「这个返回值被谁当权威」。
+        _LOG.warning("parity 参照侧异常：%s: %s", type(exc).__name__, exc)
+        return build_parity_snapshot(
+            available=False,
+            reason="reference_error",
+            reference="none",
+            reference_detail=f"{type(exc).__name__}: {exc}",
         )
     source = backend.source or "none"
     if source == "czsc":
