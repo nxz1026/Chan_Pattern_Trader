@@ -1056,8 +1056,24 @@ def make_handler(
         # ---------------------------------------------------------- A 股（R17-3）
 
         def _handle_a_share_get(self, path: str, query: dict[str, list[str]]) -> None:
-            """A 股三条只读路由：snapshot / pool / watchlist。"""
+            """A 股只读路由：snapshot / pool / watchlist / recommendation。"""
             from cpt.web import a_share_routes  # noqa: PLC0415 — 避免顶层拖入 psycopg
+
+            if path == "/api/dashboard/a-share/recommendation":
+                # R45：结构判断摘要（买卖 + 参考价）。**纯确定性** ——
+                # 买卖与价格由 `application.recommendation` 算，**不经 LLM**；
+                # LLM 只在另一条 `llm/summarize` 路由上配人话，失败不影响这里。
+                code = (query.get("code") or [""])[0].strip()
+                if not code:
+                    self._write_json_error(
+                        HTTPStatus.BAD_REQUEST, "code_required", "缺少 code 参数"
+                    )
+                    return
+                level = (query.get("level") or [""])[0].strip()
+                self._write_json(
+                    a_share_routes.build_recommendation(code, level=level or None)
+                )
+                return
 
             if path == "/api/dashboard/a-share/snapshot":
                 code = (query.get("code") or [""])[0].strip()

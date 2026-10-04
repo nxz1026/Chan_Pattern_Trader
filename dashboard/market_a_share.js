@@ -318,6 +318,67 @@
       if (node) node.textContent = text;
     }
 
+    /**
+     * 拉结构判断摘要并渲染到卡片上。
+     *
+     * ⚠️ 走**独立接口**而不是从已有快照里现算 ——
+     * 那边是「图的数据」，这块要的是「一句话结论」，
+     * 混在一起会让两者在任一变更时互相牵连。
+     * 但**同一次请求周期**内先后到达，用户不会看到打架的两套数字。
+     *
+     * 拿不到就显示「—」+ 原因，**不阻塞图**（推荐是锦上添花，不是主路径）。
+     */
+    /** 价格格式化。⚠️ ``dashboard.js`` 里那个同名函数在**另一个 IIFE** 里，
+     *  这里取不到 —— 直接复用会在运行时抛 ReferenceError。 */
+    const formatPrice = (value) => {
+      const n = Number(value);
+      return Number.isFinite(n) ? n.toFixed(2) : "—";
+    };
+
+    async function loadRecommendation() {
+      const actionEl = q('[data-testid="rec-action"]');
+      const priceEl = q('[data-testid="rec-price"]');
+      const headEl = q('[data-testid="rec-headline"]');
+      const reasonEl = q('[data-testid="rec-reason"]');
+      if (!actionEl || !headEl) return;
+      if (!state.code) {
+        actionEl.textContent = "—";
+        actionEl.dataset.action = "";
+        headEl.textContent = "未选标的";
+        if (priceEl) priceEl.textContent = "参考价 —";
+        if (reasonEl) reasonEl.textContent = "";
+        return;
+      }
+      try {
+        const url = `${state.base}/recommendation?code=${encodeURIComponent(state.code)}`;
+        const response = await fetch(safeUrl(url), { headers: { Accept: "application/json" } });
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        const rec = await response.json();
+        actionEl.textContent = rec.action_label || "—";
+        actionEl.dataset.action = rec.action || "";
+        if (priceEl) {
+          // ⚠️ 优先显示**不复权价** —— 快照里的 candles 是后复权价
+          // （600519 会显示 8886，而实际约 1400），给用户当「参考价」是挂不了单的。
+          const shown = rec.raw_close != null ? rec.raw_close : rec.price;
+          priceEl.textContent = shown == null
+            ? "参考价 —"
+            : `参考价 ${formatPrice(shown)}`;
+        }
+        headEl.textContent = rec.headline || "";
+        if (reasonEl) reasonEl.textContent = rec.reason || "";
+        root.dataset.recAvailable = rec.available ? "1" : "0";
+      } catch (error) {
+        actionEl.textContent = "—";
+        actionEl.dataset.action = "";
+        headEl.textContent = "推荐不可用";
+        if (priceEl) priceEl.textContent = "参考价 —";
+        if (reasonEl) {
+          reasonEl.textContent = error && error.message ? error.message : String(error);
+        }
+        root.dataset.recAvailable = "0";
+      }
+    }
+
     async function loadPool() {
       try {
         const response = await fetch(safeUrl(`${state.base}/pool`), {
@@ -375,6 +436,7 @@
       // 由来源标注显示，不依赖会被快照请求覆盖的状态栏。
       selectCode(code);
       await loadPool();
+      loadRecommendation();
     }
 
     async function removeManual() {
@@ -399,7 +461,7 @@
             // 先同步刷一遍控件（按钮高亮要立刻响应点击），再等热门池回来
             syncUrl();
             renderSwitch();
-            loadPool().then(() => applyMarket());
+            loadPool().then(() => { applyMarket(); loadRecommendation(); });
           } else {
             syncUrl();
             renderSwitch();
@@ -429,7 +491,7 @@
       installSwitch();
       renderSwitch();
       if (state.market === MARKET_A_SHARE) {
-        loadPool().then(() => applyMarket());
+        loadPool().then(() => { applyMarket(); loadRecommendation(); });
       }
     }
 

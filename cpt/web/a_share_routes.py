@@ -115,6 +115,67 @@ def snapshot_payload(code: str, *, width_k: int = DEFAULT_WIDTH_K) -> dict[str, 
     )
 
 
+def build_recommendation(code: str, *, level: str | None = None) -> dict[str, Any]:
+    """推荐块：动作 + 参考价 + 依据。**永不抛异常**。
+
+    R45 新增。买卖与价格由 :mod:`cpt.application.recommendation` **纯确定性**算出
+    —— 刻意**不经 LLM**：让模型生成「买/卖 + 价格」会不可复现、不可测，
+    且在最要紧的输出上引入幻觉风险。LLM 只负责给这段结果**配人话**
+    （另一条路由，且失败时前端照常显示这里的确定性结果）。
+
+    走的是**同一份快照**而不是另查一次 ——
+    推荐与图上画的结构必须来自同一次计算，否则两边会打架。
+    """
+    from cpt.application.recommendation import build_recommendation as _build  # noqa: PLC0415
+
+    try:
+        payload = snapshot_payload(code)
+    except Exception as exc:  # noqa: BLE001 — 看板主路径，不能因推荐块崩掉
+        return {
+            "available": False,
+            "action": "hold",
+            "action_label": "观望",
+            "headline": "推荐不可用",
+            "reason": f"{type(exc).__name__}: {exc}",
+            "price": None,
+            "disclaimer": "结构状态翻译，非投资建议",
+        }
+    out = _build(payload)
+    if level:
+        out["level"] = level
+
+    # ⚠️ 快照里的 K 线是**后复权价**（实测 600519 茅台显示 8886，而实际约 1400），
+    # 拿它当「参考价」给用户是**不可挂单**的 —— 一个「买卖 + 价格」的面板
+    # 给的是后复权价，等于给了一个他下不了单的数字。
+    # ⇒ 补一个**不复权收盘价**（raw_close）作为可执行参考价，
+    #    后复权价保留在 raw 里以备核对。
+    out["raw_close"] = _raw_close(_normalize(code))
+    return out
+
+
+def _raw_close(code: str) -> float | None:
+    """不复权收盘价（``public.daily_bar.close``，未复权）。
+
+    与快照的 ``candles[-1].close`` **口径不同**，别混用：
+    快照那份是后复权价，用于画图（复权后价格连续，结构才连得上）。
+    """
+    from cpt.adapters._dbconfig import connection_kwargs  # noqa: PLC0415
+
+    try:
+        import psycopg  # noqa: PLC0415
+
+        with psycopg.connect(**connection_kwargs()) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT close FROM public.daily_bar WHERE code=%s "
+                "ORDER BY date DESC LIMIT 1",
+                (code,),
+            )
+            row = cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+    except Exception:  # noqa: BLE001 — 拿不到就退回后复权价，不崩
+        return None
+
+
 def _factor_codes() -> set[str]:
     """带复权因子的代码集合（A 股能否画出来的前提）。
 

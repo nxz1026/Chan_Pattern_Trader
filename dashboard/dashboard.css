@@ -2086,3 +2086,24 @@ noscript p {
   border-radius: 4px;
   background: var(--color-panel);
 }
+
+/* ------------------------------------------------- 结构判断摘要卡（R45）
+ * 目标只有一个：**一眼看懂**。所以动作词用大号字 + 四态色，
+ * 参考价紧邻其右，理由压成一行小字。
+ * ⚠️ 配色与 parity 差异点**故意不同**：那边是「同一维度上的多状态」
+ * 需要彼此区分；这里只有一个状态，要的是**一眼定性**。
+ */
+.cpt-rec { border: 1px solid var(--color-border); border-radius: 6px; padding: 12px 14px; background: var(--color-panel); }
+.cpt-rec-title { margin: 0 0 8px; font-size: 12px; color: var(--color-text-muted); font-weight: 600; }
+.cpt-rec-main { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+.cpt-rec-action { font-size: 26px; font-weight: 700; line-height: 1.15; }
+.cpt-rec-action[data-action="buy"] { color: #cf222e; }   /* A 股习惯：红涨 */
+.cpt-rec-action[data-action="sell"] { color: #1a7f37; }
+.cpt-rec-action[data-action="watch"] { color: #9a6700; }
+.cpt-rec-action[data-action="hold"] { color: var(--color-text-muted); }
+.cpt-rec-price { font: 600 15px var(--font-mono); color: var(--color-text); }
+.cpt-rec-headline { margin: 8px 0 2px; font-size: 14px; font-weight: 600; }
+.cpt-rec-reason { margin: 0; font-size: 12px; color: var(--color-text-muted); }
+.cpt-rec-llm { margin: 8px 0 0; padding: 8px 10px; border-left: 3px solid var(--color-accent);
+  background: var(--color-accent-soft); font-size: 12px; border-radius: 0 4px 4px 0; }
+.cpt-rec-disc { margin: 8px 0 0; font-size: 11px; color: var(--color-text-muted); opacity: .8; }

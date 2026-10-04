@@ -1,0 +1,189 @@
+"""看板的**结构判断摘要**：把信号翻译成「一句话 + 一个动作 + 一个参考价」。
+
+## 为什么买卖与价格**必须**由代码算，不能交给 LLM
+
+用户要的是「直观、简单的推荐（买卖、价格）」，同时要 LLM 出摘要。
+这两件事**必须分开**，否则等于让模型在**最要紧的输出上**自由生成：
+
+- **不可复现** —— 同一份快照跑两次给出两个不同结论，没法回归、没法对账；
+- **不可测** —— 「推荐得对不对」没有客观判据；
+- **会漂移** —— 提示词一改、模型一换，推荐就变，而结构数据没变。
+
+⇒ 本模块**纯确定性**、零 LLM、零 IO，输入是快照里的结构事实，
+输出是动作 + 参考价 + 依据。LLM 只在
+:func:`cpt.application.llm_cases.summarize_recommendation` 里
+**给这段结果配一段人话**，且失败时前端照常显示确定性结果。
+
+## 措辞纪律：这是**结构判断的翻译**，不是投资建议
+
+看板全程标注「只读 · 不构成投资建议」。所以这里的动作词是
+``买入关注`` / ``卖出关注`` 这类**结构状态**，不是「建议买卖」。
+``action_label`` 刻意用「结构」二字收尾，避免被当成荐股。
+"""
+
+from __future__ import annotations
+
+from typing import Any, Final, Literal
+
+__all__ = [
+    "ACTION_BUY",
+    "ACTION_SELL",
+    "ACTION_WATCH",
+    "ACTION_HOLD",
+    "build_recommendation",
+    "ACTIONS",
+]
+
+Action = Literal["buy", "sell", "watch", "hold"]
+
+ACTION_BUY: Final[str] = "buy"
+ACTION_SELL: Final[str] = "sell"
+ACTION_WATCH: Final[str] = "watch"   # 有候选/预警，但未确认
+ACTION_HOLD: Final[str] = "hold"     # 无信号 / 已失效
+
+ACTIONS: Final[dict[str, str]] = {
+    ACTION_BUY: "买入结构",
+    ACTION_SELL: "卖出结构",
+    ACTION_WATCH: "关注",
+    ACTION_HOLD: "观望",
+}
+
+#: 信号状态 → 该状态有多「硬」。确认 > 候选 > 预警 > 失效。
+_STATUS_RANK: Final[dict[str, int]] = {
+    "confirmed": 3,
+    "candidate": 2,
+    "alert": 1,
+    "invalidated": 0,
+}
+
+#: 信号类型 → 方向
+_TYPE_TO_ACTION: Final[dict[str, str]] = {
+    "first_buy": ACTION_BUY,
+    "first_sell": ACTION_SELL,
+}
+
+
+def _num(value: Any) -> float | None:
+    """容忍字符串/None（快照里的价格来自 jsonb，可能是字符串）。"""
+    if isinstance(value, bool) or value is None:
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    return out
+
+
+def build_recommendation(snapshot: dict[str, Any]) -> dict[str, Any]:
+    """从快照算出推荐块。**永不抛异常** —— 结构缺失就降级到「观望」。
+
+    :param snapshot: ``a_share_snapshot`` 的产物（含 ``signal`` / ``candles``）。
+    :returns: 见模块 docstring；``available`` 为 ``False`` 时没有 action。
+    """
+    if not isinstance(snapshot, dict):
+        return _degraded("快照不是对象")
+
+    signal = snapshot.get("signal")
+    if not isinstance(signal, dict) or not signal:
+        return _degraded("当前没有信号")
+
+    status = str(signal.get("status") or "").strip()
+    sig_type = str(signal.get("signal_type") or "").strip()
+    divergence = str(signal.get("divergence_status") or "").strip()
+
+    if status not in _STATUS_RANK:
+        return _degraded(f"未知的信号状态 {status!r}")
+    if sig_type not in _TYPE_TO_ACTION:
+        return _degraded(f"未知的信号类型 {sig_type!r}")
+
+    # 失效的信号**不是**「反向信号」—— 它意味着「之前那个判断已经不成立」，
+    # 所以动作退回观望，而不是取反。取反会把「失效的一买」说成「卖出」。
+    if status == "invalidated":
+        # ⚠️ 也要带 price —— 失效**发生在某个价位**上，那个价是有用的上下文
+        # （补测试时发现这里把 price 漏了，界面上会显示「—」而不是价位）。
+        return _build(
+            ACTION_HOLD,
+            "信号已失效",
+            f"{_label(sig_type)}已失效（不取反方向）—— 之前的结构判断不再成立。",
+            price=_num(signal.get("price")) or _last_close(snapshot),
+            status=status, signal_type=sig_type, divergence=divergence,
+        )
+
+    action = _TYPE_TO_ACTION[sig_type]
+    rank = _STATUS_RANK[status]
+    if rank >= _STATUS_RANK["confirmed"]:
+        headline = f"{_label(sig_type)}**已确认**"
+    elif status == "candidate":
+        action, headline = ACTION_WATCH, f"{_label(sig_type)}候选（未确认）"
+    else:
+        action, headline = ACTION_WATCH, f"{_label(sig_type)}预警"
+
+    price = _num(signal.get("price"))
+    if price is None:
+        price = _last_close(snapshot)
+
+    reasons: list[str] = [f"信号状态：{status}"]
+    if divergence == "detected":
+        reasons.append("已检测到背驰")
+    if price is not None:
+        reasons.append(f"参考价 {price:.2f}")
+
+    return _build(
+        action, headline, _join(reasons), price=price,
+        status=status, signal_type=sig_type, divergence=divergence,
+    )
+
+
+def _last_close(snapshot: dict[str, Any]) -> float | None:
+    candles = snapshot.get("candles")
+    if not isinstance(candles, list) or not candles:
+        return None
+    last = candles[-1]
+    return _num(last.get("close")) if isinstance(last, dict) else None
+
+
+def _label(sig_type: str) -> str:
+    return {"first_buy": "一买", "first_sell": "一卖"}.get(sig_type, sig_type)
+
+
+def _join(items: list[str]) -> str:
+    return "；".join(x for x in items if x)
+
+
+def _build(
+    action: str,
+    headline: str,
+    reason: str,
+    *,
+    price: float | None = None,
+    status: str = "",
+    signal_type: str = "",
+    divergence: str = "",
+) -> dict[str, Any]:
+    return {
+        "available": True,
+        "action": action,
+        "action_label": ACTIONS.get(action, action),
+        "headline": headline,
+        "reason": reason,
+        "price": price,
+        "status": status,
+        "signal_type": signal_type,
+        "divergence_status": divergence,
+        "disclaimer": "结构状态翻译，非投资建议",
+    }
+
+
+def _degraded(why: str) -> dict[str, Any]:
+    return {
+        "available": False,
+        "action": ACTION_HOLD,
+        "action_label": ACTIONS[ACTION_HOLD],
+        "headline": "暂无明确结构信号",
+        "reason": why,
+        "price": None,
+        "status": "",
+        "signal_type": "",
+        "divergence_status": "",
+        "disclaimer": "结构状态翻译，非投资建议",
+    }

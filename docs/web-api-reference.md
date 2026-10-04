@@ -103,3 +103,27 @@ python scripts/verify_public_contracts.py    # 外部契约（adapters 层）
    再写 iframe），`draw()` 在异步完成前就返回计数，所以带 `pending: true`。
    `canvas_d.js` 里有注释记着为此踩过一次（`Object.assign` 把这两个字段混进
    `counts`，首轮审计里 D 的计数多了两项）。审计脚本**必须只挑那五个键**。
+
+## R45 新增：`/api/dashboard/a-share/recommendation`
+
+```
+GET /api/dashboard/a-share/recommendation?code=600519[&level=1d]
+```
+
+结构判断摘要：**动作 + 参考价 + 依据**。**纯确定性** ——
+买卖与价格由 `cpt/application/recommendation.py` 算出，**不经 LLM**
+（理由：让模型生成「买/卖 + 价格」会不可复现、不可测，且在最要紧的输出上
+引入幻觉风险）。
+
+| 字段 | 说明 |
+|---|---|
+| `available` | 是否有可用信号；false 时降级为「观望」并写明原因 |
+| `action` / `action_label` | `buy` / `sell` / `watch` / `hold` |
+| `headline` | 一句话结论，如「一买已确认」 |
+| `reason` | 依据（信号状态 / 背驰 / 参考价） |
+| `price` | **后复权价**（与快照同口径，用于核对结构） |
+| `raw_close` | **不复权收盘价** —— 前端显示的「参考价」用这个 |
+| `disclaimer` | 恒为「结构状态翻译，非投资建议」 |
+
+**为什么需要 `raw_close`**：快照里的 K 线是**后复权价**（茅台会显示 8886，
+实际约 1258）。给「买卖 + 价格」的面板一个挂不了单的数字是错的。
