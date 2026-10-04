@@ -85,6 +85,7 @@
       //: 手输落盘失败的原因。**单独存**而不是只写状态栏：状态栏会被随后的快照
       //: 请求覆盖，用户就再也看不到"这次没保存"了 —— 而这正是要修的坑。
       saveError: null,
+      recPoll: null,   // R45：当前这轮的轮询句柄（换标的/重渲染时 stop）
       base: aShareBase(root.dataset.snapshotUrl),
       // R45：`/api/dashboard/llm/calls` **不在** a-share 前缀下。
       // 用显式字段，别靠 `state.base.replace(...)` 反推 —— 那是巧合式依赖。
@@ -340,6 +341,7 @@
 
     async function loadRecommendation() {
       delete root.dataset.recCallId;   // 换标的 ⇒ 上一次的摘要不再适用
+      if (state.recPoll) { state.recPoll.stop(); state.recPoll = null; }
       const actionEl = q('[data-testid="rec-action"]');
       const priceEl = q('[data-testid="rec-price"]');
       const headEl = q('[data-testid="rec-headline"]');
@@ -437,39 +439,36 @@
         if (out.available !== true && out.reason !== "same_request_in_flight_or_done") {
           return;
         }
-        pollLlmSummary(out.call_id, box, 0);
+        state.recPoll = pollLlmSummary(out.call_id, box);
       } catch (error) {
         /* 摘要拿不到就算了 —— 上面那张卡才是结论 */
       }
     }
 
-    async function pollLlmSummary(callId, box, tries) {
-      if (tries > 40 || root.dataset.recCallId !== callId) return;   // 上限 40 次
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      let out = null;
-      try {
-        // ⚠️ `safeUrl(...)` 必须**内联在 fetch 的同一行** ——
-        // 门禁 `test_dashboard_url_credentials` 的判据是「含 `fetch(` 的那
-        // 一行是否也含 `safeUrl`」，它看不穿变量中转。
-        // 我试过 `const listUrl = safeUrl(...); fetch(listUrl)` —— 被判成
-        // 「绕过凭据消毒」。这是本仓既定写法，别引入间接层。
-        const response = await fetch(safeUrl(`${state.apiRoot}/llm/calls?limit=20`), { headers: { Accept: "application/json" } });
-        if (!response.ok) return;
-        const body = await response.json();
-        const hit = (body.calls || body.items || []).find((c) => c.call_id === callId);
-        if (!hit) { pollLlmSummary(callId, box, tries + 1); return; }
-        out = hit;
-      } catch (error) {
-        return;
+    /** 轮询交给 ``window.CPTJob.poll``（全站唯一实现，R45 P1-1）。
+     *  ⚠️ 加载顺序：cpt_job.js 在 index.html 里排第 2，早于本文件。
+     *     缺它要**响亮失败**，不能静默自己写一套 —— 静默回退等于没统一。 */
+    function pollLlmSummary(callId, box) {
+      if (!(window.CPTJob && typeof window.CPTJob.poll === "function")) {
+        box.hidden = true;
+        return null;
       }
-      const text = (out && (out.result_text || out.output_text || out.text)) || "";
-      if (!text) {
-        if (out && ["done", "error", "failed"].includes(out.status)) return;  // 失败就藏起来
-        pollLlmSummary(callId, box, tries + 1);
-        return;
-      }
-      box.textContent = text;
-      box.hidden = false;
+      return window.CPTJob.poll(
+        async () => {
+          const response = await fetch(safeUrl(`${state.apiRoot}/llm/calls?limit=20`), { headers: { Accept: "application/json" } });
+          if (!response.ok) throw new Error(`HTTP ${response.status}`);
+          const body = await response.json();
+          return (body.calls || []).find((c) => c.call_id === callId) || null;
+        },
+        (hit) => {
+          if (!hit) return true;                                    // 还没查到，继续
+          const text = hit.result_text || "";
+          if (text) { box.textContent = text; box.hidden = false; return false; }
+          if (["error", "failed", "interrupted"].includes(hit.status)) return false;  // 失败就藏起来
+          return true;
+        },
+        { intervalMs: 1500, maxTries: 40 }
+      );
     }
 
     async function loadPool() {

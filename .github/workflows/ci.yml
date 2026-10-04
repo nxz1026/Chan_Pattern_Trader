@@ -80,6 +80,12 @@ jobs:
           #   是补 summarize 的测试才发现）。用 AST 锁住「只有一份」。
           - name: Enqueue skeleton is unique
             run: python scripts/check_enqueue_skeleton_unique.py
+          # 门禁⑦：前端「等任务」轮询必须走 cpt_job.js 的唯一实现。
+          # 与凭据消毒同一个坑：R44 收敛了 9 处 url 重复实现，
+          # R45 我又自己发明了一套轮询 —— 不踩第二遍。
+          # **只报告不阻断**（还有 1 处语义不同的持续刷新，故意不合并）。
+          - name: Frontend job polling is unique
+            run: python scripts/check_job_poll_unique.py
       - name: Dead-code audit (vulture)
         run: |
           # vulture==2.14 自 2026-09-25 起已在 requirements-dev.txt 锁文件里，
