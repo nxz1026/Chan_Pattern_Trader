@@ -278,15 +278,24 @@ cpt/
 ├── storage/        CPT 自有持久化（R24 恢复；SQL 只许在这里和 adapters）
 │   signal_event_store.py   → public.cpt_signal_event（R21）
 │   dashboard_run_store.py  → public.cpt_dashboard_run（R23）
+│   factor_epoch_store.py    → public.cpt_factor_epoch（R45：复权因子口径切换点）
 └── web/            HTTP 入口（4 个模块 + __init__）
     __main__.py  app.py  a_share.py  a_share_routes.py
 
 scripts/            运维入口（不在包内，但已在 CI 门禁覆盖范围内）
-    factor_backfill.py  snapshot_a_share_batch.py  fetch_references.sh
-    check_sql_layering.py   ← R24 的内容级分层门禁，已进 CI
-    migrations/（R20 / R21 / R23 三份幂等 SQL）
+    factor_backfill.py  factor_recompute.py  factor_report.py
+    snapshot_a_share_batch.py  fetch_references.sh
+    compare_chanlun_backends.py   ← native vs czsc 真机对比
+    verify_public_contracts.py    ← 腾讯/新浪契约真机验证
+    check_sql_layering.py             ← 门禁①，已进 CI
+    check_storage_failure_semantics.py ← 门禁②，已进 CI
+    check_doc_drift.py                ← 门禁③，已进 CI（R45 新增）
+    scan_doc_claims.py                ← 文档「未兑现承诺」候选抽取（R45 新增）
+    migrations/（R20 / R21 / R23 三份幂等 SQL + R45 的 cpt_factor_epoch）
+
 dashboard/          前端静态产物（Nginx 从 /var/www/cpt-dashboard 提供，非包内）
-tests/              扁平布局：72 个 test_*.py 直接放 tests/ 下，仅一个 fixtures/ 存放
+    url_safety.js  ← ⚠️ **必须第一个 defer 加载**：凭据消毒的**唯一实现**
+tests/              扁平布局：104 个 test_*.py 直接放 tests/ 下，仅一个 fixtures/ 存放
                     人工构造案例；**没有** unit/ oracle/ e2e 子目录（见 §11）
 docs/               rules.md  architecture.md  implementation-plan.md  progress-log.md
                     pending-wiring.md  duplication-triage.md  export-schema-v1.md
@@ -297,7 +306,12 @@ references/         czsc @ 701e480a（可选 extra `chan`）  wbt @ 39bb1e8a（�
 
 > `engine/` 已于 2026-09-25 整层删除（生产零导入），见 §2。
 >
-> `llm/` 是**未实现蓝图**（§4），明确标注「从未有过代码」，不计入上表。
+> ⚠️ **R45 更正（2026-10-04）**：
+> - `llm/` **已落地**（R25，2026-10-02），8 文件 / 1,300 行，**计入上表**（§4）；
+> - `engine/` 的删除说明仍然成立；
+> - `dashboard/url_safety.js` **必须第一个 `defer` 加载** ——
+>   它是凭据消毒的**唯一实现**，缺它应当响亮失败而不是静默回退裸 URL
+>   （R45 把 5 个文件里的 9 处重复实现收敛到这一个文件，门禁②⓷ 锁住）。
 >
 > ### storage/ 的边界（R24，2026-10-01）
 >
