@@ -70,3 +70,6 @@ graphflow-out/
 .env
 *.sqlite3
 *.pyc
+
+# 沙箱 TLS 代理证书（环境产物，见 known-traps #29）
+.git/git-proxy-ca.crt

@@ -157,3 +157,24 @@ GET /api/dashboard/a-share/recommendation?code=600519[&level=1d]
 > 原来返回的是**刚生成但根本没进库**的 id ⇒ 前端拿着它轮询永远查不到，
 > 表现是「明明算过，刷新一下摘要就没了」。
 > **同一段代码抄了两份，bug 也抄了两份** —— `explain` 和 `summarize` 都中招。
+
+### P2 追加：`history_days=N` 读回推荐留痕
+
+```
+GET /api/dashboard/a-share/recommendation?code=600519&level=1d&history_days=30
+```
+
+多返回一个 `recommendation_history`：
+
+| 字段 | 说明 |
+|---|---|
+| `available` | 有没有留痕；**读失败时为 false + reason**，不返回空列表冒充「没有历史」 |
+| `count` / `items` | 留痕行，**时间倒序** |
+| `epochs` | 出现过的**因子口径纪元**（取自 `cpt_factor_epoch.switched_at`） |
+
+**写**是 best-effort（留痕失败不让推荐接口 500，但**必留日志**）；
+**读**失败则如实报 `recommendation_history_unavailable`。
+表：`public.cpt_recommendation`（`scripts/migrations/2026-10-05_r45_recommendation.sql`）。
+
+> 为什么值得做：因子表 R45 一天切了 **4 次**，而「切表前推荐长什么样」
+> 当时**没有答案**、现在也补不回来 ⇒ 至少让**今后的**这类变化**看得见**。

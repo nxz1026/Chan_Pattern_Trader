@@ -115,7 +115,8 @@ def snapshot_payload(code: str, *, width_k: int = DEFAULT_WIDTH_K) -> dict[str, 
     )
 
 
-def build_recommendation(code: str, *, level: str | None = None) -> dict[str, Any]:
+def build_recommendation(code: str, *, level: str | None = None,
+                          history_days: int = 0) -> dict[str, Any]:
     """推荐块：动作 + 参考价 + 依据。**永不抛异常**。
 
     R45 新增。买卖与价格由 :mod:`cpt.application.recommendation` **纯确定性**算出
@@ -151,7 +152,89 @@ def build_recommendation(code: str, *, level: str | None = None) -> dict[str, An
     #    后复权价保留在 raw 里以备核对。
     out["raw_close"] = _raw_close(_normalize(code))
     out["history"] = _signal_history(_normalize(code))
+    out["level"] = level or ""
+
+    # P2：留痕。**best-effort** —— 留痕失败不该让推荐接口 500，
+    # 但**必须留日志**：静默丢会让「历史」悄悄变空而没人知道。
+    #
+    # ⚠️ 写**没有**去重：同一只票每次刷新写一行，这是**时间序列**不是状态。
+    # 「最新一条」由读端排序表达。
+    _persist_recommendation(code, out, level)
+    if history_days:
+        out["recommendation_history"] = _recommendation_history(
+            code, days=history_days)
     return out
+
+
+def _recommendation_history(code: str, *, days: int) -> dict[str, Any]:
+    """读回这只票的历史推荐（按口径纪元分组）。
+
+    失败 ⇒ ``available:False`` + 写明原因，**不返回空列表冒充「没有历史」**。
+    """
+    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+    from cpt.storage.recommendation_store import (  # noqa: PLC0415
+        RecommendationPersistError,
+        recent_recommendations,
+    )
+
+    client = None
+    try:
+        client = AShareLocalClient()
+        rows = recent_recommendations(client._get_conn(), code=code, days=days)  # noqa: SLF001
+    except RecommendationPersistError as exc:
+        return {"available": False, "reason": "recommendation_history_unavailable",
+                "detail": str(exc), "count": 0, "items": []}
+    except Exception as exc:  # noqa: BLE001
+        return {"available": False, "reason": "recommendation_history_error",
+                "detail": f"{type(exc).__name__}: {exc}", "count": 0, "items": []}
+    finally:
+        if client is not None:
+            client.close()
+
+    epochs = sorted({r["factor_epoch"] for r in rows if r.get("factor_epoch")})
+    return {
+        "available": bool(rows),
+        "count": len(rows),
+        "days": days,
+        "epochs": [e.isoformat() if hasattr(e, "isoformat") else str(e) for e in epochs],
+        "items": [
+            {**r, "created_at": r["created_at"].isoformat() if hasattr(r["created_at"], "isoformat") else str(r["created_at"]),
+             "factor_epoch": r["factor_epoch"].isoformat() if hasattr(r["factor_epoch"], "isoformat") else r["factor_epoch"]}
+            for r in rows
+        ],
+    }
+
+
+def _persist_recommendation(code: str, rec: dict[str, Any], level: str) -> None:
+    """把这次推荐落一行。**失败只记日志**，不让它带崩推荐接口。"""
+    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+    from cpt.storage.factor_epoch_store import current_epoch  # noqa: PLC0415
+    from cpt.storage.recommendation_store import (  # noqa: PLC0415
+        RecommendationPersistError,
+        append_recommendation,
+        ensure_table,
+    )
+
+    rec = {**rec, "code": code, "level": level}
+    client = None
+    try:
+        client = AShareLocalClient()
+        conn = client._get_conn()  # noqa: SLF001
+        ensure_table(conn)
+        epoch = None
+        try:
+            epoch = current_epoch(conn).switched_at
+        except Exception:  # noqa: BLE001 — 没有纪元就存 NULL，不该因此丢掉整条留痕
+            epoch = None
+        append_recommendation(conn, rec, epoch=epoch)
+        conn.commit()          # store 层不 commit（边界归调用方），同 llm_cases
+    except RecommendationPersistError as exc:
+        _LOG.warning("推荐留痕未写入 code=%s: %s", code, exc)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("推荐留痕异常 code=%s: %s", code, exc)
+    finally:
+        if client is not None:
+            client.close()
 
 
 def _signal_history(code: str) -> dict[str, Any]:

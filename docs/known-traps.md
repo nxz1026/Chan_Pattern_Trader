@@ -743,3 +743,39 @@ finally:
 
 ⇒ **一个失败若长期不被修，先怀疑它是不是真问题**，
 别用「不是本轮引入」当解释 —— 那是个会传染的标签。
+
+---
+
+## 29. 沙箱里 `git fetch` 静默失败 ⇒ `origin/main` 长期陈旧（R45）
+
+**症状**：三端同步时，本地（沙箱）显示
+
+```
+本地 HEAD     f826770   ✅
+origin/main   1f7d098   ❌ 落后 100 个提交
+```
+
+而 Oracle 与 GitHub 都是 `f8267702` —— **只有沙箱这一端"冲突"**。
+
+**根因**：沙箱出网走 **TLS 中间人代理**（自签
+``CN = ack-agent-identity-proxy``），系统 CA 里没有它 ⇒
+``git fetch`` 报 ``server certificate verification failed``。
+**而 `fetch` 失败时 git 保留旧的 remote ref、不删除它**
+⇒ ``origin/main`` 一直停在最后一次成功 fetch 的位置，**看起来像分叉，其实是陈旧**。
+
+**修**：把代理证书取出、只配进**本仓** ``.git/config``（不动全局）：
+
+```bash
+openssl s_client -connect github.com:443 -servername github.com </dev/null 2>/dev/null \
+  | openssl x509 > .git/git-proxy-ca.crt
+git config http.sslCAInfo "$PWD/.git/git-proxy-ca.crt"
+git fetch origin        # 之后 origin/main 正常更新
+```
+
+⚠️ 注意这个证书**不能提交进仓**（它是环境产物，且不该让别处的机器依赖它），
+所以加进 ``.gitignore`` 的风险是「换台机器又要重配一遍」——
+判据写在这里就是为��。
+
+**怎么确认是「陈旧」而不是「真分叉」**：``git rev-list --count HEAD..origin/main``
+给出落后数；若同时 ``origin/main..HEAD`` 为 0，就是**单向落后**（陈旧），
+双向都有才是分叉。**先看方向再动手**，别一上来就 reset。

@@ -1099,8 +1099,12 @@ def make_handler(
                     )
                     return
                 level = (query.get("level") or [""])[0].strip()
+                hdays = (query.get("history_days") or [""])[0]
                 self._write_json(
-                    a_share_routes.build_recommendation(code, level=level or None)
+                    a_share_routes.build_recommendation(
+                        code, level=level or None,
+                        history_days=int(hdays) if hdays.isdigit() else 0,
+                    )
                 )
                 return
 

@@ -56,12 +56,12 @@
 
 | 层 | 文件 | 行数 | 复盘状态 |
 |---|---:|---:|---|
-| `storage/` | 7 | 1,697 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 门禁②；R24 只是恢复层+划边界，**不算复盘**。详见 `docs/review-storage-layer-r45.md`） |
+| `storage/` | 8 | 1,839 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 门禁②；R24 只是恢复层+划边界，**不算复盘**。详见 `docs/review-storage-layer-r45.md`） |
 | `llm/` | 8 | 1,370 | ✅ **已做**（R45：全层勘察 + 3 个真 bug —— 清空进程环境 / 归类撒谎 / 单例丢弃审计回调） |
 | `adapters/` | 20 | 6,015 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 外部契约真机验证脚本 `scripts/verify_public_contracts.py`；顺带实测更正了 handoff 里 K 线缺口的量级） |
 | `application/` | 33 | 5,702 | ✅ **已做**（R45：全层勘察 + 3 个真 bug —— DB 故障被报成「缺因子」两处 + CDN 护栏后门） |
 | `domain/` | 16 | 2,964 | ✅ **已做**（R30 语义契约门禁；R45 重扫 16 文件，**未发现需修问题** —— 递归/中枢/级别标签不变量实测通过） |
-| `web/` | 5 | 3,035 | ✅ **已做**（R29 门禁仍成立；R45 重扫 5 文件，**未发现需修问题** —— 4 处候选经真机实证均为假阳性） |
+| `web/` | 5 | 3,122 | ✅ **已做**（R29 门禁仍成立；R45 重扫 5 文件，**未发现需修问题** —— 4 处候选经真机实证均为假阳性） |
 | `dashboard/`（前端） | 7 | ~1.6 MB | ⚠️ 只被画布 D 与几个面板碰过 |
 | `engine/` | — | — | 🚫 2026-09-25 整层删除（四个孤儿文件，R24 未恢复） |
 
@@ -285,6 +285,8 @@ cpt/
 │   dashboard_run_store.py  → public.cpt_dashboard_run（R23）
 │   factor_epoch_store.py   → public.cpt_factor_epoch（R45：复权因子口径切换点）
 │   llm_call_store.py  run_metric_store.py  structure_event_store.py
+│   recommendation_store.py   → public.cpt_recommendation（R45：推荐留痕，
+│                            「切表前后推荐变了没」从推断变成可查）
 ├── llm/            LLM 服务层（R25 落地，8 个文件含 providers/ 子目录）
 │   base.py  config.py  prompts.py  queue.py  registry.py  structured.py
 │   providers/openai_compatible.py
