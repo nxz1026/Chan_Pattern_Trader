@@ -20,10 +20,11 @@ import re
 from pathlib import Path
 
 import pytest
+
 from tests.conftest import dashboard_js
 
 ROOT = Path(__file__).resolve().parents[1]
-DASHBOARD_JS_TEXT = dashboard_js()   # R45 拆分：读全部模块
+DASHBOARD_JS_TEXT = dashboard_js()  # R45 拆分：读全部模块
 CSS = ROOT / "dashboard" / "dashboard.css"
 APP_PY = ROOT / "cpt" / "web" / "app.py"
 

@@ -27,8 +27,6 @@ from typing import Any
 from cpt.llm import get_queue
 from cpt.llm.base import LLMResult
 from cpt.llm.prompts import (
-    PURPOSE_EXPLAIN,
-    PURPOSE_SUMMARIZE,
     explain_request,
     summarize_request,
 )
@@ -340,8 +338,7 @@ def _enqueue_and_submit(
 
     queue = _bootstrap()
     if queue is None:
-        _write(conn, finish_call, row["call_id"], status="error",
-               error_text="llm_unavailable")
+        _write(conn, finish_call, row["call_id"], status="error", error_text="llm_unavailable")
         return {
             "available": False,
             "call_id": row["call_id"],
@@ -375,6 +372,7 @@ def _enqueue_and_submit(
         "status": "queued",
         "reason": "",
     }
+
 
 def _existing_call_id(conn: Any, digest: str) -> str | None:
     """按 ``request_hash`` 找出**已存在**那条调用的 ``call_id``；查不到返回 ``None``。

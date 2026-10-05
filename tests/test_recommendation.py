@@ -32,7 +32,6 @@ from cpt.application.recommendation import (  # noqa: E402
     build_recommendation,
 )
 
-
 #: 真实 A 股快照**总是**带 candles（本仓下限 30 根）。R45 加数据质量位之后，
 #: 早期那些「只放 signal 不放 candles」的夹具全被判成「数据不足」——
 #: 那是**夹具不真实**，不是代码错：真实路径上 candles 不会缺。
@@ -59,9 +58,7 @@ def snap(signal: dict | None, candles: list | None = None) -> dict:
     ],
 )
 def test_first_buy_states(status: str, expect: str, label: str) -> None:
-    out = build_recommendation(
-        snap({"status": status, "signal_type": "first_buy", "price": 28.5})
-    )
+    out = build_recommendation(snap({"status": status, "signal_type": "first_buy", "price": 28.5}))
     assert out["available"] is True
     assert out["action"] == expect
     assert out["action_label"] == label
@@ -92,8 +89,14 @@ def test_invalidated_buy_is_NOT_sell() -> None:
 
 def test_divergence_is_surfaced() -> None:
     out = build_recommendation(
-        snap({"status": "confirmed", "signal_type": "first_buy",
-              "price": 1.0, "divergence_status": "detected"})
+        snap(
+            {
+                "status": "confirmed",
+                "signal_type": "first_buy",
+                "price": 1.0,
+                "divergence_status": "detected",
+            }
+        )
     )
     assert "背驰" in out["reason"]
 
@@ -128,9 +131,14 @@ def test_no_price_anywhere_is_none_not_zero() -> None:
 # ── 降级：永不抛 ──────────────────────────────────────────────
 @pytest.mark.parametrize(
     "bad",
-    [None, {}, {"signal": None}, {"signal": {}},
-     {"signal": {"status": "???"}},
-     {"signal": {"status": "confirmed"}}],
+    [
+        None,
+        {},
+        {"signal": None},
+        {"signal": {}},
+        {"signal": {"status": "???"}},
+        {"signal": {"status": "confirmed"}},
+    ],
 )
 def test_degrades_never_raises(bad) -> None:
     out = build_recommendation(bad) if bad is not None else build_recommendation(None)  # type: ignore[arg-type]
@@ -153,8 +161,7 @@ def test_non_dict_snapshot_degrades() -> None:
 
 def test_every_result_has_disclaimer() -> None:
     """看板全程标注「不构成投资建议」—— 推荐块也必须带。"""
-    for s in (snap({"status": "confirmed", "signal_type": "first_buy", "price": 1.0}),
-              snap(None)):
+    for s in (snap({"status": "confirmed", "signal_type": "first_buy", "price": 1.0}), snap(None)):
         assert "非投资建议" in build_recommendation(s)["disclaimer"]
 
 
@@ -177,10 +184,12 @@ def test_too_few_bars_says_data_insufficient_not_no_signal() -> None:
 def test_signal_present_but_bars_short_still_says_insufficient() -> None:
     """**顺序不能反**：K 线不足时本来就不可能有可信信号，
     先报「没有信号」等于把「不知道」说成「知道没有」。"""
-    out = build_recommendation(snap(
-        {"status": "confirmed", "signal_type": "first_buy", "price": 10.0},
-        candles=[{"close": 1.0}] * 5,
-    ))
+    out = build_recommendation(
+        snap(
+            {"status": "confirmed", "signal_type": "first_buy", "price": 10.0},
+            candles=[{"close": 1.0}] * 5,
+        )
+    )
     assert out["headline"] == "数据不足，暂无法判断"
     assert out["available"] is False
 

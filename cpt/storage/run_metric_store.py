@@ -56,6 +56,7 @@ __all__ = [
     "waterline_trend",
 ]
 
+
 class RunMetricError(RuntimeError):
     """巡检/水位表**写与清理**失败（R45 新增）。
 
@@ -344,9 +345,7 @@ def waterline_trend(conn: Any, *, market: str, symbol: str, limit: int = 50) -> 
     }
 
 
-def prune(
-    conn: Any, *, keep_days: int = 30, kinds: Sequence[str] | None = None
-) -> int:
+def prune(conn: Any, *, keep_days: int = 30, kinds: Sequence[str] | None = None) -> int:
     """删掉 ``keep_days`` 之前的行，返回删除行数。**不 commit**。
 
     run 行是高频的（每轮一行），不留窗口就会长成第二份 ``daily_bar``。

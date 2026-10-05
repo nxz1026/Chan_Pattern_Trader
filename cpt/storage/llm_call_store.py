@@ -46,6 +46,7 @@ class LLMCallError(RuntimeError):
     它让人以为「没调用过」，而实际上模型已经被调过、token 已经花掉了。
     """
 
+
 #: ``status`` 列的取值。**定义在这里而不是 ``cpt/llm/queue.py``** ——
 #: 这张表是 storage 的，枚举就归 storage。反过来说 storage → llm 是低层依赖高层，
 #: 会踩 layers 契约（见 .importlinter）。
@@ -226,6 +227,8 @@ def finish_call(
             )
     except Exception as exc:
         _LOG.warning("更新 LLM 调用状态失败 %s: %s", call_id, exc)
+
+
 def recent_calls(
     conn: Any, *, limit: int = 20, subject_id: str | None = None
 ) -> tuple[dict[str, Any], ...]:

@@ -38,7 +38,7 @@ from cpt.adapters import feishu  # noqa: E402
 class _Resp:
     status = 200
 
-    def __enter__(self) -> "_Resp":
+    def __enter__(self) -> _Resp:
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -106,7 +106,7 @@ def test_clip_keeps_full_trace() -> None:
 
     long = "b" * (feishu._MAX_CHARS + 123)
     out = feishu._clip(long)
-    assert len(out) < len(long) + 40        # 只多了那句留痕，不是整条
+    assert len(out) < len(long) + 40  # 只多了那句留痕，不是整条
     assert "已截断 123 字符" in out
 
 

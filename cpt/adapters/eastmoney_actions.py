@@ -232,9 +232,7 @@ class EastmoneyActionClient:
                     payload.get("code"),
                 )
                 return ()
-            raise EastmoneyActionError(
-                f"东财分红接口返回失败（{em_code}）：{message}"
-            )
+            raise EastmoneyActionError(f"东财分红接口返回失败（{em_code}）：{message}")
 
         result = payload.get("result")
         if result is not None and not isinstance(result, dict):

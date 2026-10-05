@@ -147,8 +147,14 @@ def c5_hfq_matches_local_factor() -> str:
     local_hfq_close = float(raw) * float(row[0])
     dev = abs(local_hfq_close / tencent_hfq_close - 1)
     if dev > 0.01:
-        return f"⚠️ 两侧后复权价差 {dev*100:.2f}%：腾讯 {tencent_hfq_close:.2f} vs 本地 {local_hfq_close:.2f}"
-    return f"✅ 两侧一致（差 {dev*100:.3f}%）：腾讯 {tencent_hfq_close:.2f} / 本地 {local_hfq_close:.2f}"
+        return (
+            f"⚠️ 两侧后复权价差 {dev * 100:.2f}%："
+            f"腾讯 {tencent_hfq_close:.2f} vs 本地 {local_hfq_close:.2f}"
+        )
+    return (
+        f"✅ 两侧一致（差 {dev * 100:.3f}%）："
+        f"腾讯 {tencent_hfq_close:.2f} / 本地 {local_hfq_close:.2f}"
+    )
 
 
 CHECKS = (
@@ -170,7 +176,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print("=" * 88)
     bad = 0
-    for name, ok, detail in results:
+    for name, _ok, detail in results:
         if not detail.startswith(("✅", "⚠️")):
             bad += 1
         elif detail.startswith("⚠️"):

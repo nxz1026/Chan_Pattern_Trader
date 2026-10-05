@@ -48,6 +48,8 @@ import argparse
 import importlib.util
 import sys
 from pathlib import Path
+from types import ModuleType
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -55,17 +57,18 @@ sys.path.insert(0, str(ROOT))
 from cpt.domain.models import CanonicalBar  # noqa: E402
 
 
-def _load(name: str):
+def _load(name: str) -> ModuleType:
     p = ROOT / "cpt" / "adapters" / f"{name}.py"
     spec = importlib.util.spec_from_file_location(f"_cmp_{name}", p)
+    assert spec is not None and spec.loader is not None
     m = importlib.util.module_from_spec(spec)
     sys.modules[f"_cmp_{name}"] = m
     spec.loader.exec_module(m)
     return m
 
 
-def available_backends() -> list[tuple[str, object]]:
-    out: list[tuple[str, object]] = []
+def available_backends() -> list[tuple[str, Any]]:
+    out: list[tuple[str, Any]] = []
     try:
         nat = _load("native_chanlun").NativeChanlunBackend
         out.append(("native", nat()))
@@ -100,14 +103,24 @@ def fetch_bars(code: str, n: int) -> list[CanonicalBar]:
     )
     rows = cur.fetchall()[::-1]
     out = []
-    for d, o, h, l, c, v in rows:
+    for d, o, h, lo, c, v in rows:
         ms = int(dt.datetime(d.year, d.month, d.day, tzinfo=dt.UTC).timestamp() * 1000)
-        out.append(CanonicalBar(
-            open_time=ms, open=float(o), high=float(h), low=float(l),
-            close=float(c), volume=float(v or 0), close_time=ms + 86400000 - 1,
-            quote_volume=0.0, trade_count=0, taker_buy_base_volume=0.0,
-            taker_buy_quote_volume=0.0, is_closed=True,
-        ))
+        out.append(
+            CanonicalBar(
+                open_time=ms,
+                open=float(o),
+                high=float(h),
+                low=float(lo),
+                close=float(c),
+                volume=float(v or 0),
+                close_time=ms + 86400000 - 1,
+                quote_volume=0.0,
+                trade_count=0,
+                taker_buy_base_volume=0.0,
+                taker_buy_quote_volume=0.0,
+                is_closed=True,
+            )
+        )
     return out
 
 
@@ -122,9 +135,11 @@ def count_of(res: object) -> dict[str, int]:
                     continue
         return 0
 
-    return {"fractals": n("fx_list", "fractals", "fx"),
-            "bis": n("bi_list", "bis", "bi"),
-            "zhongshus": n("zs_list", "zhongshus", "zs")}
+    return {
+        "fractals": n("fx_list", "fractals", "fx"),
+        "bis": n("bi_list", "bis", "bi"),
+        "zhongshus": n("zs_list", "zhongshus", "zs"),
+    }
 
 
 def check_contract(label: str, res: object) -> list[str]:

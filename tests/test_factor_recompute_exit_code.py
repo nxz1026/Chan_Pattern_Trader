@@ -106,8 +106,10 @@ def test_cron_script_propagates_exit_code() -> None:
     结尾的那行 —— 找错行就会误判（踩过：按 ``\\`` 找，拿到的是续行本身）。
     """
     lines = CRON_SH.splitlines()
-    start = next(i for i, ln in enumerate(lines) if "scripts/factor_recompute.py" in ln and "timeout" in ln)
+    start = next(
+        i for i, ln in enumerate(lines) if "scripts/factor_recompute.py" in ln and "timeout" in ln
+    )
     end = next(i for i in range(start, len(lines)) if not lines[i].rstrip().endswith("\\"))
     assert "rc=$?" in lines[end + 1], (
-        f"rc 捕获被隔开了：命令在第 {end+1} 行结束，下一行是 {lines[end+1]!r}"
+        f"rc 捕获被隔开了：命令在第 {end + 1} 行结束，下一行是 {lines[end + 1]!r}"
     )

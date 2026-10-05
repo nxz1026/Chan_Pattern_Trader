@@ -36,7 +36,6 @@ from __future__ import annotations
 import dataclasses
 from pathlib import Path
 
-import pytest
 from cpt.domain.config import SCHEMA_VERSION, RulesConfig
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -95,8 +94,7 @@ def test_every_frozen_param_is_documented_in_rules_md() -> None:
     这条让「同步文档」也不靠自觉 —— 加了新参数却忘了写进规则文档，门禁会红。
     """
     doc = RULES_DOC.read_text(encoding="utf-8")
-    missing = [name for name in FROZEN_V0
-               if name != "config_version" and name not in doc]
+    missing = [name for name in FROZEN_V0 if name != "config_version" and name not in doc]
     assert not missing, (
         f"这些冻结参数在 docs/rules.md 里查不到：{missing}。"
         f"  §9 是口径的权威文档，参数没写进去 = 口径没定义。"

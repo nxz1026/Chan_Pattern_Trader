@@ -40,12 +40,12 @@ from cpt.storage import run_metric_store as rms  # noqa: E402
 class _Cur:
     rowcount = 0
 
-    def __init__(self, conn: "_Conn") -> None:
+    def __init__(self, conn: _Conn) -> None:
         self.conn = conn
         self.sql = ""
         self.params: tuple = ()
 
-    def __enter__(self) -> "_Cur":
+    def __enter__(self) -> _Cur:
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -61,8 +61,7 @@ class _Cur:
 
 
 class _Conn:
-    def __init__(self, *, raise_on_delete: Exception | None = None,
-                 deleted: int = 0) -> None:
+    def __init__(self, *, raise_on_delete: Exception | None = None, deleted: int = 0) -> None:
         self.calls: list[str] = []
         self.raise_on_delete = raise_on_delete
         self.deleted = deleted

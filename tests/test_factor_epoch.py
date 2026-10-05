@@ -16,7 +16,6 @@ import datetime as dt
 import re
 from pathlib import Path
 
-import pytest
 from cpt.storage.factor_epoch_store import (
     EPOCH_DDL,
     FactorEpoch,
@@ -107,9 +106,10 @@ def test_record_epoch_is_idempotent() -> None:
     fn = ast.parse(textwrap.dedent(inspect.getsource(record_epoch))).body[0]
     body = list(fn.body)
     if body and isinstance(body[0], ast.Expr) and isinstance(body[0].value, ast.Constant):
-        body = body[1:]                      # 丢掉 docstring
+        body = body[1:]  # 丢掉 docstring
     sql = "\n".join(
-        n.value for stmt in body
+        n.value
+        for stmt in body
         for n in ast.walk(stmt)
         if isinstance(n, ast.Constant) and isinstance(n.value, str)
     )
@@ -140,8 +140,9 @@ def test_migration_script_matches_store_ddl() -> None:
 
 def test_migration_states_deploy_order_safety() -> None:
     """迁移是**纯新增表**，不需停服 —— 文档必须写明，否则下个人会照抄 R27 那套停服流程。"""
-    text = (ROOT / "scripts" / "migrations"
-            / "2026-10-03_r45_factor_epoch.sql").read_text(encoding="utf-8")
+    text = (ROOT / "scripts" / "migrations" / "2026-10-03_r45_factor_epoch.sql").read_text(
+        encoding="utf-8"
+    )
     assert "不需要停服" in text or "不需停服" in text, (
         "迁移必须写明『纯新增表、不需要停服』，否则会被误当成交叉迁移"
     )

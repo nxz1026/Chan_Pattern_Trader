@@ -44,12 +44,7 @@ def fake_dbconfig(monkeypatch: pytest.MonkeyPatch) -> None:
         tmp.write_text(text, encoding="utf-8")
         monkeypatch.setattr(_dbconfig, "DB_CONFIG_FILE", tmp)
 
-    _install(
-        "$RDSHOST=db.internal\n"
-        "$DB_PW=secret\n"
-        "$DBNAME=emotion_core\n"
-        "$USER=postgres\n"
-    )
+    _install("$RDSHOST=db.internal\n$DB_PW=secret\n$DBNAME=emotion_core\n$USER=postgres\n")
 
 
 # ---------------------------------------------------------------------------
@@ -58,7 +53,7 @@ def fake_dbconfig(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_valid_port_parses(fake_dbconfig: None) -> None:
-    assert connection_kwargs()["port"] == 5432          # 缺省
+    assert connection_kwargs()["port"] == 5432  # 缺省
     _dbconfig.connection_kwargs  # noqa: B018 - 保持可读
 
 
@@ -71,9 +66,7 @@ def test_malformed_port_raises_injected_exc_type(
     import tempfile
 
     tmp = pathlib.Path(tempfile.mkdtemp()) / "dbconfig"
-    tmp.write_text(
-        f"$RDSHOST=db.internal\n$DB_PW=secret\n$DBPORT={raw}\n", encoding="utf-8"
-    )
+    tmp.write_text(f"$RDSHOST=db.internal\n$DB_PW=secret\n$DBPORT={raw}\n", encoding="utf-8")
     monkeypatch.setattr(_dbconfig, "DB_CONFIG_FILE", tmp)
 
     with pytest.raises(_WatchlistError):
@@ -94,9 +87,7 @@ def test_empty_port_falls_back_to_default(
     import tempfile
 
     tmp = pathlib.Path(tempfile.mkdtemp()) / "dbconfig"
-    tmp.write_text(
-        f"$RDSHOST=db.internal\n$DB_PW=secret\n$DBPORT={raw}\n", encoding="utf-8"
-    )
+    tmp.write_text(f"$RDSHOST=db.internal\n$DB_PW=secret\n$DBPORT={raw}\n", encoding="utf-8")
     monkeypatch.setattr(_dbconfig, "DB_CONFIG_FILE", tmp)
 
     assert connection_kwargs(exc_type=_WatchlistError)["port"] == 5432
@@ -124,9 +115,7 @@ def test_out_of_range_port_raises_injected_exc_type(
     import tempfile
 
     tmp = pathlib.Path(tempfile.mkdtemp()) / "dbconfig"
-    tmp.write_text(
-        f"$RDSHOST=db.internal\n$DB_PW=secret\n$DBPORT={raw}\n", encoding="utf-8"
-    )
+    tmp.write_text(f"$RDSHOST=db.internal\n$DB_PW=secret\n$DBPORT={raw}\n", encoding="utf-8")
     monkeypatch.setattr(_dbconfig, "DB_CONFIG_FILE", tmp)
 
     with pytest.raises(_WatchlistError):
@@ -161,7 +150,7 @@ def test_missing_required_keys_still_raise_injected_type(
     import tempfile
 
     tmp = pathlib.Path(tempfile.mkdtemp()) / "dbconfig"
-    tmp.write_text("$RDSHOST=db.internal\n", encoding="utf-8")   # 故意缺 $DB_PW
+    tmp.write_text("$RDSHOST=db.internal\n", encoding="utf-8")  # 故意缺 $DB_PW
     monkeypatch.setattr(_dbconfig, "DB_CONFIG_FILE", tmp)
 
     with pytest.raises(_WatchlistError):

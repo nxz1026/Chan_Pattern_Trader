@@ -220,20 +220,20 @@ def served(provider: object = None) -> Iterator[str]:
 #: 看板 JS 的**加载顺序**（index.html 里 script 标签的先后）。
 #: 拆成 ``dash-*.js`` 之后它就是「谁先谁后」的唯一真相。
 DASHBOARD_JS_ORDER = (
-    "url_safety.js",        # 必须第一个：凭据消毒唯一实现
-    "cpt_job.js",           # 必须第二个：轮询唯一实现
+    "url_safety.js",  # 必须第一个：凭据消毒唯一实现
+    "cpt_job.js",  # 必须第二个：轮询唯一实现
     "canvas_registry.js",
     "canvas_b.js",
     "canvas_c.js",
     "canvas_d.js",
     "market_a_share.js",
     "inspection_panel.js",
-    "dash-core.js",        # R45 拆分：核心 + boot（必须最先）
+    "dash-core.js",  # R45 拆分：核心 + boot（必须最先）
     "dash-chrome.js",
     "dash-structure.js",
     "dash-signal.js",
-    "dash-chart.js",       # ⚠️ 第一版漏了它 ⇒ 漏掉整个画布绘制模块
-    "dash-alert.js",       # ⚠️ 第一版也漏了它
+    "dash-chart.js",  # ⚠️ 第一版漏了它 ⇒ 漏掉整个画布绘制模块
+    "dash-alert.js",  # ⚠️ 第一版也漏了它
     "dash-ops.js",
 )
 
@@ -265,7 +265,8 @@ def dashboard_js(*, strip_comments: bool = False) -> str:
         parts.append(f"// ==== {name} ====\n" + p.read_text(encoding="utf-8"))
     if missing:
         raise FileNotFoundError(
-            "看板 JS 缺失：" + ", ".join(missing)
+            "看板 JS 缺失："
+            + ", ".join(missing)
             + "（DASHBOARD_JS_ORDER 与实际文件不一致 —— 拆分时漏加或拼错名）"
         )
     text = "\n".join(parts)
@@ -303,8 +304,8 @@ def _isolate_run_store(monkeypatch: _pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("CPT_RUN_STORE_PERSIST", "0")
     from cpt.application import dashboard_runs as _dr  # noqa: PLC0415
 
-    _dr._RUN_RING.clear()        # noqa: SLF001
-    _dr._RUN_BODIES.clear()      # noqa: SLF001
+    _dr._RUN_RING.clear()  # noqa: SLF001
+    _dr._RUN_BODIES.clear()  # noqa: SLF001
     yield
-    _dr._RUN_RING.clear()        # noqa: SLF001
-    _dr._RUN_BODIES.clear()      # noqa: SLF001
+    _dr._RUN_RING.clear()  # noqa: SLF001
+    _dr._RUN_BODIES.clear()  # noqa: SLF001

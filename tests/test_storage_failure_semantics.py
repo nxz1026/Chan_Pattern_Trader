@@ -52,10 +52,10 @@ lcs = _store("llm_call_store")
 class _FailingCursor:
     """模拟「PG 语句失败」：execute 抛，连接进入 aborted 态。"""
 
-    def __init__(self, conn: "_AbortingConn") -> None:
+    def __init__(self, conn: _AbortingConn) -> None:
         self._conn = conn
 
-    def __enter__(self) -> "_FailingCursor":
+    def __enter__(self) -> _FailingCursor:
         return self
 
     def __exit__(self, *a: Any) -> bool:
@@ -108,13 +108,21 @@ def test_load_previous_signal_returns_none_when_row_absent() -> None:
     """
 
     class _EmptyCursor:
-        def __enter__(self): return self
-        def __exit__(self, *a): return False
-        def execute(self, *a, **k): pass
-        def fetchone(self): return None
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def execute(self, *a, **k):
+            pass
+
+        def fetchone(self):
+            return None
 
     class _EmptyConn:
-        def cursor(self): return _EmptyCursor()
+        def cursor(self):
+            return _EmptyCursor()
 
     assert ses.load_previous_signal(_EmptyConn(), "first_buy:5:zs1") is None
 

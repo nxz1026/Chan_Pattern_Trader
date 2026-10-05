@@ -37,6 +37,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
+
 from tests.conftest import dashboard_js
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -107,9 +108,7 @@ console.log(JSON.stringify((function () {{
 {body}
 }})()));
 """
-    proc = subprocess.run(
-        [_node(), "-e", script], capture_output=True, text=True, timeout=60
-    )
+    proc = subprocess.run([_node(), "-e", script], capture_output=True, text=True, timeout=60)
     assert proc.returncode == 0, f"node 执行失败:\n{proc.stderr[:800]}"
     lines = [ln for ln in proc.stdout.strip().splitlines() if ln.strip()]
     assert lines, f"node 没有输出（rc=0）。脚本:\n{script[:600]}"
@@ -353,9 +352,17 @@ def test_every_fetch_exit_goes_through_safe_url() -> None:
     # ⚠️ 名单按「**真的发请求**」列，不按文件名列。
     #   dash-chart.js / dash-alert.js **一次 fetch 都没有**（纯 SVG 绘制 /
     #   Notification API），要求它们「委托 window.CPT_URL」本身是错的判据。
-    for name in ("canvas_d.js", "inspection_panel.js", "market_a_share.js",
-                 "dashboard.bundle.js", "dash-core.js", "dash-ops.js",
-                 "dash-signal.js", "dash-chrome.js", "dash-structure.js"):
+    for name in (
+        "canvas_d.js",
+        "inspection_panel.js",
+        "market_a_share.js",
+        "dashboard.bundle.js",
+        "dash-core.js",
+        "dash-ops.js",
+        "dash-signal.js",
+        "dash-chrome.js",
+        "dash-structure.js",
+    ):
         text = (ROOT / "dashboard" / name).read_text(encoding="utf-8")
         for line_no, line in enumerate(text.splitlines(), 1):
             if "fetch(" not in line or line.lstrip().startswith(("*", "//", ".")):
@@ -385,9 +392,17 @@ def test_credential_stripping_has_a_single_implementation() -> None:
     # ⚠️ 名单按「**真的发请求**」列。``dash-chart.js``（纯 SVG 绘制）、
     #    ``dash-alert.js``（Notification API）**一次 fetch 都没有**，
     #    要求它们「委托 window.CPT_URL」本身是错的判据。
-    for name in ("canvas_d.js", "inspection_panel.js", "market_a_share.js",
-                 "dashboard.bundle.js", "dash-core.js", "dash-ops.js",
-                 "dash-signal.js", "dash-chrome.js", "dash-structure.js"):
+    for name in (
+        "canvas_d.js",
+        "inspection_panel.js",
+        "market_a_share.js",
+        "dashboard.bundle.js",
+        "dash-core.js",
+        "dash-ops.js",
+        "dash-signal.js",
+        "dash-chrome.js",
+        "dash-structure.js",
+    ):
         text = (ROOT / "dashboard" / name).read_text(encoding="utf-8")
         if name == "url_safety.js":
             continue
@@ -415,8 +430,7 @@ def test_credential_stripping_has_a_single_implementation() -> None:
         # ⇒ 判据改成「**定义方**必须真的委托 window.CPT_URL」。
         if name in ("dash-core.js", "dashboard.bundle.js"):
             assert "CPT_URL" in clean, (
-                f"dashboard/{name} 定义了 safeFetchUrl/resolveUrl，"
-                f"却没有真的委托 window.CPT_URL"
+                f"dashboard/{name} 定义了 safeFetchUrl/resolveUrl，却没有真的委托 window.CPT_URL"
             )
 
 
@@ -432,9 +446,12 @@ def test_url_safety_loads_before_every_consumer() -> None:
     order = re.findall(r'<script src="\./([a-z_-]+\.js)" defer', html)
     assert "url_safety.js" in order, "index.html 没有加载 url_safety.js"
     first_use = min(
-        (i for i, n in enumerate(order)
-         if n in ("canvas_d.js", "inspection_panel.js",
-                  "market_a_share.js", "dashboard.bundle.js")),
+        (
+            i
+            for i, n in enumerate(order)
+            if n
+            in ("canvas_d.js", "inspection_panel.js", "market_a_share.js", "dashboard.bundle.js")
+        ),
         default=None,
     )
     assert order.index("url_safety.js") < first_use, (

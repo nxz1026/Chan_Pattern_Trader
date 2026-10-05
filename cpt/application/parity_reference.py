@@ -9,7 +9,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Sequence
 from dataclasses import asdict
-from typing import Any, Final
+from typing import Any, Final, cast
 
 from cpt.domain.config import RulesConfig
 from cpt.domain.models import CanonicalBar
@@ -40,36 +40,6 @@ def _normalize(items: Sequence[Any], kind: str) -> list[dict[str, Any]]:
         raw = asdict(item) if hasattr(item, "__dataclass_fields__") else dict(item)
         out.append({f: raw.get(f) for f in fields})
     return out
-
-
-def _czsc_structures(
-    bars: Sequence[CanonicalBar], config: RulesConfig
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]] | None:
-    """参照侧 = czsc 后端；不可用返回 ``None``（由调用方决定回落）。
-
-    直接返回**归一化后的 dict**（而不是领域对象），这样两条参照路
-    （czsc 给 dataclass、腾讯给已 ``asdict`` 的 dict）类型一致。
-    """
-    from cpt.adapters.backend_factory import resolve_backend
-    from cpt.adapters.czsc_chanlun import CzscNotInstalledError, CzscVersionError
-    from cpt.application.replay import compute_domain_structures
-
-    try:
-        backend = resolve_backend("czsc", min_bi_len=config.min_bi_len)
-    except (CzscNotInstalledError, CzscVersionError) as exc:
-        # R38：**降为 debug**。这是**配置状态**（czsc 没装），不是事件 ——
-        # 而这段在**每次** A 股快照都会走一遍，于是它一个人就占了线上日志的
-        # 41%（24h 内 22/53 条），把真信号淹掉了。
-        # 常态由 `scripts/run_inspection.py` 统一汇报（ccxt / czsc 都归 degraded），
-        # 日志流只留"不该发生"的东西。
-        _LOG.debug("parity 参照侧 czsc 不可用，回落公开源：%s", exc)
-        return None
-    fractals, bis, zhongshus = compute_domain_structures(bars, config, backend)
-    return (
-        _normalize(fractals, "fractal"),
-        _normalize(bis, "bi"),
-        _normalize(zhongshus, "zhongshu"),
-    )
 
 
 def build_parity_snapshot_for(
@@ -105,6 +75,7 @@ def build_parity_snapshot_for(
     # ⇒ 现在只有一份实现，且**实际用了哪一级由后端如实报告**。
     from cpt.adapters.backend_factory import resolve_backend  # noqa: PLC0415
     from cpt.adapters.reference_backend import (  # noqa: PLC0415
+        ReferenceChanlunBackend,
         ReferenceUnavailableError,
     )
     from cpt.adapters.reference_chanlun import ReferenceChanlunConfig  # noqa: PLC0415
@@ -114,7 +85,10 @@ def build_parity_snapshot_for(
     # ``TypeError``（该 dataclass 只有 use_fx_*/zs_wzgx/macd_*/fixed_commit），
     # 而 TypeError **不在** `except ReferenceUnavailableError` 里 ⇒ 抛穿出去。
     # ⇒ 它是**后端级**参数（同 code），走 resolve_backend。
-    backend = resolve_backend("reference", min_bi_len=cfg.min_bi_len)
+    backend = cast(
+        ReferenceChanlunBackend,
+        resolve_backend("reference", min_bi_len=cfg.min_bi_len),
+    )
     try:
         # ⚠️ 用 ``compute_domain_structures`` 而不是契约方法 ``compute_structures``：
         # 后者返回 ``ChanlunResult``（存 **bar 索引**），而本层要的是带

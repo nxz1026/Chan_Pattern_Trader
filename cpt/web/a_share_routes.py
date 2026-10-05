@@ -160,7 +160,7 @@ def build_recommendation(
     #
     # ⚠️ 写**没有**去重：同一只票每次刷新写一行，这是**时间序列**不是状态。
     # 「最新一条」由读端排序表达。
-    _persist_recommendation(code, out, level)
+    _persist_recommendation(code, out, level or "")
     if history_days:
         out["recommendation_history"] = _recommendation_history(code, days=history_days)
     return out
@@ -264,8 +264,8 @@ def _signal_history(code: str) -> dict[str, Any]:
     读失败**降级为不可用**，但不假装「确实没有历史」——
     与 ``load_signal_events`` 自己抛 ``SignalEventError`` 的口径一致。
     """
-    from cpt.application.recommendation import build_history  # noqa: PLC0415
     from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+    from cpt.application.recommendation import build_history  # noqa: PLC0415
     from cpt.storage.factor_epoch_store import current_epoch  # noqa: PLC0415
     from cpt.storage.signal_event_store import (  # noqa: PLC0415
         SignalEventError,

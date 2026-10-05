@@ -24,10 +24,10 @@ from cpt.storage import recommendation_store as rs  # noqa: E402
 
 
 class _Cur:
-    def __init__(self, conn: "_Conn") -> None:
+    def __init__(self, conn: _Conn) -> None:
         self.conn = conn
 
-    def __enter__(self) -> "_Cur":
+    def __enter__(self) -> _Cur:
         return self
 
     def __exit__(self, *e: object) -> None:
@@ -60,9 +60,14 @@ class _Conn:
 
 
 REC = {
-    "code": "600519", "level": "1d", "action": "hold", "raw_close": 1258.62,
-    "status": "invalidated", "signal_type": "first_buy",
-    "headline": "信号已失效", "reason": "一买已失效（不取反方向）",
+    "code": "600519",
+    "level": "1d",
+    "action": "hold",
+    "raw_close": 1258.62,
+    "status": "invalidated",
+    "signal_type": "first_buy",
+    "headline": "信号已失效",
+    "reason": "一买已失效（不取反方向）",
     "data_quality": {"bars": 122, "min_bars": 30, "sufficient": True},
 }
 
@@ -101,10 +106,12 @@ def test_read_failure_raises_not_empty_list() -> None:
 
 
 def test_read_orders_newest_first() -> None:
-    c = _Conn(rows=[
-        (2, "600519", "1d", "buy", 1.0, "confirmed", "first_buy", "h", "r", 122, None, None),
-        (1, "600519", "1d", "hold", 1.0, "invalidated", "first_buy", "h", "r", 122, None, None),
-    ])
+    c = _Conn(
+        rows=[
+            (2, "600519", "1d", "buy", 1.0, "confirmed", "first_buy", "h", "r", 122, None, None),
+            (1, "600519", "1d", "hold", 1.0, "invalidated", "first_buy", "h", "r", 122, None, None),
+        ]
+    )
     out = rs.recent_recommendations(c, code="600519")
     assert [r["id"] for r in out] == [2, 1], "必须是时间倒序（最新在前）"
     assert out[0]["action"] == "buy"

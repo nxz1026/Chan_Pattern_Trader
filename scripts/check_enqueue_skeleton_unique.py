@@ -28,12 +28,15 @@
      照样被算进去（报 4）
 ⇒ 「有没有第二份实现」是**调用点**问题，**只能用 AST 判**，grep 不成立。
 """
-import ast, sys
+
+import ast
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "cpt" / "application" / "llm_cases.py"
 tree = ast.parse(SRC.read_text(encoding="utf-8"))
+
 
 # 函数体内对该符号的**真实调用**（排除 def 本身与属性访问）
 def call_sites(name: str) -> list[int]:
@@ -62,9 +65,10 @@ def ref_sites(name: str) -> list[int]:
             out.append(node.lineno)
     return sorted(set(out))
 
+
 def defs(name: str) -> list[int]:
-    return [n.lineno for n in tree.body
-            if isinstance(n, ast.FunctionDef) and n.name == name]
+    return [n.lineno for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name]
+
 
 checks = [
     ("_enqueue_and_submit 调用点", len(call_sites("_enqueue_and_submit")), 2),
@@ -79,16 +83,19 @@ for name, got, want in checks:
     ok &= good
     print(f"  {'✅' if good else '❌'} {name:28s} {got}  (期望 {want})")
 
-dup = [n.name for n in tree.body
-       if isinstance(n, ast.FunctionDef)
-       and sum(1 for m in tree.body if isinstance(m, ast.FunctionDef) and m.name == n.name) > 1]
+dup = [
+    n.name
+    for n in tree.body
+    if isinstance(n, ast.FunctionDef)
+    and sum(1 for m in tree.body if isinstance(m, ast.FunctionDef) and m.name == n.name) > 1
+]
 print(f"  {'✅' if not dup else '❌'} 无重复定义的函数 {dup}")
 
 # 入队逻辑是否**只**在骨架里：骨架之外不得出现 enqueue/queue 相关调用
-skeleton = next(n for n in tree.body
-                if isinstance(n, ast.FunctionDef) and n.name == "_enqueue_and_submit")
+skeleton = next(
+    n for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == "_enqueue_and_submit"
+)
 sk_lines = set(range(skeleton.lineno, (skeleton.end_lineno or 0) + 1))
-stray = [ln for ln in call_sites("enqueue_call") + call_sites("_bootstrap")
-         if ln not in sk_lines]
+stray = [ln for ln in call_sites("enqueue_call") + call_sites("_bootstrap") if ln not in sk_lines]
 print(f"  {'✅' if not stray else '❌'} 骨架外无入队调用 {stray}")
 sys.exit(0 if ok and not dup and not stray else 1)

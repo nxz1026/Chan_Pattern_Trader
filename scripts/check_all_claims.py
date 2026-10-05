@@ -35,9 +35,9 @@ from __future__ import annotations
 import argparse
 import ast
 import re
-import subprocess
 from collections import defaultdict
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SKIP_DIRS = {".git", "references", "node_modules", "__pycache__", ".venv"}
@@ -53,10 +53,16 @@ def all_docs() -> list[Path]:
 
 
 def all_code() -> list[Path]:
-    out = []
-    for pat in ("cpt/**/*.py", "scripts/**/*.py", "tests/**/*.py",
-                "dashboard/**/*.js", "dashboard/**/*.css", "dashboard/**/*.html",
-                "deploy/**/*"):
+    out: list[Path] = []
+    for pat in (
+        "cpt/**/*.py",
+        "scripts/**/*.py",
+        "tests/**/*.py",
+        "dashboard/**/*.js",
+        "dashboard/**/*.css",
+        "dashboard/**/*.html",
+        "deploy/**/*",
+    ):
         out.extend(ROOT.glob(pat))
     return [p for p in out if p.is_file() and not any(x in SKIP_DIRS for x in p.parts)]
 
@@ -80,12 +86,30 @@ def _text(p: Path) -> str:
 
 
 #: 出现在上下文里就说明「文档在声明它不存在 / 已删」的措辞。
-_ABSENCE = ("不存在", "没有", "已删除", "git rm", "从未", "不是", "已废", "没有建",
-            "已随", "已移", "已清理", "搬到了", "不在本仓", "包内", "尚未创建",
-            "从未存在", "包内部", "新建", "设想")
+_ABSENCE = (
+    "不存在",
+    "没有",
+    "已删除",
+    "git rm",
+    "从未",
+    "不是",
+    "已废",
+    "没有建",
+    "已随",
+    "已移",
+    "已清理",
+    "搬到了",
+    "不在本仓",
+    "包内",
+    "尚未创建",
+    "从未存在",
+    "包内部",
+    "新建",
+    "设想",
+)
 
 
-_GI_PATTERNS: list[str] | None = None
+_GI_PATTERNS: list[tuple[bool, str]] | None = None
 
 
 def _gitignore_matches(relpath: str) -> bool:
@@ -100,6 +124,7 @@ def _gitignore_matches(relpath: str) -> bool:
     纯 I/O 等待）。⇒ 规则**一次性解析进内存**，之后纯字符串判断。
     """
     import fnmatch
+
     global _GI_PATTERNS
     if _GI_PATTERNS is None:
         _GI_PATTERNS = []
@@ -121,18 +146,24 @@ def _gitignore_matches(relpath: str) -> bool:
     # 后出现的规则覆盖先出现的（gitignore 语义）
     verdict = False
     for negate, pat in _GI_PATTERNS:
-        if fnmatch.fnmatch(relpath, pat) or fnmatch.fnmatch(relpath, pat + "/*") \
-           or relpath.startswith(pat.rstrip("/") + "/"):
+        if (
+            fnmatch.fnmatch(relpath, pat)
+            or fnmatch.fnmatch(relpath, pat + "/*")
+            or relpath.startswith(pat.rstrip("/") + "/")
+        ):
             verdict = not negate
     return verdict
 
 
 # ── 收集代码侧的「事实」 ───────────────────────────────────────
-def build_facts() -> dict:
+def build_facts() -> dict[str, Any]:
     files = {rel(p) for p in all_code()}
     # 目录本身也算存在（文档常引用目录）
-    dirs = {str(p.relative_to(ROOT)) for p in ROOT.rglob("*")
-            if p.is_dir() and not any(x in SKIP_DIRS for x in p.parts)}
+    dirs = {
+        str(p.relative_to(ROOT))
+        for p in ROOT.rglob("*")
+        if p.is_dir() and not any(x in SKIP_DIRS for x in p.parts)
+    }
     syms: set[str] = set()
     for p in all_code():
         if p.suffix != ".py":
@@ -155,8 +186,11 @@ def build_facts() -> dict:
             syms |= set(re.findall(r"\bfunction\s+([A-Za-z_]\w*)", txt))
             syms |= set(re.findall(r"\bconst\s+([A-Za-z_]\w*)\s*=", txt))
     # 全仓文本（用于查 env 键 / 表名）
-    blob = "\n".join(p.read_text(encoding="utf-8", errors="ignore")
-                     for p in all_code() if p.suffix in (".py", ".js", ".sh", ".sql", ".example"))
+    blob = "\n".join(
+        p.read_text(encoding="utf-8", errors="ignore")
+        for p in all_code()
+        if p.suffix in (".py", ".js", ".sh", ".sql", ".example")
+    )
     return {"files": files, "dirs": dirs, "syms": syms, "blob": blob}
 
 
@@ -174,12 +208,6 @@ _ALLOW: dict[str, str] = {
     "asel.idx_sm_board": "索引，已于 R45 删除（文档标注了「已删」）",
     # 历史缺口记录：那张表后来没了
     "asel.ref_trading_calendar": "R17 记录的历史缺口，表已不存在",
-    # 两份复盘的措辞是「该变量**未设** ⇒ 走 native」——
-    # **代码里没有这个变量，正是那句话成立的前提**
-    "CPT_CHANLUN_BACKEND": "复盘里说的是「进程环境未设它」，代码里本就不该有",
-    # 两份复盘的措辞是「该变量**未设** ⇒ 走 native」——
-    # **代码里没有这个变量，正是那句话成立的前提**
-    "CPT_CHANLUN_BACKEND": "复盘里说的是「进程环境未设它」，代码里本就不该有",
     # 两份复盘的措辞是「该变量**未设** ⇒ 走 native」——
     # **代码里没有这个变量，正是那句话成立的前提**
     "CPT_CHANLUN_BACKEND": "复盘里说的是「进程环境未设它」，代码里本就不该有",
@@ -231,8 +259,17 @@ def main(argv: list[str] | None = None) -> int:
                     # `._compute_domain_structures` 一起吃掉。这类不算漂移。
                     # 不是**文件后缀**结尾的，就是「模块.符号」写法，不是路径
                     # （`cpt/web/__main__._compute_domain_structures` 这类）
-                    if Path(t).suffix not in (".py", ".js", ".css", ".html",
-                                              ".md", ".sh", ".sql", ".json", ".toml"):
+                    if Path(t).suffix not in (
+                        ".py",
+                        ".js",
+                        ".css",
+                        ".html",
+                        ".md",
+                        ".sh",
+                        ".sql",
+                        ".json",
+                        ".toml",
+                    ):
                         continue
                     if (ROOT / t).exists() or _gitignore_matches(t):
                         continue
@@ -250,7 +287,7 @@ def main(argv: list[str] | None = None) -> int:
                     hi = i
                     while hi < len(lines) and lines[hi].strip():
                         hi += 1
-                    ctx = "\n".join(lines[lo:hi + 1])
+                    ctx = "\n".join(lines[lo : hi + 1])
                     # 判据一：段落里有「不存在/已删/包内/未创建」这类措辞
                     # 判据二：段落里出现 R45 / 更正 —— 本仓所有「路径已迁移」类
                     #        更正都带这个标记，比穷举措辞变体稳
@@ -329,15 +366,17 @@ def main(argv: list[str] | None = None) -> int:
             closes = _re.findall(r"</script>", body)
             if len(opens) != len(closes):
                 bad["H script 标签不成对"].append(
-                    f"index.html: <script> {len(opens)} 个 / </script> {len(closes)} 个")
+                    f"index.html: <script> {len(opens)} 个 / </script> {len(closes)} 个"
+                )
             # 逐个标签：开标签到它的闭合之间**不能再出现 <script**
             for m in _re.finditer(r"<script\b[^>]*>", body):
-                tail = body[m.end():]
+                tail = body[m.end() :]
                 end = tail.find("</script>")
                 seg = tail if end < 0 else tail[:end]
                 if "<script" in seg:
                     bad["H script 标签畸形"].append(
-                        f"index.html: {m.group(0)[:60]} 未闭合（吞掉了后续标签）")
+                        f"index.html: {m.group(0)[:60]} 未闭合（吞掉了后续标签）"
+                    )
                     break
 
     if "L" in a.cat:
@@ -362,8 +401,7 @@ def main(argv: list[str] | None = None) -> int:
                         lens = []
                         for h in hits:
                             try:
-                                lens.append(len(
-                                    h.read_text(encoding="utf-8").splitlines()))
+                                lens.append(len(h.read_text(encoding="utf-8").splitlines()))
                             except OSError:
                                 pass
                         _linecount[fn] = max(lens) if lens else -1
@@ -390,11 +428,12 @@ def main(argv: list[str] | None = None) -> int:
             for x in hist[:6]:
                 print("  · " + x)
             if len(hist) > 6:
-                print(f"  … 另 {len(hist)-6} 处")
+                print(f"  … 另 {len(hist) - 6} 处")
     # ⚠️ 退出码必须**如实反映**「现行文档」的不一致项 ——
     # 第一版恒返回 0，于是门禁④ 在 CI 上永远是绿的，等于没有门禁。
     live_bad = sum(
-        1 for cat, items in bad.items()
+        1
+        for cat, items in bad.items()
         for x in set(items)
         if not any(x.startswith(h) for h in ("docs/archive/", "docs/audit/"))
     )

@@ -43,7 +43,7 @@ class _BoomCur:
         self.queries.append(" ".join(sql.split())[:70])
         raise self._exc
 
-    def __enter__(self) -> "_BoomCur":
+    def __enter__(self) -> _BoomCur:
         return self
 
     def __exit__(self, *exc: object) -> None:
@@ -88,12 +88,11 @@ def test_names_failure_is_debug_not_error(monkeypatch, caplog) -> None:
     import cpt.adapters.a_share_local as local
 
     monkeypatch.setattr(
-        local, "fetch_security_names",
-        lambda _c: (_ for _ in ()).throw(RuntimeError("boom")))
+        local, "fetch_security_names", lambda _c: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
     with caplog.at_level("DEBUG", logger="cpt.web.a_share_routes"):
         a_share_routes._names(["600519"])  # noqa: SLF001
-    assert any("证券名称" in r.message for r in caplog.records), \
-        "失败没有留痕 —— 降级会变成静默"
+    assert any("证券名称" in r.message for r in caplog.records), "失败没有留痕 —— 降级会变成静默"
 
 
 def test_names_success_passes_through(monkeypatch) -> None:
@@ -118,9 +117,9 @@ class _Cur:
 
     def execute(self, sql: str, *a: object) -> None:
         if "max(" in sql:
-            self._rows.append([None])          # 没有历史数据 ⇒ 跳过该源
+            self._rows.append([None])  # 没有历史数据 ⇒ 跳过该源
 
-    def __enter__(self) -> "_Cur":
+    def __enter__(self) -> _Cur:
         return self
 
     def __exit__(self, *e: object) -> None:
@@ -158,15 +157,16 @@ def test_hot_pool_propagates_db_error_fails_loud() -> None:
 
 def test_hot_pool_respects_limit() -> None:
     """限量必须生效（重算要按额度分几天）。"""
+
     class _ManyCur:
         def __init__(self) -> None:
             self._date: object = None
 
         def execute(self, sql: str, *a: object) -> None:
-            if "max(" in sql:          # 先问最新日期 ⇒ 后面才会去取该日明细
+            if "max(" in sql:  # 先问最新日期 ⇒ 后面才会去取该日明细
                 self._date = "2026-10-04"
 
-        def __enter__(self) -> "_ManyCur":
+        def __enter__(self) -> _ManyCur:
             return self
 
         def __exit__(self, *e: object) -> None:
@@ -188,6 +188,7 @@ def test_hot_pool_respects_limit() -> None:
 
 def test_hot_pool_dedupes_and_strips_suffix() -> None:
     """``600519.SH`` 剥成 ``600519``，且**跨两个源去重**。"""
+
     class _Cur2:
         def __init__(self) -> None:
             self._n = 0
@@ -195,16 +196,22 @@ def test_hot_pool_dedupes_and_strips_suffix() -> None:
         def execute(self, sql: str, *a: object) -> None:
             pass
 
-        def __enter__(self): return self
-        def __exit__(self, *e: object): return None
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *e: object):
+            return None
+
         def fetchone(self):  # noqa: ANN201
             self._n += 1
             return ["2026-10-04"]
+
         def fetchall(self) -> list:
             return [["600519.SH"]] if self._n % 2 else [["600519.SZ"]]
 
     class _Conn3:
-        def cursor(self): return _Cur2()
+        def cursor(self):
+            return _Cur2()
 
     out = a_share_factor.hot_pool_codes(_Conn3())  # type: ignore[arg-type]
     assert out == ("600519",), out

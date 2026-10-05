@@ -30,7 +30,6 @@ R45 第一轮复盘（找 bug）里反复撞见**同一类**问题，且都不�
 from __future__ import annotations
 
 import argparse
-import ast
 import re
 import sys
 from pathlib import Path
@@ -65,9 +64,11 @@ def check_counts() -> list[str]:
         n_real, l_real = files_and_lines(layer)
         flag = "✅" if (n_doc == n_real and l_doc == l_real) else "❌"
         if flag == "❌":
-            bad.append(f"  {flag} {layer:12s} 文档 {n_doc:3d} 文件/{l_doc:5d} 行"
-                       f"  vs 实际 {n_real:3d}/{l_real:5d}"
-                       f"  (差 {n_real-n_doc:+d} 文件 / {l_real-l_doc:+d} 行)")
+            bad.append(
+                f"  {flag} {layer:12s} 文档 {n_doc:3d} 文件/{l_doc:5d} 行"
+                f"  vs 实际 {n_real:3d}/{l_real:5d}"
+                f"  (差 {n_real - n_doc:+d} 文件 / {l_real - l_doc:+d} 行)"
+            )
         else:
             print(f"  {flag} {layer:12s} {n_doc:3d} 文件/{l_doc:5d} 行")
     return bad
@@ -79,10 +80,7 @@ def check_status() -> list[str]:
     arch = (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
     # ⚠️ 复盘记录可能落在 progress-log，也可能落在 docs/review-<层>-*.md。
     # 只认 progress-log 会把「写了独立复盘文档的层」误判成没复盘（踩过：llm）。
-    corpus = "\n".join(
-        p.read_text(encoding="utf-8")
-        for p in sorted((ROOT / "docs").glob("*.md"))
-    )
+    corpus = "\n".join(p.read_text(encoding="utf-8") for p in sorted((ROOT / "docs").glob("*.md")))
     bad = []
     for m in re.finditer(r"\| `(\w+)/` \| \d+ \| [\d,]+ \| (.+?) \|", arch):
         layer, status = m.group(1), m.group(2)
@@ -106,7 +104,6 @@ def check_status() -> list[str]:
 def check_params() -> list[str]:
     section("C. 参数漂移：rules.md §9 声明的冻结参数 vs RulesConfig 实际")
     import dataclasses
-    import sys
 
     sys.path.insert(0, str(ROOT))
     from cpt.domain.config import RulesConfig
@@ -139,11 +136,13 @@ def check_endpoints() -> list[str]:
         src = p.read_text(encoding="utf-8")
         for m in re.finditer(r'["\'](/api/(?:dashboard|canvas)/[a-z0-9/_-]*)["\']', src):
             code.add(m.group(1))
-    code.discard("/api/dashboard/a-share/")   # 前缀常量，非独立路由
+    code.discard("/api/dashboard/a-share/")  # 前缀常量，非独立路由
 
     docs: dict[str, list[str]] = {}
     for p in sorted((ROOT / "docs").glob("*.md")) + [ROOT / "deploy" / "README.md"]:
-        for m in re.finditer(r"(/api/(?:dashboard|canvas)/[a-z0-9/_-]+)", p.read_text(encoding="utf-8")):
+        for m in re.finditer(
+            r"(/api/(?:dashboard|canvas)/[a-z0-9/_-]+)", p.read_text(encoding="utf-8")
+        ):
             docs.setdefault(m.group(1).rstrip(".,)"), []).append(p.name)
 
     bad = []
@@ -154,8 +153,9 @@ def check_endpoints() -> list[str]:
     for path in sorted(code - set(docs)):
         bad.append(f"  ⚠️  {path:44s} 代码有、文档无")
     if not bad:
-        print(f"  ✅ 文档与代码完全对齐（{len(code)} 个路由）"
-              f"，{len(_GHOST_PATHS)} 个幽灵接口已豁免")
+        print(
+            f"  ✅ 文档与代码完全对齐（{len(code)} 个路由），{len(_GHOST_PATHS)} 个幽灵接口已豁免"
+        )
     return bad
 
 
@@ -182,7 +182,7 @@ def check_existence() -> list[str]:
             # ⚠️ 必须看**上文窗口**，不能只看本行 —— 实测踩过：更正说明写在
             # 前一行（「R45 更正：」），被引用的原句在下一行，单行判断抓不到，
             # 于是把自己的更正又报成漂移。
-            window = "\n".join(lines[max(0, i - 4):i])
+            window = "\n".join(lines[max(0, i - 4) : i])
             if any(k in line + window for k in ("更正", "已作废", "R45", "原文写着", "曾经")):
                 continue
             m = GONE_CLAIMS.search(line)
@@ -194,7 +194,8 @@ def check_existence() -> list[str]:
                 if cand.exists():
                     bad.append(
                         f"  ❌ {p.name}:{i} 声称「{m.group(0)[:34]}…」，"
-                        f"但 {cand.relative_to(ROOT)} **实际存在**")
+                        f"但 {cand.relative_to(ROOT)} **实际存在**"
+                    )
                     break
     if not bad:
         print("  ✅ 无「声称已删除但实际存在」的声明")

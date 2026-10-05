@@ -98,13 +98,25 @@ def test_no_dividend_returns_empty_instead_of_raising() -> None:
         pytest.param(PAYLOAD_NO_DIVIDEND, id="001239-real"),
         # 999999 是**不存在**的代码，东财同样回 9201 —— 「查无此票」与「无分红」
         # 在 API 层无法区分，而对本项目两者等价：都拿不到任何公司行动。
-        pytest.param({"version": None, "result": None, "success": False,
-                      "message": "返回数据为空", "code": 9201}, id="nonexistent-code"),
+        pytest.param(
+            {
+                "version": None,
+                "result": None,
+                "success": False,
+                "message": "返回数据为空",
+                "code": 9201,
+            },
+            id="nonexistent-code",
+        ),
         # 万一东财哪天把 result 改成 {"data": null} / {"data": []}，仍应算无数据。
-        pytest.param({"result": {"data": None}, "success": False,
-                      "message": "返回数据为空", "code": 9201}, id="data-null"),
-        pytest.param({"result": {"data": []}, "success": False,
-                      "message": "返回数据为空", "code": 9201}, id="data-empty"),
+        pytest.param(
+            {"result": {"data": None}, "success": False, "message": "返回数据为空", "code": 9201},
+            id="data-null",
+        ),
+        pytest.param(
+            {"result": {"data": []}, "success": False, "message": "返回数据为空", "code": 9201},
+            id="data-empty",
+        ),
     ],
 )
 def test_legit_no_data_shapes(payload: dict[str, Any]) -> None:
@@ -125,14 +137,23 @@ def test_success_true_with_empty_data_is_empty() -> None:
     ("payload", "why"),
     [
         pytest.param(
-            {"version": None, "result": None, "success": False,
-             "message": "报表配置不存在,RPT_NONEXISTENT_XYZ", "code": 9501},
+            {
+                "version": None,
+                "result": None,
+                "success": False,
+                "message": "报表配置不存在,RPT_NONEXISTENT_XYZ",
+                "code": 9501,
+            },
             "9501=请求写错了（重试无用），绝不能当成「这家公司没分过红」",
             id="bad-report-name-9501",
         ),
         pytest.param(
-            {"result": {"data": [{"EX_DIVIDEND_DATE": "2024-01-01"}]},
-             "success": False, "message": "返回数据为空", "code": 9201},
+            {
+                "result": {"data": [{"EX_DIVIDEND_DATE": "2024-01-01"}]},
+                "success": False,
+                "message": "返回数据为空",
+                "code": 9201,
+            },
             "9201 却带**非空** result ⇒ 自相矛盾，按 fatal 更安全",
             id="9201-with-nonempty-result",
         ),
@@ -215,10 +236,20 @@ def test_normal_dividend_still_parsed() -> None:
 
 def test_unimplemented_plan_is_filtered_out() -> None:
     """未实施的方案不能用 —— 否则等于按还没发生的事件调价。"""
-    payload = {"result": {"data": [{
-        "EX_DIVIDEND_DATE": "2026-06-03 00:00:00", "BONUS_IT_RATIO": 4,
-        "PRETAX_BONUS_RMB": 1, "ASSIGN_PROGRESS": "预案",
-    }]}, "success": True, "code": 0}
+    payload = {
+        "result": {
+            "data": [
+                {
+                    "EX_DIVIDEND_DATE": "2026-06-03 00:00:00",
+                    "BONUS_IT_RATIO": 4,
+                    "PRETAX_BONUS_RMB": 1,
+                    "ASSIGN_PROGRESS": "预案",
+                }
+            ]
+        },
+        "success": True,
+        "code": 0,
+    }
     assert _client(payload).fetch_actions("001238") == ()
 
 
@@ -238,11 +269,17 @@ def test_normalize_code(raw: str, want: str) -> None:
         pytest.param(PAYLOAD_NO_DIVIDEND, True, id="9201+返回数据为空+空result"),
         pytest.param({"code": 9201, "message": "返回数据为空", "result": None}, True, id="minimal"),
         pytest.param({"code": 9201, "message": "暂无数据", "result": None}, True, id="暂无数据"),
-        pytest.param({"code": 9501, "message": "返回数据为空", "result": None}, False,
-                     id="code-mismatch"),
-        pytest.param({"code": 9201, "message": "系统繁忙", "result": None}, False, id="msg-mismatch"),
-        pytest.param({"code": 9201, "message": "返回数据为空",
-                      "result": {"data": [1]}}, False, id="nonempty-result"),
+        pytest.param(
+            {"code": 9501, "message": "返回数据为空", "result": None}, False, id="code-mismatch"
+        ),
+        pytest.param(
+            {"code": 9201, "message": "系统繁忙", "result": None}, False, id="msg-mismatch"
+        ),
+        pytest.param(
+            {"code": 9201, "message": "返回数据为空", "result": {"data": [1]}},
+            False,
+            id="nonempty-result",
+        ),
         pytest.param({"message": "返回数据为空", "result": None}, False, id="missing-code"),
     ],
 )

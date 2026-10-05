@@ -16,7 +16,6 @@ from typing import Any
 
 import pytest
 from cpt.storage.llm_call_store import (
-    LLMCallError,
     STATUS_ERROR,
     STATUS_INTERRUPTED,
     STATUS_OK,
@@ -24,6 +23,7 @@ from cpt.storage.llm_call_store import (
     STATUS_RATE_LIMITED,
     STATUS_RUNNING,
     TERMINAL_STATUSES,
+    LLMCallError,
     call_row,
     enqueue_call,
     finish_call,

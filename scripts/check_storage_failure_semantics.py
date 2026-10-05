@@ -48,7 +48,7 @@ CHECKED_DIRS = ("storage", "adapters")
 IGNORE = {"__init__.py"}
 
 
-def _docstring(node: ast.AST) -> str:
+def _docstring(node: ast.FunctionDef) -> str:
     try:
         return ast.get_docstring(node) or ""
     except TypeError:
@@ -67,17 +67,12 @@ def _has_db_call(fn: ast.FunctionDef) -> bool:
 def _swallows(fn: ast.FunctionDef) -> tuple[bool, str]:
     """返回 (是否吞掉 DB 异常, 证据)。"""
     for handler in [n for n in ast.walk(fn) if isinstance(n, ast.ExceptHandler)]:
-        tail = ast.Module(
-            body=handler.body, type_ignores=[]
-        )
+        tail = ast.Module(body=handler.body, type_ignores=[])
         # 注释掉的 raise 不算：用 AST 找真实的 Raise
         raises = any(isinstance(n, ast.Raise) for n in ast.walk(tail))
         if raises:
             continue
-        rets = [
-            n for n in ast.walk(tail)
-            if isinstance(n, ast.Return) and n.value is not None
-        ]
+        rets = [n for n in ast.walk(tail) if isinstance(n, ast.Return) and n.value is not None]
         for r in rets:
             v = r.value
             # return False / None / () / []  → 降级

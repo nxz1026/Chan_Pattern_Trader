@@ -32,12 +32,12 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from cpt.application import parity_reference as pr  # noqa: E402
 from cpt.adapters.reference_backend import (  # noqa: E402
     ReferenceChanlunBackend,
     ReferenceUnavailableError,
 )
 from cpt.adapters.reference_chanlun import ReferenceChanlunConfig  # noqa: E402
+from cpt.application import parity_reference as pr  # noqa: E402
 
 
 class _FakeBackend(ReferenceChanlunBackend):
@@ -74,7 +74,6 @@ def patch_backend(monkeypatch: pytest.MonkeyPatch):
 
 def _config_fields(cls_name: object) -> set[str]:
     from dataclasses import fields
-    from cpt.adapters.reference_chanlun import ReferenceChanlunConfig
 
     assert cls_name == ReferenceChanlunConfig.__name__
     return {f.name for f in fields(ReferenceChanlunConfig)}
@@ -97,7 +96,7 @@ def test_unavailable_reports_reason_and_no_shell(patch_backend) -> None:
     out = _call()
     assert out["available"] is False
     assert out["reason"] in ("reference_unavailable", "reference_error")
-    assert out["reference"]["source"] == "none"   # payload 里 reference 是 dict
+    assert out["reference"]["source"] == "none"  # payload 里 reference 是 dict
     assert "czsc" in out["reference"]["detail"]
 
 
@@ -110,7 +109,7 @@ def test_never_raises_even_if_backend_explodes(patch_backend) -> None:
 
     fake.compute_domain_structures = _boom  # type: ignore[method-assign]
     patch_backend(fake)
-    out = _call()          # 不应抛
+    out = _call()  # 不应抛
     assert out["available"] is False
     assert out["reason"] == "reference_error"
     # 必须**如实写出异常类型**，不能吞成一个空壳
@@ -162,11 +161,17 @@ def test_backend_gets_config_pinned_to_min_bi_len(monkeypatch) -> None:
     monkeypatch.setattr(bf, "resolve_backend", _fake_resolve)
     cfg = RulesConfig()
     pr.build_parity_snapshot_for(
-        code="600519", bars=[], fractals=[], bis=[], zhongshus=[],
-        production_backend=object(), config=cfg,
+        code="600519",
+        bars=[],
+        fractals=[],
+        bis=[],
+        zhongshus=[],
+        production_backend=object(),
+        config=cfg,
     )
     # ⚠️ min_bi_len 必须走 resolve_backend，**不能**塞进 ReferenceChanlunConfig
     # （那个 dataclass 没有该字段，会 TypeError 且不在 except 覆盖范围内）
     assert seen["min_bi_len"] == cfg.min_bi_len
-    assert "min_bi_len" not in _config_fields(seen["config_type"]), \
+    assert "min_bi_len" not in _config_fields(seen["config_type"]), (
         "又往 ReferenceChanlunConfig 上塞 min_bi_len 了 —— 那是 TypeError 源头"
+    )

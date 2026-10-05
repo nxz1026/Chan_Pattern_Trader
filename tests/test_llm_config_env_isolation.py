@@ -128,8 +128,13 @@ def test_no_arg_still_reads_process_env(isolated_env: None) -> None:
 
 def test_api_key_never_appears_in_repr_or_redacted() -> None:
     """密钥不许出现在 repr / redacted() 里 —— 那是它最容易被带出去的两条路。"""
-    cfg = LLMConfig(enabled=True, provider="openai_compatible", base_url="u", model="m",
-                    api_key="sk-super-secret")
+    cfg = LLMConfig(
+        enabled=True,
+        provider="openai_compatible",
+        base_url="u",
+        model="m",
+        api_key="sk-super-secret",
+    )
     assert "sk-super-secret" not in repr(cfg), "repr() 泄露了 api_key"
     red = cfg.redacted()
     assert "sk-super-secret" not in str(red), "redacted() 泄露了 api_key"

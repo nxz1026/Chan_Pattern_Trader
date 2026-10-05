@@ -39,10 +39,6 @@ import logging
 from collections.abc import Sequence
 from typing import Any, Final
 
-from cpt.domain.config import RulesConfig
-from cpt.domain.models import CanonicalBar
-from cpt.domain.types import BarLike
-
 from cpt.adapters.reference_chanlun import (
     BiRaw,
     ChanlunResult,
@@ -50,6 +46,9 @@ from cpt.adapters.reference_chanlun import (
     ReferenceChanlunConfig,
     ZsRaw,
 )
+from cpt.domain.config import RulesConfig
+from cpt.domain.models import CanonicalBar
+from cpt.domain.types import BarLike
 
 _LOG = logging.getLogger(__name__)
 
@@ -211,7 +210,8 @@ class ReferenceChanlunBackend:
         except (CzscNotInstalledError, CzscVersionError) as exc:
             _LOG.debug("参照侧 czsc 不可用，回落腾讯：%s", exc)
             return None
-        return tuple(compute_domain_structures(bars, _rules_cfg(config), backend))
+        fracs, bis, zss = compute_domain_structures(bars, _rules_cfg(config), backend)
+        return list(fracs), list(bis), list(zss)
 
     # ── 第二级：腾讯 hfq（数据链路对照）────────────────────────
     def _try_tencent(
@@ -265,7 +265,7 @@ def _as_canonical(bar: BarLike) -> CanonicalBar:
     # ⚠️ **dict 也要能读**：``getattr(dict, "open_time", 0)`` 恒为 0 ——
     # 真机跑实测：传 dict 进来，全部字段静默变成 0，czsc 随后报
     # 「中位间隔 0 ms」这种**看不出根因**的错。⇒ 两种取法都支持。
-    def _get(name: str, default: object = None) -> object:
+    def _get(name: str, default: object = None) -> Any:
         if isinstance(bar, dict):
             return bar.get(name, default)
         return getattr(bar, name, default)
@@ -354,60 +354,6 @@ def _from_domain(triples: Sequence[Any]) -> ChanlunResult:
                 high=float(getattr(z, "high", 0.0)),
                 low=float(getattr(z, "low", 0.0)),
                 level=int(getattr(z, "level", 0)),
-                bi_indices=(),
-            )
-            for z in zhongshus
-        ),
-        level_map={},
-    )
-
-
-def _from_normalized(
-    fractals: Sequence[dict[str, Any]],
-    bis: Sequence[dict[str, Any]],
-    zhongshus: Sequence[dict[str, Any]],
-) -> ChanlunResult:
-    """已归一化的 dict 三分组 → :class:`ChanlunResult`。
-
-    ⚠️ 腾讯那条路给的是**已 ``asdict`` 的 dict**（`dashboard_parity._normalize`
-    的输出），带 ``start_time``/``end_time`` 而不是 bar 索引。
-    这里**不伪造 bar 索引** —— 契约里 ``start_bar`` 是索引，
-    而腾讯路给的是时间戳，**两者量纲不同**。
-    统一用 ``bar_index=0`` 并在 `level_map` 里空着，
-    是为了让调用方能区分「没有索引」而不是拿到一个假索引。
-    """
-    return ChanlunResult(
-        fx_list=tuple(
-            FxRaw(
-                bar_index=int(f.get("bar_index", 0) or 0),
-                kind=str(f.get("kind", "")),
-                high=float(f.get("high", 0.0) or 0.0),
-                low=float(f.get("low", 0.0) or 0.0),
-                level=int(f.get("level", 0) or 0),
-            )
-            for f in fractals
-        ),
-        bi_list=tuple(
-            BiRaw(
-                direction=int(b.get("direction", 0) or 0),
-                start_bar=int(b.get("bar_index", 0) or 0),
-                end_bar=int(b.get("bar_index", 0) or 0),
-                high=float(b.get("high", 0.0) or 0.0),
-                low=float(b.get("low", 0.0) or 0.0),
-                level=int(b.get("level", 0) or 0),
-                power_price=float(b.get("power_price", 0.0) or 0.0),
-                power_volume=float(b.get("power_volume", 0.0) or 0.0),
-                length=int(b.get("length", 0) or 0),
-            )
-            for b in bis
-        ),
-        zs_list=tuple(
-            ZsRaw(
-                start_bar=0,
-                end_bar=0,
-                high=float(z.get("high", 0.0) or 0.0),
-                low=float(z.get("low", 0.0) or 0.0),
-                level=int(z.get("level", 0) or 0),
                 bi_indices=(),
             )
             for z in zhongshus

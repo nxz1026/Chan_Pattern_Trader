@@ -398,7 +398,7 @@ def build_ashare_snapshot(
     _attach_t_plus_one(snapshot, active_client)
     _attach_close_countdown(snapshot, active_client)
     _attach_signal_change(snapshot, active_client)
-    _attach_factor_epoch(snapshot, active_client)   # R45：口径纪元随快照下发
+    _attach_factor_epoch(snapshot, active_client)  # R45：口径纪元随快照下发
     _attach_dual_compare(snapshot, code, active_client)
     _attach_calendar_gaps(snapshot, active_client)
     # R38：A 股侧也落「运行水位 + 算法指纹」。加密侧那行在"只有走到这里才算成功
@@ -846,12 +846,8 @@ def _attach_factor_epoch(snapshot: dict[str, Any], client: Any) -> None:
             "switched_at": ep.switched_at.isoformat() if ep.switched_at else None,
             "old_source": ep.old_source,
             "new_source": ep.new_source,
-            "old_match_rate": (
-                float(ep.old_match_rate) if ep.old_match_rate is not None else None
-            ),
-            "new_match_rate": (
-                float(ep.new_match_rate) if ep.new_match_rate is not None else None
-            ),
+            "old_match_rate": (float(ep.old_match_rate) if ep.old_match_rate is not None else None),
+            "new_match_rate": (float(ep.new_match_rate) if ep.new_match_rate is not None else None),
         }
     snapshot["summary"]["factor_epoch"] = payload
 

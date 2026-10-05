@@ -27,7 +27,6 @@ import json
 import re
 import subprocess
 import sys
-from collections import defaultdict
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -43,13 +42,18 @@ PROD_ROOTS = (
 
 
 def main(argv: list[str] | None = None) -> int:
-    cov = json.loads(Path("/tmp/coverage.json").read_text(encoding="utf-8")) \
-        if Path("/tmp/coverage.json").exists() else None
+    cov = (
+        json.loads(Path("/tmp/coverage.json").read_text(encoding="utf-8"))
+        if Path("/tmp/coverage.json").exists()
+        else None
+    )
     if cov is None:
         # 没有 JSON 就直接问 coverage
         out = subprocess.run(
             [sys.executable, "-m", "coverage", "json", "-o", "/tmp/coverage.json"],
-            cwd=ROOT, capture_output=True, text=True,
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
         )
         if out.returncode != 0:
             print(out.stderr[-800:] or "coverage json 失败")
@@ -59,9 +63,11 @@ def main(argv: list[str] | None = None) -> int:
     files = cov["files"]
     summary = cov["totals"]
     print("=" * 78)
-    print(f"总行覆盖 {summary['covered_lines']}/{summary['num_statements']} "
-          f"= {summary['percent_covered']:.1f}%   "
-          f"分支覆盖 {summary.get('percent_covered_display', '')}")
+    print(
+        f"总行覆盖 {summary['covered_lines']}/{summary['num_statements']} "
+        f"= {summary['percent_covered']:.1f}%   "
+        f"分支覆盖 {summary.get('percent_covered_display', '')}"
+    )
     print("=" * 78)
 
     # 生产代码引用了哪些函数名
@@ -76,7 +82,7 @@ def main(argv: list[str] | None = None) -> int:
         rel = path if path.startswith("cpt/") else path
         if not rel.startswith("cpt/"):
             continue
-        pct = info["summary"]["percent_covered"]
+        info["summary"]["percent_covered"]
         missing = [ln for ln in info["missing_lines"]]
         if not missing:
             continue
@@ -101,12 +107,12 @@ def main(argv: list[str] | None = None) -> int:
     p0.sort()
     print(f"\n🔴 P0 —— **生产会调用**但覆盖不足（{len(p0)} 个函数）")
     for ratio, rel, fn, m, t in p0[:22]:
-        print(f"  {ratio*100:5.1f}%  {rel:42s} {fn}  ({m}/{t} 行未覆盖)")
+        print(f"  {ratio * 100:5.1f}%  {rel:42s} {fn}  ({m}/{t} 行未覆盖)")
 
     p1.sort()
     print(f"\n🟡 P1 —— 覆盖 <70% 且非生产直接引用（{len(p1)} 个函数）")
     for ratio, rel, fn, m, t in p1[:12]:
-        print(f"  {ratio*100:5.1f}%  {rel:42s} {fn}  ({m}/{t} 行未覆盖)")
+        print(f"  {ratio * 100:5.1f}%  {rel:42s} {fn}  ({m}/{t} 行未覆盖)")
 
     print("\n" + "─" * 78)
     print("P0 是先补的：那些代码**线上真的会跑**，只是从没被测过。")

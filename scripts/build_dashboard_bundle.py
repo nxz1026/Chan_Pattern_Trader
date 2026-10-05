@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import argparse
 import re
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -111,8 +110,9 @@ def build() -> str:
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--check", action="store_true",
-                    help="只校验 bundle 是否与源文件同步（CI 用），不写盘")
+    ap.add_argument(
+        "--check", action="store_true", help="只校验 bundle 是否与源文件同步（CI 用），不写盘"
+    )
     a = ap.parse_args(argv)
 
     out = build()
@@ -121,8 +121,7 @@ def main(argv: list[str] | None = None) -> int:
         if cur == out:
             print("  ✅ bundle 与源文件同步")
             return 0
-        print("  ❌ bundle 与源文件**不同步** —— 跑 "
-              "`python scripts/build_dashboard_bundle.py`")
+        print("  ❌ bundle 与源文件**不同步** —— 跑 `python scripts/build_dashboard_bundle.py`")
         return 1
 
     BUNDLE.write_text(out, encoding="utf-8")

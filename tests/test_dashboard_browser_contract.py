@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+
 from tests.conftest import dashboard_js
 
 ROOT = Path(__file__).parents[1]

@@ -78,11 +78,11 @@ def test_bootstrap_survives_interrupted_mark_failure(monkeypatch) -> None:
     ``_bootstrap`` 的 ``except Exception`` 覆盖 ``mark_interrupted`` 失败，
     只记 info 日志就继续。降级本身是对的，但要有人证明它真的不炸。
     """
-    from cpt.llm import base as llm_base
 
     calls: list[str] = []
-    monkeypatch.setattr(lc, "mark_interrupted",
-                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("表不存在")))
+    monkeypatch.setattr(
+        lc, "mark_interrupted", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("表不存在"))
+    )
     monkeypatch.setattr(lc, "get_queue", lambda **k: (calls.append("queue"), "Q")[1])
     closed = _patch_client(monkeypatch, object())
 
@@ -92,8 +92,9 @@ def test_bootstrap_survives_interrupted_mark_failure(monkeypatch) -> None:
 
 def test_bootstrap_closes_conn_even_when_mark_raises(monkeypatch) -> None:
     """失败也要 ``close()`` —— 否则每次启动漏一个连接。"""
-    monkeypatch.setattr(lc, "mark_interrupted",
-                        lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
+    monkeypatch.setattr(
+        lc, "mark_interrupted", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom"))
+    )
     monkeypatch.setattr(lc, "get_queue", lambda **k: "Q")
     closed = _patch_client(monkeypatch, object())
     lc._bootstrap()
@@ -101,9 +102,7 @@ def test_bootstrap_closes_conn_even_when_mark_raises(monkeypatch) -> None:
 
 
 # ── summarize / explain 的「LLM 不可用」分支 ────────────────────
-@pytest.mark.parametrize(
-    "fn", [lc.summarize_recommendation]
-)
+@pytest.mark.parametrize("fn", [lc.summarize_recommendation])
 def test_summary_reports_unavailable_when_queue_missing(monkeypatch, fn) -> None:
     """queue 为 None（LLM 未启用 / 缺 key）⇒ available:False，**不抛**。
 
@@ -113,11 +112,16 @@ def test_summary_reports_unavailable_when_queue_missing(monkeypatch, fn) -> None
     calls: list[str] = []
     monkeypatch.setattr(lc, "enqueue_call", lambda *a, **k: calls.append("enq") or True)
     monkeypatch.setattr(lc, "finish_call", lambda *a, **k: calls.append("finish"))
-    monkeypatch.setattr(lc, "_bootstrap", lambda: None)          # ← 队列拿不到
+    monkeypatch.setattr(lc, "_bootstrap", lambda: None)  # ← 队列拿不到
 
     out = fn(
-        _FakeConn(), code="600519", name="贵州茅台", action_label="观望",
-        headline="信号已失效", reason="一买已失效", price=1258.62,
+        _FakeConn(),
+        code="600519",
+        name="贵州茅台",
+        action_label="观望",
+        headline="信号已失效",
+        reason="一买已失效",
+        price=1258.62,
     )
     assert out["available"] is False
     assert out["reason"] == "llm_unavailable"
@@ -141,19 +145,30 @@ def test_duplicate_returns_existing_call_id(monkeypatch, fn) -> None:
     import cpt.storage.llm_call_store as store
 
     monkeypatch.setattr(
-        store, "recent_calls",
+        store,
+        "recent_calls",
         lambda *a, **k: [{"call_id": "REAL-1", "request_hash": "DIGEST"}],
     )
     monkeypatch.setattr(lc, "request_hash", lambda *a: "DIGEST")
     monkeypatch.setattr(
-        lc, "call_row",
-        lambda **k: {"call_id": "FRESH-NOT-IN-DB", "request_hash": "DIGEST",
-                     "status": "queued", "purpose": k.get("purpose", "")},
+        lc,
+        "call_row",
+        lambda **k: {
+            "call_id": "FRESH-NOT-IN-DB",
+            "request_hash": "DIGEST",
+            "status": "queued",
+            "purpose": k.get("purpose", ""),
+        },
     )
 
     out = fn(
-        _FakeConn(), code="600519", name="", action_label="观望",
-        headline="h", reason="r", price=1.0,
+        _FakeConn(),
+        code="600519",
+        name="",
+        action_label="观望",
+        headline="h",
+        reason="r",
+        price=1.0,
     )
     assert out["status"] == "duplicate"
     assert out["call_id"] == "REAL-1", "回的是刚生成、库里不存在的 id"

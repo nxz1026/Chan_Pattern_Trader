@@ -43,8 +43,18 @@ __all__ = [
 KIND_ASK: Final[str] = "ask"
 
 REC_COLUMNS: Final[tuple[str, ...]] = (
-    "id", "code", "level", "action", "price", "signal_status", "signal_type",
-    "headline", "reason", "data_bars", "factor_epoch", "created_at",
+    "id",
+    "code",
+    "level",
+    "action",
+    "price",
+    "signal_status",
+    "signal_type",
+    "headline",
+    "reason",
+    "data_bars",
+    "factor_epoch",
+    "created_at",
 )
 
 
@@ -109,8 +119,9 @@ def append_recommendation(conn: Any, rec: dict[str, Any], *, epoch: Any = None) 
         raise RecommendationPersistError(f"推荐留痕写入失败: {exc}") from exc
 
 
-def recent_recommendations(conn: Any, *, code: str, days: int = 30,
-                           limit: int = 100) -> list[dict[str, Any]]:
+def recent_recommendations(
+    conn: Any, *, code: str, days: int = 30, limit: int = 100
+) -> list[dict[str, Any]]:
     """读最近 ``days`` 天的留痕，**时间倒序**。
 
     :raises RecommendationPersistError: 读失败（**不返回空列表冒充「没历史」**）。
@@ -133,10 +144,18 @@ def recent_recommendations(conn: Any, *, code: str, days: int = 30,
         raise RecommendationPersistError(f"推荐留痕读取失败: {exc}") from exc
     return [
         {
-            "id": r[0], "code": r[1], "level": r[2], "action": r[3],
-            "price": r[4], "signal_status": r[5], "signal_type": r[6],
-            "headline": r[7], "reason": r[8], "data_bars": r[9],
-            "factor_epoch": r[10], "created_at": r[11],
+            "id": r[0],
+            "code": r[1],
+            "level": r[2],
+            "action": r[3],
+            "price": r[4],
+            "signal_status": r[5],
+            "signal_type": r[6],
+            "headline": r[7],
+            "reason": r[8],
+            "data_bars": r[9],
+            "factor_epoch": r[10],
+            "created_at": r[11],
         }
         for r in rows
     ]

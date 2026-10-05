@@ -1102,7 +1102,8 @@ def make_handler(
                 hdays = (query.get("history_days") or [""])[0]
                 self._write_json(
                     a_share_routes.build_recommendation(
-                        code, level=level or None,
+                        code,
+                        level=level or None,
                         history_days=int(hdays) if hdays.isdigit() else 0,
                     )
                 )
@@ -1193,7 +1194,8 @@ def make_handler(
                 rec = self._read_json_body() or {}
                 if not isinstance(rec, dict) or not rec:
                     self._write_json_error(
-                        HTTPStatus.BAD_REQUEST, "recommendation_required",
+                        HTTPStatus.BAD_REQUEST,
+                        "recommendation_required",
                         "recommendation 不能为空",
                     )
                     return True

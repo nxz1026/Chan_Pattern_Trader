@@ -229,8 +229,7 @@ class MetricRecorder:
             try:
                 self.conn.rollback()
             except Exception as exc:  # noqa: BLE001 — 救不回来也别带崩主流程
-                _LOG.warning("run_metric 落库失败后 rollback 也失败 %s/%s: %s",
-                             market, symbol, exc)
+                _LOG.warning("run_metric 落库失败后 rollback 也失败 %s/%s: %s", market, symbol, exc)
         return row
 
     def record_and_commit(self, snapshot: dict[str, Any], **kwargs: Any) -> RunMetric:

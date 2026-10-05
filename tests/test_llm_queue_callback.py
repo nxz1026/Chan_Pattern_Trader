@@ -33,8 +33,9 @@ from cpt.llm.base import LLMRequest, LLMResult
 from cpt.llm.config import LLMConfig
 from cpt.llm.queue import Job
 
-_CFG = LLMConfig(enabled=True, provider="openai_compatible", base_url="http://x",
-                 model="m", api_key="k")
+_CFG = LLMConfig(
+    enabled=True, provider="openai_compatible", base_url="http://x", model="m", api_key="k"
+)
 
 
 class _FakeClient:
@@ -59,13 +60,12 @@ def test_callback_registered_after_queue_exists() -> None:
     def cb(call_id: str, status: str, detail: str, result: Any = None) -> None:
         seen.append((call_id, status))
 
-    first = get_queue(config=_CFG)                    # 模拟看板轮询先到
+    first = get_queue(config=_CFG)  # 模拟看板轮询先到
     assert first is not None
-    second = get_queue(config=_CFG, on_status=cb)     # 模拟 _bootstrap 后到
+    second = get_queue(config=_CFG, on_status=cb)  # 模拟 _bootstrap 后到
     assert second is first, "应当是同一个单例"
 
-    second.submit(Job(request=LLMRequest(purpose="t", system="s", user="u"),
-                      call_id="probe-1"))
+    second.submit(Job(request=LLMRequest(purpose="t", system="s", user="u"), call_id="probe-1"))
     second.drain(timeout=5.0)
 
     assert seen, "审计回调一次都没被调用 —— on_status 被静默丢弃了"
@@ -103,7 +103,7 @@ def test_existing_queue_survives_config_disabled(monkeypatch: pytest.MonkeyPatch
     # 假装环境被改成停用
     monkeypatch.setattr(pkg, "load_config", lambda *a, **k: LLMConfig(enabled=False))
 
-    again = get_queue()          # 不传 config ⇒ 会走 load_config
+    again = get_queue()  # 不传 config ⇒ 会走 load_config
     assert again is q, "已有队列不该因为配置变成停用就被藏起来"
 
 
@@ -126,8 +126,7 @@ def test_set_on_status_is_thread_safe() -> None:
         t.start()
     try:
         for _ in range(200):
-            q.submit(Job(request=LLMRequest(purpose="t", system="s", user="u"),
-                         call_id="race"))
+            q.submit(Job(request=LLMRequest(purpose="t", system="s", user="u"), call_id="race"))
         q.drain(timeout=5.0)
     finally:
         stop.set()

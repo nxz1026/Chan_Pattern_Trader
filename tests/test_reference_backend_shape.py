@@ -59,9 +59,11 @@ class _Stub(ReferenceChanlunBackend):
         self.domain_calls += 1
         self.source = self._source
         self.detail = f"stub:{self._source}"
-        return ([{"kind": "top", "bar_index": 1, "high": 1.0, "low": 1.0, "level": 0}],
-                [{"direction": 1, "high": 1.0, "low": 1.0, "level": 0}],
-                [])
+        return (
+            [{"kind": "top", "bar_index": 1, "high": 1.0, "low": 1.0, "level": 0}],
+            [{"direction": 1, "high": 1.0, "low": 1.0, "level": 0}],
+            [],
+        )
 
 
 def test_two_failure_kinds_are_distinct() -> None:

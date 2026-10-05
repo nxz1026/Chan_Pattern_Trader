@@ -35,7 +35,7 @@ N_FILES = re.compile(r"`?(\d+)`?\s*个(?:代码)?文件")
 N_LINES = re.compile(r"`?(\d+)`?\s*行")
 
 #: 文档里显式写出的「目录 → 计数」对应表（人工核过、值得钉住的那种）
-CHECKS: list[tuple[str, str, str]] = [
+CHECKS: list[tuple[str, str | None, str]] = [
     # (文档片段, 实数, 描述)
     ("cpt/domain", None, "domain 层 .py 文件数"),
     ("cpt/adapters", None, "adapters 层 .py 文件数"),
@@ -53,17 +53,18 @@ def count_files(rel: str) -> int:
 
 def count_lines(rel: str) -> int:
     base = ROOT / rel
-    return sum(len(p.read_text(encoding="utf-8").splitlines())
-               for p in base.rglob("*.py") if p.is_file())
+    return sum(
+        len(p.read_text(encoding="utf-8").splitlines()) for p in base.rglob("*.py") if p.is_file()
+    )
 
 
 def main() -> int:
     print("═══ 实际计数（用作对照）═══")
     truth: dict[str, tuple[int, int]] = {}
     for rel, _, desc in CHECKS:
-        n, l = count_files(rel), count_lines(rel)
-        truth[rel] = (n, l)
-        print(f"  {rel:18s} {n:3d} 文件 / {l:6d} 行   ({desc})")
+        n, lines = count_files(rel), count_lines(rel)
+        truth[rel] = (n, lines)
+        print(f"  {rel:18s} {n:3d} 文件 / {lines:6d} 行   ({desc})")
 
     print("\n═══ architecture.md §2.1 表里写的 ═══")
     arch = (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
@@ -74,10 +75,13 @@ def main() -> int:
         if key not in truth:
             continue
         n_real, l_real = truth[key]
-        ok = (n_doc == n_real and l_doc == l_real)
+        ok = n_doc == n_real and l_doc == l_real
         if not ok:
             bad += 1
-        print(f"  {'✅' if ok else '❌'} {layer:12s} 文档 {n_doc:3d}/{l_doc:6d}  实际 {n_real:3d}/{l_real:6d}")
+        print(
+            f"  {'✅' if ok else '❌'} {layer:12s} 文档 {n_doc:3d}/{l_doc:6d}  "
+            f"实际 {n_real:3d}/{l_real:6d}"
+        )
 
     print("\n═══ 全仓散落的「N 个文件 / M 行」断言 ═══")
     hits = 0

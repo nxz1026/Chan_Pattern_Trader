@@ -24,7 +24,7 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-from typing import Any, Final, Literal
+from typing import Any, Final
 
 __all__ = [
     "MIN_BARS",
@@ -37,7 +37,6 @@ __all__ = [
     "ACTIONS",
 ]
 
-Action = Literal["buy", "sell", "watch", "hold"]
 
 #: 低于这么多根 K 线就**判不了结构** —— 与 ``factor_recompute`` 的 30 根门槛同源。
 #: R45 实测：Oracle 上有 **17 只**新股落在这个区间，它们在推荐卡上原本显示
@@ -47,8 +46,8 @@ MIN_BARS: Final[int] = 30
 
 ACTION_BUY: Final[str] = "buy"
 ACTION_SELL: Final[str] = "sell"
-ACTION_WATCH: Final[str] = "watch"   # 有候选/预警，但未确认
-ACTION_HOLD: Final[str] = "hold"     # 无信号 / 已失效
+ACTION_WATCH: Final[str] = "watch"  # 有候选/预警，但未确认
+ACTION_HOLD: Final[str] = "hold"  # 无信号 / 已失效
 
 ACTIONS: Final[dict[str, str]] = {
     ACTION_BUY: "买入结构",
@@ -98,8 +97,7 @@ def build_recommendation(snapshot: dict[str, Any]) -> dict[str, Any]:
     quality = _data_quality(snapshot)
     if not quality["sufficient"]:
         return _degraded(
-            f"K 线仅 {quality['bars']} 根，不足 {MIN_BARS} 根 —— "
-            "数据不足，暂无法判断结构",
+            f"K 线仅 {quality['bars']} 根，不足 {MIN_BARS} 根 —— 数据不足，暂无法判断结构",
             quality=quality,
         )
 
@@ -126,7 +124,9 @@ def build_recommendation(snapshot: dict[str, Any]) -> dict[str, Any]:
             "信号已失效",
             f"{_label(sig_type)}已失效（不取反方向）—— 之前的结构判断不再成立。",
             price=_num(signal.get("price")) or _last_close(snapshot),
-            status=status, signal_type=sig_type, divergence=divergence,
+            status=status,
+            signal_type=sig_type,
+            divergence=divergence,
         )
         out["data_quality"] = _data_quality(snapshot)
         return out
@@ -151,8 +151,13 @@ def build_recommendation(snapshot: dict[str, Any]) -> dict[str, Any]:
         reasons.append(f"参考价 {price:.2f}")
 
     out = _build(
-        action, headline, _join(reasons), price=price,
-        status=status, signal_type=sig_type, divergence=divergence,
+        action,
+        headline,
+        _join(reasons),
+        price=price,
+        status=status,
+        signal_type=sig_type,
+        divergence=divergence,
     )
     out["data_quality"] = _data_quality(snapshot)
     return out
@@ -215,7 +220,8 @@ def _degraded(why: str, *, quality: dict[str, Any] | None = None) -> dict[str, A
         "available": False,
         "action": ACTION_HOLD,
         "action_label": ACTIONS[ACTION_HOLD],
-        "headline": "数据不足，暂无法判断" if (quality or {}).get("sufficient") is False
+        "headline": "数据不足，暂无法判断"
+        if (quality or {}).get("sufficient") is False
         else "暂无明确结构信号",
         "reason": why,
         "price": None,
@@ -254,14 +260,16 @@ def build_history(
         if epoch_ms and t_ms:
             before += 1 if legacy else 0
             after += 0 if legacy else 1
-        rows.append({
-            "at_ms": t_ms,
-            "status": e.get("status") or "",
-            "signal_type": e.get("signal_type") or "",
-            "price": _num(e.get("price")),
-            "divergence_status": e.get("divergence_status") or "",
-            "legacy": legacy,
-        })
+        rows.append(
+            {
+                "at_ms": t_ms,
+                "status": e.get("status") or "",
+                "signal_type": e.get("signal_type") or "",
+                "price": _num(e.get("price")),
+                "divergence_status": e.get("divergence_status") or "",
+                "legacy": legacy,
+            }
+        )
     return {
         "available": bool(rows),
         "count": len(rows),

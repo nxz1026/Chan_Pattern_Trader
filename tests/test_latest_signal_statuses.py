@@ -23,8 +23,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cpt.web import app as web_app  # noqa: E402
@@ -54,23 +52,29 @@ def _patch(monkeypatch, events, *, exc: Exception | None = None, closed: list | 
 
 def test_first_occurrence_wins(monkeypatch) -> None:
     """⚠️ **倒序输入，首次出现即最新** —— 搞反会让每行显示历史状态且看不出。"""
-    _patch(monkeypatch, [
-        {"code": "600519", "status": "invalidated"},   # 最新
-        {"code": "600519", "status": "confirmed"},     # 更早
-        {"code": "000001", "status": "structure_ready"},
-    ])
+    _patch(
+        monkeypatch,
+        [
+            {"code": "600519", "status": "invalidated"},  # 最新
+            {"code": "600519", "status": "confirmed"},  # 更早
+            {"code": "000001", "status": "structure_ready"},
+        ],
+    )
     out = web_app._latest_signal_statuses()  # type: ignore[attr-defined]  # noqa: SLF001
     assert out == {"600519": "invalidated", "000001": "structure_ready"}, out
 
 
 def test_skips_rows_without_usable_code(monkeypatch) -> None:
     """缺 code / code 非字符串 ⇒ 跳过（**不能**拿 None 当 key）。"""
-    _patch(monkeypatch, [
-        {"status": "confirmed"},                  # 无 code
-        {"code": None, "status": "confirmed"},    # code 是 None
-        {"code": 600519, "status": "confirmed"},  # code 是 int 不是 str
-        {"code": "000001", "status": "confirmed"},
-    ])
+    _patch(
+        monkeypatch,
+        [
+            {"status": "confirmed"},  # 无 code
+            {"code": None, "status": "confirmed"},  # code 是 None
+            {"code": 600519, "status": "confirmed"},  # code 是 int 不是 str
+            {"code": "000001", "status": "confirmed"},
+        ],
+    )
     out = web_app._latest_signal_statuses()  # type: ignore[attr-defined]  # noqa: SLF001
     assert out == {"000001": "confirmed"}, out
 
@@ -98,8 +102,9 @@ def test_read_failure_returns_empty_and_warns(monkeypatch, caplog) -> None:
     with caplog.at_level("WARNING", logger="cpt.web.app"):
         out = web_app._latest_signal_statuses()  # type: ignore[attr-defined]  # noqa: SLF001
     assert out == {}
-    assert any("signal statuses unavailable" in r.message for r in caplog.records), \
+    assert any("signal statuses unavailable" in r.message for r in caplog.records), (
         "读失败没有留痕 —— 降级会变成静默"
+    )
 
 
 def test_connection_is_always_closed(monkeypatch) -> None:

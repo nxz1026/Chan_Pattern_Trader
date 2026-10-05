@@ -78,7 +78,7 @@ class _FailingConn:
 class _OkCursor:
     """execute 成功但被 ON CONFLICT 挡掉（rowcount=0 ⇒ 重复提交）。"""
 
-    def __init__(self, conn: "_DupConn") -> None:
+    def __init__(self, conn: _DupConn) -> None:
         self._conn = conn
 
     def __enter__(self):

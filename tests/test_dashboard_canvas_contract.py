@@ -13,6 +13,7 @@ from __future__ import annotations
 import hashlib
 import re
 from pathlib import Path
+
 from tests.conftest import dashboard_js
 
 REPO_ROOT = Path(__file__).resolve().parents[1]

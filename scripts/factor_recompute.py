@@ -504,12 +504,11 @@ def process_code(
         # 对「保留旧真值」的票，写 1.0 会让显示价格缩放两个数量级。
         const = anchor if anchor else 1.0
         detail = (
-            f"{source.name}:events steps=0 (窗口内无除权，最早除权日早于 "
-            f"bar 起点 {first_bar})"
+            f"{source.name}:events steps=0 (窗口内无除权，最早除权日早于 bar 起点 {first_bar})"
             if actions
             else f"{source.name}:events steps=0 (东财确认无公司行动记录)"
         )
-        rows = [
+        const_rows = [
             (
                 code,
                 dt.datetime.fromtimestamp(ms / 1000, tz=dt.UTC).date().isoformat(),
@@ -520,9 +519,11 @@ def process_code(
             for ms, _ in bars
         ]
         if write:
-            save_recompute_factors(conn, rows)
-        return CodeResult(code, True, rows=len(rows), steps=0,
-                          note="无公司行动/因子恒定"), calls
+            save_recompute_factors(conn, const_rows)
+        return (
+            CodeResult(code, True, rows=len(const_rows), steps=0, note="无公司行动/因子恒定"),
+            calls,
+        )
 
     fmap = factor_from_actions(actions, prev_closes=prev_closes_for(bars, ex_dates))
     steps = sorted(fmap)
@@ -719,11 +720,7 @@ def main(argv: list[str] | None = None) -> int:
     # 用 3 而不是 1：1 常被脚本当成「一般错误」，3 明确表示
     # 「任务未完成，进度已存盘，可续跑」，与「跑完了」区分得开。
     if stopped_reason:
-        print(
-            "\n  ⚠️ 本轮因 {} 提前停止（退出码 3）—— 进度已存盘，下次可续跑。".format(
-                stopped_reason
-            )
-        )
+        print(f"\n  ⚠️ 本轮因 {stopped_reason} 提前停止（退出码 3）—— 进度已存盘，下次可续跑。")
         return 3
 
     # 本轮跑完 ⇒ 清掉上一轮遗留的 stopped 标记，否则它会永远挂在进度文件里，

@@ -31,8 +31,6 @@ import importlib.util
 import sys
 from pathlib import Path
 
-import pytest
-
 _ROOT = Path(__file__).resolve().parents[1]
 _spec = importlib.util.spec_from_file_location(
     "run_inspection_under_test", _ROOT / "scripts" / "run_inspection.py"
@@ -43,8 +41,15 @@ sys.modules["run_inspection_under_test"] = ri
 _spec.loader.exec_module(ri)
 
 
-def _install(monkeypatch, *, problems: list[str], degraded: list[str],
-             notified: bool, webhook: bool = True, prev: dict | None = None):
+def _install(
+    monkeypatch,
+    *,
+    problems: list[str],
+    degraded: list[str],
+    notified: bool,
+    webhook: bool = True,
+    prev: dict | None = None,
+):
     """把巡检的所有外部依赖换成假实现。"""
     # ⚠️ 键要**对齐** ``build_report`` 的真实返回（run_inspection.py:147）——
     # 第一版只给了 5 个键，main 里读 ``report["sources"]`` 直接 KeyError。
@@ -88,7 +93,7 @@ def _install(monkeypatch, *, problems: list[str], degraded: list[str],
         detail: str = ""
 
     class _RMS:
-        RunMetric = _Row          # main 用 ``rms.RunMetric(kind=…, …)`` 构造
+        RunMetric = _Row  # main 用 ``rms.RunMetric(kind=…, …)`` 构造
         KIND_INSPECTION = "inspection"
         appended: list = []
 
@@ -115,12 +120,17 @@ def test_no_problem_and_no_change_returns_zero(monkeypatch) -> None:
     ⇒ **别编 key，用同一个 report 算。**
     """
     rms = _install(monkeypatch, problems=[], degraded=[], notified=False)
-    report = ri.build_report(None)                     # type: ignore[arg-type]
+    report = ri.build_report(None)  # type: ignore[arg-type]
     # 重装一次，让 prev 用**真算出来的** key
-    _install(monkeypatch, problems=[], degraded=[], notified=False,
-             prev={"detail": {"state_key": ri._state_key(report)}})  # noqa: SLF001
+    _install(
+        monkeypatch,
+        problems=[],
+        degraded=[],
+        notified=False,
+        prev={"detail": {"state_key": ri._state_key(report)}},
+    )  # noqa: SLF001
     assert ri.main([]) == 0
-    assert not rms.appended or True                    # 落库与否与本断言无关
+    assert not rms.appended or True  # 落库与否与本断言无关
 
 
 def test_print_mode_returns_zero_and_sends_nothing(monkeypatch) -> None:
@@ -152,8 +162,7 @@ def test_webhook_not_configured_also_returns_3(monkeypatch) -> None:
     代价：本地开发机（有意不配）每天退 3。内容**照样打印到日志**，
     排查不受影响；换来「告警静默失效」能被机器发现。
     """
-    _install(monkeypatch, problems=["水位断了"], degraded=[],
-             notified=False, webhook=False)
+    _install(monkeypatch, problems=["水位断了"], degraded=[], notified=False, webhook=False)
     assert ri.main(["--force"]) == 3
 
 

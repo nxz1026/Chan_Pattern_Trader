@@ -67,13 +67,21 @@ class _RejectingClient:
         base, step = 1_700_000_000_000, 3_600_000
         return [
             CanonicalBar(
-                open_time=base + i * step, close_time=base + i * step + step - 1,
-                open=1.0, high=1.0, low=1.0, close=1.0, volume=0.0,
-                quote_volume=0.0, trade_count=0, taker_buy_base_volume=0.0,
-                taker_buy_quote_volume=0.0, is_closed=True,
+                open_time=base + i * step,
+                close_time=base + i * step + step - 1,
+                open=1.0,
+                high=1.0,
+                low=1.0,
+                close=1.0,
+                volume=0.0,
+                quote_volume=0.0,
+                trade_count=0,
+                taker_buy_base_volume=0.0,
+                taker_buy_quote_volume=0.0,
+                is_closed=True,
             )
-            for i in (0, 1, 5, 9)     # 间隔 1×step / 4×step ⇒ 最小正间隔会被推成 step，
-                                       # 而 close_time 按 step 算 ⇒ 第 3、4 根周期错配
+            for i in (0, 1, 5, 9)  # 间隔 1×step / 4×step ⇒ 最小正间隔会被推成 step，
+            # 而 close_time 按 step 算 ⇒ 第 3、4 根周期错配
         ]
 
 
@@ -112,13 +120,15 @@ def test_poll_failure_degrades_and_records(client, reason_prefix: str) -> None:
     assert bars == (), "降级时必须清空 bars —— 否则与降级快照对不上"
     runtime = snap.get("runtime") or {}
     assert runtime.get("degraded") is True, "runtime.degraded 没置位"
-    assert str(runtime.get("degraded_reason", "")).startswith(reason_prefix), \
+    assert str(runtime.get("degraded_reason", "")).startswith(reason_prefix), (
         f"降级原因不对：{runtime.get('degraded_reason')!r}"
+    )
     assert p._last_poll_ok is False, "健康状态还停在『好』⇒ 监控会骗人"  # noqa: SLF001
 
 
 def test_poll_failure_clears_previous_ok_state() -> None:
     """先成功一次、再失败 —— 健康状态**必须**翻过来。"""
+
     class _OkOnce:
         def __init__(self) -> None:
             self.n = 0
@@ -133,9 +143,16 @@ def test_poll_failure_clears_previous_ok_state() -> None:
                     CanonicalBar(
                         open_time=base + i * 3_600_000,
                         close_time=base + i * 3_600_000 + 3_600_000 - 1,
-                        open=1.0, high=1.0, low=1.0, close=1.0, volume=0.0,
-                        quote_volume=0.0, trade_count=0, taker_buy_base_volume=0.0,
-                        taker_buy_quote_volume=0.0, is_closed=True,
+                        open=1.0,
+                        high=1.0,
+                        low=1.0,
+                        close=1.0,
+                        volume=0.0,
+                        quote_volume=0.0,
+                        trade_count=0,
+                        taker_buy_base_volume=0.0,
+                        taker_buy_quote_volume=0.0,
+                        is_closed=True,
                     )
                     for i in range(30)
                 ]

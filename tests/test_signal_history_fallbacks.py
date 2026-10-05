@@ -38,10 +38,20 @@ from cpt.storage.signal_event_store import SignalEventError  # noqa: E402
 from cpt.web import a_share_routes  # noqa: E402
 
 _EV = [
-    {"transition_time": 1_000, "status": "confirmed", "signal_type": "first_buy",
-     "price": 10.0, "divergence_status": "detected"},
-    {"transition_time": 5_000, "status": "invalidated", "signal_type": "first_buy",
-     "price": 11.0, "divergence_status": "not_detected"},
+    {
+        "transition_time": 1_000,
+        "status": "confirmed",
+        "signal_type": "first_buy",
+        "price": 10.0,
+        "divergence_status": "detected",
+    },
+    {
+        "transition_time": 5_000,
+        "status": "invalidated",
+        "signal_type": "first_buy",
+        "price": 11.0,
+        "divergence_status": "not_detected",
+    },
 ]
 
 
@@ -60,6 +70,7 @@ class _Client:
 def client(monkeypatch):
     c = _Client()
     import cpt.adapters.a_share_local as local
+
     monkeypatch.setattr(local, "AShareLocalClient", lambda: c)
     return c
 
@@ -69,8 +80,9 @@ def _patch(monkeypatch, *, epoch, events, events_exc: Exception | None = None) -
     import cpt.storage.signal_event_store as se
 
     if isinstance(epoch, Exception) or epoch is None:
-        monkeypatch.setattr(fe, "current_epoch",
-                            lambda *a: (_ for _ in ()).throw(epoch) if epoch else None)
+        monkeypatch.setattr(
+            fe, "current_epoch", lambda *a: (_ for _ in ()).throw(epoch) if epoch else None
+        )
     else:
         monkeypatch.setattr(fe, "current_epoch", lambda *a: epoch)
 
@@ -111,8 +123,7 @@ def test_epoch_unavailable_still_returns_history(monkeypatch, client) -> None:
 
 def test_events_read_failure_is_reported_not_faked(monkeypatch, client) -> None:
     """事件读失败 ⇒ available=False + 写明原因，**不能返回空列表冒充「没历史」**。"""
-    _patch(monkeypatch, epoch=_Epoch(3_000), events=[],
-           events_exc=SignalEventError("db down"))
+    _patch(monkeypatch, epoch=_Epoch(3_000), events=[], events_exc=SignalEventError("db down"))
     out = a_share_routes._signal_history("600519")  # noqa: SLF001
     assert out["available"] is False
     assert out["reason"] == "signal_history_unavailable"
@@ -130,8 +141,10 @@ def test_no_history_is_empty_not_error(monkeypatch, client) -> None:
 def test_outer_failure_still_degrades(monkeypatch, client) -> None:
     """整个函数炸了（建连接就失败）⇒ 降级，**不能带崩推荐接口**。"""
     import cpt.adapters.a_share_local as local
-    monkeypatch.setattr(local, "AShareLocalClient",
-                        lambda: (_ for _ in ()).throw(RuntimeError("no db")))
+
+    monkeypatch.setattr(
+        local, "AShareLocalClient", lambda: (_ for _ in ()).throw(RuntimeError("no db"))
+    )
     out = a_share_routes._signal_history("600519")  # noqa: SLF001
     assert out["available"] is False
     assert out["reason"] == "signal_history_error"

@@ -10,13 +10,14 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+
 from tests.conftest import dashboard_js
 
 DASHBOARD = Path(__file__).resolve().parents[1] / "dashboard"
 
 CANVAS_MODULES = ("canvas_b.js", "canvas_c.js", "canvas_d.js")
 A_SHARE_JS = DASHBOARD / "market_a_share.js"
-DASHBOARD_JS_TEXT = dashboard_js()   # R45 拆分：读全部模块，不再绑死单文件
+DASHBOARD_JS_TEXT = dashboard_js()  # R45 拆分：读全部模块，不再绑死单文件
 INDEX_HTML = DASHBOARD / "index.html"
 CSS = DASHBOARD / "dashboard.css"
 

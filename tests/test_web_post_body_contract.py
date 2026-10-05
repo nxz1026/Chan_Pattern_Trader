@@ -36,8 +36,9 @@ from tests.conftest import served
 _URL = "/api/dashboard/a-share/llm/summarize?code=600519"
 
 
-def _post(base: str, body: bytes | None, *, ctype: str | None = "application/json",
-          method: str = "POST") -> tuple[int, str]:
+def _post(
+    base: str, body: bytes | None, *, ctype: str | None = "application/json", method: str = "POST"
+) -> tuple[int, str]:
     """发一个 POST，返回 (状态码, 响应体前 200 字)。"""
     headers = {"Accept": "application/json"}
     if ctype:

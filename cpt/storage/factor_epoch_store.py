@@ -58,7 +58,6 @@ CREATE TABLE IF NOT EXISTS public.cpt_factor_epoch (
 """
 
 
-
 class FactorEpoch(dict[str, Any]):
     """一行纪元记录（``dict`` 子类，便于直接 JSON 化）。"""
 
@@ -128,8 +127,7 @@ def record_epoch(
                 new_match_rate = EXCLUDED.new_match_rate,
                 note           = EXCLUDED.note
             """,
-            (switched_at, old_source, new_source,
-             old_match_rate, new_match_rate, note),
+            (switched_at, old_source, new_source, old_match_rate, new_match_rate, note),
         )
 
 
@@ -173,6 +171,6 @@ def is_legacy_event(created_at: Any, epoch: FactorEpoch) -> bool:
     if not epoch.known or created_at is None:
         return False
     try:
-        return created_at < epoch.switched_at
+        return bool(created_at < epoch.switched_at)
     except TypeError:  # 类型不可比（naive vs aware）时保守判新口径
         return False

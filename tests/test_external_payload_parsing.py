@@ -103,10 +103,18 @@ def _wind(columns: list[str], rows: list[list]) -> dict:
     一个**看起来像数据缺失**的错误。」
     ⇒ 造的夹具必须是**当时那个真实形状**，不能是我想象的。
     """
-    return {"data": {"data": [{
-        "columns": [{"name": c} for c in columns],
-        "rows": rows,
-    }], "error": None}, "error": None}
+    return {
+        "data": {
+            "data": [
+                {
+                    "columns": [{"name": c} for c in columns],
+                    "rows": rows,
+                }
+            ],
+            "error": None,
+        },
+        "error": None,
+    }
 
 
 def test_empty_envelope_yields_empty_tuple() -> None:
@@ -123,10 +131,12 @@ def test_empty_envelope_yields_empty_tuple() -> None:
 def test_maps_by_column_name_not_index() -> None:
     """⚠️ **列顺序变了也不影响** —— docstring 明说「列集合按标的甚至按次而变」，
     解析全程用列名子串。第一版我把列顺序打乱就该照样解析出来。"""
-    acts = parse_corporate_actions(_wind(
-        ["转增比例", "代码", "除权除息日", "税前每股派息"],
-        [[0.1, "000001.SZ", "2026-06-10", 0.5]],
-    ))
+    acts = parse_corporate_actions(
+        _wind(
+            ["转增比例", "代码", "除权除息日", "税前每股派息"],
+            [[0.1, "000001.SZ", "2026-06-10", 0.5]],
+        )
+    )
     assert len(acts) == 1
     a = acts[0]
     assert a.ex_date == "2026-06-10"
@@ -136,9 +146,7 @@ def test_maps_by_column_name_not_index() -> None:
 
 def test_missing_optional_column_is_tolerated() -> None:
     """少一列（docstring 说「两次调用分别少了/多了某列」）⇒ **不能抛**。"""
-    acts = parse_corporate_actions(_wind(
-        ["除权除息日", "税前每股派息"], [["2026-06-10", 0.3]]
-    ))
+    acts = parse_corporate_actions(_wind(["除权除息日", "税前每股派息"], [["2026-06-10", 0.3]]))
     assert len(acts) == 1
     assert acts[0].cash_pre_tax == pytest.approx(0.3)
     assert acts[0].transfer is None or acts[0].transfer == pytest.approx(0.0)
@@ -148,34 +156,34 @@ def test_sorts_by_ex_date_not_input_order() -> None:
     """⚠️ 实现**按 ex_date 排序**（不是保持输入顺序）——
     我第一版断言「保持输入顺序」是编的。因子计算依赖时间序，
     所以这个排序是**必需**的，测试要钉的是它。"""
-    acts = parse_corporate_actions(_wind(
-        ["除权除息日", "税前每股派息"],
-        [["2026-12-01", 0.1], ["2026-01-01", 0.2], ["2026-06-01", 0.3]],
-    ))
+    acts = parse_corporate_actions(
+        _wind(
+            ["除权除息日", "税前每股派息"],
+            [["2026-12-01", 0.1], ["2026-01-01", 0.2], ["2026-06-01", 0.3]],
+        )
+    )
     assert [a.ex_date for a in acts] == ["2026-01-01", "2026-06-01", "2026-12-01"]
 
 
 def test_row_without_usable_date_is_skipped() -> None:
     """没有 / 日期太短的行 ⇒ 跳过（**不能**造一个 1970 的日期出来）。"""
-    acts = parse_corporate_actions(_wind(
-        ["除权除息日", "税前每股派息"],
-        [[None, 0.3], ["", 0.4], ["2026", 0.5], ["2026-06-10", 0.6]],
-    ))
+    acts = parse_corporate_actions(
+        _wind(
+            ["除权除息日", "税前每股派息"],
+            [[None, 0.3], ["", 0.4], ["2026", 0.5], ["2026-06-10", 0.6]],
+        )
+    )
     assert [a.ex_date for a in acts] == ["2026-06-10"]
 
 
 def test_date_with_slashes_is_normalised() -> None:
     """``2026/09/24`` ⇒ ``2026-09-24``。"""
-    acts = parse_corporate_actions(_wind(
-        ["除权除息日", "税前每股派息"], [["2026/09/24", 0.3]]
-    ))
+    acts = parse_corporate_actions(_wind(["除权除息日", "税前每股派息"], [["2026/09/24", 0.3]]))
     assert acts[0].ex_date == "2026-09-24"
 
 
 def test_ragged_row_is_skipped_not_crashed() -> None:
     """行比列短 ⇒ 跳过（不 IndexError）。"""
-    acts = parse_corporate_actions(_wind(
-        ["除权除息日", "税前每股派息"], [["2026-06-10"]]
-    ))
+    acts = parse_corporate_actions(_wind(["除权除息日", "税前每股派息"], [["2026-06-10"]]))
     assert len(acts) == 1
     assert acts[0].cash_pre_tax is None

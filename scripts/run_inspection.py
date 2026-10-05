@@ -269,8 +269,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(f"[未配置 {ENV_WEBHOOK}] 本应发送的告警：")
                 for line in lines:
                     print("   ", line)
-                print(f"[!] 巡检发现了问题，但告警通道未配置（{ENV_WEBHOOK}）"
-                      " —— 告警能力不可用")
+                print(f"[!] 巡检发现了问题，但告警通道未配置（{ENV_WEBHOOK}） —— 告警能力不可用")
                 return 3
             else:
                 ok = notify_problem(title, lines)

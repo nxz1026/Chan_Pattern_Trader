@@ -83,9 +83,14 @@ class _FakeClient:
         return self._conn
 
 
-def _install(monkeypatch: pytest.MonkeyPatch, *,
-             bars: list[tuple[int, float]], anchor: float | None,
-             actions: list[CorporateAction], written: list[tuple]) -> Any:
+def _install(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    bars: list[tuple[int, float]],
+    anchor: float | None,
+    actions: list[CorporateAction],
+    written: list[tuple],
+) -> Any:
     monkeypatch.setattr(fr, "load_recent_closes", lambda conn, code, limit=800: tuple(bars))
     monkeypatch.setattr(fr, "current_latest_factor", lambda conn, code: anchor)
     monkeypatch.setattr(
@@ -111,7 +116,7 @@ def _bars(n: int = 60) -> list[tuple[int, float]]:
     """60 根 bar，起始 2024-01-02（毫秒），逐日。"""
     import datetime as dt
 
-    d0 = dt.date(2024, 1, 2)
+    dt.date(2024, 1, 2)
     base = int(dt.datetime(2024, 1, 2, tzinfo=dt.UTC).timestamp() * 1000)
     return [(base + i * 86_400_000, 10.0 + i) for i in range(n)]
 
@@ -119,8 +124,16 @@ def _bars(n: int = 60) -> list[tuple[int, float]]:
 def test_all_ex_dates_before_window_writes_constant(monkeypatch: pytest.MonkeyPatch) -> None:
     """核心回归：除权日全早于窗口 ⇒ 写恒定，**不是**拒写。"""
     written: list[tuple] = []
-    acts = [CorporateAction(ex_date="2022-06-16", cash_pre_tax=0.3, share_bonus=None,
-                            transfer=None, source="eastmoney", status="实施分配")]
+    acts = [
+        CorporateAction(
+            ex_date="2022-06-16",
+            cash_pre_tax=0.3,
+            share_bonus=None,
+            transfer=None,
+            source="eastmoney",
+            status="实施分配",
+        )
+    ]
     src = _install(monkeypatch, bars=_bars(), anchor=1.0, actions=acts, written=written)
 
     res, _ = fr.process_code(_client(1.0), src, "000761", write=True, retries=0)
@@ -138,17 +151,23 @@ def test_constant_uses_anchor_not_one(monkeypatch: pytest.MonkeyPatch) -> None:
     **用错实现这个测试也会绿**。这里特意用 anchor=199.4 的票。
     """
     written: list[tuple] = []
-    acts = [CorporateAction(ex_date="2022-06-16", cash_pre_tax=0.3, share_bonus=None,
-                            transfer=None, source="eastmoney", status="实施分配")]
+    acts = [
+        CorporateAction(
+            ex_date="2022-06-16",
+            cash_pre_tax=0.3,
+            share_bonus=None,
+            transfer=None,
+            source="eastmoney",
+            status="实施分配",
+        )
+    ]
     src = _install(monkeypatch, bars=_bars(), anchor=199.4, actions=acts, written=written)
 
     fr.process_code(_client(199.4), src, "000001", write=True, retries=0)
 
     assert written
     vals = {round(r[2], 9) for r in written}
-    assert vals == {199.4}, (
-        f"常数应等于 anchor 199.4（否则显示价格会缩放 199 倍），实得 {vals}"
-    )
+    assert vals == {199.4}, f"常数应等于 anchor 199.4（否则显示价格会缩放 199 倍），实得 {vals}"
 
 
 def test_still_refuses_when_ex_date_inside_window_has_no_prev_close(
@@ -164,8 +183,16 @@ def test_still_refuses_when_ex_date_inside_window_has_no_prev_close(
     算出台阶是正确行为，测试会误判成"放宽过头"。
     """
     written: list[tuple] = []
-    acts = [CorporateAction(ex_date="2024-01-02", cash_pre_tax=0.3, share_bonus=None,
-                            transfer=None, source="eastmoney", status="实施分配")]
+    acts = [
+        CorporateAction(
+            ex_date="2024-01-02",
+            cash_pre_tax=0.3,
+            share_bonus=None,
+            transfer=None,
+            source="eastmoney",
+            status="实施分配",
+        )
+    ]
     src = _install(monkeypatch, bars=_bars(), anchor=1.0, actions=acts, written=written)
 
     res, _ = fr.process_code(_client(1.0), src, "688089", write=True, retries=0)
@@ -235,8 +262,16 @@ def test_too_few_bars_still_rejected_keeps_uncertainty(monkeypatch: pytest.Monke
 def test_too_few_bars_still_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
     """新股（K 线不足 30 根）仍然拒写 —— 不受本次改动影响。"""
     written: list[tuple] = []
-    acts = [CorporateAction(ex_date="2024-03-01", cash_pre_tax=0.3, share_bonus=None,
-                            transfer=None, source="eastmoney", status="实施分配")]
+    acts = [
+        CorporateAction(
+            ex_date="2024-03-01",
+            cash_pre_tax=0.3,
+            share_bonus=None,
+            transfer=None,
+            source="eastmoney",
+            status="实施分配",
+        )
+    ]
     src = _install(monkeypatch, bars=_bars(10), anchor=1.0, actions=acts, written=written)
 
     res, _ = fr.process_code(_client(1.0), src, "688089", write=True, retries=0)

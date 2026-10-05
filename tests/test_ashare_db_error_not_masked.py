@@ -176,6 +176,7 @@ def test_reread_after_factor_fetch_is_not_labelled_no_factor(
     **并落库**了」。走到这里重读还失败，**几乎必然是 DB 问题**，
     原实现却报 ``no_factor`` 且不 rollback，与上面那处是同一个 bug 的两处。
     """
+
     class _Ensurer:
         """让 ``_try_on_demand_factors`` 返回「已取到因子」。"""
 

@@ -39,6 +39,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -62,12 +63,14 @@ def fx_doc_drift(root: Path) -> tuple[str, str]:
     # ⚠️ 夹具必须备齐**其它类要 import 的模块**，否则门禁会先崩在别处，
     # 轮不到 E 类 —— 第一版就因此「漏报」，看起来像门禁坏了，其实夹具不全。
     _pkg(root, "domain/__init__.py", "")
-    _pkg(root, "domain/config.py",
-         "from dataclasses import dataclass\n"
-         "@dataclass(frozen=True)\n"
-         "class RulesConfig:\n    min_bi_len: int = 4\n")
-    _write(root / "docs/architecture.md",
-           "### 2.1\n`cpt/domain/x.py` **已整层删除**（真的删了）\n")
+    _pkg(
+        root,
+        "domain/config.py",
+        "from dataclasses import dataclass\n"
+        "@dataclass(frozen=True)\n"
+        "class RulesConfig:\n    min_bi_len: int = 4\n",
+    )
+    _write(root / "docs/architecture.md", "### 2.1\n`cpt/domain/x.py` **已整层删除**（真的删了）\n")
     _pkg(root, "domain/x.py", "# 还在\n")
     return "check_doc_drift.py", "x.py"
 
@@ -81,9 +84,11 @@ def fx_all_claims(root: Path) -> tuple[str, str]:
 def fx_doc_counts(root: Path) -> tuple[str, str]:
     """⑤ 计数：architecture §2.1 的行数与实际不符。"""
     _pkg(root, "domain/a.py", "x = 1\ny = 2\n")
-    _write(root / "docs" / "architecture.md",
-           "## 2.1\n| 层 | 文件 | 行数 | 复盘状态 |\n|---|---:|---:|---|\n"
-           "| `domain/` | 1 | 999 | x |\n")
+    _write(
+        root / "docs" / "architecture.md",
+        "## 2.1\n| 层 | 文件 | 行数 | 复盘状态 |\n|---|---:|---:|---|\n"
+        "| `domain/` | 1 | 999 | x |\n",
+    )
     # 期望串取门禁**真实**的失败措辞 —— 第一版写 "domain/"（带斜杠），
     # 而它打印的是 "cpt/domain" / "domain 层" ⇒ 永远匹配不上，看着像漏报。
     return "check_doc_counts.py", "对不上"
@@ -103,20 +108,25 @@ def fx_enqueue_unique(root: Path) -> tuple[str, str]:
         "sys.exit(0 if len(cs('_enqueue_and_submit')) == 2 else 1)\n"
     )
     _write(root / "scripts/check_enqueue_skeleton_unique.py", body)
-    _pkg(root, "application/llm_cases.py",
-         "def _enqueue_and_submit(c, r, subject_id=''):\n    pass\n"
-         "def a(c, r):\n    _enqueue_and_submit(c, r); _enqueue_and_submit(c, r)\n"
-         "def b(c, r):\n    enqueue_call; _bootstrap(); _enqueue_and_submit(c, r)\n")
+    _pkg(
+        root,
+        "application/llm_cases.py",
+        "def _enqueue_and_submit(c, r, subject_id=''):\n    pass\n"
+        "def a(c, r):\n    _enqueue_and_submit(c, r); _enqueue_and_submit(c, r)\n"
+        "def b(c, r):\n    enqueue_call; _bootstrap(); _enqueue_and_submit(c, r)\n",
+    )
     return "check_enqueue_skeleton_unique.py", ""
 
 
 def fx_poll_unique(root: Path) -> tuple[str, str]:
     """⑦ 前端轮询：自己写一个 poll 循环。"""
-    _write(root / "dashboard/x.js",
-           "async function pollThing() {\n"
-           "  await fetch('/x');\n"
-           "  window.setTimeout(pollThing, 1000);\n"
-           "}\n")
+    _write(
+        root / "dashboard/x.js",
+        "async function pollThing() {\n"
+        "  await fetch('/x');\n"
+        "  window.setTimeout(pollThing, 1000);\n"
+        "}\n",
+    )
     _write(root / "README.md", "x\n")
     return "check_job_poll_unique.py", "pollThing"
 
@@ -129,16 +139,20 @@ def fx_sql_layering(root: Path) -> tuple[str, str]:
     �� ``import psycopg``（实测：该门禁正是为了抓这种**没有 import 也能写 SQL**
     的越界）。
     """
-    _write(root / "cpt/domain/bad.py",
-           "def fetch(conn):\n"
-           "    with conn.cursor() as cur:\n"
-           "        cur.execute(\"SELECT * FROM public.derived_bar\")\n"
-           "        return cur.fetchall()\n")
-    _write(root / "cpt/storage/ok.py",
-           "def fetch(conn):\n"
-           "    with conn.cursor() as cur:\n"
-           "        cur.execute(\"SELECT * FROM public.cpt_run_metric\")\n"
-           "        return cur.fetchall()\n")
+    _write(
+        root / "cpt/domain/bad.py",
+        "def fetch(conn):\n"
+        "    with conn.cursor() as cur:\n"
+        '        cur.execute("SELECT * FROM public.derived_bar")\n'
+        "        return cur.fetchall()\n",
+    )
+    _write(
+        root / "cpt/storage/ok.py",
+        "def fetch(conn):\n"
+        "    with conn.cursor() as cur:\n"
+        '        cur.execute("SELECT * FROM public.cpt_run_metric")\n'
+        "        return cur.fetchall()\n",
+    )
     return "check_sql_layering.py", "cpt/domain"
 
 
@@ -150,14 +164,16 @@ def fx_storage_failure(root: Path) -> tuple[str, str]:
     PostgreSQL 里事务中一条语句失败会让**同连接后续全部 aborted**，
     吞掉异常不是降级，是把局部失败放大成整页失败。
     """
-    _write(root / "cpt/storage/bad_store.py",
-           "def load_x(conn):\n"
-           "    try:\n"
-           "        with conn.cursor() as cur:\n"
-           "            cur.execute(\"SELECT 1\")\n"
-           "            return cur.fetchone()\n"
-           "    except Exception:\n"
-           "        return None\n")
+    _write(
+        root / "cpt/storage/bad_store.py",
+        "def load_x(conn):\n"
+        "    try:\n"
+        "        with conn.cursor() as cur:\n"
+        '            cur.execute("SELECT 1")\n'
+        "            return cur.fetchone()\n"
+        "    except Exception:\n"
+        "        return None\n",
+    )
     return "check_storage_failure_semantics.py", "bad_store"
 
 
@@ -168,16 +184,23 @@ def fx_bundle_sync(root: Path) -> tuple[str, str]:
     ⚠️ 这个夹具要**先生成**再改，否则 ``--check`` 找不到 bundle 会
     因「文件不存在」而报错 —— 那是另一条路径，测不到「改���没重建」这个真问题。
     """
-    _write(root / "dashboard/dash-core.js",
-           "// <<<HEAD\nconst A = 1;\n// >>>HEAD\n"
-           "// <<<FUNCS\nfunction f() { return A; }\n// >>>FUNCS\n")
-    _write(root / "dashboard/dash-ops.js",
-           "// <<<HEAD\nconst A = 1;\n// >>>HEAD\n"
-           "// <<<FUNCS\nfunction g() { return A; }\n// >>>FUNCS\n})();\n")
+    _write(
+        root / "dashboard/dash-core.js",
+        "// <<<HEAD\nconst A = 1;\n// >>>HEAD\n"
+        "// <<<FUNCS\nfunction f() { return A; }\n// >>>FUNCS\n",
+    )
+    _write(
+        root / "dashboard/dash-ops.js",
+        "// <<<HEAD\nconst A = 1;\n// >>>HEAD\n"
+        "// <<<FUNCS\nfunction g() { return A; }\n// >>>FUNCS\n})();\n",
+    )
     # 先照它自己的 ORDER 生成一份，再改源文件
     import re as _re
-    ords = _re.findall(r'^[A-Z_]+ = \(\n((?:    "[^"]+",\n)+)\)',
-                      (root / "scripts/build_dashboard_bundle.py").read_text(encoding="utf-8"))
+
+    ords = _re.findall(
+        r'^[A-Z_]+ = \(\n((?:    "[^"]+",\n)+)\)',
+        (root / "scripts/build_dashboard_bundle.py").read_text(encoding="utf-8"),
+    )
     names = _re.findall(r'"([^"]+)"', ords[0]) if ords else ["dash-core.js", "dash-ops.js"]
     (root / "scripts/build_dashboard_bundle.py").write_text(
         "#!/usr/bin/env python3\n"
@@ -197,7 +220,8 @@ def fx_bundle_sync(root: Path) -> tuple[str, str]:
         "        if i == 0:\n            h = mh.group(1)\n"
         "        f += ('\\n' if f else '') + mf.group(1)\n"
         "        if mt:\n            t = mt.group(1)\n"
-        "    return BANNER + chr(10) + h + chr(10) + chr(10) + f + chr(10) + chr(10) + t + chr(10)\n"
+        "    return BANNER + chr(10) + h + chr(10) + chr(10)"
+        " + f + chr(10) + chr(10) + t + chr(10)\n"
         "def main():\n"
         "    ap = argparse.ArgumentParser()\n"
         "    ap.add_argument('--check', action='store_true')\n"
@@ -210,18 +234,25 @@ def fx_bundle_sync(root: Path) -> tuple[str, str]:
         "        return 0 if cur == out else 1\n"
         "    b.write_text(out, encoding='utf-8')\n    print('  BUILT')\n    return 0\n"
         "if __name__ == '__main__':\n    raise SystemExit(main())\n",
-        encoding="utf-8")
+        encoding="utf-8",
+    )
     import subprocess as _sp
-    _sp.run([sys.executable, str(root / "scripts/build_dashboard_bundle.py")],
-            capture_output=True, text=True)
+
+    _sp.run(
+        [sys.executable, str(root / "scripts/build_dashboard_bundle.py")],
+        capture_output=True,
+        text=True,
+    )
     # 现在**改源文件**而不重建 ⇒ --check 必须报不同步。
     # ⚠️ 改的必须是 **FUNCS**，不能改 HEAD ——
     # builder 的 head 只取**第一个**文件（``if i == 0: h = mh.group(1)``），
     # 改第二个文件的 HEAD **不进输出** ⇒ bundle 仍然同步 ⇒ 报 OK。
     # 第一版就这么写错了，夹具自己是个假阴性。
-    _write(root / "dashboard/dash-ops.js",
-           "// <<<HEAD\nconst A = 1;\n// >>>HEAD\n"
-           "// <<<FUNCS\nfunction g() { return A + 1; }\n// >>>FUNCS\n})();\n")
+    _write(
+        root / "dashboard/dash-ops.js",
+        "// <<<HEAD\nconst A = 1;\n// >>>HEAD\n"
+        "// <<<FUNCS\nfunction g() { return A + 1; }\n// >>>FUNCS\n})();\n",
+    )
     return "build_dashboard_bundle.py", "STALE"
 
 
@@ -232,11 +263,13 @@ def fx_script_tags(root: Path) -> tuple[str, str]:
     **从未被请求**、对应全局恒 undefined ⇒ 功能静默消失，
     而页面正常、console 零报错。
     """
-    _write(root / "dashboard/index.html",
-           "<html><body>\n"
-           '<script src="./a.js" defer>\n'
-           '<script src="./cpt_job.js"></script></script>\n'
-           "</body></html>\n")
+    _write(
+        root / "dashboard/index.html",
+        "<html><body>\n"
+        '<script src="./a.js" defer>\n'
+        '<script src="./cpt_job.js"></script></script>\n'
+        "</body></html>\n",
+    )
     return "check_all_claims.py", "script"
 
 
@@ -254,7 +287,9 @@ FIXTURES = {
 
 
 # ── 跑 ────────────────────────────────────────────────────────
-def run_one(script: str, builder, verbose: bool) -> tuple[bool, str]:
+def run_one(
+    script: str, builder: Callable[[Path], tuple[str, str]], verbose: bool
+) -> tuple[bool, str]:
     with tempfile.TemporaryDirectory() as td:
         root = Path(td) / "repo"
         (root / "scripts").mkdir(parents=True)
@@ -279,7 +314,11 @@ def run_one(script: str, builder, verbose: bool) -> tuple[bool, str]:
         if cat:
             argv.extend(["--cat", cat])
         out = subprocess.run(
-            argv, capture_output=True, text=True, cwd=str(root), timeout=120,
+            argv,
+            capture_output=True,
+            text=True,
+            cwd=str(root),
+            timeout=120,
         )
         blob = out.stdout + out.stderr
         if not expect:
@@ -313,8 +352,7 @@ def main(argv: list[str] | None = None) -> int:
             for line in blob.strip().split("\n")[:8]:
                 print(f"      │ {line[:88]}")
     print("─" * 72)
-    print("全部门禁都能抓到各自的错例 ✅" if ok
-          else "有门禁**抓不到自己该抓的错例** ❌")
+    print("全部门禁都能抓到各自的错例 ✅" if ok else "有门禁**抓不到自己该抓的错例** ❌")
     return 0 if ok else 1
 
 

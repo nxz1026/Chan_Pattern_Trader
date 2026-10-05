@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""门禁⑦：异步任务轮询必须是**唯一**实现（``dashboard/cpt_job.js``）。
+r"""门禁⑦：异步任务轮询必须是**唯一**实现（``dashboard/cpt_job.js``）。
 
 ## 为什么
 
@@ -39,7 +39,6 @@ A 股短路（日线收盘后不变，轮询是浪费）。
 from __future__ import annotations
 
 import re
-import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -51,9 +50,7 @@ ALLOW = {"cpt_job.js"}
 #: 函数名像轮询
 #: ⚠️ 必须 ``IGNORECASE`` —— ``startPolling`` 是大写 P，
 #: 大小写敏感会把这一处**漏报成「无重复」**（第一版就如此）。
-POLL_NAME = re.compile(
-    r"^(\s*)(async\s+)?function\s+(\w*(poll|watch|retry)\w*)\s*\(", re.M | re.I
-)
+POLL_NAME = re.compile(r"^(\s*)(async\s+)?function\s+(\w*(poll|watch|retry)\w*)\s*\(", re.M | re.I)
 
 
 def main() -> int:
@@ -69,15 +66,15 @@ def main() -> int:
             name = m.group(3)
             # 取该函数体，看里面有没有定时器
             start = m.end()
-            nxt = re.search(r"^\s*(?:async\s+)?function\s+\w+|^\s*\}\s*$", text[m.start():], re.M)
-            body = text[start:start + 2500]
+            re.search(r"^\s*(?:async\s+)?function\s+\w+|^\s*\}\s*$", text[m.start() :], re.M)
+            body = text[start : start + 2500]
             if not re.search(r"setTimeout|setInterval", body):
                 continue
-            line = text[:m.start()].count("\n") + 1
+            line = text[: m.start()].count("\n") + 1
             offenders.append(f"  dashboard/{p.name}:{line}  function {name}()")
 
-    print(f"  唯一实现: dashboard/cpt_job.js（window.CPTJob.poll）")
-    print(f"  加载顺序: index.html 第 2 个（紧随 url_safety.js）")
+    print("  唯一实现: dashboard/cpt_job.js（window.CPTJob.poll）")
+    print("  加载顺序: index.html 第 2 个（紧随 url_safety.js）")
     if offenders:
         print(f"\n  ⚠️ 另有 {len(offenders)} 处自己实现的轮询：")
         for o in offenders:
