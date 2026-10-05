@@ -6806,6 +6806,31 @@ R54 把四类静默门禁失效列全之后，其中 **① R45（门禁恒返回
   lint-imports（`Contracts: 6 kept, 0 broken`）+ vulture + ruff check +
   ruff format --check（235 files）+ mypy（91 source files）。
 - 全量 pytest：**1090 passed / 4 skipped**。
+- **推送后 CI 第一次红了（run `37323724126`，`220e05d2f`）**：两版都红在「Static quality gates」：
+
+  ```
+  scripts/check_gate_coverage.py:98: error: Unused "type: ignore" comment  [unused-ignore]
+  scripts/check_gate_coverage.py:98: error: "expr" has no attribute "keys"  [attr-defined]
+  Found 2 errors in 1 file (checked 114 source files)
+  ```
+
+  **根因不是门禁的逻辑，是本地复验的命令。** `ci.yml:55` 写的是 `mypy cpt scripts`，
+  我复验时凭记忆敲成了 `mypy cpt` —— 覆盖范围少了 `scripts/`，于是我新写的门禁自己的
+  类型错误，恰好落在没被检查的那一半里（本地「91 source files Success」，CI 114 files /
+  2 errors）。这条教训（**「照着 ci.yml 的原句跑」**）文档里早写着（R52 vulture 那次就是
+  漏了 `whitelist.py`），**还是又踩一次**。
+  - 修法：不用 `type: ignore` 硬压，改成 `isinstance(node.value, ast.Dict)` 收窄；
+    类型本来就该这么写。
+  - **复验方法也改了**：写了 `run_ci_steps.py`（放工作区外，不入库），它**从 ci.yml 里读**
+    每个 `- name:` / `run:` 步骤（含 `run: |` 块标量），照原句在本地逐步执行 ——
+    手敲命令这件事本身被取消了。它自己第一版也写错：块标量终止条件算错，把 3 个
+    `run: |` 步骤（`Run unit and integration tests` / `Static quality gates` /
+    `Dead-code audit`）整个漏掉（正是本仓被块标量吞过 5 个 step 的那个坑），改成拿
+    `run:` 键自身的缩进去比之后，解析出 **14 步，全 rc=0**。
+  - `1d3579152` 再推，CI run **`37325137865`** `completed success`（3.12 / 3.14 皆绿）；
+    门禁⑪⑫⑬ 在 CI 上各有实跑输出，全日志 `command not found` / `exit code 127` 计数 **0**。
+  - CI 冷跑 `1058 passed / 36 skipped` vs 正常跑 `1067 / 27`，差的 9 条 = 2 条 chromium +
+    7 条 node —— 与本地口径（`1090/4` → `1083/11`）一致，不是「被冷环境悄悄关掉」。
 
 ### 教训
 
@@ -6814,4 +6839,9 @@ R54 把四类静默门禁失效列全之后，其中 **① R45（门禁恒返回
 >
 > **判据立不立得住，要用数据试，不要用直觉定。** ② 的两条静态路都是写之前先在
 > 真仓上量过的（99 个命中 / 7 个模块），量完才知道不能立。
+>
+> **「照着 ci.yml 的原句跑」是条会反复踩的坑 —— 根治法不是再提醒自己一次。**
+> 提醒已经失效两次了（R52、R55）。真正的修法是让命令**从 ci.yml 里读出来**：
+> 手敲这件事本身要被取消。写这条时连「从 YAML 里读步骤」的解析器都第一版就写错了 ——
+> 而它错的方式，恰好就是本仓被块标量吞过 5 个 step 的那个方式。
 
