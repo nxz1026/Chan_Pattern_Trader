@@ -306,7 +306,8 @@ scripts/            运维入口（不在包内，但已在 CI 门禁覆盖范�
     check_doc_counts.py                ← 门禁⑤（文档里的计数断言）
     check_enqueue_skeleton_unique.py   ← 门禁⑥（LLM 入队骨架唯一）
     check_job_poll_unique.py           ← 门禁⑦（前端轮询唯一）
-    selftest_gates.py                  ← **门禁自检**，必须排在 ①~⑦ 之前
+    check_ci_workflow.py              ← 门禁⑩（CI workflow 缩进；R51 新增）
+    selftest_gates.py                  ← **门禁自检**，必须排在 ①~⑦ 与 ⑩ 之前
     scan_doc_claims.py                 ← 「未兑现承诺」候选抽取（只报不判）
     report_coverage_gaps.py  run_coverage.sh  ← 覆盖率 + 「生产路径未测透」清单
     migrations/（8 份幂等 SQL，R20 → R27）
@@ -495,7 +496,10 @@ tests/
 与 czsc 的差异必须可解释并记录；czsc 不在 CI 环境，相关测试走 `importorskip`，
 **不允许**用 mock 假装它在位。
 
-**门禁**见 `README.md`「质量门」—— 6 条全部在 CI（3.12 + 3.14 双版本）执行。
+**门禁**见 `README.md`「质量门」—— 全部在 CI（3.12 + 3.14 双版本）逐条执行。
+> ⚠️ R51 更正：这句以前写的是「6 条」。实际有 **5 个脚本门禁从未在 CI 上跑过** ——
+> 它们的 `- name:` 缩进被上一条 `run: |` 的块标量整段吞成 shell 文本，
+> bash 报 `-: command not found`、步骤 exit 127。已由门禁⑩ `check_ci_workflow.py` 盯住。
 
 ---
 

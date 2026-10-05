@@ -6541,3 +6541,67 @@ owner 发现看板上的 **LLM 摘要（说人话）面板不见了**。
 
 ⇒ 记入 `known-traps` #30：**「页面正常 + console 干净」不等于「功能在」**。
 今天栽了两次（另一次是 parity 塞独立 script 导致画布 D 标签消失）。
+
+---
+
+## R51：画布 D 下线（2026-10-05 11:20，commit `cf8b2216d`）
+
+按 owner 指示**整体删除**画布 D，不是加开关、不是留 410 墓碑：
+
+| 动作 | 内容 |
+|---|---|
+| 1.a | `/api/canvas/wbt` 端点**直接除名** —— 外部调用拿到 `404 not_found` |
+| 2.删 | `dashboard/dashboard.js`（4925 行）一并删 |
+
+合计 `32 files changed, 172 insertions(+), 6729 deletions(-)`。
+
+**顺带根除 CI 五连红的第一根因**：`cpt/application/canvas_wbt.py` 是全仓
+**唯一** import pandas/plotly 的地方，且两处 import 都写在 `try` **之外** ——
+CI 没装 pandas ⇒ `ModuleNotFoundError`。删掉它，`pyproject.toml` 的
+`report = ["wbt==0.9.1"]` extra 也能删（pandas/plotly 本就没在 `requirements-dev.txt`）。
+
+**顺带修一个真 bug**：`deploy/dashboard-sync.sh:45` 的 `FILES=(...)` 停在 R45 拆分前
+—— 它**一直在同步线上根本不加载的文件**（`dashboard.js` / `canvas_d.js`），
+却漏掉了真正在线的 7 个 `dash-*.js` + `dashboard.bundle.js`。
+
+**两处「作废的契约」换成了更狠的守卫**：
+- `test_canvas_d_only_forwards_market_context`（断言画布 D 只转发 market/code，
+  记的是**跨市场错配**的根因）→ 改成 `test_canvas_modules_never_fetch_server_side`：
+  遍历 A/B/C 三个画布模块，断言源码里不出现 `fetch(` / `XMLHttpRequest` / `/api/`。
+  删掉原断言会丢掉根因，改写后它比原来更强（**任何**画布自己取数都会红）。
+- `test_canvas_modules_use_vendored_libraries_not_cdn` 的第 3 条（canvas_d 的
+  iframe vendorBase）作废 —— 现在唯一用 iframe 的是 plotly，canvas_c 的断言已盯住禁 CDN。
+
+**「死代码」确认**：`tests/conftest.py` 的 `DASHBOARD_JS_ORDER` 里**从来没有**
+`dashboard.js`，`index.html` 也没有任何 `<script src>` 加载它 ⇒ 4925 行无入口孤儿。
+
+---
+
+## R52：CI 恒红的第二根因 —— `ci.yml` 自己的 YAML 缩进（2026-10-05 11:50，commit `7e7a525a0`）
+
+R51 推上去 CI **仍然红**，但形状变了：pytest 绿（`1051 passed`）、门禁输出都打了 ✅、
+末行却是一条看不懂的 `line 33: -: command not found` → `exit code 127`。
+
+**根因在 `.github/workflows/ci.yml` 自己**：`- name:` 缩进 10 空格 > `run:` 键 8 空格
+⇒ 被块标量吞成 shell 文本 ⇒ 那 5 个 `- name:` 不是 step，是脚本的行。
+
+**后果是"没跑"不是"红"**：`build_dashboard_bundle --check`、`check_all_claims.py`、
+`check_doc_counts.py`、`check_enqueue_skeleton_unique.py`、`check_job_poll_unique.py`
+在 CI 上**一次都没真正执行过**。
+
+引入于 `1cda27af1`（R45），被 pytest 红灯挡在前面、从没暴露；R51 让 pytest 转绿才浮出。
+
+**新增门禁⑩ `scripts/check_ci_workflow.py`**：抠出每个 `run: |` 的真实内容，
+出现 `- name:` / `- uses:` / `- run:` 即判「step 被吞」rc=1。不用 PyYAML
+（CI 装了但 `.venv` 没有；门禁不该依赖装不装得上的包）。接进 `selftest_gates` ⇒
+**自检 9 道 → 10 道全抓到**。
+
+**CI 首次全绿**：run `37304899073`，`completed success`。日志核对 5 个曾被吞的门禁
+各 2 行引用（step 定义 + 执行回显）、`command not found` 计数 0。
+
+**这是本仓第三类「只产生看不见、不产生测试失败」的问题**（前两类：R45 的恒返回 0 门禁、
+R49 的判据依赖本机环境）。通用判据已写进 `known-traps`：
+**判断门禁有没有效，要看它在不在 `ci.yml`、那一行有没有真被执行、退出码有没有被传播。**
+
+**本轮全量复验**：`1074 passed / 0 failed / 4 skipped`（skip 全是环境原因：
+ccxt 未装、chromium aarch64 SIGTRAP ×2、first_buy_bridge 该序列无两个中枢）。

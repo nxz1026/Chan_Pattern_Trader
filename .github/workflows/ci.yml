@@ -101,11 +101,12 @@ jobs:
       # **只报告不阻断**（还有 1 处语义不同的持续刷新，故意不合并）。
       - name: Frontend job polling is unique
         run: python scripts/check_job_poll_unique.py
-      # 门禁⑨（R51 新增）：workflow 自己的 YAML 缩进。
+      # 门禁⑩（R51 新增）：workflow 自己的 YAML 缩进。
       # R51 实测踩出来的：`- name:` 缩进比 `run:` 键更深 ⇒ 被块标量吞成 shell
       # 文本 ⇒ bash 报 `-: command not found`、整个步骤 exit 127，而那 5 个
       # 门禁**一次都没真跑过**。这个错不产生任何测试失败，纯靠人眼。
       # 它必须排在**所有 step 之后**（自己没被吞，才敢查别人）。
+      # 编号⑨留给 `check_all_claims.py` 的 H 类（<script> 标签配对），不重复占用。
       - name: CI workflow indentation is sane
         run: python scripts/check_ci_workflow.py
       - name: Dead-code audit (vulture)

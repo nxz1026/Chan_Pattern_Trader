@@ -220,6 +220,9 @@ _ALLOW: dict[str, str] = {
     ),
     "tests/test_canvas_wbt.py": "R51 随画布 D 下线删除；duplication-triage §6 已标注作废",
     "tests/test_web_canvas_wbt.py": "R51 随画布 D 下线删除；duplication-triage §5.2 已标注",
+    # R51 的**代码**同样被删了。progress-log R51 段讲的是「删掉它根除了 CI 五连红」，
+    # 那句话要成立就得提到这个文件名 —— 它是**因果链的一环**，改掉它等于抹掉根因。
+    "cpt/application/canvas_wbt.py": "R51 随画布 D 下线删除；progress-log R51 段记的是删除动作本身",
 }
 
 

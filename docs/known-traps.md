@@ -834,3 +834,53 @@ git fetch origin        # 之后 origin/main 正常更新
 改完必须**真机打开页面、亲眼看到那个具体功能**，
 不能只看 HTTP 200 和控制台 —— 这条今天栽了两次
 （另一次是 parity 塞独立 `<script>` 导致画布 D 标签消失）。
+
+## R52：YAML 块标量把 5 个门禁整段吞了（2026-10-05）
+
+**症状**：CI 恒红，但日志里 pytest **绿**、所有门禁输出都打了 ✅，
+最后一行却是一条看不懂的：
+
+```
+line 33: -: command not found
+##[error]Process completed with exit code 127.
+```
+
+**根因**（在 `.github/workflows/ci.yml` 自己，不在任何脚本里）：
+
+```yaml
+      - name: Static quality gates
+        run: |
+          python scripts/check_doc_drift.py
+          - name: Dashboard bundle in sync      # ← 缩进 10 > run: 键的 8
+            run: python scripts/build_dashboard_bundle.py --check
+```
+
+`run: |` 是**块标量**：其后所有缩进比 `run:` 键**更深**的行都是字符串内容。
+那 5 个 `- name:` 于是不是 step，是 shell 脚本的行 ⇒ bash 执行
+`- name: Dashboard bundle in sync` ⇒ 报 `-: command not found` ⇒ 整个
+`Static quality gates` 步骤 exit 127。
+
+**后果不是"红"，是"没跑"**：`build_dashboard_bundle.py --check`、
+`check_all_claims.py`、`check_doc_counts.py`、`check_enqueue_skeleton_unique.py`、
+`check_job_poll_unique.py` 在 CI 上**一次都没真正执行过**。
+
+**为什么这么久没人发现**：引入于 `1cda27af1`（R45 dashboard 拆分），
+此后一直被 pytest 的红灯**挡在前面** —— pytest 先失败，那个步骤根本轮不到执行，
+缩进错误零暴露。R51 删掉画布 D 让 pytest 转绿，它才浮出来。
+
+### 防
+
+**门禁⑩ `scripts/check_ci_workflow.py`**：把每个 `run: |` 块标量的**实际内容**
+抠出来，若内容里出现 `- name:` / `- uses:` / `- run:` 开头的行 ⇒ step 被吞，rc=1。
+**不用 PyYAML**（CI 装了 pyyaml，本仓 `.venv` 没有；门禁不该依赖装不装得上的包）。
+已用 `1cda27af1` 的真实坏文件验证能抓到，并接进 `selftest_gates`（9 道 → 10 道）。
+
+### 判据（这一类的通用判据）
+
+> **「CI 绿」不等于「门禁在守」。** 判断一道门禁有没有效，要看三件事：
+> ① 它在不在 `ci.yml` 里；② **它那一行到底有没有被执行**（日志里能 grep 到）；
+> ③ 它的退出码真的被 `set -e` 传播了吗。
+>
+> 本仓吃过**三类**同源问题，全部是「只产生看不见、不产生测试失败」：
+> R45 的恒返回 0 门禁、R49 的判据依赖本机环境、R52 的 YAML 缩进吞 step。
+> 共同点：**每一个都需要人肉去查一次 CI 日志才能发现**。

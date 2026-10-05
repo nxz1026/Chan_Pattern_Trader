@@ -277,18 +277,33 @@ Dashboard 静态文件位于 `dashboard/`，Nginx/systemd 模板见 `deploy/READ
 
 ## 质量门
 
-CI（`.github/workflows/ci.yml`）在 **Python 3.12 与 3.14 两个版本**上各跑一遍以下 6 条，
+CI（`.github/workflows/ci.yml`）在 **Python 3.12 与 3.14 两个版本**上各跑一遍，
 逐条执行、任一失败即红：
 
 ```bash
+python scripts/selftest_gates.py                # 门禁自检，必须排最前
 pytest tests -rsq
 ruff check cpt tests scripts
 ruff format --check cpt tests scripts
 mypy cpt scripts
 lint-imports                                    # 4 条分层契约
 python scripts/check_sql_layering.py           # SQL 只许在 adapters/storage（R24 新增）
+python scripts/check_storage_failure_semantics.py   # 门禁②
+python scripts/check_doc_drift.py               # 门禁③
+python scripts/build_dashboard_bundle.py --check    # bundle 必须与 dash-*.js 同步
+python scripts/check_all_claims.py              # 门禁④
+python scripts/check_doc_counts.py              # 门禁⑤
+python scripts/check_enqueue_skeleton_unique.py # 门禁⑥
+python scripts/check_job_poll_unique.py         # 门禁⑦
+python scripts/check_ci_workflow.py             # 门禁⑩（R51 新增）
 vulture --min-confidence 60 cpt whitelist.py    # 死代码审计
 ```
+
+> ⚠️ **R51 更新**：这段清单以前只写了「6 条」，因为**另外 5 个门禁被 YAML 缩进
+> 整段吞进 `run: |` 的块标量里**，bash 把 `- name: ...` 当命令执行、报
+> `-: command not found`、整个步骤 exit 127 —— 它们在 CI 上**一次都没真跑过**。
+> 引入于 `1cda27af1`（R45 dashboard 拆分），被 pytest 的红灯挡在前面，从未暴露。
+> 门禁⑩ `check_ci_workflow.py` 就是为这类错加的：**清单必须与 ci.yml 逐条对得上**。
 
 四点容易记错，都是踩过的坑：
 
@@ -300,6 +315,11 @@ vulture --min-confidence 60 cpt whitelist.py    # 死代码审计
   别处符号的真实使用；框架回调改由 `whitelist.py` 逐条登记。
 - **`check_sql_layering.py` 管的是 import-linter 管不了的那一半**。import-linter
   查依赖方向，查不了「职责有没有放对层」。
+- **门禁自检必须排在最前**。顺序反了的话，一个恒返回 0 的门禁会把整条链
+  伪装成绿的 —— R45 那天就有一个门禁恒返回 0，「全绿」只是它什么都没查。
+- **`check_ci_workflow.py`（门禁⑩）查的是 CI 自己**。YAML 块标量会把缩进更深的
+  行吞成字符串，step 一旦被吞就**既不报错也不执行**，只留下一条看不懂的
+  `-: command not found`。这类错没有任何测试能发现，只能靠一道门禁盯住。
 
 > Windows 开发机上有几个**已知且与代码无关**的基线偏差（`fcntl` / 无浏览器）：
 > `a_share_pool.py` 顶层 `import fcntl` 导致该模块在 Windows 不可导入
