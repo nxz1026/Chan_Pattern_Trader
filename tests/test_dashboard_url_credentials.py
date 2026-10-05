@@ -88,10 +88,38 @@ def _helper_source() -> str:
     return "\n\n".join(out)
 
 
+def _url_safety_source() -> str:
+    """``dashboard/url_safety.js`` 的**真源码**（原样，不抠函数体）。
+
+    ⚠️ R50：这条是**修一个假阴性的关键**。R45 把凭据消毒收敛成唯一实现
+    ``url_safety.js`` 之后，``resolveUrl`` / ``safeFetchUrl`` 都变成了
+    **薄委托**：
+
+        const shared = window.CPT_URL;
+        if (shared && typeof shared.urlObject === "function") { ... }
+        const url = new URL(endpoint, window.location.href);   // ← 兜底，无 try
+
+    而 ``try/catch``（"解析不了就返回 null"）**只存在于 url_safety.js 里**。
+    沙箱若只抠 dashboard.js 那两个函数体，``window.CPT_URL`` 恒为 undefined ⇒
+    永远走**兜底分支** ⇒ ``new URL("http://", base)`` 直接抛 ``ERR_INVALID_URL``。
+
+    结果就是 ``test_safe_fetch_url_keeps_endpoint_when_unresolvable`` 在
+    node v22 上红 —— 但它红的**原因不是产品代码坏了**（浏览器里 url_safety.js
+    先加载，走的是 shared.safe，返回原值），而是**沙箱没搭成页面真正的样子**。
+    这类「测试失真」比测试直接失败危险：它会让人去改本来正确的业务代码。
+
+    ⇒ 沙箱必须按 ``index.html`` 的真实顺序把 url_safety.js 放在最前面
+    （``tests/test_url_safety_loads_before_every_consumer`` 守的就是那个顺序）。
+    """
+    path = ROOT / "dashboard" / "url_safety.js"
+    assert path.is_file(), "dashboard/url_safety.js 不存在 —— R45 的唯一实现被删了？"
+    return path.read_text(encoding="utf-8")
+
+
 def _run(body: str) -> dict:
     """把 helper 注入 node 沙箱并执行 ``body``（body 需 return 一个对象）。
 
-    两个踩过的坑，都很隐蔽：
+    三个踩过的坑，都很隐蔽：
 
     1. ``body`` 必须包在 IIFE 里 —— ``node -e`` 的顶层不允许 ``return``
        （SyntaxError: Illegal return statement）。
@@ -99,9 +127,13 @@ def _run(body: str) -> dict:
        ``JSON.stringify(...)``。本沙箱里的 node 构建会把「顶层表达式语句」
        的结果直接丢掉（rc=0 但 stdout 为空），于是测试会以
        "list index out of range" 这种与被测代码毫无关系的报错失败。
+    3. R50：**必须先加载 url_safety.js**（见 :func:`_url_safety_source`）。
+       只抠 dashboard.js 的两个函数体 ⇒ ``window.CPT_URL`` 是 undefined ⇒
+       测的是 R45 之后**再也不会在浏览器里执行**的兜底分支。
     """
     script = f"""
 const window = {{ location: {{ href: "about:blank" }} }};
+{_url_safety_source()}
 {_helper_source()}
 
 console.log(JSON.stringify((function () {{
@@ -134,10 +166,52 @@ def test_helper_source_actually_clears_both_fields() -> None:
     只靠上面的 node 用例是不够的：CI/Oracle 可能没有 node，而这条 bug
     恰恰是「静默退化成离线」—— 最需要它在任何环境都被挡住。
     所以源码层面也钉一道：清空动作必须同时覆盖 username 与 password。
+
+    ⚠️ R50：判据必须是**唯一实现** ``url_safety.js``，不能只看 dashboard.js
+    的兜底分支。R45 收敛之后，dashboard.js 里那两行已经是「shared 缺席时」
+    的死路径 —— 断言它只能证明死代码没被改，证明不了产品行为。
+    """
+    body = _url_safety_source()
+    assert 'url.username = ""' in body, "url_safety.js 没有清空 username"
+    assert 'url.password = ""' in body, "url_safety.js 没有清空 password"
+
+
+def test_sandbox_actually_loads_url_safety() -> None:
+    """**沙箱失真守门**（R50）。
+
+    :func:`_run` 若哪天漏了 url_safety.js，上面所有 node 用例**仍然会绿** ——
+    只是测的不再是浏览器里真正跑的那条路径。这就是「测试静默失效」：
+    比红更危险，因为红会被人看见。
+
+    ⇒ 直接断言沙箱里 ``window.CPT_URL`` 真的被装上了，且两个方法都在。
+    """
+    got = _run(
+        """
+        return {
+          hasShared: typeof window.CPT_URL === "object" && window.CPT_URL !== null,
+          hasSafe: typeof (window.CPT_URL || {}).safe === "function",
+          hasUrlObject: typeof (window.CPT_URL || {}).urlObject === "function",
+        };
+        """
+    )
+    assert got["hasShared"], "沙箱没加载 url_safety.js —— node 用例已失真（见 _url_safety_source）"
+    assert got["hasSafe"] and got["hasUrlObject"], (
+        "window.CPT_URL 缺 safe/urlObject，url_safety.js 被改坏了"
+    )
+
+
+def test_dashboard_js_thin_delegate_still_has_fallback() -> None:
+    """dashboard.js 的兜底分支**不能被删**。
+
+    R45 之后它确实是浏览器里走不到的路径，但它是 url_safety.js 缺席时
+    （加载顺序被改坏、脚本 404）唯一的防线。删掉它等于把一次「加载顺序错」
+    升级成「白屏 + 抛异常」。
     """
     body = _helper_source()
-    assert 'url.username = ""' in body, "resolveUrl 没有清空 username"
-    assert 'url.password = ""' in body, "resolveUrl 没有清空 password"
+    assert "window.CPT_URL" in body, "dashboard.js 的 helper 不再委托唯一实现（R45 收敛被回退？）"
+    assert 'url.username = ""' in body and 'url.password = ""' in body, (
+        "dashboard.js 兜底分支丢了凭据清空 —— url_safety.js 缺席时会漏凭据"
+    )
 
 
 def test_resolved_url_is_actually_fetchable() -> None:

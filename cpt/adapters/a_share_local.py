@@ -413,6 +413,14 @@ def fetch_latest_raw_close(code: str) -> float | None:
 
     拿不到（无 psycopg / DB 不可达 / 该代码无数据）返回 ``None``，**不抛**：
     调用方会退回后复权价。
+
+    # gate: allow-silent: 拿不到就退回后复权价，不崩 —— 与
+    # ``cpt/web/a_share_routes.py:154`` 的调用点契约一致：那里的消费方
+    # ``_summarize`` 显式写了 ``rec.get("raw_close") if ... is not None
+    # else rec.get("price")``，``None`` 是**被处理的正常分支**而非故障。
+    # 且本函数自己 ``with psycopg.connect(...)`` 开连接、用完即弃，
+    # **不复用调用方的连接**，所以吞掉不会把同连接后续语句拖进
+    # aborted 事务（那才是门禁担心的放大路径）。
     """
     try:
         import psycopg  # noqa: PLC0415

@@ -298,6 +298,51 @@ def _install_fake_psycopg(
     return logs
 
 
+def _cli_missing_init(missing_cli: Path) -> Any:
+    """造一个「CLI 指向不存在文件」的 ``WindSourceClient.__init__`` 替身（R50）。
+
+    **不替换整个类，也不注入假 runner** —— 只把构造参数里的 ``cli_script``
+    钉到不存在的路径。这样：
+
+    - ``availability()`` 走的是**真实实现**，按真实顺序判到
+      ``if not self._cli_script.is_file(): return False, "wind_cli_missing:..."``；
+    - ``call()`` 走的是**真实实现**，按真实逻辑抛 ``WindUnavailableError``；
+    - ``_wind_fallback()`` 的 ``except WindUnavailableError`` 分支因此被真实走到。
+
+    换句话说：被钉死的只是**环境前提**，被验证的是**产品行为**。
+
+    ⚠️ 形参名故意**不叫** ``cli_script``：内层关键字形参同名会遮蔽闭包变量，
+    ``None`` 分支就回落到 ``DEFAULT_CLI_SCRIPT``（本机真实存在的那个文件），
+    availability 照样返回 True，替身静默失效。踩过。
+    """
+    from cpt.adapters import wind_source as wind_mod
+
+    real_init = wind_mod.WindSourceClient.__init__
+    assert not missing_cli.is_file(), f"替身要求 CLI 路径不存在，但 {missing_cli} 在"
+
+    def patched(
+        self: Any,
+        *,
+        cli_script: Path | None = None,
+        config_path: Path | None = None,
+        ledger_path: Path | None = None,
+        node: str | None = None,
+        timeout: float = 90.0,
+        runner: Any = None,
+    ) -> None:
+        real_init(
+            self,
+            cli_script=cli_script if cli_script is not None else missing_cli,
+            config_path=config_path,
+            ledger_path=ledger_path,
+            node=node,
+            timeout=timeout,
+            runner=runner,
+        )
+
+    return patched
+
+
 def _prepare_main(
     script: Any,
     monkeypatch: Any,
@@ -396,8 +441,26 @@ def test_main_wind_fallback_degrades_when_wind_missing(
 ) -> None:
     """Wind 不可用（CI 的常态：没有 CLI、没有密钥）→ 记原因、继续，返回码仍是 0。
 
-    这里**不注入假 runner**：走的就是真实 ``WindSourceClient.availability()``。
+    ⚠️ R50：这条原先**不注入任何 Wind 替身**，直接吃真实环境的
+    ``WindSourceClient.availability()``。那等于把「这台机器没装 Wind」
+    当成测试前提 —— 而本机三件套齐全（CLI 在、密钥在、node 可解析），
+    ``availability()`` 返回 ``(True, "")``，于是走进 R31 的基准闸分支，
+    产出 ``wind_basis_unknown`` 而不是本用例要的 ``wind_unavailable``。
+
+    **症状**：同一份代码在 Oracle 上绿、在本机红，CI 换台机器结果就变。
+    **根因**：判据依赖环境。⇒ 改成显式制造「不可用」（见 :func:`_cli_missing_init`）。
+
+    仍然**不注入假 runner**：``availability() → call() → WindUnavailableError``
+    这条异常链是真实的，被钉死的只有 CLI 路径这一个环境前提。
     """
+    from cpt.adapters import wind_source as wind_mod
+
+    monkeypatch.setattr(
+        wind_mod.WindSourceClient,
+        "__init__",
+        _cli_missing_init(Path("/nonexistent/wind-mcp-skill/scripts/cli.mjs")),
+        raising=True,
+    )
 
     def boom(code: str, *, days: int = 0) -> Any:
         raise script.ASharePublicError("腾讯不供该标的后复权")
@@ -410,7 +473,86 @@ def test_main_wind_fallback_degrades_when_wind_missing(
 
     assert rc == 0, "Wind 接不通绝不能把整轮回填搞崩"
     assert "wind_unavailable" in caplog.text
+    assert "wind_cli_missing" in caplog.text, "降级理由必须说清是 CLI 缺失，便于运维定位"
     assert "本地源permanent失败" in caplog.text  # 两类原因必须可分
+
+
+def test_main_wind_fallback_never_probes_wind_when_local_succeeds(
+    script: Any, monkeypatch: Any, caplog: Any
+) -> None:
+    """本地源成功 ⇒ 连 ``availability()`` 都不该探，更不该发 Wind 请求。
+
+    这是上面那条的**镜像守卫**，也是本机（Wind 三件套齐全）唯一能验证
+    「兜底判定写对了」的用例。上一条把 CLI 指向不存在的文件来制造「不可用」，
+    如果哪天 ``main()`` 的兜底判断写反了 —— 比如无条件探一次 availability、
+    或在本地成功时也去问 —— 只有「不可用」那一条测试发现得了。
+
+    ⚠️ 探活不是免费的：真发一次 Wind 调用会**消耗真实额度**（见
+    ``wind_source`` 模块 docstring 的配额纪律）。所以这里把 availability
+    也 spy 住：连探都不许探。
+    """
+    from cpt.adapters import wind_source as wind_mod
+
+    probe: list[str] = []
+    real_availability = wind_mod.WindSourceClient.availability
+
+    def spy_availability(self: Any) -> tuple[bool, str]:
+        probe.append("availability")
+        return real_availability(self)
+
+    monkeypatch.setattr(wind_mod.WindSourceClient, "availability", spy_availability)
+    monkeypatch.setattr(
+        script,
+        "fetch_wind_factor_rows",
+        lambda code: pytest.fail("本地源已成功，不该调用 Wind 兜底"),
+    )
+    monkeypatch.setattr(
+        script,
+        "fetch_tx_factor_rows",
+        lambda code, *, days=0: [
+            script.FactorRow(code=code, trade_date="2026-09-30", hfq_factor=1.5)
+        ],
+    )
+    _prepare_main(script, monkeypatch, ["600519"])
+
+    with caplog.at_level("INFO", logger="factor_backfill"):
+        assert script.main(["--mode", "full", "--wind-fallback", "--sleep-ms", "0"]) == 0
+
+    assert probe == [], f"本地源成功时连 availability 都不该探（会消耗真实额度）：{probe}"
+    assert "Wind 兜底" not in caplog.text, f"本地源已成功却打了 Wind 兜底日志：\n{caplog.text}"
+    assert "新增 1 行" in caplog.text
+
+
+def test_main_wind_fallback_degrades_under_real_availability(
+    script: Any, monkeypatch: Any, caplog: Any
+) -> None:
+    """**真实 availability()** 下，兜底失败必须降级不崩，且理由落在 ``wind_*`` 族。
+
+    这条刻意**不**改 availability，让它按真实环境判定：CI 上返回不可用、
+    本机返回可用。两种环境下 ``rc`` 都必须是 0，日志都必须说清是哪一档
+    （``wind_unavailable`` / ``wind_error`` / ``wind_quota`` / ``wind_empty`` /
+    ``wind_basis_*``）—— 这样「环境变了」不再等于「测试红了」。
+
+    本地一行因子都没有 ⇒ 基准闸必然拒绝（overlap=0 < ``WIND_BASIS_MIN_OVERLAP``），
+    所以不必真发 Wind 请求就能走到「取到了但不可信」这一档，**不消耗任何额度**。
+    """
+    from cpt.adapters import wind_source as wind_mod
+
+    def boom(code: str, *, days: int = 0) -> Any:
+        raise script.ASharePublicError("腾讯不供该标的后复权")
+
+    monkeypatch.setattr(script, "fetch_tx_factor_rows", boom)
+    _prepare_main(script, monkeypatch, ["600519"])
+
+    with caplog.at_level("INFO", logger="factor_backfill"):
+        rc = script.main(["--mode", "full", "--wind-fallback", "--sleep-ms", "0", "--dry-run"])
+
+    assert rc == 0, "Wind 兜底任何一档失败都不能把整轮回填搞崩"
+    assert "wind_" in caplog.text, f"降级理由必须带 wind_ 前缀以便运维分流：\n{caplog.text[-400:]}"
+    assert "本地源permanent失败" in caplog.text
+    # 真值写进断言信息：具体哪一档取决于环境，测试不绑它
+    ok, reason = wind_mod.WindSourceClient().availability()
+    assert ok or reason, "availability() 必须给出可解释的真值"
 
 
 def test_main_wind_fallback_keeps_local_rows_untouched(
