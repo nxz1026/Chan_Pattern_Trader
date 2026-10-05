@@ -44,7 +44,7 @@ EXPECTED_SCRIPT_ORDER = [
     "./vendor/plotly-finance.min.js",
     "./canvas_b.js",
     "./canvas_c.js",
-    "./canvas_d.js",
+    # R51：./canvas_d.js 随画布 D 下线删除
     "./dashboard.bundle.js",
 ]
 
@@ -100,7 +100,7 @@ def test_registry_defines_contract() -> None:
 
 
 def test_canvas_modules_register_their_ids() -> None:
-    for canvas_id, filename in (("B", "canvas_b.js"), ("C", "canvas_c.js"), ("D", "canvas_d.js")):
+    for canvas_id, filename in (("B", "canvas_b.js"), ("C", "canvas_c.js")):
         source = (DASHBOARD / filename).read_text(encoding="utf-8")
         assert f'window.CPT_CANVASES.register("{canvas_id}"' in source, (
             f"{filename} 未注册画布 {canvas_id}"
@@ -111,17 +111,16 @@ def test_canvas_modules_register_their_ids() -> None:
 
 
 def test_canvas_modules_use_vendored_libraries_not_cdn() -> None:
-    for filename in ("canvas_b.js", "canvas_c.js", "canvas_d.js"):
+    for filename in ("canvas_b.js", "canvas_c.js"):
         source = (DASHBOARD / filename).read_text(encoding="utf-8")
         assert not ABSOLUTE_ASSET_RE.search(source), f"{filename} 里出现 CDN 外链"
     assert "vendor/lightweight-charts.standalone.production.js" in (
         DASHBOARD / "canvas_b.js"
     ).read_text(encoding="utf-8")
     assert "vendor/plotly-finance.min.js" in (DASHBOARD / "canvas_c.js").read_text(encoding="utf-8")
-    # 画布 D 的 iframe 资产由 vendorBase() 拼出来，必须指向 vendor 目录
-    assert 'replace(/dashboard\\.css.*$/, "vendor/")' in (DASHBOARD / "canvas_d.js").read_text(
-        encoding="utf-8"
-    )
+    # R51：原第 3 条「画布 D 的 iframe 资产由 vendorBase() 拼出来，必须指向 vendor
+    # 目录」随 canvas_d.js 删除而作废 —— 现在唯一用到 iframe 的是 plotly 图，
+    # 上面那条 canvas_c 的 vendor 断言已经把「禁 CDN」这件事盯住了。
 
 
 def test_dashboard_dispatches_through_registry() -> None:
@@ -136,7 +135,7 @@ def test_dashboard_dispatches_through_registry() -> None:
         'url.searchParams.set("canvas", wanted)',
         'new CustomEvent("cpt:canvas-changed"',
     ):
-        assert token in source, f"dashboard.js 缺少画布分发关键片段：{token}"
+        assert token in source, f"看板 JS 缺少画布分发关键片段：{token}"
 
 
 def test_snapshot_query_param_overrides_attribute() -> None:

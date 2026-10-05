@@ -261,7 +261,7 @@ DASHBOARD_JS_ORDER = (
     "canvas_registry.js",
     "canvas_b.js",
     "canvas_c.js",
-    "canvas_d.js",
+    # R51：canvas_d.js 随画布 D 下线删除。
     "market_a_share.js",
     "inspection_panel.js",
     "dash-core.js",  # R45 拆分：核心 + boot（必须最先）
@@ -285,6 +285,11 @@ def dashboard_js(*, strip_comments: bool = False) -> str:
     「测试静默失效」比「测试直接失败」危险得多。
 
     ⇒ 统一走这里，读的是**全部**模块的有序拼接。
+
+    R51 补记：``dashboard/dashboard.js`` **本就不在这个列表里** —— R45 拆分后
+    index.html 早已只加载 ``dashboard.bundle.js``，那个 4925 行的文件成了
+    无入口的孤儿。本轮按用户指示把它删了；本助手读的一直是 ``dash-*.js``，
+    契约测试的覆盖面不受影响。
 
     :param strip_comments: 去掉 ``//`` / ``/* */`` 注释后再返回
         （用于「这个 fetch 出口有没有走 safeUrl」这类纯源码断言）。

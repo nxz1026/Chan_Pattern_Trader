@@ -1,4 +1,4 @@
-﻿<!DOCTYPE html>
+<!DOCTYPE html>
 <html lang="zh-CN" data-view="readonly">
   <head>
     <meta charset="utf-8" />
@@ -585,9 +585,10 @@
       </p>
     </noscript>
 
-    <!-- R16-5 四画布：注册表必须最先加载（defer 按文档顺序执行），
+    <!-- R16-5 画布 A/B/C：注册表必须最先加载（defer 按文档顺序执行），
          画布模块次之，dashboard.bundle.js 最后 —— 它 boot() 时要读到完整注册表。
-         vendor 资产全部本地内联，无任何 CDN 请求（总计划决策 E2）。 -->
+         vendor 资产全部本地内联，无任何 CDN 请求（总计划决策 E2）。
+         R51：画布 D 已下线，canvas_d.js 与 /api/canvas/wbt 一并移除。 -->
     <!-- ⚠️ R45：必须最先加载。凭据消毒的唯一实现，canvas_* / market_a_share /
          inspection_panel 都在它之前用 window.CPT_URL.safe。 -->
     <script src="./url_safety.js" defer></script>
@@ -597,7 +598,6 @@
     <script src="./vendor/plotly-finance.min.js" defer></script>
     <script src="./canvas_b.js" defer></script>
     <script src="./canvas_c.js" defer></script>
-    <script src="./canvas_d.js" defer></script>
     <script src="./market_a_share.js" defer></script>
     <!-- R38：运行巡检与水位面板（自带轮询，不依赖 dashboard.bundle.js 的内部状态）。
          ⚠️ 必须排在 dashboard.bundle.js **之前** —— 契约

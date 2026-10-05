@@ -65,13 +65,17 @@ def _node() -> str:
 
 
 def _helper_source() -> str:
-    """从 dashboard.js 里原样抠出 resolveUrl / safeFetchUrl 两个函数体。"""
+    """从看板 JS（原样拼接 dash-*.js）里抠出 resolveUrl / safeFetchUrl 两个函数体。
+
+    R51：`dashboard/dashboard.js` 已删除，这里读的一直是 conftest 的
+    ``dashboard_js()``（dash-*.js 有序拼接），断言语义不变。
+    """
     js = dashboard_js()
     out: list[str] = []
     for name in (_HELPER, _SAFE):
         marker = f"function {name}("
         start = js.find(marker)
-        assert start >= 0, f"dashboard.js 里找不到 {name}() —— R44 的修复被回退了？"
+        assert start >= 0, f"看板 JS 里找不到 {name}() —— R44 的修复被回退了？"
         depth = 0
         i = js.find("{", start)
         assert i >= 0
@@ -201,16 +205,19 @@ def test_sandbox_actually_loads_url_safety() -> None:
 
 
 def test_dashboard_js_thin_delegate_still_has_fallback() -> None:
-    """dashboard.js 的兜底分支**不能被删**。
+    """看板 helper 的兜底分支**不能被删**（现居 ``dash-core.js``）。
 
     R45 之后它确实是浏览器里走不到的路径，但它是 url_safety.js 缺席时
     （加载顺序被改坏、脚本 404）唯一的防线。删掉它等于把一次「加载顺序错」
     升级成「白屏 + 抛异常」。
+
+    R51：`dashboard/dashboard.js` 已删除；本测试读的是 conftest 拼出的
+    ``dash-*.js``，断言对象未变。
     """
     body = _helper_source()
-    assert "window.CPT_URL" in body, "dashboard.js 的 helper 不再委托唯一实现（R45 收敛被回退？）"
+    assert "window.CPT_URL" in body, "看板 helper 不再委托唯一实现（R45 收敛被回退？）"
     assert 'url.username = ""' in body and 'url.password = ""' in body, (
-        "dashboard.js 兜底分支丢了凭据清空 —— url_safety.js 缺席时会漏凭据"
+        "兜底分支丢了凭据清空 —— url_safety.js 缺席时会漏凭据"
     )
 
 
@@ -421,13 +428,14 @@ def test_every_fetch_exit_goes_through_safe_url() -> None:
     ``market_a_share`` ×2（热门池 / 自选增删），以及 ``dashboard.js`` 自己的
     LLM explain POST。实测在带凭据的页面上这 4 个会各自抛
     "Request cannot be constructed from a URL that includes credentials"。
+
+    R51：``canvas_d`` 随画布 D 下线，从名单里划掉；剩下的 3 个漏网文件照旧盯着。
     """
     offenders: list[str] = []
     # ⚠️ 名单按「**真的发请求**」列，不按文件名列。
     #   dash-chart.js / dash-alert.js **一次 fetch 都没有**（纯 SVG 绘制 /
     #   Notification API），要求它们「委托 window.CPT_URL」本身是错的判据。
     for name in (
-        "canvas_d.js",
         "inspection_panel.js",
         "market_a_share.js",
         "dashboard.bundle.js",
@@ -467,7 +475,6 @@ def test_credential_stripping_has_a_single_implementation() -> None:
     #    ``dash-alert.js``（Notification API）**一次 fetch 都没有**，
     #    要求它们「委托 window.CPT_URL」本身是错的判据。
     for name in (
-        "canvas_d.js",
         "inspection_panel.js",
         "market_a_share.js",
         "dashboard.bundle.js",

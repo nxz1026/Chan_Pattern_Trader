@@ -81,7 +81,7 @@
 | 10 | `probe` | `ccxt_source.py:212` / `wind_source.py:428` | 各自探活（Wind 还涉及额度纪律） |
 | 11 | `compute_structures` | `czsc_chanlun.py:159` / `native_chanlun.py:30` / `reference_chanlun.py:132` + `:225` | 四个后端适配器，**接口相同实现不同** |
 | 12 | `resolve` | `czsc_chanlun.py:187` / `native_chanlun.py:60` | 同上 |
-| 14 | `_stamp` | `application/canvas_wbt.py:374` / `domain/signal.py:142` | 前者是把毫秒戳格式化成 `%Y-%m-%d`（缺失回 `—`）；后者是"已有值不覆盖、缺失才写入"的时间戳保留语义。**同名不同义** |
+| 14 | `_stamp` | ~~`application/canvas_wbt.py:374`~~ / `domain/signal.py:142` | ~~前者是把毫秒戳格式化成 `%Y-%m-%d`（缺失回 `—`）~~；后者是"已有值不覆盖、缺失才写入"的时间戳保留语义。**R51 画布 D 下线，`canvas_wbt.py` 已删 ⇒ 这条「同名不同义」只剩单边** |
 | 16 | `_infer_interval_ms` | `application/dashboard.py:70` / `application/replay.py:327` | 看板与回放各自推断周期，**参数与回落策略不同** |
 | 17 | `main` | `application/replay.py:448` / `web/__main__.py:884` / `web/a_share.py:95` / `scripts/factor_backfill.py:220` | 四个入口，**同名不同义** |
 | 18 | `_resolve_level` | `domain/bi.py:67` / `domain/trend_type.py:67` / `domain/zhongshu.py:91` | 三种结构各自解析 level |
@@ -171,6 +171,9 @@ tests/test_dashboard_health.py:49          tests/test_web_a_share_routes.py:124
 tests/test_dashboard_http.py:22
 ```
 
+> **R51**：`tests/test_web_canvas_wbt.py` 随画布 D 下线删除 ⇒ 上面这份名单
+> 当时的 8 处/7 文件，现在少一处。收口结论不变（样板已全进 `conftest.served`）。
+
 > **交接文档写的是"7 处"，那是按文件数算的；按出现次数是 8 处。**
 
 每份都要自己写 `shutdown` / `server_close` / `thread.join(timeout=2)` 三连，
@@ -194,6 +197,10 @@ tests/test_dashboard_http.py:22
 唯一重叠是那个 7 键 `set(payload)` 断言，但它们断言的是**不同 payload**
 （一个 `unavailable`、一个 6 根 candles）—— 这是同一契约在**两个层**各自钉住，
 不是复制粘贴。**结论：保留两份。**
+
+> **R51 作废**：画布 D 与 `/api/canvas/wbt` 已按用户指示下线，这两份测试连同
+> `application/canvas_wbt.py`、`dashboard/canvas_d.js` 一并删除。本节原结论
+> 「保留两份」已不适用，留档备查。
 
 ---
 

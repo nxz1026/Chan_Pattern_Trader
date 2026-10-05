@@ -5,12 +5,17 @@
 2026-10-02 真机实测发现：JSON API 有一半错误响应**是 HTML 错误页**。最刺眼的是
 **同一个路由里两种形状并存**：
 
-    /api/canvas/wbt?start_ms=abc&end_ms=def  ->  400  Content-Type: text/html
-    /api/canvas/wbt?code=ZZZZZZ              ->  400  Content-Type: application/json
+    /api/dashboard/a-share/snapshot?width_k=abc  ->  400  Content-Type: text/html
+    /api/dashboard/a-share/snapshot?code=ZZZZZZ  ->  400  Content-Type: application/json
 
 客户端 `await response.json()` 遇到 HTML 会直接抛 `SyntaxError` —— 而前端
 恰恰是靠 `error.code` 做分支的（`invalid_code` / `not_json_safe` / …）。
 一半错误走 JSON、一半走 HTML，等于让前端的错误处理随机失效。
+
+> **R51 留档**：当年钉住这条契约的样本是 `/api/canvas/wbt?start_ms=abc&end_ms=def`
+> 与 `?code=ZZZZZZ` 这对「同路由两种形状」。画布 D 已下线，该端点除名（回 404），
+> 样本换成仍在线的 `/api/dashboard/a-share/snapshot` 的 `width_k` 与 `code` 两条
+> 错误路径，契约本身不变；除名后的 404 也一并留在 `_BAD_REQUESTS` 里盯着。
 
 ## 为什么不用 `send_error` 就算完
 
@@ -46,13 +51,16 @@ _BAD_REQUESTS = [
     ("/api/dashboard/snapshot?start_ms=abc&end_ms=def", 400),
     ("/api/dashboard/snapshot?start_ms=5&end_ms=1", 400),
     ("/api/dashboard/inspect?bar_index=abc", 400),
-    ("/api/canvas/wbt?start_ms=abc&end_ms=def", 400),
-    ("/api/canvas/wbt?code=ZZZZZZ", 400),
+    ("/api/dashboard/a-share/snapshot?width_k=abc", 400),
+    ("/api/dashboard/a-share/snapshot?code=ZZZZZZ", 400),
     ("/api/dashboard/export?start_ms=abc", 400),
     ("/api/dashboard/compare?left=1", 400),
     ("/api/dashboard/structure-events/timeline", 400),
     ("/api/dashboard/signal-stats?days=abc", 400),
     ("/api/dashboard/nope", 404),
+    # R51：画布 D 下线 ⇒ 端点除名。删路由后若错落到非 JSON 分支（send_error /
+    # 静态目录兜底），这里立刻红 —— 正是本文件要守的那条契约。
+    ("/api/canvas/wbt", 404),
 ]
 
 #: **刻意不在上面那张表里**的路径：`?level=abc`。它的行为**随模式而变** ——
@@ -101,7 +109,7 @@ def test_error_responses_are_json(base: str, path: str, expected: int) -> None:
 
 def test_error_code_is_machine_readable(base: str) -> None:
     """``error.code`` 必须是稳定的机器可读串，不是中文散文。"""
-    _, ctype, body = _request(base, "/api/canvas/wbt?code=ZZZZZZ")
+    _, ctype, body = _request(base, "/api/dashboard/a-share/snapshot?code=ZZZZZZ")
     assert "application/json" in ctype
     code = json.loads(body)["error"]["code"]
     assert re.fullmatch(r"[a-z0-9_]+", code), f"code 不是 slug 形态：{code!r}"

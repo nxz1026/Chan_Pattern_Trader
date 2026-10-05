@@ -211,6 +211,15 @@ _ALLOW: dict[str, str] = {
     # 两份复盘的措辞是「该变量**未设** ⇒ 走 native」——
     # **代码里没有这个变量，正是那句话成立的前提**
     "CPT_CHANLUN_BACKEND": "复盘里说的是「进程环境未设它」，代码里本就不该有",
+    # R51：画布 D 下线 + dashboard.js 死代码删除。留下的文档引用都是**下线/历史
+    # 记录**（progress-log / review-dashboard-r45 / roadmap 讲的是当时的情况，
+    # duplication-triage §6 的结论已被显式标注作废），不是「这东西现在还在」。
+    "dashboard/canvas_d.js": "R51 随画布 D 下线删除；文档里的提及是历史记录/下线说明",
+    "dashboard/dashboard.js": (
+        "R51 删除（R45 拆分后已是无入口孤儿）；文档里的提及是历史记录/部署旧说明"
+    ),
+    "tests/test_canvas_wbt.py": "R51 随画布 D 下线删除；duplication-triage §6 已标注作废",
+    "tests/test_web_canvas_wbt.py": "R51 随画布 D 下线删除；duplication-triage §5.2 已标注",
 }
 
 

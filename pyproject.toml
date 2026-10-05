@@ -28,9 +28,9 @@ dev = [
 # 分型/笔的参考实现（R14，方案 C）。核心 dependencies 保持为空；
 # 只有需要 czsc 后端（生产/交叉验证）时才安装本 extra。
 chan = ["czsc==1.0.1"]
-# 画布 D（R16-5）：wbt 报告外壳。核心 dependencies 保持为空 ——
-# 没有 wbt 时 /api/canvas/wbt 返回 available=false，其余三个画布照常工作。
-report = ["wbt==0.9.1"]
+# 画布 D（R16-5）的 wbt 报告外壳。R51 起**本 extra 整体移除**：
+# 画布 D 与 /api/canvas/wbt 已按用户指示下线，wbt 及其 pandas/plotly 传递依赖
+# 不再是本仓任何运行路径所需。留档：git f7b0c5fe8:pyproject.toml。
 # 加密第二通道（R17）：ccxt 公开端点。主通道 binance_futures 零依赖，
 # 未装 ccxt 时注册表把它标成 unavailable，不影响实时看板。
 crypto = ["ccxt>=4.0"]

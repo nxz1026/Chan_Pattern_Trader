@@ -59,10 +59,10 @@
 | `storage/` | 8 | 1,867 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 门禁②；R24 只是恢复层+划边界，**不算复盘**。详见 `docs/review-storage-layer-r45.md`） |
 | `llm/` | 8 | 1,370 | ✅ **已做**（R45：全层勘察 + 3 个真 bug —— 清空进程环境 / 归类撒谎 / 单例丢弃审计回调） |
 | `adapters/` | 21 | 6,194 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 外部契约真机验证脚本 `scripts/verify_public_contracts.py`；顺带实测更正了 handoff 里 K 线缺口的量级） |
-| `application/` | 33 | 5,553 | ✅ **已做**（R45：全层勘察 + 3 个真 bug —— DB 故障被报成「缺因子」两处 + CDN 护栏后门） |
+| `application/` | 32 | 5,084 | ✅ **已做**（R45：全层勘察 + 3 个真 bug —— DB 故障被报成「缺因子」两处 + CDN 护栏后门；R51 删 `canvas_wbt.py`） |
 | `domain/` | 16 | 2,964 | ✅ **已做**（R30 语义契约门禁；R45 重扫 16 文件，**未发现需修问题** —— 递归/中枢/级别标签不变量实测通过） |
-| `web/` | 5 | 3,141 | ✅ **已做**（R29 门禁仍成立；R45 重扫 5 文件，**未发现需修问题** —— 4 处候选经真机实证均为假阳性） |
-| `dashboard/`（前端） | 7 | ~1.6 MB | ⚠️ 只被画布 D 与几个面板碰过 |
+| `web/` | 5 | 3,112 | ✅ **已做**（R29 门禁仍成立；R45 重扫 5 文件，**未发现需修问题** —— 4 处候选经真机实证均为假阳性；R51 删 `/api/canvas/wbt` 路由分支） |
+| `dashboard/`（前端） | 6 | ~1.6 MB | ⚠️ R45 勘察时只被画布 D 与几个面板碰过；**R51 画布 D 已下线** |
 | `engine/` | — | — | 🚫 2026-09-25 整层删除（四个孤儿文件，R24 未恢复） |
 
 > ⚠️ **「文件 / 行数」是快照，会随改动腐坏** —— R45 第二轮扫文档时发现
@@ -273,9 +273,10 @@ cpt/
 │   reference_backend.py ← R45：**参照侧一等后端**（czsc→腾讯两级回落）
 │   corporate_actions.py  eastmoney_actions.py  feishu.py  source_registry.py
 │   backend_factory.py  _dbconfig.py
-├── application/    用例编排（33 个模块；**不出现 SQL**）
+├── application/    用例编排（32 个模块；**不出现 SQL**）
 │   replay.py  export.py  dashboard.py  dashboard_snapshot_v2.py
-│   multi_level.py  a_share_snapshot.py  first_buy_bridge.py  canvas_wbt.py
+│   multi_level.py  a_share_snapshot.py  first_buy_bridge.py
+│                    ← R51：canvas_wbt.py 随画布 D 下线删除
 │   recommendation.py  ← R45：结构判断摘要（**买卖与价格纯确定性，
 │                          刻意不经 LLM**）；dashboard_runs.py
 │   llm_cases.py  parity_reference.py
@@ -328,7 +329,7 @@ docs/               38 份（rules.md / architecture.md / progress-log.md /
                     known-traps.md / web-api-reference.md / todo-r45-followups.md /
                     review-*-r45.md 各一份 / audit/ / archive/ …）
 deploy/             nginx/  systemd/  cron/  env/  golden/  README.md
-references/         czsc @ 701e480a（可选 extra `chan`）  wbt @ 39bb1e8a（仅可视化参考）
+references/         czsc @ 701e480a（可选 extra `chan`）  ~~wbt @ 39bb1e8a~~（R51 随画布 D 下线）
                     ⚠️ 「参照侧」= **czsc**，不是 references/ 里的某个独立实现
 ```
 
@@ -402,7 +403,7 @@ references/         czsc @ 701e480a（可选 extra `chan`）  wbt @ 39bb1e8a（�
 | 仓库 | 固定版本 | 许可证 | 复用方式 |
 |---|---|---|---|
 | czsc | `701e480a` | Apache-2.0 | 可选依赖 extra（`chan`），经反腐层复用分型/笔/力度度量/一买谓词 |
-| wbt | `39bb1e8a` | MIT | 仅作可视化与回测参考（R16 画布 D），不整体依赖 |
+| ~~wbt~~ | `39bb1e8a` | MIT | ~~仅作可视化与回测参考（R16 画布 D）~~ **R51：画布 D 下线后无任何代码引用** |
 
 **已移除（2026-09-24，G1 决议）**：`chanlun-pro`、`chanlun.py`、`chanlun_pine`。前者的分型/笔实现与缠论定义冲突（笔端点中位跨度仅 2 根原始K线，66–74% 的笔跨度不足 4 根），后两者只提供借鉴价值且引入了不可核验的溯源负担。移除依据与实测数据见 `rules.md` §7.6 与 `progress-log.md`。
 
@@ -414,7 +415,7 @@ references/         czsc @ 701e480a（可选 extra `chan`）  wbt @ 39bb1e8a（�
     一买一卖结构谓词（移植为 cpt/domain/first_buy.py，与上游逐笔数交叉验证一致）
 
 借鉴逻辑（wbt）
-    可视化报告与回测口径（R16 画布 D 参考）
+    可视化报告与回测口径（R16 画布 D 参考）—— R51 起画布 D 已下线，此块无在用代码
 
 CPT 自研（czsc 未覆盖）
     笔中枢（严格三笔重叠 + ≥3 笔 + 延伸不收缩）

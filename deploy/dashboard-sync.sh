@@ -42,8 +42,15 @@ for arg in "$@"; do
   esac
 done
 
-FILES=(index.html dashboard.css dashboard.js canvas_b.js canvas_c.js canvas_d.js
-       canvas_registry.js market_a_share.js inspection_panel.js url_safety.js)
+# R51 更正：R45 拆分后 index.html 实际加载的是 dash-*.js + dashboard.bundle.js，
+# 而这份列表还停在拆分前（dashboard.js / canvas_*.js）—— 也就是说它一直在同步
+# **线上根本不加载**的文件。canvas_d.js 随画布 D 下线删除。
+FILES=(index.html dashboard.css url_safety.js cpt_job.js
+       canvas_registry.js canvas_b.js canvas_c.js
+       market_a_share.js inspection_panel.js
+       dash-core.js dash-chrome.js dash-structure.js dash-signal.js
+       dash-chart.js dash-alert.js dash-ops.js
+       dashboard.bundle.js)
 
 [ -d "$SRC" ] || { echo "仓库里没有 $SRC" >&2; exit 1; }
 [ -d "$DEST" ] || { echo "部署目录不存在: $DEST" >&2; exit 1; }
@@ -84,7 +91,7 @@ done
 if [ "$HTTP_CHECK" -eq 1 ]; then
   echo
   echo "=== 校验：线上 HTTP 拿到的内容 ==="
-  for f in dashboard.js index.html dashboard.css; do
+  for f in dashboard.bundle.js index.html dashboard.css; do
     local_url="$PUBLIC_URL/$f"
     if curl -sk -u "$BASIC_AUTH" --max-time 15 "$local_url" -o /tmp/_cpt_http_body 2>/dev/null; then
       a=$(md5sum "$DEST/$f" | cut -d' ' -f1)

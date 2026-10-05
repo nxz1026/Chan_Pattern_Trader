@@ -24,6 +24,9 @@
  * 而「多份实现漂移」正是本仓反复吃的那类亏（三个 chanlun 后端、
  * 三份 `_dbconfig`、`_try_on_demand_factors` 的两处同源 bug）。
  *
+ * R51：画布 D 下线，漏网名单从 4 个减到 3 个（巡检面板 / 热门池 / 自选增删），
+ * 统一出口本身不变。
+ *
  * ## 契约
  *
  * `window.CPT_URL.safe(endpoint) -> string`

@@ -1183,6 +1183,7 @@
     // 的 fetch 也必须走 safeFetchUrl —— 相对路径在**带凭据的页面**上会继承
     // URL 里的 user:pwd@，撞 "Request cannot be constructed from a URL that
     // includes credentials"。这次修复漏了它们，统一出口在这里。
+    // R51：canvas_d.js 已随画布 D 下线，剩 inspection_panel / market_a_share。
     safeFetchUrl,
   };
 

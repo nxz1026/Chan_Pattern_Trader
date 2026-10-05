@@ -225,7 +225,7 @@ Wind 路径（`--source wind`）保留作交叉校验，但要积分 —— 实�
 | 仓库 | 固定版本 | 许可证 | 用途 |
 |---|---|---|---|
 | [czsc](https://github.com/waditu/czsc) | `701e480a` | Apache-2.0 | 可选依赖 extra `chan`，复用分型/新笔/力度度量/一买谓词 |
-| [wbt](https://github.com/zengbin93/wbt) | `39bb1e8a` | MIT | 可视化与回测参考（画布 D） |
+| ~~[wbt](https://github.com/zengbin93/wbt)~~ | `39bb1e8a` | MIT | ~~可视化与回测参考（画布 D）~~ **R51 随画布 D 下线，已无代码引用** |
 
 > `chanlun-pro` / `chanlun.py` / `chanlun_pine` 已于 2026-09-24 移除：前者的分型/笔
 > 实现与缠论定义冲突（笔端点中位跨度仅 2 根原始K线，66–74% 的笔跨度不足 4 根），
@@ -268,7 +268,7 @@ czsc 现在的位置是 parity 的**参照侧**（`parity_reference.py`），那
 
 | 参数 | 作用 |
 |---|---|
-| `?canvas=A\|B\|C\|D` | 选画布（A 原生 / B lightweight-charts / C plotly / D wbt 服务端报告） |
+| `?canvas=A\|B\|C` | 选画布（A 原生 / B lightweight-charts / C plotly）。~~D wbt 服务端报告~~ **R51 已下线** |
 | `?market=a_share&code=600519` | 切 A 股并指定代码 |
 | `?snapshot=<url>` | 指向固定快照（离线审计用；优先级高于 `data-snapshot-url`） |
 | `?mode=watch\|research` | 视图模式 |
@@ -313,9 +313,13 @@ vulture --min-confidence 60 cpt whitelist.py    # 死代码审计
 > 跑一遍**逐条对比失败名单** —— 条数会随环境漂，名单不会。
 > CI 跑在 ubuntu 上不受影响。
 
-CI 只装 `requirements-dev.txt`，因此 czsc/ccxt/psycopg/pandas/plotly/wbt 均不在
-CI 环境里 —— 依赖它们的测试一律走 `pytest.importorskip`，**不允许**用 mock 假装
-它们在位。
+CI 只装 `requirements-dev.txt`，因此 czsc/ccxt/psycopg 均不在 CI 环境里 ——
+依赖它们的测试一律走 `pytest.importorskip`，**不允许**用 mock 假装它们在位。
+
+> **R51 更新**：pandas/plotly/wbt 也从这份名单里划掉了 —— 画布 D 下线后
+> `cpt/` 下不再有任何 pandas/plotly import，wbt 的 extra `report` 一并删除。
+> 这正是 2026-10-05 前 CI 五连红的根因（`test_canvas_d_trust_boundary.py`
+> 在未装 pandas 的 CI 上 `ModuleNotFoundError`），随画布 D 删除而根除。
 
 首版非目标：自动下单、多交易所、LLM 参与结构判断。
 

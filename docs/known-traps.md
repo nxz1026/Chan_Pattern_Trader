@@ -50,8 +50,11 @@ grep -c "^SKIPPED" /dev/null   # 直接看 skip 原因：
 > **已修平的不一致**：`psycopg` 现在在 `a_share_local.py:103,190` 两处都是
 > `try/except ModuleNotFoundError` → 抛带安装指引的 `AShareLocalError`，
 > `a_share_routes.py:pool_payload()` 捕获后降级为 `db_error` 字段，前端不白屏。
-> 剩余 `pandas`/`plotly`（`canvas_wbt.py:158,345`）仍是裸 import —— 但画布 D
-> 走 `wbt` extra，装 `.[report]` 时连带装上 pandas/plotly，实际不会触发。
+>
+> **R51 已消解**：曾剩下的 `pandas`/`plotly` 裸 import（`canvas_wbt.py:158,345`）
+> 随画布 D 与 `report` extra 一并删除。现在 `cpt/` 下**没有任何 pandas/plotly
+> import** —— 这同时是 CI 那盏红灯（`test_canvas_d_trust_boundary.py` 因 CI 未装
+> pandas 而 `ModuleNotFoundError`）的根因，一并根除。
 
 ---
 

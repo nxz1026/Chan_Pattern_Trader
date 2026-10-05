@@ -4076,8 +4076,9 @@
     const view = buildCanvasView();
     if (!view) return null;
     // 未就绪（无 K 线 / 容器还没布局）时**不交给画布模块**：此时 view 里没有
-    // geom / windowStart / xForIndex，画布 B/C/D 拿去会算出 undefined 的请求参数
-    // （首轮审计实测：画布 D 对 /api/canvas/wbt 发了 start_ms=undefined 的 400 请求）。
+    // geom / windowStart / xForIndex，画布 B/C 拿去会算出 undefined 的参数
+    // （首轮审计实测：当时的画布 D 对 /api/canvas/wbt 发了 start_ms=undefined
+    // 的 400 请求；该画布已于 R51 下线，判据本身仍成立）。
     if (!view.ready) {
       renderCanvasPlaceholder(view);
       const empty = {
@@ -5078,6 +5079,7 @@
     // 的 fetch 也必须走 safeFetchUrl —— 相对路径在**带凭据的页面**上会继承
     // URL 里的 user:pwd@，撞 "Request cannot be constructed from a URL that
     // includes credentials"。这次修复漏了它们，统一出口在这里。
+    // R51：canvas_d.js 已随画布 D 下线，剩 inspection_panel / market_a_share。
     safeFetchUrl,
   };
 

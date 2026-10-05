@@ -1045,38 +1045,9 @@ def make_handler(
                 payload = _signal_stats_payload(days, code_filter)
             elif path.path == "/api/dashboard/watchlist":
                 payload = _watchlist_payload()
-            elif path.path == "/api/canvas/wbt":
-                # 画布 D（R16-5）：服务端用 wbt 的 HtmlReportBuilder 渲染报告片段。
-                # 客户端必须传可视窗口（start_ms/end_ms），否则只画窗口的 A/B/C
-                # 与画全量的 D 计数不相等，"四画布一致"的验收无从谈起。
-                window: tuple[int, int] | None = None
-                if query.get("start_ms") and query.get("end_ms"):
-                    try:
-                        window = (int(query["start_ms"][0]), int(query["end_ms"][0]))
-                    except ValueError:
-                        self._write_json_error(
-                            HTTPStatus.BAD_REQUEST,
-                            "window_not_int",
-                            "start_ms/end_ms must be integers",
-                        )
-                        return
-                # 延迟导入：wbt/pandas/plotly 是可选依赖，demo/加密路径不该被迫加载。
-                from cpt.application.canvas_wbt import build_canvas_d_payload  # noqa: PLC0415
-
-                # A 股模式（R17-3）：本路由是**服务端**取数的，默认拿 provider 的
-                # 加密快照。客户端画布 D 必须带上 code，否则会出现 A/B/C 画 A 股、
-                # D 画 BTCUSDT 的**跨市场错配** —— 实测 579 根加密 K 线 vs 123 根
-                # A 股 K 线同时出现在一屏上。
-                canvas_code = (query.get("code") or [""])[0].strip()
-                if canvas_code:
-                    from cpt.web import a_share_routes  # noqa: PLC0415
-
-                    try:
-                        snapshot = a_share_routes.snapshot_payload(canvas_code)
-                    except a_share_routes.InvalidCodeError as exc:
-                        self._write_json_error(HTTPStatus.BAD_REQUEST, "invalid_code", str(exc))
-                        return
-                payload = build_canvas_d_payload(snapshot, window=window)
+            # R51：画布 D（wbt 报告视图）与 `/api/canvas/wbt` 一并下线 ——
+            # 按用户指示取消该画布，端点直接除名，外部调用拿到 404 not_found。
+            # 留档：原实现见 git f7b0c5fe8:cpt/application/canvas_wbt.py。
             else:
                 self._write_json_error(HTTPStatus.NOT_FOUND, "not_found", "")
                 return

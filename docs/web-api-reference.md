@@ -13,7 +13,7 @@
 
 | 方法 | 路径 | 真机 | 用途 | 源码 |
 |---|---|---:|---|---|
-| `GET` | `/api/canvas/wbt` | `200` | 画布 D：wbt 报告视图 | `app.py` |
+| ~~`GET`~~ | ~~`/api/canvas/wbt`~~ | — | ~~画布 D：wbt 报告视图~~ **R51 已下线，回 404 `not_found`** | — |
 | `POST` | `/api/dashboard/a-share/llm/explain` | `200` | 提交一次 LLM 规则解释（写，fire-and-forget） | `app.py` |
 | `GET` | `/api/dashboard/a-share/pool` | `200` | A 股热门池 / 观察池 | `app.py` |
 | `GET` | `/api/dashboard/a-share/snapshot` | `200` | A 股单只快照 | `app.py` |
@@ -89,9 +89,14 @@ python scripts/verify_public_contracts.py    # 外部契约（adapters 层）
 | A 手写 SVG | — | 180 | 63 | 63 | 8 | 5 |
 | B | `lightweight-charts` | 180 | 63 | 63 | 8 | 5 |
 | C | `plotly-finance` | 180 | 63 | 63 | 8 | 5 |
-| D | `wbt.report.HtmlReportBuilder` | 180 | 63 | 63 | 8 | 5 |
+| ~~D~~ | ~~`wbt.report.HtmlReportBuilder`~~ | ~~180~~ | ~~63~~ | ~~63~~ | ~~8~~ | ~~5~~ |
 
 ⇒ **五项共享计数四画布完全一致，契约成立。**
+
+> **R51**：画布 D 与 `/api/canvas/wbt` 已按用户指示下线，上表 D 行作废留档。
+> 现在是**三画布**（A/B/C）——这三行才是活的契约。另记 D 当年多出的两个字段
+> `pending` / `library`（`draw()` 在异步 iframe 写完前就返回计数）随画布 D 一并消失，
+> 审计脚本若还在挑那五个键，行为不变。
 
 两个必须知道的读法陷阱：
 
@@ -99,10 +104,8 @@ python scripts/verify_public_contracts.py    # 外部契约（adapters 层）
    bis=221 / zhongshus=21 / trendTypes=9`，而画布侧是 `180 / 63 / 63 / 8 / 5`。
    差额来自**可视窗口过滤**（`applyZoomWindow`，R16-5 加的）——
    只画与当前窗口相交的结构。**两者本就不该相等**，脚本别拿它们互相比。
-2. **画布 D 多两个字段**：`pending` 与 `library`。D 是**异步渲染**（先取 wbt 报告
-   再写 iframe），`draw()` 在异步完成前就返回计数，所以带 `pending: true`。
-   `canvas_d.js` 里有注释记着为此踩过一次（`Object.assign` 把这两个字段混进
-   `counts`，首轮审计里 D 的计数多了两项）。审计脚本**必须只挑那五个键**。
+2. ~~**画布 D 多两个字段**~~（D 已下线，此陷阱随之消失；原文见 git
+   `f7b0c5fe8:docs/web-api-reference.md`）。
 
 ## R45 新增：`/api/dashboard/a-share/recommendation`
 

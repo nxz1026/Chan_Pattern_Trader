@@ -130,7 +130,8 @@
 
     function renderSwitch() {
       root.dataset.market = state.market;
-      // 画布 D 是服务端取数的，需要从 DOM 读 market/code（见 canvas_d.js marketQuery）
+      // R51：画布 D 下线，原先唯一读方 canvas_d.js 的 marketQuery 已删；
+      // 这里保留写入方，供巡检/调试从 DOM 读当前 A 股标的。
       root.dataset.aShareCode = state.market === MARKET_A_SHARE ? state.code : "";
       root.querySelectorAll("[data-market-action]").forEach((button) => {
         button.setAttribute(

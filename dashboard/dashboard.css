@@ -1455,25 +1455,9 @@ body[data-runtime-mode="offline"] .chart-canvas::after {
   font-size: var(--font-size-sm);
 }
 
-/* R30-1 画布 D 的诊断回传：iframe 里出错时，父页把它显示出来。
-   定位用（覆盖在 iframe 之上），所以要有底色才读得清。 */
-.cpt-d-diag {
-  position: absolute;
-  left: var(--space-2);
-  bottom: var(--space-2);
-  z-index: 5;
-  max-width: calc(100% - var(--space-4));
-  margin: 0;
-  padding: var(--space-1) var(--space-2);
-  border: var(--border-width) solid var(--color-error);
-  border-radius: var(--radius-sm);
-  background-color: var(--color-bg);
-  color: var(--color-error);
-  font-size: var(--font-size-sm);
-  pointer-events: none;
-  white-space: pre-wrap;
-  word-break: break-word;
-}
+/* R51：R30-1 画布 D 的 iframe 诊断回传层 `.cpt-d-diag` 随画布 D 下线移除
+ * （全仓已无写入方 —— 唯一写它的是 dashboard/canvas_d.js）。留档见 git
+ * f7b0c5fe8:dashboard/dashboard.css。 */
 
 .replay-controls {
   display: flex;
@@ -1873,14 +1857,8 @@ noscript p {
   inset: 0;
 }
 
-.cpt-canvas-d-frame {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
-  border: 0;
-  background: var(--color-bg);
-}
+/* R51：`.cpt-canvas-d-frame` 第一处定义随画布 D 下线移除（此处原为
+ * position/absolute/inset:0 的满屏 iframe 宿主）。 */
 
 /* ---- 市场切换 + A 股代码选择器（R17-3） ---- */
 .market-switch {
@@ -2063,29 +2041,10 @@ noscript p {
 .cpt-parity-legend-item i.parity-extra { background: #0969da; }
 .cpt-parity-legend-item i.parity-mismatched { background: #8250df; }
 
-/* ------------------------------------------------- 画布 D 的 wbt 报告 iframe
- *
- * ⚠️ **R45 无头浏览器实测定位的「画布 D 空白」根因**：
- * 这个类**一直没有 CSS 定义**，iframe 于是落回 **HTML 默认尺寸 300×150**
- * （实测 304×154 含边框），而父容器 `#chart-canvas` 是 924×933。
- *
- * ⇒ 报告其实**渲染了**（报告头、图例、结构预警、指标块、笔明细表、plotly 图
- * 全都在），只是被塞进一个 304px 宽的窄柱，plotly 只分到 251px ——
- * 从外面看就是「一片空白」。**不是没画，是画了但挤成一团看不见。**
- *
- * 这也解释了前几轮为什么查不出来：payload 全对、vendor 报 OK、console 干净、
- * 请求全成功 —— **唯一异常是「尺寸」，而尺寸没有任何检查覆盖**。
- * `display:block` 顺带消掉 inline 元素的下边缘空隙。
- */
-.cpt-canvas-d-frame {
-  display: block;
-  width: 100%;
-  height: 100%;
-  min-height: 880px;   /* 报告正文实测约 880px 高；给下限避免双层滚动条 */
-  border: 1px solid var(--color-border);
-  border-radius: 4px;
-  background: var(--color-panel);
-}
+/* R51：画布 D 的 wbt 报告 iframe 样式（两处 `.cpt-canvas-d-frame`）已随画布 D 下线移除。
+ * 留档：第二处那段 R45 的根因记录（iframe 落回 HTML 默认 300×150，父容器
+ * #chart-canvas 是 924×933 ⇒ 报告渲染了但挤成一团看不见）见 git
+ * f7b0c5fe8:dashboard/dashboard.css 的「画布 D 的 wbt 报告 iframe」段。 */
 
 /* ------------------------------------------------- 结构判断摘要卡（R45）
  * 目标只有一个：**一眼看懂**。所以动作词用大号字 + 四态色，

@@ -122,10 +122,13 @@ def check_params() -> list[str]:
 # ---------------------------------------------------------------- D 接口漂移
 #: 这些路径在文档里出现是**为了说明它们不存在**（幽灵接口的记录），
 #: 不算「文档声称存在」。把它们排除，否则扫描器会指着自己的说明报错。
+#: R51 新增 `/api/canvas/wbt`：画布 D 下线后端点已除名（回 404 not_found），
+#: 文档里剩下的提及是**下线记录**，同属这一类。
 _GHOST_PATHS = {
     "/api/dashboard/candles",
     "/api/dashboard/events",
     "/api/dashboard/stats",
+    "/api/canvas/wbt",
 }
 
 

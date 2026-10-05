@@ -17,7 +17,8 @@
  * ## 纪律（照抄 url_safety 的那几条）
  *
  * 1. **必须先于所有使用者加载** —— index.html 把它放在第 2 个
- *    （紧随 url_safety.js，早于 canvas_d / market_a_share / dashboard）。
+ *    （紧随 url_safety.js，早于 market_a_share / dashboard；
+ *    R51 起不再早于 canvas_d，该文件已随画布 D 下线）。
  * 2. **缺失时要响亮失败**，不静默回退一个残缺实现 ——
  *    否则"统一"只是看起来统一。
  * 3. **一切交给调用方的判定**：本模块只管"等"和"停"，

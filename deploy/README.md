@@ -44,14 +44,20 @@ Nginx 的静态根是 `/var/www/cpt-dashboard`（见 `deploy/nginx/cpt-dashboard
 更新前端 = 把 `dashboard/` 下的产物拷进去：
 
 ```bash
-sudo cp dashboard/{index.html,dashboard.css,dashboard.js,canvas_*.js,market_a_share.js} \
+# R51 更正：R45 拆分后线上加载的是 dash-*.js + dashboard.bundle.js，
+# 下面这份列表已随之更新（canvas_*.js 只剩 B/C，dashboard.js 已随画布 D 下线删除）
+sudo cp dashboard/{index.html,dashboard.css,url_safety.js,cpt_job.js,\
+canvas_registry.js,canvas_b.js,canvas_c.js,market_a_share.js,inspection_panel.js,\
+dash-*.js,dashboard.bundle.js} \
         /var/www/cpt-dashboard/
 # 首次或依赖有变时还要拷 vendor/
 sudo cp -r dashboard/vendor /var/www/cpt-dashboard/
+# 改过 dash-*.js 后必须重建 bundle，否则线上拿的是旧产物
+.venv/bin/python scripts/build_dashboard_bundle.py
 ```
 
 > ⚠️ **从 Windows 部署必须先归一化换行**（2026-10-02 R34 实测踩了两次）。
-> Windows 检出的 `dashboard.js` 是 **CRLF**，仓里的规范内容与服务器都是 **LF**
+> Windows 检出的 `dash-*.js` 是 **CRLF**，仓里的规范内容与服务器都是 **LF**
 > （`git ls-files --eol` → `i/lf w/crlf`）。不归一化的话：
 >
 > - 静态根与仓永远对不上，之后每次漂移检查都在演假警报（R34 第一次就因此误判
@@ -60,8 +66,9 @@ sudo cp -r dashboard/vendor /var/www/cpt-dashboard/
 >
 > ```bash
 > # 在开发机上先归一化再 scp，或在服务器上：
-> tr -d '\r' < dashboard.js.new > dashboard.lf.js
-> sudo install -m 644 -o ubuntu -g ubuntu dashboard.lf.js /var/www/cpt-dashboard/dashboard.js
+> tr -d '\r' < dashboard.bundle.js.new > dashboard.bundle.lf.js
+> sudo install -m 644 -o ubuntu -g ubuntu dashboard.bundle.lf.js \
+>   /var/www/cpt-dashboard/dashboard.bundle.js
 > ```
 >
 > `install -m 644` 而不是 `cp`：09-29 那 3 次 `run6.sh` 的 403 就是文件被给成

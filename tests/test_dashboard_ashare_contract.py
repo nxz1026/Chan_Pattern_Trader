@@ -15,7 +15,7 @@ from tests.conftest import dashboard_js
 
 DASHBOARD = Path(__file__).resolve().parents[1] / "dashboard"
 
-CANVAS_MODULES = ("canvas_b.js", "canvas_c.js", "canvas_d.js")
+CANVAS_MODULES = ("canvas_b.js", "canvas_c.js")  # R51：canvas_d.js 随画布 D 下线删除
 A_SHARE_JS = DASHBOARD / "market_a_share.js"
 DASHBOARD_JS_TEXT = dashboard_js()  # R45 拆分：读全部模块，不再绑死单文件
 INDEX_HTML = DASHBOARD / "index.html"
@@ -90,21 +90,25 @@ def test_render_canvas_modules_are_market_agnostic() -> None:
         assert "market" not in source.lower().replace("marketdata", ""), f"{name} 里出现了市场分支"
 
 
-def test_canvas_d_only_forwards_market_context() -> None:
-    """D 是**服务端**取数的，必须透传 code —— 但仅此而已。
+def test_canvas_modules_never_fetch_server_side() -> None:
+    """画布模块**必须只画客户端快照**，一律不许自己发请求取数。
 
-    实测过的坑：不透传 code 时服务端拿的是 provider 的加密快照，于是 A/B/C 画
-    123 根 A 股 K 线、D 画 579 根 BTCUSDT K 线，一屏两个市场。
-    允许的"市场相关"只有这一处透传；一旦 D 开始按市场分支渲染，就该重新设计。
+    R51 取代原 `test_canvas_d_only_forwards_market_context`（随画布 D 下线作废）。
+    原断言守的是「D 是服务端取数的，只能透传 code、不得按市场分支渲染」——
+    画布 D 与 `/api/canvas/wbt` 已下线，那条契约没有承载对象了。
+
+    但它记的**根因仍然成立且更该守住**：跨市场错配（123 根 A 股 K 线与 579 根
+    BTCUSDT K 线同屏）之所以会发生，是画布**各自取数**。R51 之后这条从根上消解 ——
+    全部画布都只消费同一份客户端快照。于是把它改写成正向、可验证的守卫：
+    任何一个 `canvas_*.js` 里出现 fetch / safeFetch，就是跨市场错配的门重新开了。
     """
-    source = (DASHBOARD / "canvas_d.js").read_text(encoding="utf-8")
-    lowered = source.lower()
-    assert "a_share" in lowered, "canvas_d.js 丢了市场透传，会画成加密"
-    # 只允许在 marketQuery() 这一处出现市场判断
-    assert lowered.count("a_share") == 1, "canvas_d.js 里出现了多余的市场分支"
-    assert "function marketQuery()" in source
-    assert "&code=" in source
-    assert 'data.market !== "a_share"' in source
+    for name in CANVAS_MODULES:
+        source = (DASHBOARD / name).read_text(encoding="utf-8")
+        for token in ("fetch(", "XMLHttpRequest", "/api/"):
+            assert token not in source, (
+                f"{name} 里出现 {token} —— 画布开始自己取数，"
+                f"跨市场错配（各画布消费不同快照）的门重新打开了"
+            )
 
 
 def test_a_share_mode_disables_polling() -> None:
