@@ -101,6 +101,23 @@ def _persist_run(row: dict[str, Any], body: dict[str, Any] | None) -> None:
     失败的真实后果只是「这次运行重启后查不到」，日志里留痕即可——这与
     ``dashboard_runs`` 的 ring 是完全独立的两条路径。
     """
+    # ⚠️ R45 新增开关 ``CPT_RUN_STORE_PERSIST=0``：**测试用**。
+    #
+    # 实测踩到：web 契约测试起真 server，会真的往**生产表** ``cpt_dashboard_run``
+    # 写行（实测已积 89 行，2026-10-01 → 10-04）。而 ``/api/dashboard/runs``
+    # 是「**表优先**」⇒ 测试读回的是**别的测试写的行**，不是自己的 ring ——
+    # 于是 ``test_timestamp_falls_back_when_runtime_omits_generated_at``
+    # 长期失败（拿到的 generated_at 是别的测试的挂钟时间，不是本例的 as_of_ms）。
+    #
+    # ⇒ 三个问题一起解决：
+    #   1. 测试不再污染生产表；
+    #   2. 读路由回落 ring ⇒ 每个测试的断言**只看自己**，可复现；
+    #   3. **生产默认行为不变**（不设该变量时照旧双写）。
+    import os as _os  # noqa: PLC0415
+
+    if _os.environ.get("CPT_RUN_STORE_PERSIST", "1") == "0":
+        return
+
     try:
         from cpt.storage.dashboard_run_store import upsert_run  # noqa: PLC0415
 
@@ -194,8 +211,20 @@ def _run_index_rows(limit: int = _RUN_INDEX_LIMIT, conn: Any = None) -> list[dic
 
     表**完全不可用**（连不上/表不存在）时退化成纯 ring —— 即 R20 行为。
     """
+    # ⚠️ R45：与 ``_persist_run`` 同一个开关，**读端也要关**。
+    # 只关写端不够 —— 表里**还留着**历史写进去的行（实测 89 行），
+    # 而本函数是「表优先」⇒ 测试读回的是那些行的挂钟时间，
+    # 而不是本例的 ``as_of_ms``。⇒ 开关管住读写两端，测试才只看自己。
+    import os as _os  # noqa: PLC0415
+
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
+    if _os.environ.get("CPT_RUN_STORE_PERSIST", "1") == "0":
+        # 读端也关 ⇒ 纯 ring（R20 行为），完全由本次进程决定，可复现。
+        for row in recent_runs(limit):
+            rows.append(dict(row))
+        rows.sort(key=_run_sort_key, reverse=True)
+        return rows[:limit]
     try:
         # 别名导入：裸 ``recent_runs`` 会遮蔽模块级那个（in-process ring 版），
         # 兜底分支就会把 ring 的 limit 参数当 conn 传进去。

@@ -273,3 +273,38 @@ def dashboard_js(*, strip_comments: bool = False) -> str:
         return text
     text = _re.sub(r"/\*.*?\*/", "", text, flags=_re.S)
     return _re.sub(r"^\s*//.*$", "", text, flags=_re.M)
+
+
+# ── 测试**不许**写生产库（R45 新增）──────────────────────────
+# web 契约测试会起真 server 打真请求，于是真的往生产表
+# ``cpt_dashboard_run`` 写行（实测已积 89 行）。
+# 而 ``/api/dashboard/runs`` 是「表优先」⇒ 测试读回的是**别的测试写的行**，
+# ``test_timestamp_falls_back_when_runtime_omits_generated_at`` 因此长期失败。
+#
+# ⇒ autouse 关掉双写：读路由回落 ring，每个测试只看自己，可复现。
+# **生产默认行为不变**（不设该变量时照旧双写）。
+import pytest as _pytest  # noqa: E402
+
+
+@_pytest.fixture(autouse=True)
+def _isolate_run_store(monkeypatch: _pytest.MonkeyPatch) -> None:
+    """测试期间：关掉运行索引落库 + **清空 in-process ring**。
+
+    ⚠️ 只关落库**不够** —— ``cpt.application.dashboard_runs`` 的
+    ``_RUN_RING`` / ``_RUN_BODIES`` 是**模块级全局**，同一进程里
+    前一个测试 append 的行还在里面。而 ``/api/dashboard/runs`` 按
+    ``generated_at`` 降序取 ``rows[0]`` ⇒ 别的测试的行可能更近，
+    于是本例拿到的是**别人的挂钟时间**而不是自己的 ``as_of_ms``。
+    实测这正是 ``test_timestamp_falls_back_when_runtime_omits_generated_at``
+    长期失败的直接原因。
+
+    ⇒ 两个隔离一起做，测试才只看自己。
+    """
+    monkeypatch.setenv("CPT_RUN_STORE_PERSIST", "0")
+    from cpt.application import dashboard_runs as _dr  # noqa: PLC0415
+
+    _dr._RUN_RING.clear()        # noqa: SLF001
+    _dr._RUN_BODIES.clear()      # noqa: SLF001
+    yield
+    _dr._RUN_RING.clear()        # noqa: SLF001
+    _dr._RUN_BODIES.clear()      # noqa: SLF001

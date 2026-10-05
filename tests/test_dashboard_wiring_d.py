@@ -313,8 +313,22 @@ def test_signal_stats_route_reports_basis_and_stats(monkeypatch: pytest.MonkeyPa
     assert calls and calls[0]["days"] == 7 and calls[0]["code"] == "600519"
 
 
-def test_signal_stats_route_degrades_when_history_unavailable() -> None:
-    """不 patch：本机/CI 都取不到事件表 ⇒ 必须是 available:false，绝不 500、绝不伪造 0。"""
+def test_signal_stats_route_degrades_when_history_unavailable(monkeypatch) -> None:
+    """取不到事件表 ⇒ 必须 ``available:false``，绝不 500、绝不带 ``stats``。
+
+    ⚠️ R45 修：原版**不 patch**，靠「本机/CI 取不到事件表」这个
+    **环境假设**来触发降级路径。而在 Oracle 上事件表**有 49 行、拿得到**
+    ⇒ ``available`` 是 ``True`` ⇒ 这条测试**长期失败**，且原因与被测代码无关。
+
+    ⇒ 改成**主动制造**不可用，让它测的是「降级路径本身对不对」，
+    而不是「这台机器有没有库」。
+    """
+    import cpt.storage.signal_event_store as store  # noqa: PLC0415
+
+    def _boom(*_a, **_k):
+        raise store.SignalEventError("模拟：事件表不可用")
+
+    monkeypatch.setattr(store, "load_signal_events", _boom)
     with served(_provider()) as base:
         status, body = _request(f"{base}/api/dashboard/signal-stats?days=30")
     assert status == 200

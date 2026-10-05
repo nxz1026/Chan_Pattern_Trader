@@ -613,3 +613,11 @@ def test_app_persist_run_swallows_db_failure(monkeypatch: pytest.MonkeyPatch) ->
 def _passthrough(conn: Any) -> Any:
     """把已有连接直接交出去（不负责关闭），对齐 ``_run_store_conn(conn=...)``。"""
     yield conn
+
+
+# ⚠️ 本模块**专门验证运行索引落库**，而 conftest 的 autouse fixture 为了
+# 「测试不污染生产表」把 ``CPT_RUN_STORE_PERSIST`` 设成了 0。
+# ⇒ 本模块必须**显式反向打开**，否则它测的是「不写库」而不是「写库且 commit」。
+@pytest.fixture(autouse=True)
+def _allow_run_store_persist(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("CPT_RUN_STORE_PERSIST", "1")
