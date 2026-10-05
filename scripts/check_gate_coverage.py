@@ -94,8 +94,10 @@ def _fixture_keys() -> set[str]:
         names = [t.id for t in node.targets if isinstance(t, ast.Name)]
         if "FIXTURES" not in names:
             continue
+        if not isinstance(node.value, ast.Dict):
+            continue
         keys: set[str] = set()
-        for k in node.value.keys:  # type: ignore[union-attr]
+        for k in node.value.keys:
             if isinstance(k, ast.Constant) and isinstance(k.value, str):
                 keys.add(k.value.split("#", 1)[0])
         return keys
