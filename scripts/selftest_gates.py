@@ -274,7 +274,7 @@ def fx_script_tags(root: Path) -> tuple[str, str]:
 
 
 def fx_ci_workflow(root: Path) -> tuple[str, str]:
-    """⑨ workflow 缩进：造 5 个被 ``run: |`` 吞掉的 step —— R51 真的踩过。
+    """⑩ workflow 缩进：造 5 个被 ``run: |`` 吞掉的 step —— R51 真的踩过。
 
     这个错最阴的地方在于它**不产生测试失败**：门禁脚本本身全对、全绿，
     但它们根本没在 CI 上执行过；CI 恒红却指向一条看不懂的
@@ -298,6 +298,24 @@ def fx_ci_workflow(root: Path) -> tuple[str, str]:
     return "check_ci_workflow.py", "command not found"
 
 
+def fx_line_refs(root: Path) -> tuple[str, str]:
+    """⑪ 行号引用：造一处**行号对不上符号**的引用 —— R54 清出来的。
+
+    这类错长得最像「没事」：文件在、行号也没越界、门禁打印 ✅，
+    只是那一行早已换成别的东西。R54 实测现行文档里有 30+ 处这样的坐标，
+    而 ``check_all_claims.py`` 的 L 类只验「行号没超出文件总行数」，一路放行。
+    """
+    _write(
+        root / "cpt/domain/models.py",
+        "\n".join(f"# 填充 {i}" for i in range(1, 30)) + "\n\nclass TrendType:\n    pass\n",
+    )
+    _write(
+        root / "docs/pending-wiring.md",
+        "# 待接线\n\n`cpt/domain/models.py:3` 里的 `TrendType` 还没接上。\n",
+    )
+    return "check_line_refs.py", "处没有 `TrendType`"
+
+
 FIXTURES = {
     "check_doc_drift.py": fx_doc_drift,
     "check_all_claims.py": fx_all_claims,
@@ -309,6 +327,7 @@ FIXTURES = {
     "build_dashboard_bundle.py": fx_bundle_sync,
     "check_all_claims.py#H": fx_script_tags,
     "check_ci_workflow.py": fx_ci_workflow,
+    "check_line_refs.py": fx_line_refs,
 }
 
 

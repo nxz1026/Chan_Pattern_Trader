@@ -145,7 +145,7 @@ parity
   > 📌 **范围说明（2026-10-01 补）**：上面这句说的是 **A 股**路径。A 股没有 24h
   > 行情源，前端按 `available:false` 显示「—」（`progress-log.md` R21 摘掉窗口兜底
   > 就是为这个）。**加密 realtime 路径有真实 24h**：
-  > `__main__.py:844 _safe_24h_for()` → `fetch_24h_ticker()` → `normalize_24h()`，
+  > `__main__.py:920 _safe_24h_for()` → `fetch_24h_ticker()` → `normalize_24h()`，
   > 上游不可达时降级为 `{"available": false, "reason": "upstream_ticker_unavailable"}`。
   > 另有 `docs/dashboard-final-acceptance.md` 第 40 行说「24h 真实数据已接入」——
   > 那句对加密成立、对 A 股不成立。三处并非矛盾，是**没标范围**。
@@ -161,7 +161,7 @@ parity
 - 事件前后状态对比；
 - 配置字段 diff；
 - 回放与引擎内部状态；
-- 数据质量报告（✅ R22：`dashboard_quality.py::quality_report` 接进 `dashboard.py:140 _data_quality`，
+- 数据质量报告（✅ R22：`dashboard_quality.py::quality_report` 接进 `cpt/application/dashboard.py:120 _data_quality`，
   两条活路径都过；`data_quality` 由 4 键扩为 9 键，新增 severity/gap_count/out_of_order_count/gaps/out_of_order）；
 - localStorage 本地注释（✅ R21：`dashboard.js:1113/1119` setItem/getItem 已实现）；
 

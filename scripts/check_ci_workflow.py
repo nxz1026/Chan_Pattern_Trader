@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""门禁⑨：CI workflow 的 YAML **缩进**不能把 step 吞进 `run: |` 块标量。
+"""门禁⑩：CI workflow 的 YAML **缩进**不能把 step 吞进 `run: |` 块标量。
 
 ## 为什么要这道门（R51 实测踩出来的）
 

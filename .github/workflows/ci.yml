@@ -109,6 +109,15 @@ jobs:
       # 编号⑨留给 `check_all_claims.py` 的 H 类（<script> 标签配对），不重复占用。
       - name: CI workflow indentation is sane
         run: python scripts/check_ci_workflow.py
+      # 门禁⑪（R54 新增）：文档里的 `file.py:NNN` 行号必须**仍指到那件事**。
+      # R54 清出来的**第四类**静默失效：`check_all_claims.py` 的 L 类判据只有
+      # `if ln > n:`，只验「行号没超出文件总行数」、从不读那一行是什么，
+      # 于是它一边打印「✅ 全部断言对得上」，一边有 30+ 处坐标指着无关代码
+      # （`docs/pending-wiring.md` 的 R22 接线表十处**全错**）。
+      # 判据刻意保守：只认「片段里唯一且确实被该文件 def/class 定义」的锚点，
+      # 有歧义就跳过 —— 宁可漏报也不造假阳性，假阳性会让门禁被无视。
+      - name: Doc line references still point at the right thing
+        run: python scripts/check_line_refs.py
       - name: Dead-code audit (vulture)
         run: |
           # vulture==2.14 自 2026-09-25 起已在 requirements-dev.txt 锁文件里，

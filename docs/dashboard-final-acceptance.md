@@ -30,7 +30,7 @@
 >    否则 415）。`README.md`「当前状态」一节也有同样的过时说法。
 > 4. 验收数字、路由条数均已过时。**现行门禁见 `README.md`「质量门」**。
 > 5. 24h 数据的说法与 `docs/dashboard-product-roadmap.md` 冲突 —— 本文说
->    「已接入」，roadmap 说「仍是硬编码」。以 `cpt/web/__main__.py:844 _safe_24h_for`
+>    「已接入」，roadmap 说「仍是硬编码」。以 `cpt/web/__main__.py:920 _safe_24h_for`
 >    为准：realtime 模式有真实 `fetch_24h_ticker`，fixture/demo 模式没有。
 
 ## 已交付能力

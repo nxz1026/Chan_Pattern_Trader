@@ -6652,3 +6652,87 @@ ccxt 未装、chromium aarch64 SIGTRAP ×2、first_buy_bridge 该序列无两个
 （证明「响亮」这条纪律是**被守着的**，不是摆设）；③ 把判据改回看 close → 4 红
 （证明**静默那一档**被钉住了）。还原后 `1090 passed / 0 failed / 4 skipped`，
 ruff / mypy / 9 道脚本门禁 / vulture（CI 口径 `cpt whitelist.py`）全绿。
+
+---
+
+## R54：扫全部文档对齐代码 —— 清出「第四类静默门禁失效」（2026-10-05）
+
+### 任务
+
+「扫一下 repo 的所有文档，对齐一下文档和实际代码。」
+38 份文档 / 16,023 行，按 A 现行事实 / B 计划验收报告 / C 历史记录 三分类逐份核对。
+
+### 核心问题：门禁**验错了属性**
+
+`scripts/check_all_claims.py` 的 L 类管的就是 `file.py:123` 这类行号引用，
+但它的判据只有一句（约 `:423`）：
+
+    if ln > n:                  # n = 文件总行数
+        bad["L 行号越界"].append(...)
+
+**只验「行号没超出文件总行数」，从不读那一行还是不是文档说的那件事。**
+它一边打印 `✅ 全部断言对得上`（1428 条断言），一边有 30+ 处坐标指着无关代码。
+该文件 docstring `:24` 自述 L 类要验「那行还在不在」—— 声明与实现分家。
+
+这是本仓**第四类**静默门禁失效：
+
+| 轮次 | 形态 | 表现 |
+| --- | --- | --- |
+| R45 | 门禁恒 `return 0` | 永远绿 |
+| R49 | 断言依赖本机环境 | 本机绿、CI 红 |
+| R52 | YAML 块标量吞 step | 5 个门禁一次都没跑过 |
+| **R54** | **验错了属性** | 跑了、绿了，查的条件比声明的弱 |
+
+共同点：**都不产生测试失败**。
+
+### 逐份核对：文档纪律是真的（七处自查全部属实）
+
+`architecture.md:4` 自标「已删除」；`deploy/README.md` 明确区分远端采集包内文件
+与本仓文件；`web-api-reference.md` 自称 27 个接口、grep 实测**恰好 27 条**，且它的
+「与计划文档的差异」表预先把三个从未实现的接口标出来了（预判了 grep 会误报）；
+`/api/canvas/wbt` 已划掉并注 R51 下线；`pending-wiring.md` 自带 R45 更正；
+`t_plus_one_purchase_allowed` 确实仍无生产调用方；`export-schema-v2.md` 是条件句
+不是断言。
+
+行号引用分布：最要紧的四份（`README.md` / `architecture.md` / `rules.md` /
+`web-api-reference.md`）**0 处**；风险集中在 `pending-wiring.md`（32 处）与
+`duplication-triage.md`（67 处）。
+
+### 改了什么
+
+- `docs/pending-wiring.md`：R54 复核说明 + **R22 接线表十处全错行号全部改对**
+  （`cpt/web/app.py` 整体右移约 280 行）+ 另 12 处（含 `dashboard_snapshot_v2.py`
+  的占位表、`cpt/web/__main__.py:790→920`、`cpt/domain/models.py:163→179`）。
+  **实质更正**：原文并列引用的 `_format_multi_level` 全仓已不存在，已删。
+- `docs/known-traps.md:669`：`app.py:871` → `app.py:900`。
+- `docs/duplication-triage.md`：加 R54 头部注记（行号是 2026-09-25 修复前快照的
+  历史证据，**有意不逐个改写** —— 改了等于伪造归档现场）。
+- `docs/dashboard-final-acceptance.md` / `docs/dashboard-product-roadmap.md`：
+  `cpt/web/__main__.py:844→920`、`dashboard.py:140→cpt/application/dashboard.py:120`。
+- 顺带修掉 `README.md`「四点容易记错」实为 6 条 → **七点**。
+- `docs/architecture.md` §5 目录树 + `README.md` 质量门清单补门禁⑪；
+  `scripts/check_ci_workflow.py` 自己编号写错（⑨→⑩）一并改正。
+
+### 新增门禁⑪ `scripts/check_line_refs.py`
+
+判据四步（详见 `docs/known-traps.md` R54 节与脚本 docstring）：
+严格解析目标文件（**同名多份跳过，绝不猜**）→ 行号越界即失败 →
+在**归属本次引用的片段**里找「确实被该文件 `def`/`class` 定义」的**唯一**锚点 →
+锚点在 `NNN ± 3` 内（含调用点）即通过。历史归档 5 份整体豁免、**每条必须写理由**。
+已登记进 `scripts/selftest_gates.py` 的 `FIXTURES`。
+
+### 复验
+
+- **门禁自检 11/11**：`全部门禁都能抓到各自的错例 ✅`，含新增的
+  `check_line_refs.py`（造一处「行号对不上符号」的引用 ⇒ 抓到）。
+- **真仓变异验证**：把 `docs/known-traps.md:669` 的 `app.py:900` 改成 `app.py:800`
+  ⇒ rc=1，报 `` 处没有 `_index_row_from_body`（±3 行内未见） `` 并打印该行真实内容；
+  还原 ⇒ rc=0。**注意**：第一次 `sed` 没匹配上（文档里是裸 `app.py:900`，不是
+  `cpt/web/app.py:900`），门禁照样绿 —— **变异没生效就等于没验**，
+  故第二次先 `sed -n '669p'` 确认注入生效再判。
+- **16 项门禁全 rc=0**：9 道脚本门禁 + `build_dashboard_bundle --check` +
+  selftest + lint-imports（`Contracts: 6 kept, 0 broken`）+ vulture + ruff check +
+  ruff format --check + mypy。
+- 全量 pytest：**1090 passed / 4 skipped**（skip 全是 ccxt 未装、chromium aarch64 ×2、
+  `first_buy_bridge` 该序列无两中枢）。
+

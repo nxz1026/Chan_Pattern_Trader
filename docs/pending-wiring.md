@@ -5,6 +5,12 @@
 > 收尾：2026-09-30（R22——簇二/簇三 **9 个模块 + 3 个函数全部接线**，本清单只剩 T+1 一项）
 > 来源：`docs/audit/cpt-code-audit-20260925.md` §3.4、`docs/audit/verification-20260925.md` §4
 > 维护：新增待接线模块必须登记在此；接线完成或决定删除时从此表移除，并在提交信息里说明。
+> **R54 复核（2026-10-05）**：全篇 32 处 `file.py:NNN` 引用逐条实测，**17 处已失效**
+> （`cpt/web/app.py` 整体右移约 280 行，R22 接线表十处全错）。均已用
+> `grep -n 'def <符号>'` / `grep -n 'path.path == "<路由>"'` 重定位，改动处就地标注。
+> **结论未变**：九个模块与「另有 3 个函数」仍全部接线，本期只改坐标。
+> ⚠️ **行号还会继续漂** —— 引用本文档时以**符号名 / 路由路径**为准，行号只当快速定位。
+> 顺带发现 `_format_multi_level` 已被删除（原文并列引用它），已在原处更正。
 
 ## R22 收尾：本清单现状（2026-09-30，R41 复核仍成立）
 
@@ -24,20 +30,27 @@
 簇一/二/三与「另有 3 个函数」的其余条目**全部已接线**，处置明细见下表。
 R22 的 9 个接线点（路由与调用方均已 grep 复核）：
 
-| D 类模块 | R22 接线点 |
+| D 类模块 | R22 接线点（**R54 重定位**） |
 |---|---|
-| `dashboard_export.py` | `cpt/web/app.py:513`（C1 `GET /export?start_ms=&end_ms=`） |
-| `dashboard_levels.py` | `dashboard_snapshot_v2.py:48`（`_level_tree_payload`）+ `cpt/web/app.py:541`（C2 `/levels`） |
-| `dashboard_compare.py` | `cpt/web/app.py:562`（C3 `/compare?left=&right=`，序列值降级为 `{__summary__,count,hash}`） |
-| `dashboard_multi_run.py` | `cpt/web/app.py:602`（C4 `/multi-run?run_ids=`） |
-| `dashboard_stats.py` | `cpt/web/app.py:160`（C5 `/signal-stats?days=&code=`，自报 `basis`） |
-| `dashboard_watchlist.py` | `cpt/web/app.py:234`（C6 `/watchlist`，投影自 A 股候选池） |
-| `dashboard_quality.py` | `cpt/application/dashboard.py:140`（v1 `_data_quality` 重写 ⇒ v1/v2 两条活路径都过） |
-| `dashboard_watch.py` | `dashboard_snapshot_v2.py:29`（`_watch_payload` → `v2["watch_metrics"]`） |
-| `dashboard_realtime.py` | `cpt/web/__main__.py:572`（`_RealtimeProvider._cached_snapshot`，容量 8 的 LRU） |
+| `dashboard_export.py` | `cpt/web/app.py:798`（C1 `GET /export?start_ms=&end_ms=`） |
+| `dashboard_levels.py` | `cpt/application/dashboard_snapshot_v2.py:32`（`def _level_tree_payload`）+ `cpt/web/app.py:840`（C2 `/levels`） |
+| `dashboard_compare.py` | `cpt/web/app.py:862`（C3 `/compare?left=&right=`，序列值降级为 `{__summary__,count,hash}`） |
+| `dashboard_multi_run.py` | `cpt/web/app.py:909`（C4 `/multi-run?run_ids=`） |
+| `dashboard_stats.py` | `cpt/web/app.py:1035`（C5 `/signal-stats?days=&code=`，自报 `basis`） |
+| `dashboard_watchlist.py` | `cpt/web/app.py:1046`（C6 `/watchlist`，投影自 A 股候选池） |
+| `dashboard_quality.py` | `cpt/application/dashboard.py:120`（v1 `def _data_quality` 重写 ⇒ v1/v2 两条活路径都过） |
+| `dashboard_watch.py` | `cpt/application/dashboard_snapshot_v2.py:21`（`def _watch_payload` → `v2["watch_metrics"]`） |
+| `dashboard_realtime.py` | `cpt/web/__main__.py:594`（`_RealtimeProvider._cached_snapshot`，容量 8 的 LRU） |
 
 `dashboard_runs.py` 顺带补齐**运行本体**（此前只存索引行）：
-`dashboard_runs.py:158 run_body()` / `:173 find_run()`，被 `cpt/web/app.py:553-554`、`:570`、`:590` 调用。
+`cpt/application/dashboard_runs.py:188 def run_body()` / `:203 def find_run()`，
+被 `cpt/web/app.py:679` 的 `/api/dashboard/runs` 分支调用。
+
+> **R54 重定位说明**：上表九行坐标原为 `app.py` 的 `513`/`541`/`562`/`602`/`160`/`234`、
+> `dashboard_snapshot_v2.py` 的 `48`/`29`、`dashboard.py:140`、`__main__.py:572`，
+> **十处全部过期**（`cpt/web/app.py` 整体右移约 280 行）。判据：新坐标均已
+> `grep -n 'def <符号>' / 'path.path == "<路由>"'` 实测。**结论未变** ——
+> 九个模块仍全部接在活路径上，只是坐标漂了。
 
 
 ## 为什么有这份清单
@@ -104,7 +117,7 @@ R22 的 9 个接线点（路由与调用方均已 grep 复核）：
 
 | 模块 | 行数 | 处境 | 功能 | 接线目标 |
 |---|---:|---|---|---|
-| ~~`cpt/domain/signal.py`~~ | ~~311~~ | **已接线（R20）** | **一买状态机**：`assess_first_buy` / `transition_first_buy`，管 alert→confirmed→invalidated 转移 | 已进 A 股信号链（`a_share_snapshot.py:210`） |
+| ~~`cpt/domain/signal.py`~~ | ~~311~~ | **已接线（R20）** | **一买状态机**：`assess_first_buy` / `transition_first_buy`，管 alert→confirmed→invalidated 转移 | 已进 A 股信号链（`a_share_snapshot.py:316`） |
 | `cpt/domain/a_share_rules.py` | 152 | ✅ **R19 已接线** | **A 股交易规则标签**：涨跌停 / 停牌 / T+1。`fetch_daily_tags` / `apply_ashare_tags_to_bis` / `t_plus_one_purchase_allowed` | 标签能力已进 A 股主看板（见下）；**只剩 T+1 未接** |
 
 ### `a_share_rules` 的 R19 接线结果
@@ -142,11 +155,11 @@ R22 的 9 个接线点（路由与调用方均已 grep 复核）：
 数据其实齐了，只是没人把结构对象翻译成状态机的入参。
 `assess_first_buy` 需要 `has_two_centers` / `has_divergence_leg` / `has_reversal_bi`，
 这三个值只出现在 `signal.py` 自己、`cpt/domain/first_buy.py:12` 的 docstring 和本文件里；
-`TrendType`（`cpt/domain/models.py:163`）确实没有中心数/背驰笔/反转笔字段。
+`TrendType`（`cpt/domain/models.py:179`）确实没有中心数/背驰笔/反转笔字段。
 
 > **R20 处置：新增 `cpt/application/first_buy_bridge.py`（翻译层），接进 A 股主看板。**
 > - 桥输出 `FirstBuyFacts`（三事实 + `center_ids` + `structure_id` + `divergence_status`），
->   再由 `a_share_snapshot.py:243 _derive_first_buy_signal` 调 `assess_first_buy` 出
+>   再由 `a_share_snapshot.py:456 _derive_first_buy_signal` 调 `assess_first_buy` 出
 >   `Signal`，经 `build_dashboard_snapshot_v2(..., signal=signal)` 落到
 >   `v2["signal"]`。接线点干净：v2 早有该形参，只是没人传。
 > - **保守口径四条**（全选「宁可判否」一侧）：①取本级别**最后两个**中枢，不是任意两个；
@@ -188,7 +201,7 @@ R22 的 9 个接线点（路由与调用方均已 grep 复核）：
 
 **① `dashboard_parity` —— 依赖已消失，R20 已处置。**
 
-oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:61` 的
+oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:98` 的
 `reason: "oracle_reference_unavailable"` 是**永久 false**，不是暂时缺数据。
 
 > **R20 处置：删后端模块，保留前端空面板。**
@@ -196,8 +209,8 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:61` 的
 >   `whitelist.py` 的 `build_parity_snapshot` 豁免、移除
 >   `tests/test_dashboard_research_services.py` 与 `tests/test_review_m7_fixes.py`
 >   里的两处自证用例。
-> - **保留** `dashboard_snapshot_v2.py:61` 的 `{"available": False, "reason":
->   "oracle_reference_unavailable"}` 键位、`app.py:208` 路由与前端
+> - **保留** `dashboard_snapshot_v2.py:98` 的 `{"available": False, "reason":
+>   "oracle_reference_unavailable"}` 键位、`app.py:677` 路由与前端
 >   `renderParityCharts`：前端 28 处消费点依赖这个形状，摘面板要改 6 个渲染函数
 >   + 契约测试，收益仅为少显示一个恒空的 `<section>`。**代价大于收益。**
 > - 结论：Oracle 对比功能**永久未启用**。若将来要恢复，正确顺序是
@@ -207,12 +220,17 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:61` 的
 
 **② `dashboard_runs` —— 已接线（R20 路由 + R22 本体 + R23 落库）。**
 
-`cpt/web/app.py:210` 路由活着，`dashboard.js:827` 真的在读 `snapshot.runs`，
-R20 补了索引行数据源，但 `dashboard_snapshot_v2.py:62` 的硬编码 `v2["runs"] = []`
-让「通的是一条死管道」。**R22 补上运行本体**：`dashboard_runs.py` 新增
+`cpt/web/app.py:679` 路由活着，`dashboard/dash-ops.js:388` 与 `dashboard/dash-signal.js:439`
+真的在读 `snapshot.runs`，R20 补了索引行数据源，但 `dashboard_snapshot_v2.py:99` 的硬编码
+`v2["runs"] = []` 让「通的是一条死管道」。**R22 补上运行本体**：`dashboard_runs.py` 新增
 `_RUN_BODIES: deque[dict | None]`（与 `_RUN_RING` 严格同步 append/clear，否则错位）、
 `RUN_BODY_MAX_BYTES = 4_000_000`（超限**仍收索引行、只是不存本体**）、
-`run_body(run_id)`(:158，返回深拷) 与 `find_run(run_id)`(:173)。C3/C4 由此才有入参。
+`run_body(run_id)`(:188，返回深拷) 与 `find_run(run_id)`(:203)。C3/C4 由此才有入参。
+
+> **R54 行号更正**：本段六处引用原为 `app.py:210` / `dashboard.js:827` /
+> `dashboard_snapshot_v2.py:62` / `dashboard_runs.py` 的 `:158`、`:173`，**四处全过期**
+> （`:210` 指着一条注释；`dashboard.js` 已随 R51 删除）。结论未变，只改坐标。
+> `dashboard.js` 的前端读取职责由 `dash-ops.js` / `dash-signal.js` 承接。
 
 **R23 把「只对本进程活过的 run 可比」这个遗留口径消掉了**：新增
 `cpt/application/dashboard_run_store.py`
@@ -248,7 +266,7 @@ R20 补了索引行数据源，但 `dashboard_snapshot_v2.py:62` 的硬编码 `v
 ### 簇三里唯一确认的重复：`dashboard_market_fetch` —— **已删除（R20）**
 
 内层逻辑 `normalize_24h`（`cpt/application/dashboard_market.py:42`）**已经被活路径
-直接调用**——`cpt/web/__main__.py:790` 的 `_safe_24h_for`。本模块的
+直接调用**——`cpt/web/__main__.py:920`（`def _safe_24h_for`；调用点 `:831`/`:918`）。本模块的
 `market_snapshot` 只是在它外面包了 `symbol` / `interval_ms` / `source` 三个字段，
 且自己 0 个导入方。
 
@@ -261,22 +279,26 @@ R20 补了索引行数据源，但 `dashboard_snapshot_v2.py:62` 的硬编码 `v
 
 ## 占位集中地（半接线的统一病灶）
 
-`cpt/application/dashboard_snapshot_v2.py:56-70` 是**五个占位兜底的唯一出处**：
+`cpt/application/dashboard_snapshot_v2.py:93-111` 是**五个占位兜底的唯一出处**：
 
 | 行 | 字段 | 占位值 |
 |---:|---|---|
-| 56 | `market_24h` | `{"available": False, "reason": "upstream_aggregate_unavailable"}` |
-| 61 | `parity` | `{"available": False, "reason": "oracle_reference_unavailable"}` |
-| ~~62~~→`99` | `runs` | v2 体内的 `[]` **仍在**，但活路径不经它：`cpt/web/app.py:69 _with_run_index()` 在**HTTP 响应层**注入真值（R20），`:660`/`:699` 调用 |
-| 63 | `multi_level` | `{"available": False, "reason": "multi_level_unavailable"}` |
-| 67 | `config_compare` | `{"available": False, "reason": "config_compare_unavailable"}` |
+| 94 | `market_24h` | `{"available": False, "reason": "upstream_aggregate_unavailable"}` |
+| 98 | `parity` | `{"available": False, "reason": "oracle_reference_unavailable"}` |
+| ~~62~~→`99` | `runs` | v2 体内的 `[]` **仍在**，但活路径不经它：`cpt/web/app.py:253 _with_run_index()` 在**HTTP 响应层**注入真值（R20），`:1054`/`:1114` 调用 |
+| 101 | `multi_level` | `{"available": False, "reason": "multi_level_unavailable"}` |
+| 109 | `config_compare` | `{"available": False, "reason": "config_compare_unavailable"}` |
 
 **接线的正确改法是给这些键传入真值**——五个都已是 `build_dashboard_snapshot_v2`
-的**关键字形参**（`:32-35`），调用方传进去即可，不必改函数体。
+的**关键字形参**（`:69-72`），调用方传进去即可，不必改函数体。
 
 > 但注意：`multi_level` / `config_compare` 的**活路径并不经这里**——
-> `cpt/web/__main__.py:174-175`（`_format_multi_level` / `_compare_with_default`）
+> `cpt/web/__main__.py` 的 `_compare_with_default`（`:457 def`，调用点 `:225`/`:355`/`:402`）
 > 直接构造，不调 v2。所以这两个键的占位只在「谁调 v2」时才有意义。
+>
+> **R54 更正**：原文此处还并列了一个 `_format_multi_level`（记作 `:174-175`），
+> 该函数**现今全仓已不存在**（`grep -rn _format_multi_level --include=*.py cpt/` 零命中），
+> 已从本句删去；`_compare_with_default` 本身仍在，只是坐标从 174 漂到 457。
 
 ---
 
@@ -284,9 +306,9 @@ R20 补了索引行数据源，但 `dashboard_snapshot_v2.py:62` 的硬编码 `v
 
 | 函数 | 产品位置 | 处境 | R22 处置 |
 |---|---|---|---|
-| `dashboard_reproducibility.py::snapshot_diff` | roadmap R5 | **已接线（R22）** | 调用方 `dashboard_compare.py` 已接进 C3 `/compare`（`cpt/web/app.py:562`）；序列型值由 `_summarize_diff_value` 递归降级，避免原始 candles 灌进响应 |
-| `adapters/a_share_local.py::_to_wind_code` | 台账决策 C1 | **已接线（R22）** | 调用方 `scripts/factor_backfill.py:209`（`fetch_wind_factor_rows`）→ 循环体 `:520` 的 `_wind_fallback`，由 `--wind-fallback`（`:391-396`，**默认关闭**）开启；同时把非法输入从静默兜底改成抛 `ValueError` |
-| `adapters/wind_source.py::fetch_adjust_factors` | 台账决策 C1 | **已接线（R22）** | 同上调用链 `scripts/factor_backfill.py:212`；取数失败只转文案、绝不向上抛 |
+| `dashboard_reproducibility.py::snapshot_diff` | roadmap R5 | **已接线（R22）** | 调用方 `dashboard_compare.py` 已接进 C3 `/compare`（`cpt/web/app.py:862`）；序列型值由 `cpt/web/app.py:287 _summarize_diff_value` 递归降级，避免原始 candles 灌进响应 |
+| `adapters/a_share_local.py::_to_wind_code` | 台账决策 C1 | **已接线（R22）** | 调用方 `scripts/factor_backfill.py:199`（`def fetch_wind_factor_rows`）→ 循环体 `:594` 的 `_wind_fallback`，由 `--wind-fallback`（`:506`，**默认关闭**）开启；同时把非法输入从静默兜底改成抛 `ValueError` |
+| `adapters/wind_source.py::fetch_adjust_factors` | 台账决策 C1 | **已接线（R22）** | 同上调用链 `scripts/factor_backfill.py:210`（引用）与 `:221`（`fetch_adjust_factors` 调用）；取数失败只转文案、绝不向上抛 |
 
 > ⚠️ **前两版本文里的 `scripts/factor_backfill.py:130` 是错行号**，且"有 bug/两份重复实现"的描述
 > 已过期（`_to_wind_code` 的顺序 bug 在 R17 已修，那份重复的 `_code_to_tx` 也已删除）。

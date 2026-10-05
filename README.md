@@ -296,6 +296,7 @@ python scripts/check_doc_counts.py              # 门禁⑤
 python scripts/check_enqueue_skeleton_unique.py # 门禁⑥
 python scripts/check_job_poll_unique.py         # 门禁⑦
 python scripts/check_ci_workflow.py             # 门禁⑩（R51 新增）
+python scripts/check_line_refs.py               # 门禁⑪（R54 新增）
 vulture --min-confidence 60 cpt whitelist.py    # 死代码审计
 ```
 
@@ -305,7 +306,7 @@ vulture --min-confidence 60 cpt whitelist.py    # 死代码审计
 > 引入于 `1cda27af1`（R45 dashboard 拆分），被 pytest 的红灯挡在前面，从未暴露。
 > 门禁⑩ `check_ci_workflow.py` 就是为这类错加的：**清单必须与 ci.yml 逐条对得上**。
 
-四点容易记错，都是踩过的坑：
+七点容易记错，都是踩过的坑：
 
 - **`scripts/` 在门禁范围内**。2026-09-25 之前只覆盖 `cpt tests`，等于给 364 行的
   运维入口开了后门，它自带的重复实现和有顺序 bug 的函数都没人发现。
@@ -320,6 +321,11 @@ vulture --min-confidence 60 cpt whitelist.py    # 死代码审计
 - **`check_ci_workflow.py`（门禁⑩）查的是 CI 自己**。YAML 块标量会把缩进更深的
   行吞成字符串，step 一旦被吞就**既不报错也不执行**，只留下一条看不懂的
   `-: command not found`。这类错没有任何测试能发现，只能靠一道门禁盯住。
+- **`check_line_refs.py`（门禁⑪）查的是行号引用「还对不对」**。`check_all_claims.py`
+  也管行号，但它只验「行号没超出文件总行数」，**从不读那一行是什么** —— 于是它
+  一边打印「✅ 全部断言对得上」，一边有 30+ 处坐标指着无关代码（R54 清出来的
+  `docs/pending-wiring.md` R22 接线表十处**全错**）。门禁⑪只认「片段里唯一且
+  确实被该文件 `def`/`class` 定义」的锚点，有歧义就跳过：**宁可漏报也不造假阳性**。
 
 > Windows 开发机上有几个**已知且与代码无关**的基线偏差（`fcntl` / 无浏览器）：
 > `a_share_pool.py` 顶层 `import fcntl` 导致该模块在 Windows 不可导入
