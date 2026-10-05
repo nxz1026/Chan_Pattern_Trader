@@ -36,6 +36,7 @@ from cpt.adapters.a_share_local import (
     AShareLocalClient,
     AShareNoDataError,
     AShareNoFactorError,
+    ASharePlaceholderRowsError,
     check_t_plus_one_calendar,
 )
 from cpt.adapters.a_share_public import TENCENT_KLINE_URL
@@ -198,6 +199,14 @@ def build_ashare_snapshot(
             snapshot = empty_ashare_snapshot(code, reason, name=security_name, board=security_board)
             _attach_factor_fetch(snapshot, outcome)
             return snapshot
+    except ASharePlaceholderRowsError as exc:
+        # R52：区间内每一行都是占位行（O/H/L 全 0、无成交）⇒ 上游采集写出了废行。
+        # 与 no_factor / no_data / db_error 是**不同的上游故障**，报错的措辞必须能
+        # 把排查指到正确的地方：查因子表是白查，要去查采集。
+        _LOG.warning("A 股占位行 %s: %s", code, exc)
+        return empty_ashare_snapshot(
+            code, "placeholder_rows", name=security_name, board=security_board
+        )
     except AShareNoFactorError as exc:
         # 最常见的一种失败（因子表只覆盖热门池并集）。必须与"没数据"和
         # "DB 挂了"分开报 —— 报成 db_error 会把排查方向带偏（实测踩过）。
@@ -270,6 +279,20 @@ def build_ashare_snapshot(
         _LOG.warning("A 股序列校验失败 %s: %s", code, exc)
         return empty_ashare_snapshot(
             code, f"invalid_bars:{type(exc).__name__}", name=security_name, board=security_board
+        )
+
+    # R52：占位行已被 adapters 层丢弃，序列因此合法了 —— 但**不能就这么安静地过去**。
+    # 丢弃是「缺一天日历」，可对上游来说这是「采集写出了废行」，
+    # 而废行是**会重复发生**的（实测 2026-09-28~09-30 一次 35 行 / 18 只票）。
+    # 静默丢弃 = 下次批量坏行时没人知道，排查会退回「随机少一天，查不出原因」。
+    # 这里 WARNING 而不是降级：序列本身是对的，降级反而把好数据藏起来。
+    placeholders = _skipped_placeholder(result)
+    if placeholders:
+        _LOG.warning(
+            "A 股丢弃占位行 %s: %d 行 O/H/L 全 0（上游采集写出废行）| 样例日期 %s",
+            code,
+            len(placeholders),
+            ", ".join(placeholders[:3]),
         )
 
     # 用 ``compute_domain_structures`` 拿 **dataclass** 结构对象（分型/笔/中枢）。
@@ -1014,6 +1037,16 @@ def _skipped_no_factor(result: Any) -> tuple[str, ...]:
     mypy 会拿属性类型 ``tuple[str, ...]`` 去校验默认值 ``tuple[()]`` 并报错。
     """
     skipped = getattr(result, "skipped_no_factor", None)
+    return tuple(skipped) if skipped else ()
+
+
+def _skipped_placeholder(result: Any) -> tuple[str, ...]:
+    """取 ``AShareFetchResult.skipped_placeholder``（对 duck-typed 假客户端也安全）。
+
+    与 :func:`_skipped_no_factor` 同一套写法与理由（mypy 不接受拿属性类型
+    校验 ``tuple[()]`` 默认值，所以显式判空后转换）。
+    """
+    skipped = getattr(result, "skipped_placeholder", None)
     return tuple(skipped) if skipped else ()
 
 

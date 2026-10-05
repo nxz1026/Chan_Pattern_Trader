@@ -13,6 +13,9 @@ from cpt.adapters.a_share_local import (
     AShareFetchResult,
     AShareLocalClient,
     AShareLocalError,
+    AShareNoDataError,
+    AShareNoFactorError,
+    ASharePlaceholderRowsError,
 )
 from cpt.domain.models import CanonicalBar
 
@@ -192,6 +195,154 @@ def test_fetch_validated_bars_returns_barlike_list(full_db):
     for b in bars:
         for attr in ("open_time", "open", "high", "low", "close"):
             assert hasattr(b, attr)
+
+
+# --------------------------------------------------------------------------- #
+# 占位行守卫（R52）
+#
+# 背景：上游在 2026-09-28~09-30 一次批量写出 35 行 O/H/L=0、vol=amt=0 的废行
+# （18 只票），其中 **18 行连 close 都是 0**。危害分两档：
+#   close≠0 → validate_ashare_bars 抛 DataValidationError → 整只票降级；
+#   close=0 → 校验器 0<=0<=0 放行 → 零价 K 线进结构计算 → 假分型/假笔/假中枢，
+#             **全程零报错**。第二档更毒，所以下面的用例必须同时钉住两档。
+# --------------------------------------------------------------------------- #
+
+
+@pytest.fixture
+def db_with_placeholders():
+    """三天行情：9-22 正常、9-23 占位（close 填前收盘价）、9-24 完全空占位（close=0）。
+
+    第三行是**校验器本来会放行**的那一档 —— 它是这次修复真正的判据所在。
+    """
+    bars = [
+        ("000002", date(2026, 9, 22), 3.0, 3.1, 2.9, 3.05, 100.0, 200.0),
+        # 占位行 A：O/H/L 全 0，close 填了前收盘价（上游惯例）
+        ("000002", date(2026, 9, 23), 0.0, 0.0, 0.0, 3.05, 0.0, 0.0),
+        # 占位行 B：O/H/L/close 全 0 —— validate_ashare_bars 会放行
+        ("000002", date(2026, 9, 24), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+    ]
+    factors = [
+        (date(2026, 9, 22), 10.0),
+        (date(2026, 9, 23), 10.5),
+        (date(2026, 9, 24), 11.0),
+    ]
+    conn = FakeConn(bars=list(bars), factors=list(factors))
+    return AShareLocalClient(conn_factory=lambda: conn)
+
+
+def test_placeholder_rows_are_dropped_from_bars(db_with_placeholders):
+    """两档占位行都不得进入 ``bars`` —— 少了 9-24 那根就是关键。"""
+    result = db_with_placeholders.fetch_validated_klines(
+        "000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24))
+    )
+    assert len(result.bars) == 1
+    assert [b.open_time for b in result.bars] == [ms(date(2026, 9, 22))]
+    assert result.skipped_placeholder == ("2026-09-23", "2026-09-24")
+    # 不能与「缺因子」混记：两者对上游的指控完全不同
+    assert result.skipped_no_factor == ()
+
+
+def test_zero_price_bar_would_have_passed_the_validator(db_with_placeholders):
+    """钉住「为什么必须在 adapters 拦」—— 这是本轮最容易被后人「优化掉」的一处。
+
+    断言的是**校验器的真实行为**，不是我们的实现：如果哪天有人放宽了
+    ``validate_ashare_bars``，这个用例会先红，提醒他当初为什么加这道守卫。
+    """
+    from cpt.adapters.validators import validate_ashare_bars
+    from cpt.domain.models import CanonicalBar
+
+    zero_bar = CanonicalBar(
+        open_time=ms(date(2026, 9, 24)),
+        open=0.0,
+        high=0.0,
+        low=0.0,
+        close=0.0,
+        volume=0.0,
+        close_time=ms(date(2026, 9, 24)) + 24 * 3600 * 1000 - 1,
+        quote_volume=0.0,
+        trade_count=0,
+        taker_buy_base_volume=0.0,
+        taker_buy_quote_volume=0.0,
+        is_closed=True,
+    )
+    # 校验器**放行**了 —— 0 <= 0 <= 0 成立。这就是必须在 adapters 层拦的原因。
+    validated = validate_ashare_bars([zero_bar], interval_ms=24 * 3600 * 1000)
+    assert len(validated) == 1
+    assert validated[0].close == 0.0
+
+
+def test_placeholder_rows_do_not_break_partial_series(db_with_placeholders):
+    """丢弃占位行后，剩下的序列必须仍能通过校验（不能因为少一天就整票降级）。"""
+    from cpt.adapters.validators import validate_ashare_bars
+
+    result = db_with_placeholders.fetch_validated_klines(
+        "000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24))
+    )
+    validated = validate_ashare_bars(list(result.bars), interval_ms=24 * 3600 * 1000)
+    assert len(validated) == 1
+
+
+def test_all_placeholder_rows_raise_distinct_error(db_with_placeholders):
+    """整段都是占位行 ⇒ 必须报**专属**错误，不能混进 no_factor / no_data。
+
+    混掉的后果是排查被指到错误的方向：查因子表是白查，真凶是采集。
+    """
+    conn = db_with_placeholders._get_conn()
+    conn.bars[:] = [
+        ("000002", date(2026, 9, 22), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0),
+        ("000002", date(2026, 9, 23), 0.0, 0.0, 0.0, 3.05, 0.0, 0.0),
+    ]
+    with pytest.raises(ASharePlaceholderRowsError, match="全是占位行"):
+        db_with_placeholders.fetch_validated_klines(
+            "000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24))
+        )
+
+
+def test_placeholder_error_is_not_a_missing_factor_error(db_with_placeholders):
+    """异常类型必须与 no_factor / no_data 分开 —— 靠类型，不靠消息串。"""
+    conn = db_with_placeholders._get_conn()
+    conn.bars[:] = [("000002", date(2026, 9, 22), 0.0, 0.0, 0.0, 0.0, 0.0, 0.0)]
+    with pytest.raises(ASharePlaceholderRowsError) as exc_info:
+        db_with_placeholders.fetch_validated_klines(
+            "000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24))
+        )
+    assert not isinstance(exc_info.value, AShareNoFactorError)
+    assert not isinstance(exc_info.value, AShareNoDataError)
+
+
+def test_all_rows_missing_factor_still_raises_no_factor_error(full_db):
+    """守卫不能误伤原有的缺因子路径（占位行为空、但因子也缺 ⇒ 报缺因子）。"""
+    client, _ = full_db
+    client._get_conn().factors.clear()
+    with pytest.raises(AShareNoFactorError):
+        client.fetch_validated_klines("000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24)))
+
+
+def test_zero_open_alone_is_not_a_placeholder(db_with_placeholders):
+    """判据是 O/H/L **同时**为 0，不是「open=0」。
+
+    一字跌停的真实 bar 就是 open=high=low=close=涨停价（都非 0），
+    但仍存在 open=0 而 high>0 的极端情况（如集合竞价 0 元开盘）——
+    那类行是**合法数据**，误丢会静默造成序列缺口。
+    """
+    conn = db_with_placeholders._get_conn()
+    conn.bars[:] = [
+        ("000002", date(2026, 9, 22), 0.0, 3.1, 2.9, 3.05, 100.0, 200.0),
+    ]
+    result = db_with_placeholders.fetch_validated_klines(
+        "000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24))
+    )
+    assert len(result.bars) == 1
+    assert result.skipped_placeholder == ()
+
+
+def test_fetch_result_defaults_placeholder_to_empty(full_db):
+    """默认必须是空元组 —— 测试里大量 duck-type 假结果只给两个字段。"""
+    client, _ = full_db
+    result = client.fetch_validated_klines("000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24)))
+    assert result.skipped_placeholder == ()
+    # 手工构造时省略该字段也不该炸
+    assert AShareFetchResult(bars=(), skipped_no_factor=()).skipped_placeholder == ()
 
 
 # --------------------------------------------------------------------------- #

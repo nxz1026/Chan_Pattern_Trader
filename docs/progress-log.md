@@ -6605,3 +6605,50 @@ R49 的判据依赖本机环境）。通用判据已写进 `known-traps`：
 
 **本轮全量复验**：`1074 passed / 0 failed / 4 skipped`（skip 全是环境原因：
 ccxt 未装、chromium aarch64 SIGTRAP ×2、first_buy_bridge 该序列无两个中枢）。
+
+---
+
+## R53（2026-10-05）：占位行守卫 —— 零价 K 线不再静默进结构计算
+
+承接 R49~R52 报告里挂了三轮的 P2。这次查清了真因，**比 P2 严重**：不是一只票降级，
+是**两档危害、其中一档从无任何门禁发现**。
+
+### 查库实证
+
+`public.daily_bar` 中 `open=high=low=0` 共 **35 行 / 18 只票**，
+全部在 **2026-09-28~09-30 三天**，全部 `vol=amt=0`；10-01 之后干净 ⇒ 上游那三天批量坏了、之后修好了。
+不是停牌（18 只票不会同时停牌）。`asel.security_master` 池子 5221 只，18 只坏票全在池内。
+`public.daily_bar` 全仓无任何 INSERT ⇒ CPT 只读，改不了源头 ⇒ 只能在**读取侧**拦。
+
+分两档：**17 行 `close≠0`**（填的是前收盘价，601059 三天都 15.560、688496 三天都 0.580）
+⇒ 校验抛错、整票降级；**18 行 `close=0`** ⇒ 校验器 `0<=0<=0` 判真、**放行**、
+零价线进结构计算 ⇒ 假分型/假笔/假中枢，**零报错**。
+
+### 改了什么
+
+- `cpt/adapters/a_share_local.py`：新增 `ASharePlaceholderRowsError`；
+  `AShareFetchResult` 加 `skipped_placeholder` 字段（默认 `()`，不破坏 duck-type 假对象）；
+  循环里丢弃 `O/H/L` 同时为 0 的行，**判据不看 close**。
+- `cpt/application/a_share_snapshot.py`：部分丢弃 ⇒ 打 WARNING（行数 + 样例日期）；
+  全部丢弃 ⇒ reason `placeholder_rows`。加 `_skipped_placeholder` 辅助函数
+  （照抄 `_skipped_no_factor` 的 duck-type-safe 写法）。
+- 测试：`tests/test_a_share_local.py` +8（含一条**钉住校验器真实行为**的
+  `test_zero_price_bar_would_have_passed_the_validator`），
+  新建 `tests/test_ashare_placeholder_rows.py` +8（应用层：序列照常产出 +
+  必须响亮 + reason 词表不混 + duck-type 兼容）。
+
+### 真机复验
+
+`601238`（原报告里 `invalid_bars` 那只）：旧行为复现
+`DataValidationError: bars[294] ... 实测 low=0.0 open=0.0 high=0.0 close=10.288075359199999`
+⇒ 新行为 296 根、校验通过、丢弃 1 行。
+`000016`（第二档）：旧行为 286 根**含 3 根 0 价线且校验器放行** ⇒ 新行为 283 根、0 价线 0 根。
+10 只相关票全部校验通过；`600519` 丢弃 0 行（无误伤）。
+
+### 门禁
+
+变异测试三条，各自有测试变红：① 关掉适配器守卫 → 4 红；
+② 去掉 WARNING → `test_partial_placeholder_rows_are_announced_loudly` 红
+（证明「响亮」这条纪律是**被守着的**，不是摆设）；③ 把判据改回看 close → 4 红
+（证明**静默那一档**被钉住了）。还原后 `1090 passed / 0 failed / 4 skipped`，
+ruff / mypy / 9 道脚本门禁 / vulture（CI 口径 `cpt whitelist.py`）全绿。

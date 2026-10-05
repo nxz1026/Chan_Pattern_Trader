@@ -75,6 +75,7 @@ __all__ = [
     "AShareLocalError",
     "AShareNoDataError",
     "AShareNoFactorError",
+    "ASharePlaceholderRowsError",
     "SecurityName",
     "check_t_plus_one_calendar",
     "fetch_daily_tags",
@@ -452,12 +453,29 @@ class AShareNoFactorError(AShareLocalError):
     """
 
 
+class ASharePlaceholderRowsError(AShareLocalError):
+    """有行情行，但**每一行都是占位行**（OHL 全 0、无成交）—— 画不出任何序列。
+
+    单独成类的原因：它与 :class:`AShareNoDataError`、:class:`AShareNoFactorError`
+    是三种不同的上游故障，排查方向完全不同 ——
+    「没数据」查采集是否在跑，「缺因子」查因子表覆盖，
+    而「全是占位行」说明采集**跑了但写出了废行**（实测 2026-09-28~09-30
+    上游一次性写出 35 行 O/H/L=0、vol=0、amt=0，其中 18 行连 close 也是 0，
+    涉及 18 只票）。合并成同一类会把排查指到错误的方向。
+    """
+
+
 @dataclass(frozen=True)
 class AShareFetchResult:
     """拉取结果（含被跳过的日期缺口，便于上层做可观测性）。"""
 
     bars: tuple[CanonicalBar, ...]
     skipped_no_factor: tuple[str, ...]  # ISO 日期元组
+    # R52 新增：被丢弃的**占位行**日期（原始 O/H/L 全 0，无论 close 是否为 0）。
+    # 与 skipped_no_factor 分开记，因为两者对上游的指控完全不同：
+    # 前者是「因子表没覆盖这只票」，后者是「采集写出了废行」。默认值 `()`
+    # 是为了不破坏测试里那些只给两个字段的 duck-type 假结果对象。
+    skipped_placeholder: tuple[str, ...] = ()
 
 
 class AShareLocalClient:
@@ -606,11 +624,31 @@ class AShareLocalClient:
 
         bars: list[CanonicalBar] = []
         skipped: list[str] = []
+        placeholders: list[str] = []
         for row in rows:
             d, op, hi, lo, cl, vol, amt = row
             factor = factors.get(d)
             if factor is None:
                 skipped.append(d.isoformat())
+                continue
+            # R52：**占位行**守卫。上游会在某些交易日写出 O/H/L 全 0、
+            # vol=amt=0 的行（实测 2026-09-28~09-30 一次批量 35 行 / 18 只票）。
+            # 这类行**构造不出合法 K 线**，但危害有两档，且都很糟：
+            #
+            # ① close≠0（上游填了前收盘价）：``validate_ashare_bars`` 抛
+            #    DataValidationError ⇒ **整只票降级**，657 根里 1 根坏就全废。
+            # ② close=0（完全空行）：校验器 ``low<=close<=high`` 判 0<=0<=0 **成立**
+            #    ⇒ 放行 ⇒ 零价 K 线进结构计算 ⇒ 造出假分型/假笔/假中枢，
+            #    **全程零报错**。这档更毒，因为没有任何信号。
+            #
+            # 判据只看 O/H/L 是否**同时**为 0，**不看 close** —— 正是为了让②也被拦下。
+            # 用原始值（未复权）判定：复权因子再正常，0 * factor 仍是 0。
+            #
+            # 为什么不修校验器去「容忍」：0 价 K 线本身就不合法，放它进去等于
+            # 违反 ``docs/rules.md`` §5.3「非交易日不出图、不用 0 填充」。
+            # 丢弃才是对的 —— A 股本来就有合法的日历/停牌缺口，缺一天不影响结构。
+            if float(op) == 0.0 and float(hi) == 0.0 and float(lo) == 0.0:
+                placeholders.append(d.isoformat())
                 continue
             # 时间字段：CanonicalBar 用 open_time=date 00:00:00 UTC 毫秒
             open_ms = int(datetime(d.year, d.month, d.day, tzinfo=UTC).timestamp() * 1000)
@@ -633,6 +671,16 @@ class AShareLocalClient:
             )
 
         if not bars:
+            # 三种「一条都画不出来」的原因，指控对象各不相同，必须分开报，
+            # 否则排查会被指到错误的方向（见三个错误类的 docstring）。
+            if placeholders and len(placeholders) == len(rows) - len(skipped):
+                # 有因子、也查到了行情行，但**每一行都是占位行**。
+                raise ASharePlaceholderRowsError(
+                    f"{bare_code} {start_date}~{end_date} 区间内 "
+                    f"{len(placeholders)} 行全是占位行（O/H/L 全 0、无成交）—— "
+                    f"上游采集写出了废行，不是「无行情」也不是「缺因子」。"
+                    f"样例日期：{', '.join(placeholders[:3])}"
+                )
             raise AShareNoFactorError(
                 f"{bare_code} {start_date}~{end_date} 区间内所有日期都缺因子（{len(skipped)} 日）"
             )
@@ -640,6 +688,7 @@ class AShareLocalClient:
         return AShareFetchResult(
             bars=tuple(bars),
             skipped_no_factor=tuple(skipped),
+            skipped_placeholder=tuple(placeholders),
         )
 
     def fetch_validated_bars(self, code: str, start_ms: int, end_ms: int) -> list[BarLike]:
