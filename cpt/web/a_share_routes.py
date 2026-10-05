@@ -115,8 +115,9 @@ def snapshot_payload(code: str, *, width_k: int = DEFAULT_WIDTH_K) -> dict[str, 
     )
 
 
-def build_recommendation(code: str, *, level: str | None = None,
-                          history_days: int = 0) -> dict[str, Any]:
+def build_recommendation(
+    code: str, *, level: str | None = None, history_days: int = 0
+) -> dict[str, Any]:
     """推荐块：动作 + 参考价 + 依据。**永不抛异常**。
 
     R45 新增。买卖与价格由 :mod:`cpt.application.recommendation` **纯确定性**算出
@@ -161,8 +162,7 @@ def build_recommendation(code: str, *, level: str | None = None,
     # 「最新一条」由读端排序表达。
     _persist_recommendation(code, out, level)
     if history_days:
-        out["recommendation_history"] = _recommendation_history(
-            code, days=history_days)
+        out["recommendation_history"] = _recommendation_history(code, days=history_days)
     return out
 
 
@@ -182,11 +182,21 @@ def _recommendation_history(code: str, *, days: int) -> dict[str, Any]:
         client = AShareLocalClient()
         rows = recent_recommendations(client._get_conn(), code=code, days=days)  # noqa: SLF001
     except RecommendationPersistError as exc:
-        return {"available": False, "reason": "recommendation_history_unavailable",
-                "detail": str(exc), "count": 0, "items": []}
+        return {
+            "available": False,
+            "reason": "recommendation_history_unavailable",
+            "detail": str(exc),
+            "count": 0,
+            "items": [],
+        }
     except Exception as exc:  # noqa: BLE001
-        return {"available": False, "reason": "recommendation_history_error",
-                "detail": f"{type(exc).__name__}: {exc}", "count": 0, "items": []}
+        return {
+            "available": False,
+            "reason": "recommendation_history_error",
+            "detail": f"{type(exc).__name__}: {exc}",
+            "count": 0,
+            "items": [],
+        }
     finally:
         if client is not None:
             client.close()
@@ -198,8 +208,15 @@ def _recommendation_history(code: str, *, days: int) -> dict[str, Any]:
         "days": days,
         "epochs": [e.isoformat() if hasattr(e, "isoformat") else str(e) for e in epochs],
         "items": [
-            {**r, "created_at": r["created_at"].isoformat() if hasattr(r["created_at"], "isoformat") else str(r["created_at"]),
-             "factor_epoch": r["factor_epoch"].isoformat() if hasattr(r["factor_epoch"], "isoformat") else r["factor_epoch"]}
+            {
+                **r,
+                "created_at": r["created_at"].isoformat()
+                if hasattr(r["created_at"], "isoformat")
+                else str(r["created_at"]),
+                "factor_epoch": r["factor_epoch"].isoformat()
+                if hasattr(r["factor_epoch"], "isoformat")
+                else r["factor_epoch"],
+            }
             for r in rows
         ],
     }
@@ -227,7 +244,7 @@ def _persist_recommendation(code: str, rec: dict[str, Any], level: str) -> None:
         except Exception:  # noqa: BLE001 — 没有纪元就存 NULL，不该因此丢掉整条留痕
             epoch = None
         append_recommendation(conn, rec, epoch=epoch)
-        conn.commit()          # store 层不 commit（边界归调用方），同 llm_cases
+        conn.commit()  # store 层不 commit（边界归调用方），同 llm_cases
     except RecommendationPersistError as exc:
         _LOG.warning("推荐留痕未写入 code=%s: %s", code, exc)
     except Exception as exc:  # noqa: BLE001
@@ -273,12 +290,22 @@ def _signal_history(code: str) -> dict[str, Any]:
         try:
             events = load_signal_events(conn, days=90, code=code)
         except SignalEventError as exc:
-            return {"available": False, "reason": "signal_history_unavailable",
-                    "detail": str(exc), "count": 0, "items": []}
+            return {
+                "available": False,
+                "reason": "signal_history_unavailable",
+                "detail": str(exc),
+                "count": 0,
+                "items": [],
+            }
         return build_history(events, epoch_ms=epoch_ms)
     except Exception as exc:  # noqa: BLE001 — 历史是锦上添花，不能带崩推荐
-        return {"available": False, "reason": "signal_history_error",
-                "detail": f"{type(exc).__name__}: {exc}", "count": 0, "items": []}
+        return {
+            "available": False,
+            "reason": "signal_history_error",
+            "detail": f"{type(exc).__name__}: {exc}",
+            "count": 0,
+            "items": [],
+        }
     finally:
         if client is not None:
             client.close()
@@ -321,21 +348,11 @@ def _raw_close(code: str) -> float | None:
     与快照的 ``candles[-1].close`` **口径不同**，别混用：
     快照那份是后复权价，用于画图（复权后价格连续，结构才连得上）。
     """
-    from cpt.adapters._dbconfig import connection_kwargs  # noqa: PLC0415
+    # R46：SQL 下沉到 adapters.a_share_local（web 层不再直接写 SQL，
+    # 过 scripts/check_sql_layering.py 分层门禁）。
+    from cpt.adapters.a_share_local import fetch_latest_raw_close  # noqa: PLC0415
 
-    try:
-        import psycopg  # noqa: PLC0415
-
-        with psycopg.connect(**connection_kwargs()) as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT close FROM public.daily_bar WHERE code=%s "
-                "ORDER BY date DESC LIMIT 1",
-                (code,),
-            )
-            row = cur.fetchone()
-        return float(row[0]) if row and row[0] is not None else None
-    except Exception:  # noqa: BLE001 — 拿不到就退回后复权价，不崩
-        return None
+    return fetch_latest_raw_close(code)
 
 
 def _factor_codes() -> set[str]:

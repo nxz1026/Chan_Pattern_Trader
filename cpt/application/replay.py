@@ -49,11 +49,18 @@ from typing import Any, Final
 from cpt.adapters.native_chanlun import NativeChanlunBackend
 from cpt.adapters.reference_chanlun import (
     ChanlunBackend,
-    InMemoryChanlunBackend,
-    ReferenceChanlunConfig,
     map_bi,
     map_fractal,
     map_zhongshu,
+)
+from cpt.adapters.reference_pipeline import (
+    compute_domain_structures,  # noqa: F401  re-export：既有 import 点不变
+)
+from cpt.adapters.reference_pipeline import (
+    default_backend as _default_backend,
+)
+from cpt.adapters.reference_pipeline import (
+    to_ref_config as _to_ref_config,
 )
 from cpt.adapters.validators import validate_canonical_bars
 from cpt.application.export import dataset_hash, export_dataset
@@ -69,6 +76,7 @@ from cpt.domain.models import (
 )
 
 __all__ = [
+    "compute_domain_structures",
     "load_fixture",
     "replay_bars",
     "replay_incremental",
@@ -171,23 +179,6 @@ def load_fixture(path: str | Path) -> tuple[RulesConfig, list[CanonicalBar], dic
     return config, bars, metadata
 
 
-def _default_backend() -> InMemoryChanlunBackend:
-    return InMemoryChanlunBackend()
-
-
-def _to_ref_config(config: RulesConfig) -> ReferenceChanlunConfig:
-    """把 CPT RulesConfig 投影到反腐层配置。"""
-    return ReferenceChanlunConfig(
-        use_fx_qy_middle=config.fx_qy_middle,
-        use_fx_qj_ck=config.fx_qj_ck,
-        use_bi_type_new=config.bi_type_new,
-        zs_wzgx=config.zs_wzgx,
-        macd_fast=config.macd_fast,
-        macd_slow=config.macd_slow,
-        macd_signal=config.macd_signal,
-    )
-
-
 def run_replay(
     *,
     config: RulesConfig,
@@ -266,62 +257,6 @@ def run_replay(
         signals=list(signals) if signals else [],
         metadata=metadata,
     )
-
-
-def compute_domain_structures(
-    bars: Sequence[CanonicalBar],
-    config: RulesConfig,
-    backend: ChanlunBackend | None = None,
-) -> tuple[tuple[Fractal, ...], tuple[Bi, ...], tuple[ZhongShu, ...]]:
-    """算出一遍后端的**领域对象**三元组（未序列化的 dataclass）。
-
-    与 :func:`run_replay` 的分工：
-
-    - :func:`run_replay` 返回 ``export_dataset`` 的 **schema v1 payload** ——
-      结构元素在 ``payload["data"]`` 下且已 ``asdict`` 成普通 dict；
-    - 本函数返回 ``(fractals, bis, zhongshus)`` 的 dataclass 元组，正是
-      :func:`cpt.application.dashboard.build_dashboard_snapshot` 需要的入参形状。
-
-    实测踩过的坑：把 ``run_replay`` 的返回值直接喂给 ``build_dashboard_snapshot_v2``
-    会在 ``asdict(f)`` 处炸 ``TypeError: asdict() should be called on dataclass
-    instances``（拿到的是 dict）；而写成 ``payload.get("fractals")`` 更糟——静默
-    ``None`` → overlays 全空、K 线上一条笔都不画。要 dataclass 就用本函数。
-
-    Args:
-        bars: K 线序列（本函数不校验，调用方负责）。
-        config: 规则口径配置。
-        backend: 结构计算后端；``None`` 时用 ``InMemoryChanlunBackend``。
-
-    Returns:
-        ``(fractals, bis, zhongshus)``，三者均为 ``level=config.levels[0]`` 的元组。
-    """
-    active_backend = backend or _default_backend()
-    ref_config = _to_ref_config(config)
-    primary_level = config.levels[0]
-    result = active_backend.compute_structures(list(bars), ref_config)
-    fractals = tuple(
-        map_fractal(fx, level=primary_level, source_ids=(f"b:{fx.bar_index}",), bars=bars)
-        for fx in result.fx_list
-    )
-    bis = tuple(
-        map_bi(
-            bi,
-            level=primary_level,
-            source_ids=(f"fx:{bi.start_bar}", f"fx:{bi.end_bar}"),
-            bars=bars,
-        )
-        for bi in result.bi_list
-    )
-    zhongshus = tuple(
-        map_zhongshu(
-            zs,
-            level=primary_level,
-            source_ids=tuple(f"bi:{i}" for i in zs.bi_indices),
-            bars=bars,
-        )
-        for zs in result.zs_list
-    )
-    return fractals, bis, zhongshus
 
 
 def _infer_interval_ms(bars: Sequence[CanonicalBar], config: RulesConfig) -> int:

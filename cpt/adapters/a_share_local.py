@@ -79,6 +79,7 @@ __all__ = [
     "check_t_plus_one_calendar",
     "fetch_daily_tags",
     "fetch_factor_codes",
+    "fetch_latest_raw_close",
     "fetch_security_names",
     "hfq_factor_on",
     "is_trade_day",
@@ -399,6 +400,32 @@ def connection_kwargs() -> dict[str, Any]:
     if ssl_cert.exists():
         kwargs["sslrootcert"] = str(ssl_cert)
     return kwargs
+
+
+def fetch_latest_raw_close(code: str) -> float | None:
+    """不复权收盘价（``public.daily_bar.close``，未复权）。
+
+    与快照里的 ``candles[-1].close`` **口径不同**：快照那份是后复权价（画图用，
+    复权后价格连续、结构才连得上）；这里给「推荐留痕」记真实成交价。
+
+    R46：从 ``cpt.web.a_share_routes._raw_close`` 下沉而来 —— web 层不再直接写
+    SQL（过 ``scripts/check_sql_layering.py`` 分层门禁）。
+
+    拿不到（无 psycopg / DB 不可达 / 该代码无数据）返回 ``None``，**不抛**：
+    调用方会退回后复权价。
+    """
+    try:
+        import psycopg  # noqa: PLC0415
+
+        with psycopg.connect(**connection_kwargs()) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT close FROM public.daily_bar WHERE code=%s ORDER BY date DESC LIMIT 1",
+                (code,),
+            )
+            row = cur.fetchone()
+        return float(row[0]) if row and row[0] is not None else None
+    except Exception:  # noqa: BLE001 — 拿不到就退回后复权价，不崩
+        return None
 
 
 class AShareLocalError(RuntimeError):

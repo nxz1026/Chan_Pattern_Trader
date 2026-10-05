@@ -100,9 +100,7 @@ class ReferenceChanlunBackend:
         detail: 给人看的一句话说明（可直接进 payload）。
     """
 
-    def __init__(
-        self, *, code: str | None = None, min_bi_len: int | None = None
-    ) -> None:
+    def __init__(self, *, code: str | None = None, min_bi_len: int | None = None) -> None:
         """
         Args:
             min_bi_len: 笔的最小跨度，**只喂 czsc 那一级**。
@@ -206,12 +204,10 @@ class ReferenceChanlunBackend:
         """
         from cpt.adapters.backend_factory import resolve_backend
         from cpt.adapters.czsc_chanlun import CzscNotInstalledError, CzscVersionError
-        from cpt.application.replay import compute_domain_structures
+        from cpt.adapters.reference_pipeline import compute_domain_structures
 
         try:
-            backend = resolve_backend(
-                "czsc", min_bi_len=self._min_bi_len(config)
-            )
+            backend = resolve_backend("czsc", min_bi_len=self._min_bi_len(config))
         except (CzscNotInstalledError, CzscVersionError) as exc:
             _LOG.debug("参照侧 czsc 不可用，回落腾讯：%s", exc)
             return None
@@ -232,12 +228,12 @@ class ReferenceChanlunBackend:
         if not code:
             self._log_debug_no_code()
             return None
-        from cpt.application.parity_reference import _tencent_structures  # noqa: PLC0415
+        from cpt.adapters.reference_pipeline import tencent_structures  # noqa: PLC0415
 
         # 腾讯那条路要**同窗口** —— 本地 N 根无缺口，腾讯 800 根含节假日缺口。
         # 窗口不对齐会造出「本地没有的日期」，那正是 R45 之前的对照口径错误。
         window = (bars[0].open_time, bars[-1].open_time) if len(bars) >= 2 else (0, 0)
-        triples = _tencent_structures(code, _rules_cfg(config), window)
+        triples = tencent_structures(code, _rules_cfg(config), window)
         if triples is None:
             return None
         return triples  # 已是 dict 三分组，_normalize 直接吃
