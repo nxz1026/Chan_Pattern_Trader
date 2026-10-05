@@ -316,6 +316,51 @@ def fx_line_refs(root: Path) -> tuple[str, str]:
     return "check_line_refs.py", "处没有 `TrendType`"
 
 
+def fx_gate_coverage(root: Path) -> tuple[str, str]:
+    """⑫ 门禁体检：造一道**在 ci.yml 里跑、却没有自检夹具**的门禁。
+
+    这正是 R45「门禁恒返回 0」换了个入口复发的样子：新门禁接进了 CI，
+    却忘了在 FIXTURES 里配一个「它必须抓到的错例」——
+    于是「它能不能红」从未被证明，而 CI 依然全绿（因为它没红）。
+    """
+    _write(
+        root / ".github/workflows/ci.yml",
+        "name: CI\non: [push]\n"
+        "jobs:\n  unit:\n    runs-on: ubuntu-latest\n    steps:\n"
+        "      - name: Gates\n        run: |\n"
+        "          python scripts/check_alpha.py\n"
+        "          python scripts/check_doc_drift.py\n"
+        "          python scripts/check_gate_coverage.py\n",
+    )
+    for name in ("check_alpha.py", "check_doc_drift.py"):
+        _write(root / "scripts" / name, "raise SystemExit(0)\n")
+    # 夹具里**故意**漏掉 check_doc_drift.py
+    _write(
+        root / "scripts/selftest_gates.py",
+        "FIXTURES = {\n"
+        '    "check_alpha.py": lambda root: ("check_alpha.py", "x"),\n'
+        '    "check_gate_coverage.py": lambda root: ("check_gate_coverage.py", "x"),\n'
+        "}\n",
+    )
+    return "check_gate_coverage.py", "逃过体检：`check_doc_drift.py`"
+
+
+def fx_cold_environment(root: Path) -> tuple[str, str]:
+    """⑬ 冷环境：造一个**胜负取决于本机环境**的用例。
+
+    这就是 R49 那两个失败的样子（「本机恰好没有某物」被当成前提）：
+    本机跑它是绿的，环境一抽掉它就是红的 —— 而它红的时候，
+    看的人第一反应总是「环境问题，与本轮无关」。
+    """
+    _write(
+        root / "tests/test_ambient_probe.py",
+        "import os\n\n\n"
+        "def test_path_is_untouched():\n"
+        '    assert os.environ.get("PATH") != "/nonexistent"\n',
+    )
+    return "check_cold_environment.py", "依赖本机环境"
+
+
 FIXTURES = {
     "check_doc_drift.py": fx_doc_drift,
     "check_all_claims.py": fx_all_claims,
@@ -328,6 +373,8 @@ FIXTURES = {
     "check_all_claims.py#H": fx_script_tags,
     "check_ci_workflow.py": fx_ci_workflow,
     "check_line_refs.py": fx_line_refs,
+    "check_gate_coverage.py": fx_gate_coverage,
+    "check_cold_environment.py": fx_cold_environment,
 }
 
 

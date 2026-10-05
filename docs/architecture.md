@@ -308,7 +308,9 @@ scripts/            运维入口（不在包内，但已在 CI 门禁覆盖范�
     check_job_poll_unique.py           ← 门禁⑦（前端轮询唯一）
     check_ci_workflow.py              ← 门禁⑩（CI workflow 缩进；R51 新增）
     check_line_refs.py               ← 门禁⑪（文档行号引用是否仍指对；R54 新增）
-    selftest_gates.py                  ← **门禁自检**，必须排在 ①~⑦ 与 ⑩⑪ 之前
+    check_gate_coverage.py           ← 门禁⑫（不许有门禁逃过自检；R55 新增）
+    check_cold_environment.py        ← 门禁⑬（测试结论不许是本机环境的函数；R55 新增）
+    selftest_gates.py                  ← **门禁自检**，必须排在 ①~⑦ 与 ⑩~⑬ 之前
     scan_doc_claims.py                 ← 「未兑现承诺」候选抽取（只报不判）
     report_coverage_gaps.py  run_coverage.sh  ← 覆盖率 + 「生产路径未测透」清单
     migrations/（8 份幂等 SQL，R20 → R27）

@@ -297,6 +297,8 @@ python scripts/check_enqueue_skeleton_unique.py # 门禁⑥
 python scripts/check_job_poll_unique.py         # 门禁⑦
 python scripts/check_ci_workflow.py             # 门禁⑩（R51 新增）
 python scripts/check_line_refs.py               # 门禁⑪（R54 新增）
+python scripts/check_gate_coverage.py           # 门禁⑫（R55 新增）
+python scripts/check_cold_environment.py        # 门禁⑬（R55 新增，约 75 秒）
 vulture --min-confidence 60 cpt whitelist.py    # 死代码审计
 ```
 
@@ -306,7 +308,7 @@ vulture --min-confidence 60 cpt whitelist.py    # 死代码审计
 > 引入于 `1cda27af1`（R45 dashboard 拆分），被 pytest 的红灯挡在前面，从未暴露。
 > 门禁⑩ `check_ci_workflow.py` 就是为这类错加的：**清单必须与 ci.yml 逐条对得上**。
 
-七点容易记错，都是踩过的坑：
+九点容易记错，都是踩过的坑：
 
 - **`scripts/` 在门禁范围内**。2026-09-25 之前只覆盖 `cpt tests`，等于给 364 行的
   运维入口开了后门，它自带的重复实现和有顺序 bug 的函数都没人发现。
@@ -326,6 +328,22 @@ vulture --min-confidence 60 cpt whitelist.py    # 死代码审计
   一边打印「✅ 全部断言对得上」，一边有 30+ 处坐标指着无关代码（R54 清出来的
   `docs/pending-wiring.md` R22 接线表十处**全错**）。门禁⑪只认「片段里唯一且
   确实被该文件 `def`/`class` 定义」的锚点，有歧义就跳过：**宁可漏报也不造假阳性**。
+- **`check_gate_coverage.py`（门禁⑫）查的是「有没有门禁逃过体检」**。门禁自检的
+  错例清单（`selftest_gates.py` 的 `FIXTURES`）是**手工维护**的，此前没有任何东西
+  保证它与 `ci.yml` 同步 —— 新门禁接进 CI 却忘了配夹具，就**逃过体检**，
+  「它能不能红」从未被证明，而 CI 依然全绿（因为**它没红**）。病根与 R45 的
+  「门禁恒返回 0」是同一个，只是入口从「门禁自己坏」换成了「门禁逃过体检」。
+  判据是三方对齐：ci.yml 跑的门禁 ⊆ 夹具的键；夹具必须指向真实存在的脚本；
+  磁盘上的 `check_*.py` 必须都在 CI 里跑（配置上这份清单**跟着代码一起长**，
+  新加门禁必须同时改 ci.yml 和 FIXTURES，门禁⑫ 会拦住漏改的那一半）。
+- **`check_cold_environment.py`（门禁⑬）查的是「测试的结论是不是本机环境的函数」**。
+  R49 那两个失败（沙箱没注入 `url_safety.js`、把「本机没装 Wind」当前提）当时被我
+  定性成「环境问题，与本轮无关」—— **这个定性是错的**，R50 才推翻：真根因是
+  **测试自身的判据缺陷**。静态判据两条路都实测否决了（名字启发式假阳性 61/99；
+  环境探测启发式今日零违规、且抓不到真身 —— 那例代码里根本没有探测调用，
+  靠的是「本机恰好没有某物」这个沉默事实）。⇒ 判据只能是执行级的：
+  以 `PATH=/nonexistent`、空 `HOME` 重跑整个 `tests/`。有 failed/error 就红；
+  skip **不算**失败，但会**逐条打出来** —— 「绿灯来自没执行」比红更糟。
 
 > Windows 开发机上有几个**已知且与代码无关**的基线偏差（`fcntl` / 无浏览器）：
 > `a_share_pool.py` 顶层 `import fcntl` 导致该模块在 Windows 不可导入

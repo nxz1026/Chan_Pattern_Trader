@@ -118,6 +118,27 @@ jobs:
       # 有歧义就跳过 —— 宁可漏报也不造假阳性，假阳性会让门禁被无视。
       - name: Doc line references still point at the right thing
         run: python scripts/check_line_refs.py
+      # 门禁⑫（R55 新增）：**不许有门禁逃过自检**。
+      # R45 的对策是 `selftest_gates.py`（给每个门禁配已知错例，先证明它能红），
+      # 但那份清单是手工维护的、没有任何东西保证它与本文件同步 ——
+      # 于是同一个病换个入口复发：新门禁接进 CI 却忘了配夹具，
+      # 「它能不能红」从未被证明，而 CI 依然全绿（因为它没红）。
+      # 判据是三方对齐：ci.yml 跑的门禁 ⊆ FIXTURES 的键；
+      # 夹具必须指向真实存在的脚本；磁盘上的 check_*.py 必须都在 CI 里跑。
+      - name: No gate escapes the self-test
+        run: python scripts/check_gate_coverage.py
+      # 门禁⑬（R55 新增）：测试的结论**不许是本机环境的函数**。
+      # R49 的两个失败（沙箱没注入 url_safety.js / 把「本机没装 Wind」当前提）
+      # 是**第二类**静默失效：断言依赖本机环境 —— 本机绿、CI 红，或反之，
+      # 而且看的人第一反应总是「环境问题，与本轮无关」（R49 我自己就这么定性过，
+      # R50 才推翻：真根因是**测试自身的判据缺陷**）。
+      # 静态判据实测都不成立（名字启发式假阳性 61/99；环境探测启发式今日零违规，
+      # 且抓不到真身 —— 那例代码里根本没有探测调用，靠的是沉默事实）。
+      # ⇒ 判据只能是执行级的：把 PATH/HOME 抽掉，整个 tests/ 重跑一遍。
+      # 代价实测 74.66 秒。有 failed/error 就红；skip 不算失败，
+      # 但会逐条打出来 —— 「绿灯来自没执行」比红更糟。
+      - name: Tests do not depend on the ambient environment
+        run: python scripts/check_cold_environment.py
       - name: Dead-code audit (vulture)
         run: |
           # vulture==2.14 自 2026-09-25 起已在 requirements-dev.txt 锁文件里，

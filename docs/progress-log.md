@@ -6736,3 +6736,82 @@ ruff / mypy / 9 道脚本门禁 / vulture（CI 口径 `cpt whitelist.py`）全�
 - 全量 pytest：**1090 passed / 4 skipped**（skip 全是 ccxt 未装、chromium aarch64 ×2、
   `first_buy_bridge` 该序列无两中枢）。
 
+---
+
+## R55：给 ①② 补门禁 —— 「同一类病会换入口复发」（2026-10-05）
+
+### 任务
+
+R54 把四类静默门禁失效列全之后，其中 **① R45（门禁恒返回 0）** 与
+**② R49（断言依赖本机环境）** 两类**没有专盯的门禁**，只有 `selftest_gates.py`
+泛泛兜着。本轮就是给这两类找准残量缺口、各立一道。
+
+### ① 的残量缺口：没有东西保证「自检清单」与 CI 同步
+
+`selftest_gates.py` 的 `FIXTURES`（每个门禁配一个已知错例、先证明它能红）是
+**手工维护**的，而**没有任何东西**保证它与 `.github/workflows/ci.yml` 同步：
+
+> 新门禁接进 CI、却忘了配夹具 ⇒ 它**逃过体检**，而 CI 依然全绿 ——
+> 因为**它没红**。
+
+病根与 R45 一模一样（**全绿只是它什么都没查**），入口从「门禁自己坏」换成了
+「门禁逃过体检」。门禁⑩ 只查 YAML 缩进，不管这个。
+
+### ② 为什么立不出静态判据（两条路都实测否决）
+
+| 试探 | 实测 | 结论 |
+| --- | --- | --- |
+| 名字启发式（名字含 missing/unavailable/degrade ⇒ 必须有 patch） | 命中 99 个，61 个看不到 patch；但那 61 个的「缺」是**数据缺**，由用例自己构造 | 假阳性会让你无视这道门禁，**否决** |
+| 环境探测启发式（出现 `shutil.which` / `Path.home` / `os.environ` ⇒ 必须有守卫） | 只有 7 个模块探环境，5 个已有守卫，余下 2 个是 `subprocess.Popen` 启自家服务（正当）—— **今日零违规** | 立起来只是摆设，且**抓不到 R49 真身**（那例代码里没有探测调用，靠「本机恰好没装 Wind」这个沉默事实），**否决** |
+
+⇒ ② 的真身是**执行级**的。**判据只能是「换个环境再跑一遍」。**
+
+### 新增门禁
+
+**⑫ `scripts/check_gate_coverage.py`** —— 三方对齐：
+
+| 集合 | 来源 |
+| --- | --- |
+| `A` | `ci.yml` 里 `python scripts/x.py` 调起的门禁 |
+| `B` | `selftest_gates.py` 的 `FIXTURES` 键（**AST 解析**，非正则） |
+| `C` | `scripts/check_*.py` 实际存在的文件 |
+
+**R1** `A ⊆ B`（逃过体检）；**R2** 夹具指向的脚本必须真实存在（死夹具）；
+**R3** `C ⊆ A`（闲置门禁）。`NOT_A_GATE` 豁免两条**各写明理由**。
+配置即约束：新加门禁必须**同时**改 `ci.yml` 与 `FIXTURES`，改半边就会被拦住。
+
+> 写错过一次：R2 初版用 `b - c` 集合差比较，把不以 `check_` 开头的
+> `build_dashboard_bundle.py` 误报成死夹具；改成逐个 `(SCRIPTS / name).exists()`。
+
+**⑬ `scripts/check_cold_environment.py`** —— 以 `PATH=/nonexistent`、空 `HOME`
+（其余环境原样保留）重跑整个 `tests/`：有 failed/error ⇒ 该用例的结论是
+**本机环境的函数** ⇒ 判红；`skip` 不算失败，但**逐条打出来**
+（「绿灯来自没执行」比红更糟）。临时 HOME 建在 `ROOT/.pytest_cache` 下，
+**不放 /tmp**（本仓 /tmp 配额紧且不支持 SQLite WAL）。
+
+### 复验
+
+- **门禁自检 13/13**：含新增的 ⑫（造一道「在 ci.yml 里跑、FIXTURES 里没有」的门禁）
+  与 ⑬（造一个断言 `PATH != "/nonexistent"` 的用例 ⇒ 冷跑必红）。
+- **真仓变异（三条，全部有效）**：
+  - ⑫/①：往 `ci.yml` 插 `python scripts/check_does_not_exist.py` ⇒ rc=1
+    `R1 逃过体检`；把 `check_line_refs.py` 从 `ci.yml` 摘掉 ⇒ rc=1 `R3 闲置门禁`。
+  - ⑬/②：落盘一个 `tests/test_r55_ambient_probe.py`（断言 `PATH != "/nonexistent"`）
+    ⇒ rc=1，报该用例依赖本机环境；删掉 ⇒ rc=0。**探针用完即删，不入库。**
+  - 三条变异都用 `assert s.count(old) == 1` 或先 `sed -n` 确认**注入真的落到了文件里**
+    —— R54 吃过「sed 没匹配上、门禁照样绿」的亏。
+- **门禁⑬ 实测**：冷跑 `1083 passed / 11 skipped`（正常跑 `1090 / 4`，差的 7 条正是
+  `node 不可用，跳过 JS 行为契约`），耗时 **72~75 秒**。
+- **17 项门禁全 rc=0**：10 道脚本门禁 + `build_dashboard_bundle --check` + selftest +
+  lint-imports（`Contracts: 6 kept, 0 broken`）+ vulture + ruff check +
+  ruff format --check（235 files）+ mypy（91 source files）。
+- 全量 pytest：**1090 passed / 4 skipped**。
+
+### 教训
+
+> **同一类病会换入口复发。** R45 是「门禁自己恒返回 0」，到 R55 变成「门禁逃过
+> 体检」—— 形态变了，病根没变。补门禁时要顺着病根问一句：**这个病还有别的入口吗？**
+>
+> **判据立不立得住，要用数据试，不要用直觉定。** ② 的两条静态路都是写之前先在
+> 真仓上量过的（99 个命中 / 7 个模块），量完才知道不能立。
+
