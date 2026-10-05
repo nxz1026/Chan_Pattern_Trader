@@ -268,3 +268,38 @@ DROP INDEX CONCURRENTLY public.idx_cpt_dashboard_run_dataset_hash; -- 16 kB
 > 代码侧只 import store 类）—— 也**会多出索引名**（`idx_` 前缀被 grep 吃掉，
 > 把 `idx_cpt_llm_call_subject` 误读成一张表）。
 > 本轮两份文档都被这个假阳性/假阴性咬到。
+
+---
+
+## R45 追加：`cpt_dashboard_run` 的测试污染已清理（2026-10-05）
+
+web 契约测试用 `tests/conftest.py::served` 起**真 server** 打**真请求**，
+而测试与生产**共用同一个库**（`~/.dbconfig` 的 `$DBNAME`，无测试库）
+⇒ 真的往本表写了测试快照。
+
+同时 `/api/dashboard/runs` 是「**表优先**」，于是
+`test_timestamp_falls_back_when_runtime_omits_generated_at` 长期失败
+（读到的是别的测试写的墙钟时间）。
+
+| | 清理前 | 清理后 |
+|---|---:|---:|
+| 总行数 | 89 | **35** |
+| 判定为测试数据 | 54 | 0（已删） |
+
+删除判据（**只删能确证的**）：
+
+```sql
+snapshot::jsonb #>> '{market,symbol}' LIKE 'SYM%'          -- 49 行，必是 fixture
+OR snapshot::jsonb #>> '{runtime,data_source}'
+   IN ('fixture', 'native_fixture')                          -- BTCUSDT 的 fixture 行
+OR snapshot::jsonb #>> '{market_24h,reason}'
+   IN ('demo_mode_no_upstream', 'fixture_mode_no_upstream')
+```
+
+保留的 35 行是 `data_source = db_local` 的真实运行记录。
+⚠️ 其中 `000001` / `600036` 相隔 2 秒（08:34:38 / 08:34:40），
+**这个形态也可能是测试** —— 未能确证，故保留，需要时再核。
+
+**防复发**：新增 `CPT_RUN_STORE_PERSIST=0` 开关（`tests/conftest.py` autouse），
+**读写两端**都关，且每个测试前后清空 in-process ring。
+**生产默认行为不变**。

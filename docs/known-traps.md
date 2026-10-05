@@ -705,3 +705,41 @@ finally:
 ⚠️ 这条是 `tests/test_signal_history_fallbacks.py` 的最后一条用例逼出来的，
 而那条用例只是**顺手**把 `AShareLocalClient` 换成会抛的假对象。
 **假对象越"坏"，越容易照出真问题。**
+
+---
+
+## 28. 测试会往**生产表**写数据 —— 而读路由是「表优先」（R45 修）
+
+**症状**：`cpt_dashboard_run` 里混着测试快照（实测 89 行，最早 2026-10-01），
+且 `test_timestamp_falls_back_when_runtime_omits_generated_at` **长期失败**。
+
+**根因**（两层，都是隔离问题）：
+
+1. **写**：web 契约测试用 `tests/conftest.py::served` 起**真 server** 打**真请求**，
+   于是真的 `upsert_run` 进生产表。测试与生产**共用同一个库**
+   （`~/.dbconfig` 的 `$DBNAME`，没有测试库）。
+2. **读**：`/api/dashboard/runs` 是「**表优先**」⇒ 测试读回的是
+   **别的测试写的行**，`rows[0].generated_at` 是墙钟时间而不是本例的 `as_of_ms`。
+
+还有第三层：`_RUN_RING` / `_RUN_BODIES` 是**模块级全局**，跨测试残留。
+
+**修**（`CPT_RUN_STORE_PERSIST=0`，读写**两端**都管住）：
+
+- 只关写端**不够** —— 表里还留着历史行，读端照样优先；
+- `tests/conftest.py` 加 autouse fixture：关双写 + **每个测试前后清空 ring**；
+- **生产默认行为不变**（不设该变量时照旧双写 + 读表）；
+- `tests/test_dashboard_runs_persisted.py` 专门验证落库，
+  所以它**显式反向打开**该开关 —— 否则它测的是「不写库」。
+
+**清理**：按 `SYM%` 代码 / `data_source in (fixture, native_fixture)` /
+`market_24h.reason in (demo_mode_no_upstream, fixture_mode_no_upstream)`
+删掉 **54 行**能确证的测试数据，保留 35 行 `db_local`。
+
+### 为什么这条值得单独记
+
+它不是「测试写得不好」，是**测试在改生产数据**。
+而症状（一个长期失败的测试）看起来像「代码有 bug」——
+我因此把 `test_signal_stats_route_...` 归成「既存基线失败」喊了一整天。
+
+⇒ **一个失败若长期不被修，先怀疑它是不是真问题**，
+别用「不是本轮引入」当解释 —— 那是个会传染的标签。
