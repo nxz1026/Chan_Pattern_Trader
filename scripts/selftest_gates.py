@@ -225,6 +225,21 @@ def fx_bundle_sync(root: Path) -> tuple[str, str]:
     return "build_dashboard_bundle.py", "STALE"
 
 
+def fx_script_tags(root: Path) -> tuple[str, str]:
+    """造一个**未闭合**的 ``<script>`` —— R45 真的踩过。
+
+    后果特别隐蔽：浏览器把后续标签当脚本文本吞掉 ⇒ 那个文件
+    **从未被请求**、对应全局恒 undefined ⇒ 功能静默消失，
+    而页面正常、console 零报错。
+    """
+    _write(root / "dashboard/index.html",
+           "<html><body>\n"
+           '<script src="./a.js" defer>\n'
+           '<script src="./cpt_job.js"></script></script>\n'
+           "</body></html>\n")
+    return "check_all_claims.py", "script"
+
+
 FIXTURES = {
     "check_doc_drift.py": fx_doc_drift,
     "check_all_claims.py": fx_all_claims,
@@ -234,6 +249,7 @@ FIXTURES = {
     "check_sql_layering.py": fx_sql_layering,
     "check_storage_failure_semantics.py": fx_storage_failure,
     "build_dashboard_bundle.py": fx_bundle_sync,
+    "check_all_claims.py#H": fx_script_tags,
 }
 
 
@@ -243,6 +259,12 @@ def run_one(script: str, builder, verbose: bool) -> tuple[bool, str]:
         root = Path(td) / "repo"
         (root / "scripts").mkdir(parents=True)
         (root / "docs").mkdir(parents=True)
+        # ⚠️ 形如 ``check_all_claims.py#H`` 要**先**拆名再复制 ——
+        # 否则 shutil 会去找一个叫 ``…py#H`` 的文件（第一版就栽在这，报
+        # 「自检本身崩了」而不是「夹具不对」）。
+        cat = None
+        if "#" in script:
+            script, cat = script.split("#", 1)
         # 复制**真脚本**，ROOT 随之指向临时仓库
         shutil.copy(SCRIPTS / script, root / "scripts" / script)
         script, expect = builder(root)
@@ -254,6 +276,8 @@ def run_one(script: str, builder, verbose: bool) -> tuple[bool, str]:
         argv = [sys.executable, str(root / "scripts" / script)]
         if script == "build_dashboard_bundle.py":
             argv.append("--check")
+        if cat:
+            argv.extend(["--cat", cat])
         out = subprocess.run(
             argv, capture_output=True, text=True, cwd=str(root), timeout=120,
         )

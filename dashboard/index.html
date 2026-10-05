@@ -590,8 +590,8 @@
          vendor 资产全部本地内联，无任何 CDN 请求（总计划决策 E2）。 -->
     <!-- ⚠️ R45：必须最先加载。凭据消毒的唯一实现，canvas_* / market_a_share /
          inspection_panel 都在它之前用 window.CPT_URL.safe。 -->
-    <script src="./url_safety.js" defer>
-  <script src="./cpt_job.js"></script></script>
+    <script src="./url_safety.js" defer></script>
+  <script src="./cpt_job.js" defer></script>
     <script src="./canvas_registry.js" defer></script>
     <script src="./vendor/lightweight-charts.standalone.production.js" defer></script>
     <script src="./vendor/plotly-finance.min.js" defer></script>

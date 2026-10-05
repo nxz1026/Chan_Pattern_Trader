@@ -207,7 +207,7 @@ LINEREF = re.compile(r"`?([a-z_]+\.py):(\d+)`?")
 
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--cat", default="PSETK L".replace(" ", ""), choices=list("PSETKL"))
+    ap.add_argument("--cat", default="PSETKLH".replace(" ", ""), choices=list("PSETKLH"))
     ap.add_argument("--verbose", action="store_true")
     a = ap.parse_args(argv)
 
@@ -310,6 +310,35 @@ def main(argv: list[str] | None = None) -> int:
                 k = m.group(1)
                 if k not in facts["blob"] and not _allowed(k):
                     bad["K 配置键未出现"].append(f"{rel(d)} → {k}")
+
+    if "H" in a.cat:
+        # ── index.html 的 <script> 标签必须**成对闭合**（门禁⑨）─────────
+        # R45 踩过：一个 replace 把 `</script>` 落错位置，index.html 变成
+        #     <script src="./url_safety.js" defer>          ← 丢了闭合
+        #       <script src="./cpt_job.js"></script></script> ← 多了闭合
+        # 浏览器把第二行当**前一个脚本文本**吞掉 ⇒ cpt_job.js 从未成为
+        # script 元素、从未被请求、window.CPTJob 恒 undefined
+        # ⇒ 那个「说人话」面板**静默不显示**，而页面完全正常、console 零报错。
+        import re as _re
+
+        idx = ROOT / "dashboard" / "index.html"
+        if idx.exists():
+            raw = idx.read_text(encoding="utf-8")
+            body = _re.sub(r"<!--.*?-->", "", raw, flags=_re.S)
+            opens = _re.findall(r"<script\b", body)
+            closes = _re.findall(r"</script>", body)
+            if len(opens) != len(closes):
+                bad["H script 标签不成对"].append(
+                    f"index.html: <script> {len(opens)} 个 / </script> {len(closes)} 个")
+            # 逐个标签：开标签到它的闭合之间**不能再出现 <script**
+            for m in _re.finditer(r"<script\b[^>]*>", body):
+                tail = body[m.end():]
+                end = tail.find("</script>")
+                seg = tail if end < 0 else tail[:end]
+                if "<script" in seg:
+                    bad["H script 标签畸形"].append(
+                        f"index.html: {m.group(0)[:60]} 未闭合（吞掉了后续标签）")
+                    break
 
     if "L" in a.cat:
         for d in docs:
