@@ -273,6 +273,31 @@ def fx_script_tags(root: Path) -> tuple[str, str]:
     return "check_all_claims.py", "script"
 
 
+def fx_ci_workflow(root: Path) -> tuple[str, str]:
+    """⑨ workflow 缩进：造 5 个被 ``run: |`` 吞掉的 step —— R51 真的踩过。
+
+    这个错最阴的地方在于它**不产生测试失败**：门禁脚本本身全对、全绿，
+    但它们根本没在 CI 上执行过；CI 恒红却指向一条看不懂的
+    ``-: command not found``。R51 之前被 pytest 红灯挡在前面，从未暴露。
+    """
+    _write(
+        root / ".github/workflows/ci.yml",
+        "name: CI\non: [push]\njobs:\n  unit:\n    runs-on: ubuntu-latest\n"
+        "    steps:\n"
+        "      - name: Static quality gates\n"
+        "        run: |\n"
+        "          python scripts/check_doc_drift.py\n"
+        "          - name: Dashboard bundle in sync\n"
+        "            run: python scripts/build_dashboard_bundle.py --check\n"
+        "          - name: Doc counts\n"
+        "            run: python scripts/check_doc_counts.py\n"
+        "      - name: Dead-code audit (vulture)\n"
+        "        run: |\n"
+        "          vulture --min-confidence 60 cpt\n",
+    )
+    return "check_ci_workflow.py", "command not found"
+
+
 FIXTURES = {
     "check_doc_drift.py": fx_doc_drift,
     "check_all_claims.py": fx_all_claims,
@@ -283,6 +308,7 @@ FIXTURES = {
     "check_storage_failure_semantics.py": fx_storage_failure,
     "build_dashboard_bundle.py": fx_bundle_sync,
     "check_all_claims.py#H": fx_script_tags,
+    "check_ci_workflow.py": fx_ci_workflow,
 }
 
 

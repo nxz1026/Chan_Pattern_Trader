@@ -71,33 +71,43 @@ jobs:
           # 3 个从未实现的接口、min_bi_len 的 docstring 声明比实际强。
           # 这些测试抓不到、代码审不出来，只能拿文档里的断言去对代码。
           python scripts/check_doc_drift.py
-          # 门禁④：全量文档断言。check_doc_drift 管「有/没有」，
-          # 这个管「**是不是还对得上**」—— 路径、符号、接口、表名、配置键、行号。
-          # 第五轮全量扫描实测它一次抓到 1 处真漂移（architecture 说 72 个测试
-          # 文件、实际 104）+ 1 个**零测试覆盖的生产 cron 作业**。
-          # 门禁⑧：看板 bundle 必须与源文件同步（R45 拆分）。
-          # 改了任何一个 dash-*.js 而忘了重跑构建器 ⇒
-          # **线上跑的是旧代码，而仓库里是新代码**，且没有任何东西会报警。
-          - name: Dashboard bundle in sync
-            run: python scripts/build_dashboard_bundle.py --check
-          - name: Doc claims (full sweep)
-            run: python scripts/check_all_claims.py
-          # 门禁⑤：文档里的**计数**断言。计数是最容易悄悄腐坏的一类，
-          # 而且完全不会让任何测试变红。
-          - name: Doc counts
-            run: python scripts/check_doc_counts.py
-          # 门禁⑥：LLM 入队骨架必须**唯一**。
-          # explain 与 summarize 曾各抄一份（76+68 行）⇒ 同一个 bug 抄了两份
-          # （「重复提交返回库里不存在的 call_id」在 explain 里早就在了，
-          #   是补 summarize 的测试才发现）。用 AST 锁住「只有一份」。
-          - name: Enqueue skeleton is unique
-            run: python scripts/check_enqueue_skeleton_unique.py
-          # 门禁⑦：前端「等任务」轮询必须走 cpt_job.js 的唯一实现。
-          # 与凭据消毒同一个坑：R44 收敛了 9 处 url 重复实现，
-          # R45 我又自己发明了一套轮询 —— 不踩第二遍。
-          # **只报告不阻断**（还有 1 处语义不同的持续刷新，故意不合并）。
-          - name: Frontend job polling is unique
-            run: python scripts/check_job_poll_unique.py
+      # ⚠️ R51：以下 5 个 step 原先被上一条 `run: |` 的块标量**整段吞了进去**
+      # （缩进 10 空格 = 仍在 run 文本内）⇒ bash 把 `- name: ...` 当命令执行，
+      # 报 `-: command not found` → **整个 Static quality gates 步骤 exit 127**。
+      # 也就是说这 5 个门禁在 CI 上**从来没真正跑过**，且整个步骤恒红。
+      # 该缩进错误由 1cda27af1（R45 dashboard 拆分）引入，此前被 pytest 的红灯
+      # 挡在前面、从未暴露。R51 删掉画布 D 让 pytest 转绿，它才浮出来。
+      - name: Dashboard bundle in sync
+        run: python scripts/build_dashboard_bundle.py --check
+      # 门禁④：全量文档断言。check_doc_drift 管「有/没有」，
+      # 这个管「**是不是还对得上**」—— 路径、符号、接口、表名、配置键、行号。
+      # 第五轮全量扫描实测它一次抓到 1 处真漂移（architecture 说 72 个测试
+      # 文件、实际 104）+ 1 个**零测试覆盖的生产 cron 作业**。
+      - name: Doc claims (full sweep)
+        run: python scripts/check_all_claims.py
+      # 门禁⑤：文档里的**计数**断言。计数是最容易悄悄腐坏的一类，
+      # 而且完全不会让任何测试变红。
+      - name: Doc counts
+        run: python scripts/check_doc_counts.py
+      # 门禁⑥：LLM 入队骨架必须**唯一**。
+      # explain 与 summarize 曾各抄一份（76+68 行）⇒ 同一个 bug 抄了两份
+      # （「重复提交返回库里不存在的 call_id」在 explain 里早就在了，
+      #   是补 summarize 的测试才发现）。用 AST 锁住「只有一份」。
+      - name: Enqueue skeleton is unique
+        run: python scripts/check_enqueue_skeleton_unique.py
+      # 门禁⑦：前端「等任务」轮询必须走 cpt_job.js 的唯一实现。
+      # 与凭据消毒同一个坑：R44 收敛了 9 处 url 重复实现，
+      # R45 我又自己发明了一套轮询 —— 不踩第二遍。
+      # **只报告不阻断**（还有 1 处语义不同的持续刷新，故意不合并）。
+      - name: Frontend job polling is unique
+        run: python scripts/check_job_poll_unique.py
+      # 门禁⑨（R51 新增）：workflow 自己的 YAML 缩进。
+      # R51 实测踩出来的：`- name:` 缩进比 `run:` 键更深 ⇒ 被块标量吞成 shell
+      # 文本 ⇒ bash 报 `-: command not found`、整个步骤 exit 127，而那 5 个
+      # 门禁**一次都没真跑过**。这个错不产生任何测试失败，纯靠人眼。
+      # 它必须排在**所有 step 之后**（自己没被吞，才敢查别人）。
+      - name: CI workflow indentation is sane
+        run: python scripts/check_ci_workflow.py
       - name: Dead-code audit (vulture)
         run: |
           # vulture==2.14 自 2026-09-25 起已在 requirements-dev.txt 锁文件里，
