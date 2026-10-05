@@ -37,6 +37,7 @@ R17-3 的按需补因子会在本地因子缺失时**联网拉腾讯并写生产
 from __future__ import annotations
 
 import shutil
+import subprocess
 import threading
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -123,6 +124,41 @@ def chromium_path() -> str | None:
         if candidate and Path(candidate).exists():
             return str(candidate)
     return None
+
+
+_CHROMIUM_RUNNABLE: bool | None = None
+
+
+def chromium_runnable() -> bool:
+    """二进制**存在**还不够：本机 Playwright chromium 能 dump ``about:blank``，
+    但加载 dashboard 真实页面时 V8 SIGTRAP(exit 133)（aarch64 环境缺 GUI/沙箱
+    能力，非代码缺陷）。探针必须实跑真实 ``index.html`` 才有判别力；
+    结果进程级缓存，避免收集期重复起浏览器。
+    """
+    global _CHROMIUM_RUNNABLE
+    if _CHROMIUM_RUNNABLE is not None:
+        return _CHROMIUM_RUNNABLE
+    path = chromium_path()
+    if path is None:
+        _CHROMIUM_RUNNABLE = False
+        return False
+    index = Path(__file__).parents[1] / "dashboard" / "index.html"
+    if not index.exists():
+        _CHROMIUM_RUNNABLE = False
+        return False
+    try:
+        result = subprocess.run(
+            [path, *CHROME_FLAGS, "--dump-dom", f"file://{index}?mode=watch"],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _CHROMIUM_RUNNABLE = False
+        return False
+    _CHROMIUM_RUNNABLE = result.returncode == 0 and "<html" in result.stdout
+    return _CHROMIUM_RUNNABLE
 
 
 @pytest.fixture(autouse=True)

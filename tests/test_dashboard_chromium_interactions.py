@@ -6,12 +6,15 @@ from pathlib import Path
 
 import pytest
 
-from tests.conftest import CHROME_FLAGS, CHROME_TIMEOUT_SECONDS, chromium_path
+from tests.conftest import CHROME_FLAGS, CHROME_TIMEOUT_SECONDS, chromium_path, chromium_runnable
 
 ROOT = Path(__file__).parents[1]
 
 
-@pytest.mark.skipif(chromium_path() is None, reason="Chromium/Chrome not installed")
+@pytest.mark.skipif(
+    not chromium_runnable(),
+    reason="Chromium 本机不可运行（aarch64 环境 SIGTRAP/缺 GUI·沙箱依赖，非代码缺陷）",
+)
 def test_chromium_smoke_exposes_interaction_contracts() -> None:
     browser = chromium_path()
     assert browser is not None

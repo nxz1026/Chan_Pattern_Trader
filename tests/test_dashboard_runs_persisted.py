@@ -209,6 +209,44 @@ def test_upsert_run_missing_run_id_is_noop_not_crash() -> None:
     assert conn.cursors == []
 
 
+def test_upsert_run_missing_run_id_placeholder_is_debug_not_warning(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """占位快照（runtime.status=empty，无数据可哈希）天然无 run_id——跳过持久化
+    是**预期路径**，绝不能刷 WARNING（线上噪音根因：缺因子票每次轮询刷一条）。"""
+    conn = FakeConn()
+    row = {
+        "run_id": None,
+        "dataset_hash": None,
+        "generated_at": 1_700_000_000_000,
+        "status": "empty",
+        "bar_count": 0,
+    }
+    with caplog.at_level("DEBUG"):
+        assert upsert_run(conn, row, {"ok": True}) is False
+    assert [r for r in caplog.records if r.levelname == "WARNING"] == []
+    assert conn.rows == {}
+
+
+def test_upsert_run_missing_run_id_nonplaceholder_still_warns(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """非占位快照却缺 run_id/dataset_hash——那是真异常，必须保留 WARNING。"""
+    conn = FakeConn()
+    row = {
+        "run_id": None,
+        "dataset_hash": None,
+        "generated_at": 1_700_000_000_000,
+        "status": "ok",
+        "bar_count": 120,
+    }
+    with caplog.at_level("WARNING"):
+        assert upsert_run(conn, row, {"ok": True}) is False
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("缺 run_id" in r.getMessage() for r in warnings)
+    assert conn.rows == {}
+
+
 def test_upsert_run_missing_dataset_hash_stores_empty_string() -> None:
     """dataset_hash 是 NOT NULL：缺失存空串而不是让整行写失败。"""
     conn = FakeConn()

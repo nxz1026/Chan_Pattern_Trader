@@ -175,9 +175,18 @@ def upsert_run(conn: Any, row: dict[str, Any], body: dict[str, Any] | None) -> b
     run_id = str(row.get("run_id") or "").strip()
     if not run_id:
         # run_id 是主键，空串会让「全部写入失败」且日志刷屏。
-        # record_run 口径是 runtime.run_id or dataset_hash，两者都空只可能
-        # 是调用方传了残缺 snapshot——记一条就够，不抛。
-        _LOG.warning("运行索引行缺 run_id，跳过持久化（dataset_hash=%r）", row.get("dataset_hash"))
+        # record_run 口径是 runtime.run_id or dataset_hash；两者都空有两类来源：
+        # ① 占位快照（无数据可哈希，属预期）② 真异常快照——分级记录，不抛。
+        # 索引行自带 status/bar_count（build_run_index 从 runtime/market 平铺投影）。
+        if row.get("status") == "empty":
+            _LOG.debug("占位快照无 run_id，跳过持久化（dataset_hash=%r）", row.get("dataset_hash"))
+        else:
+            _LOG.warning(
+                "运行索引行缺 run_id，跳过持久化（dataset_hash=%r status=%r bar_count=%r）",
+                row.get("dataset_hash"),
+                row.get("status"),
+                row.get("bar_count"),
+            )
         return False
 
     dataset_hash = str(row.get("dataset_hash") or "")
