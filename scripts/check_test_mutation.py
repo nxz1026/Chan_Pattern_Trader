@@ -55,6 +55,7 @@ test_v1_has_no_short_bi_left`` 从上线起就没断言过任何东西 ——
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -63,7 +64,14 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(
+    # ⚠️ 允许用 ``CPT_REPO`` 覆盖（沿用 deploy/cron 脚本的同名约定）。
+    # 原因：``scripts/selftest_gates.py`` 的夹具协议是「把脚本**复制到临时目录**
+    # 再改坏它」，而本脚本默认从 ``__file__`` 推仓库根 —— 那样 ROOT 会指向临时目录，
+    # 正控制立刻因为「找不到源码文件」而崩。那种崩会让自检报「夹具不对」，
+    # 掩盖真正要验的东西。覆盖之后，改坏的副本能对着**真仓库**跑。
+    os.environ.get("CPT_REPO") or Path(__file__).resolve().parents[1]
+)
 
 #: 单条变异跑测试的超时（秒）。超时要算「没抓到」而不是挂死。
 TIMEOUT = 180

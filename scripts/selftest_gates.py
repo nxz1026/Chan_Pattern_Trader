@@ -35,6 +35,7 @@ R45 一天里，我自制的检查器/门禁出了 **15+ 次**错，而且**几�
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
 import subprocess
 import sys
@@ -351,6 +352,30 @@ def fx_cold_environment(root: Path) -> tuple[str, str]:
     return "check_cold_environment.py", "依赖本机环境"
 
 
+def fx_test_mutation(root: Path) -> tuple[str, str]:
+    """⑭ 变异抽查：造一个**只会无脑报「抓到」**的机制。
+
+    这条夹具必须**在真实仓库里跑**（见 :data:`RUN_IN_REPO`）—— 因为
+    ``check_test_mutation.py`` 的正控制要真跑真测试、负控制要真的「无关改动
+    不被抓红」。临时目录里既没有源码也没有测试，在那儿跑它会因为「文件缺失」
+    而变红 —— 那是**假阳性**：它红的原因与「机制能不能分辨抓到/存活」无关。
+
+    注入的错是**逻辑取反**：把「负控制必须存活」改成「负控制必须被抓到」。
+    于是 --selftest 的两个控制必然有一个不满足 ⇒ 退出码非 0 ⇒ 夹具判定
+    「抓到了」。这证明的是：**机制坏了会报红，而不是照样放行**。
+
+    ⚠️ 这正是它自己存在的意义 —— 一个「总是说抓到」的变异检查，
+    和一条恒真的断言一样没价值。
+    """
+    script = (SCRIPTS / "check_test_mutation.py").read_text(encoding="utf-8")
+    anchor = "        good = pos and not neg"
+    assert script.count(anchor) == 1, "锚点变了，请更新这个夹具"
+    broken = script.replace(anchor, "        good = pos and neg")
+    # 写到临时目录，但 :func:`run_one` 会让它以真实仓库为 CWD 执行
+    (root / "scripts" / "check_test_mutation.py").write_text(broken, encoding="utf-8")
+    return "check_test_mutation.py", "自检失败"
+
+
 FIXTURES = {
     "check_doc_drift.py": fx_doc_drift,
     "check_all_claims.py": fx_all_claims,
@@ -365,7 +390,16 @@ FIXTURES = {
     "check_line_refs.py": fx_line_refs,
     "check_gate_coverage.py": fx_gate_coverage,
     "check_cold_environment.py": fx_cold_environment,
+    "check_test_mutation.py": fx_test_mutation,
 }
+
+#: 这些门禁的夹具必须在**真实仓库**里跑，而不是临时目录。
+#:
+#: 默认协议是「复制脚本 + 造几个假文件到临时仓库」—— 对查唯一性/行数的门禁够用，
+#: 因为它们只读那几���假文件。但 ``check_test_mutation.py`` 要**真跑 pytest**
+#: （正控制）并确认**无关改动不被抓红**（负控制）；临时目录里既没源码也没测试，
+#: 在那儿跑只会因为「文件缺失」而变红 —— 那是与被验性质无关的假阳性。
+RUN_IN_REPO: set[str] = {"check_test_mutation.py"}
 
 
 # ── 跑 ────────────────────────────────────────────────────────
@@ -395,12 +429,22 @@ def run_one(
             argv.append("--check")
         if cat:
             argv.extend(["--cat", cat])
+        # RUN_IN_REPO 的夹具：跑的是**临时目录里那份被改坏的副本**，
+        # 但 CWD 与 CPT_REPO 必须指向**真实仓库** —— 它要读真源码、真跑 pytest。
+        # ⚠️ 改的是临时目录的副本，真实仓库一个字节都不动。
+        run_env = None
+        cwd = str(root)
+        if script in RUN_IN_REPO:
+            cwd = str(ROOT)
+            argv.append("--selftest")
+            run_env = {**os.environ, "CPT_REPO": str(ROOT)}
         out = subprocess.run(
             argv,
             capture_output=True,
             text=True,
-            cwd=str(root),
-            timeout=120,
+            cwd=cwd,
+            env=run_env,
+            timeout=600,
         )
         blob = out.stdout + out.stderr
         if not expect:

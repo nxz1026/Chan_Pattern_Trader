@@ -139,6 +139,20 @@ jobs:
       # 但会逐条打出来 —— 「绿灯来自没执行」比红更糟。
       - name: Tests do not depend on the ambient environment
         run: python scripts/check_cold_environment.py
+      # 门禁⑭（R57 新增）：**测试到底有没有在工作？**
+      # R57 实测：`test_v1_has_no_short_bi_left` 从上线起就没断言过任何东西 ——
+      # 它的跨度查表键用错（拿 start_time 的表查 bi.end_time），永远查不到，
+      # 于是每次走兜底 `return PROD_GATE`，断言恒真。而当时**11 道门禁、
+      # 跑过无数次、全绿**：它们查的都是**形状**（唯一性/行数/字符串），
+      # 而恒真断言的形状是对的；且大多只跑 pytest 看 rc，而恒真断言的 rc 也是 0。
+      # ⇒ 这道不看测试「写了什么」，只注入一个已知破坏看它**会不会响**。
+      # 登记表里每条都是本仓真实出过、或差点出过的 bug 对应的不变式，
+      # 且都在 2026-10-06 手工变异验证过「确实会转红」。实测全量 6.6 秒。
+      # ⚠️ 它要求工作区干净（会临时改源码后还原），所以必须排在会写文件的
+      #    门禁之后 —— 比如 check_cold_environment 跑全量 pytest，而
+      #    `test_calibration_table_is_written` 会重写 docs/ 下那份 json。
+      - name: Tests actually catch the mutations they claim to
+        run: python scripts/check_test_mutation.py
       - name: Dead-code audit (vulture)
         run: |
           # vulture==2.14 自 2026-09-25 起已在 requirements-dev.txt 锁文件里，
