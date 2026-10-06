@@ -743,6 +743,7 @@
 
 
   function startPolling(url, intervalMs = 5000) {
+    console.error("[PROBE] startPolling called", url, intervalMs, "market=" + root.dataset.market);
     // A 股日线收盘后不再变，轮询纯属浪费（还会让"数据没变"看起来像卡住）。
     // 用 root.dataset.market 而不是另存一份 state，避免与 market_a_share.js 双头状态。
     if (root.dataset.market === "a_share") {
@@ -752,6 +753,7 @@
     stopPolling();
     state.snapshotUrl = url;
     state.pollTimer = window.setInterval(() => {
+      console.error("[PROBE] poll tick, pinned=", !!state.pinnedRange);
       if (state.pinnedRange) return;
       loadSnapshot(url).catch(() => undefined);
     }, Math.max(1000, Number(intervalMs) || 5000));
