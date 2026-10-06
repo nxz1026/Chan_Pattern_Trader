@@ -28,7 +28,7 @@
 1. 改 ``cpt/domain/config.py`` 的字段或默认值
 2. 同步 ``docs/rules.md`` §9
 3. 升 ``SCHEMA_VERSION``（``"v0"`` → ``"v0.1"``）
-4. 重新生成本文件里的 :data:`FROZEN_V0`，否则 CI 会红并告诉你差在哪
+4. 重新生成本文件里的 :data:`FROZEN`，否则 CI 会红并告诉你差在哪
 """
 
 from __future__ import annotations
@@ -45,7 +45,7 @@ RULES_DOC = ROOT / "docs" / "rules.md"
 #: 那是故意的：它要求你同时升 ``SCHEMA_VERSION`` 并同步 ``docs/rules.md`` §9。
 #:
 #: 改的时候请**连同本字典一起更新**，并在 commit message 里写明为什么改。
-FROZEN_V0: dict[str, object] = {
+FROZEN: dict[str, object] = {
     "contain_direction": "forward",
     "fx_qy_middle": True,
     "fx_qj_ck": True,
@@ -59,7 +59,7 @@ FROZEN_V0: dict[str, object] = {
     "macd_signal": 9,
     "divergence_compare": "area",
     "levels": (5, 30),
-    "config_version": "v0",
+    "config_version": "v1",
 }
 
 
@@ -68,13 +68,34 @@ def _current() -> dict[str, object]:
     return {f.name: getattr(cfg, f.name) for f in dataclasses.fields(RulesConfig)}
 
 
+# --------------------------------------------------------------------------- #
+# 已经走过一次升级流程：v0 -> v1（2026-10-06）
+# --------------------------------------------------------------------------- #
+#
+# 起因：``min_bi_len`` 的跨度门槛真正在 native 后端生效了。此前它只对 czsc
+# 生效，而生产用的就是 native（``DEFAULT_BACKEND`` 就是它），参数被静默丢弃
+# —— 文档声称已接线、代码里没有。
+#
+# 门槛一生效，全部结构（笔 / 中枢 / 走势类型 / 信号 / 水位指纹 / 缓存 run）
+# 与 v0 **不可比**，所以走了本文件自己写明的三步流程：
+#
+#   1) 同步 ``docs/rules.md`` §9.8 —— 已重写为「门槛现在对 native 也生效」
+#   2) 升 ``cpt/domain/config.py`` 的 ``SCHEMA_VERSION`` —— ``"v0"`` -> ``"v1"``
+#   3) 更新本文件的钉子 —— ``config_version`` 同步到 ``"v1"``
+#
+# **注意**：字段默认值一个都没变（``min_bi_len`` 仍是 6），变的只是「门槛是否
+# 真的被施加」。但这仍然必须升版 —— 升版挡的是「拿 v0 的回放 fixture 跑 v1
+# 的代码，界面显示一切正常而每个数字都是错的」。v0 的回放 fixture 已作废，
+# 需按 v0.x 流程重建。
+
+
 def test_frozen_config_matches_pinned_snapshot() -> None:
-    """口径参数与 :data:`FROZEN_V0` 一致；不一致即「改了却没走升级流程」。"""
+    """口径参数与 :data:`FROZEN` 一致；不一致即「改了却没走升级流程」。"""
     cur = _current()
     changed = {
-        k: (FROZEN_V0.get(k, "<新增>"), cur.get(k))
-        for k in set(cur) | set(FROZEN_V0)
-        if cur.get(k) != FROZEN_V0.get(k)
+        k: (FROZEN.get(k, "<新增>"), cur.get(k))
+        for k in set(cur) | set(FROZEN)
+        if cur.get(k) != FROZEN.get(k)
     }
     assert not changed, (
         "RulesConfig 的字段/默认值变了，但没走「v0.x 升级流程」。\n"
@@ -82,7 +103,7 @@ def test_frozen_config_matches_pinned_snapshot() -> None:
         "  必须同时做三件事：\n"
         "    1) 同步 docs/rules.md §9（该参数必须出现在文档里，见下一条用例）\n"
         "    2) 升 cpt/domain/config.py 的 SCHEMA_VERSION\n"
-        "    3) 更新本文件的 FROZEN_V0 钉子\n"
+        "    3) 更新本文件的 FROZEN 钉子\n"
         "  理由：不升版本的话，旧的回放 fixture 会通过 from_dict 校验、"
         "静默使用旧口径（config_version 恒为 v0，守卫永远不会触发）。"
     )
@@ -94,7 +115,7 @@ def test_every_frozen_param_is_documented_in_rules_md() -> None:
     这条让「同步文档」也不靠自觉 —— 加了新参数却忘了写进规则文档，门禁会红。
     """
     doc = RULES_DOC.read_text(encoding="utf-8")
-    missing = [name for name in FROZEN_V0 if name != "config_version" and name not in doc]
+    missing = [name for name in FROZEN if name != "config_version" and name not in doc]
     assert not missing, (
         f"这些冻结参数在 docs/rules.md 里查不到：{missing}。"
         f"  §9 是口径的权威文档，参数没写进去 = 口径没定义。"
@@ -108,9 +129,9 @@ def test_schema_version_is_pinned_and_matches_snapshot() -> None:
     所以这个值**只跟随代码**。若二者漂移，回放守卫会拒收**当前代码自己
     序列化出来的**配置 —— 一道永远误伤（或永远失效）的门禁。
     """
-    assert SCHEMA_VERSION == FROZEN_V0["config_version"], (
+    assert SCHEMA_VERSION == FROZEN["config_version"], (
         f"config.SCHEMA_VERSION={SCHEMA_VERSION!r} 与本文件的钉子 "
-        f"{FROZEN_V0['config_version']!r} 不一致 —— 改一个就要改另一个"
+        f"{FROZEN['config_version']!r} 不一致 —— 改一个就要改另一个"
     )
 
 

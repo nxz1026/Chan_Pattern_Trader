@@ -135,6 +135,10 @@ def detect_fractals(bars: Sequence[BarLike], level: int = 0) -> tuple[Fractal, .
                 kind=cast(FractalKind, kind),
                 level=level,
                 bar_index=indices[0],
+                # 去包含后的下标：``middle_index`` 是本 bars 序列（缠论 K 线）
+                # 里的位置，而 ``indices`` 才是成分的原始 K 线下标。笔的跨度门槛
+                # 用的是前者 —— 见 Fractal.merged_index 的说明。
+                merged_index=middle_index,
                 start_time=middle.open_time,
                 end_time=middle.close_time,
                 high=middle.high,

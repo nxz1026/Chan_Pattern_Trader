@@ -113,7 +113,7 @@ def resolve_backend(
         raise UnknownBackendError(f"未知后端 {name!r}；合法取值：{'/'.join(BACKEND_CHOICES)}")
 
     if normalized == "native":
-        return NativeChanlunBackend()
+        return NativeChanlunBackend(min_bi_len=min_bi_len)
 
     if normalized == "reference":
         # R45 新增：把**参照侧**从 application 层的私有函数提成一等后端。
@@ -146,7 +146,7 @@ def resolve_backend(
         if normalized == "czsc":
             raise
         # ``auto``：环境没装/版本不符 → 回落自研后端（可用性优先于精度）
-        return NativeChanlunBackend()
+        return NativeChanlunBackend(min_bi_len=min_bi_len)
 
     if min_bi_len is None:
         return CzscChanlunBackend()

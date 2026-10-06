@@ -26,10 +26,16 @@
    :func:`cpt.application.a_share_snapshot.empty_ashare_snapshot` 填，
    **真实有数据的路径不填**。所以 ``config_version`` **不在**线上快照里 ——
    它只在回放 fixture 这条路上有意义。
-2. ``SCHEMA_VERSION`` 硬编码为 ``"v0"`` 且 :meth:`from_dict` 会 ``pop`` 掉传入的
+2. ``SCHEMA_VERSION`` 原先硬编码为 ``"v0"`` 且 :meth:`from_dict` 会 ``pop`` 掉传入的
    同名字段，**这个版本号永远不会变**。于是「改参数要升版本」这条纪律
    **没有任何机制强制** —— 改了参数、版本号还是 ``v0``，旧 fixture 照样通过
    校验被回放，且不会有任何提示。
+
+   **2026-10-06：升到 ``"v1"``。** 起因是 ``min_bi_len`` 的跨度门槛真正在 native
+   后端生效（此前只对 czsc 生效，生产用的 native 一直静默丢弃这个参数）。门槛
+   一生效，全部结构（笔 / 中枢 / 走势类型 / 信号 / 水位指纹 / 缓存 run）与 ``v0``
+   **不可比**，所以 v0 的回放 fixture 必须作废重建。升版不是形式主义 ——
+   它是这次口径变更唯一能挡住「拿 v0 的 fixture 跑 v1 的代码还显示正常」的机制。
 
 **结论**：真正检测口径漂移的是 ``config_hash``（且它确实在
 :func:`cpt.application.run_metric` 里被比对）。本模块的
@@ -49,7 +55,7 @@ __all__ = [
 ]
 
 #: 配置口径版本号，写入每个 JSON 导出元数据。
-SCHEMA_VERSION: str = "v0"
+SCHEMA_VERSION: str = "v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -75,14 +81,19 @@ class RulesConfig:
             **量纲＝低级别结构元素数**，与 ``min_bi_len`` 不同，不可混用。
         min_bi_len: 底层笔最少跨度，**量纲＝去包含后的 K 线根数**（§9.8）。
 
-            ⚠️ **R45：这一项过去只对 ``czsc`` 后端生效，生产用的 ``native``
-            完全不设门槛。** 根因是 4 个 ``resolve_backend(DEFAULT_BACKEND,
-            min_bi_len=...)`` 调用点里 ``DEFAULT_BACKEND`` 就是 ``native``，
-            参数被**静默丢弃**。实测 40 只票 1360 笔里 35.3% 是跨度 < 4 根的
-            **退化笔**（两个分型共用一根 K 线），而力度度量正是一买/一卖
-            **背驰比较的输入**。R45 已把它接到 ``cpt.domain.bi.build_bis``
-            （门槛不足时**合并**端点，而非丢弃该笔 —— 丢弃会让笔序列出空洞，
-            后续中枢与背驰的分母就错了）。
+            ⚠️ **2026-10-06：这一项现在真的接到 native 了。** 此前它只对
+            ``czsc`` 后端生效，生产用的 ``native`` 完全不设门槛 —— 根因是 4 个
+            ``resolve_backend(DEFAULT_BACKEND, min_bi_len=...)`` 调用点里
+            ``DEFAULT_BACKEND`` 就是 ``native``，参数被**静默丢弃**（当时的
+            docstring 写「native 不参与（见后文）」，后文并没有实现）。实测 40 只票
+            1360 笔里 35.3% 是跨度 < 4 根的**退化笔**（两个分型共用一根 K 线），
+            而力度度量正是一买/一卖**背驰比较的输入**。
+            现在经 :func:`cpt.adapters.backend_factory.resolve_backend` →
+            ``NativeChanlunBackend`` → :func:`cpt.domain.bi.build_bis` 真正生效，
+            门槛不足时**合并**端点而非丢弃该笔（丢弃会让笔序列出空洞，后续中枢与
+            背驰的分母就错了）。跨度量纲是**去包含后**的 K 线根数，靠
+            :attr:`cpt.domain.models.Fractal.merged_index` 给出；拿 ``bar_index``
+            （原始下标）顶替会把门槛算严且与参照侧对不上，所以缺失时直接抛错。
 
             **升版到 v1 的原因**：门槛生效后全部结构（笔 / 中枢 / 走势类型 /
             信号 / 水位指纹 / 缓存 run）与 v0 **不可比**。

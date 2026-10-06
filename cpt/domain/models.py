@@ -124,7 +124,20 @@ class CanonicalBar:
 
 @dataclass(frozen=True, slots=True)
 class Fractal:
-    """分型（缠论 K 线三分型）。"""
+    """分型：中间 K 线相对左右两根的极值关系。
+
+    Attributes:
+        bar_index: 中间 K 线的 ``source_indices[0]``（**原始 K 线下标**）。
+            **别拿它当笔的跨度** —— 笔跨度的量纲是「去包含后 K 线根数」，
+            见 :attr:`merged_index`。
+        merged_index: 中间 K 线在**去包含后** K 线序列里的下标（``None``
+            表示未知）。这是 :attr:`~cpt.domain.config.RulesConfig.min_bi_len`
+            的量纲。**2026-10-06 新增**：跨度门槛必须按它算。包含关系会合并
+            K 线，所以去包含后根数 <= 原始根数，拿 ``bar_index`` 当跨度会让
+            门槛比参照后端更严、笔数对不上。为 ``None`` 时
+            :func:`cpt.domain.bi.build_bis` 若被要求施加门槛会**直接抛错**，
+            绝不退化成用 ``bar_index`` 静默量错单位。
+    """
 
     kind: str
     level: int
@@ -134,6 +147,7 @@ class Fractal:
     high: float
     low: float
     source_ids: tuple[str, ...]
+    merged_index: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

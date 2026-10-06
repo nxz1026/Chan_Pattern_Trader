@@ -60,6 +60,18 @@ class NativeChanlunBackend:
     not routed through this adapter.
     """
 
+    def __init__(self, *, min_bi_len: int | None = None) -> None:
+        """``min_bi_len`` = 底层笔的最少跨度（去包含后 K 线根数）。
+
+        2026-10-06 接线：此前 ``resolve_backend(..., min_bi_len=...)`` 只往 czsc
+        传，native 分支**静默丢弃**——而生产用的就是 native（``DEFAULT_BACKEND``
+        就是它），所以这条门槛在生产里从未生效。backend_factory 的 docstring
+        当时写的是「native 不参与（见后文）」，后文并没有实现，属于声明超前。
+        """
+        if min_bi_len is not None and min_bi_len < 1:
+            raise ValueError(f"min_bi_len 必须 >= 1 或 None, 实测 {min_bi_len}")
+        self._min_bi_len = min_bi_len
+
     def compute_structures(
         self, bars: list[BarLike], config: ReferenceChanlunConfig
     ) -> ChanlunResult:
@@ -70,7 +82,7 @@ class NativeChanlunBackend:
             return ChanlunResult((), (), (), {})
         merged = merge_contained_bars(canonical_bars)
         fractals = detect_fractals(merged, level=0)
-        bis = build_bis(fractals, level=0)
+        bis = build_bis(fractals, level=0, min_bi_len=self._min_bi_len)
         zhongshus = build_zhongshus(bis, level=0)
         fx_raw = tuple(
             FxRaw(

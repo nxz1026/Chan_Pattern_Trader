@@ -86,23 +86,37 @@ def _make_bi(start: Fractal, end: Fractal, level: int | None) -> Bi:
     )
 
 
-def build_bis(fractals: Sequence[Fractal], level: int | None = None) -> tuple[Bi, ...]:
+def build_bis(
+    fractals: Sequence[Fractal],
+    level: int | None = None,
+    *,
+    min_bi_len: int | None = None,
+) -> tuple[Bi, ...]:
     """把分型序列压缩成交替端点的候选新笔序列，返回不可变 :class:`Bi` 元组。
 
     :param fractals: 按时间升序排列的分型序列（``detect_fractals`` 的输出，
         或任何 ``Fractal`` 序列）；空输入返回空元组。
     :param level: 笔级别。``None`` 时继承端点 ``Fractal.level``，两端不一致则
         报错；显式传入时覆盖端点级别，必须 ``>= 0``。
+    :param min_bi_len: **底层笔的最少跨度**，量纲＝**去包含后**的 K 线根数
+        （``RulesConfig.min_bi_len``）。``None``（默认）＝不设门槛。
+
+        跨度不足时**合并端点**而不是丢弃该笔：丢掉会让笔序列出空洞，后续中枢
+        与背驰的分母就错了。合并的含义是「当前笔的终点顺延到下一个够远的
+        端点」，中间那个端点被吸收掉。
     :raises ValueError: 存在 ``kind`` 不是 ``"top"`` / ``"bottom"`` 的分型；
-        ``level < 0``；``level=None`` 时某笔两端分型 ``level`` 不同。
+        ``level < 0``；``level=None`` 时某笔两端分型 ``level`` 不同；
+        ``min_bi_len < 1``；**要求门槛但某个分型的 ``merged_index`` 是
+        ``None``**（量纲不可知时宁可报错，也不拿 ``bar_index`` 静默量错单位）。
     :returns: 按端点确认顺序排列的笔元组；相邻同类分型中较不极端者被丢弃，
         更极端者替换端点并使最后一笔端点后移。
 
-    只做端点交替与同类极端保留：不做最小跨度 / 「至少 5 根K线」门槛，不做
-    分型包含合并，不做笔中枢与走势类型判定。
+    只做端点交替与同类极端保留：不做分型包含合并，不做笔中枢与走势类型判定。
     """
     if level is not None and level < 0:
         raise ValueError(f"level 必须 >= 0 或 None, 实测 {level}")
+    if min_bi_len is not None and min_bi_len < 1:
+        raise ValueError(f"min_bi_len 必须 >= 1 或 None, 实测 {min_bi_len}")
 
     anchors: list[Fractal] = []
     for fractal in fractals:
@@ -118,4 +132,41 @@ def build_bis(fractals: Sequence[Fractal], level: int | None = None) -> tuple[Bi
         else:
             anchors.append(fractal)
 
-    return tuple(_make_bi(start, end, level) for start, end in pairwise(anchors))
+    if min_bi_len is None:
+        return tuple(_make_bi(start, end, level) for start, end in pairwise(anchors))
+    if len(anchors) < 2:
+        return ()  # 空 / 单端点：没有笔可言（与不设门槛时 pairwise 的行为一致）
+    return _build_bis_gated(anchors, level, min_bi_len)
+
+
+def _build_bis_gated(
+    anchors: Sequence[Fractal], level: int | None, min_bi_len: int
+) -> tuple[Bi, ...]:
+    """跨度门槛版：不足则**把终点顺延**到下一个够远的端点（合并，不丢弃）。
+
+    量纲只用 ``Fractal.merged_index``（去包含后 K 线序列的下标）。缺失就抛 ——
+    拿 ``bar_index``（原始下标）顶替会让门槛偏严，因为包含关系合并 K 线，
+    去包含后根数 <= 原始根数，结果就是笔数与 czsc 参照侧对不上，而这种偏差在
+    图表上看起来完全正常。
+    """
+    for a in anchors:
+        if a.merged_index is None:
+            raise ValueError(
+                f"分型 {a.kind}@{a.start_time} 没有 merged_index，无法按"
+                f"「去包含后 K 线根数」施加 min_bi_len={min_bi_len} 门槛。"
+                f"bar_index 是**原始**下标，拿它顶替会量错单位 —— 请先用"
+                f" detect_fractals() 产出的分型，或显式传 min_bi_len=None。"
+            )
+
+    out: list[Bi] = []
+    start = anchors[0]
+    for end in anchors[1:]:
+        # 跨度 = end 所在 bar 到 start 所在 bar 的**闭区间**长度
+        span = int(end.merged_index) - int(start.merged_index) + 1  # type: ignore[arg-type]
+        if span < min_bi_len:
+            # 不足：吞掉这个端点，start 不动，拿下一个端点再试 —— 这就是「合并」。
+            # 直接丢弃本笔会让笔序列在时间轴上出空洞。
+            continue
+        out.append(_make_bi(start, end, level))
+        start = end
+    return tuple(out)
