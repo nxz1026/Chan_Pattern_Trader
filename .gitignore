@@ -62,6 +62,11 @@ dist/
 # OMP runtime logs and stop flags
 .omp-logs/
 
+# 本地测试/运行日志：pytest 文本输出、cron 落盘等都是本地产物。
+# 2026-10-05 实测：`pytest-output.log`（修 mypy 报错时的临时输出，1.9 KB）
+# 被 1d35791 顺手提交进仓。Junit 那两条规则只挡 xml，挡不住 .log。
+*.log
+
 # GraphFlow runtime artifacts
 .graphflow-cache/
 graphflow-out/
