@@ -40,7 +40,9 @@ from cpt.adapters.a_share_public import (
 __all__ = [
     "DEFAULT_COOLDOWN_SECONDS",
     "DEFAULT_FACTOR_DAYS",
+    "FACTOR_UNAVAILABLE_CATEGORIES",
     "MAX_FACTOR_RATIO_JUMP",
+    "CategorizedFactorUnavailableError",
     "FactorEnsureResult",
     "FactorRow",
     "FactorUnavailableError",
@@ -52,6 +54,7 @@ __all__ = [
     "ensure_recompute_stage",
     "factor_from_actions",
     "factor_source_ref",
+    "factor_unavailable_category",
     "fetch_factor_rows",
     "load_recent_closes",
     "save_recompute_factors",
@@ -94,7 +97,53 @@ DEFAULT_COOLDOWN_SECONDS: Final[float] = 600.0
 
 
 class FactorUnavailableError(RuntimeError):
-    """按需拉因子失败（腾讯无该标的后复权 / 网络失败 / 无重叠交易日）。"""
+    """按需拉因子失败（腾讯无该标的后复权 / 网络失败 / 无重叠交易日）。
+
+    只需要「拉不到因子」这个事实时用它；要区分**为什么**拉不到，用
+    :class:`CategorizedFactorUnavailableError`（带 ``category`` 属性）。
+    """
+
+
+class CategorizedFactorUnavailableError(FactorUnavailableError):
+    """带**分类**的 :class:`FactorUnavailableError`。
+
+    为什么不让调用方去 ``str(exc).partition(":")``：
+    :meth:`OnDemandFactorFetcher.ensure` 原来就是这么分的，而 detail 本身含冒号
+    （腾讯回显的键名、``raw=800 hfq=0`` …）⇒ **第一个冒号之后的内容全被丢掉**，
+    截断后的结论还会被 ``_unsupported`` **永久缓存**。一个被截断且永不再问腾讯的
+    诊断信息，比没有更难查。
+
+    Args:
+        category: 失败分类，取值 :data:`FACTOR_UNAVAILABLE_CATEGORIES` 之一。
+        detail: 人类可读的细节（原样保留，不做任何截断）。
+
+    ``str(exc)`` 仍是 ``"{category}:{detail}"``（分类在前），所以日志与既有断言
+    的可读性不变 —— 变的只是**判定方式**：读属性，不是切字符串。
+    """
+
+    def __init__(self, category: str, detail: str = "") -> None:
+        self.category = category
+        self.detail = detail
+        super().__init__(f"{category}:{detail}" if detail else category)
+
+
+#: :class:`CategorizedFactorUnavailableError.category` 的三个取值
+#: （= :meth:`OnDemandFactorFetcher.ensure` 回给前端的 ``reason``）。
+FACTOR_UNAVAILABLE_CATEGORIES: Final[tuple[str, ...]] = ("unsupported", "network", "no_overlap")
+
+
+def factor_unavailable_category(exc: BaseException) -> tuple[str, str]:
+    """从异常里取 ``(category, detail)``；**按属性**判定，不解析 message。
+
+    没有 ``category`` 属性的（例如外部代码直接 ``FactorUnavailableError("...")``）
+    退回到旧的 ``"类别:细节"`` 切分口径，并在这里说明它只是兼容路径 ——
+    真正的抛点（:func:`fetch_factor_rows`）一律走结构化异常。
+    """
+    category = getattr(exc, "category", None)
+    if isinstance(category, str) and category:
+        return category, str(getattr(exc, "detail", "") or "")
+    reason, _, detail = str(exc).partition(":")
+    return reason, detail
 
 
 def factor_source_ref(trade_date: str) -> str:
@@ -274,14 +323,14 @@ def fetch_factor_rows(
         hfq_bars = TencentKlineClient(adjust="hfq", **kwargs).fetch_daily_bars(bare, limit=days)
     except AShareAdjustUnsupportedError as exc:
         # 逐标的属性，不是板块属性 —— 原样带上腾讯实际返回的键名，便于事后核对。
-        raise FactorUnavailableError(f"unsupported:{exc}") from exc
+        raise CategorizedFactorUnavailableError("unsupported", str(exc)) from exc
     except ASharePublicError as exc:
-        raise FactorUnavailableError(f"network:{exc}") from exc
+        raise CategorizedFactorUnavailableError("network", str(exc)) from exc
 
     rows = build_factor_rows(bare, raw_bars, hfq_bars)
     if not rows:
-        raise FactorUnavailableError(
-            f"no_overlap:raw={len(raw_bars)} hfq={len(hfq_bars)}（两个序列无共同交易日）"
+        raise CategorizedFactorUnavailableError(
+            "no_overlap", f"raw={len(raw_bars)} hfq={len(hfq_bars)}（两个序列无共同交易日）"
         )
     return rows
 
@@ -345,7 +394,10 @@ class OnDemandFactorFetcher:
         try:
             rows = self._fetch(bare, self._days)
         except FactorUnavailableError as exc:
-            reason, _, detail = str(exc).partition(":")
+            # 按**属性**取分类，不再 ``str(exc).partition(":")`` 切字符串 ——
+            # detail 里本来就有冒号，切第一个会把腾讯回显的键名 / 根数明细截断，
+            # 而下面 ``self._unsupported[bare] = detail`` 把它**永久缓存**了。
+            reason, detail = factor_unavailable_category(exc)
             _LOG.info("按需取因子失败 %s: %s", bare, exc)
             if reason == "unsupported":
                 self._unsupported[bare] = detail

@@ -223,10 +223,27 @@ def _probe_sina_quote() -> Mapping[str, Any]:
 
 
 def _probe_a_share_local() -> Mapping[str, Any]:
-    from cpt.adapters.a_share_local import AShareLocalClient, open_days_between  # noqa: PLC0415
+    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
 
     # AShareLocalClient 构造时不连库（lazy），这里显式取一次连接做最轻的探活。
+    #
+    # ⚠️ **必须 close（原来漏了，这是全仓唯一一处没配对的构造）**：
+    # `_get_conn()` 真的开一条库连接，而 `/api/dashboard/sources` 的响应缓存
+    # 60s ⇒ 一天 ~1440 次探活 ⇒ ~1440 条/天/进程的净增连接，几小时后打满
+    # ``max_connections``，届时**所有** A 股数据源一起挂。
+    # 而 :func:`_timed` 只把异常折叠成状态、**不会**替我们收尾 ——
+    # 成功路径和失败路径都落在这同一个 ``finally`` 上。
     client = AShareLocalClient()
+    try:
+        return _probe_a_share_local_with(client)
+    finally:
+        client.close()
+
+
+def _probe_a_share_local_with(client: Any) -> Mapping[str, Any]:
+    """在**已构造**的客户端上跑探活本体（连接由调用方负责关）。"""
+    from cpt.adapters.a_share_local import open_days_between  # noqa: PLC0415
+
     # ⚠️ 显式持有连接：R31 要在游标关闭**之后**再查交易日历，
     # `with client._get_conn().cursor()` 那种写法会把连接一起回收掉。
     conn = client._get_conn()  # noqa: SLF001 — 探活就是要碰真连接

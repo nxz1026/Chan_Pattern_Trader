@@ -27,6 +27,7 @@ import os
 from collections.abc import Callable, Mapping, Sequence
 from typing import Any, Final
 
+from cpt.adapters.binance_futures import resolve_interval_ms
 from cpt.domain.models import CanonicalBar
 
 __all__ = [
@@ -181,10 +182,16 @@ class CcxtKlineClient:
             symbol: ccxt 统一符号，如 ``"BTC/USDT:USDT"``（永续）或 ``"BTC/USDT"``。
             interval: 见 :data:`SUPPORTED_TIMEFRAMES`。
             limit: 1..:data:`MAX_LIMIT`。
-            interval_ms: 该周期的毫秒数，用于 ``is_closed``；``None`` 表示全部按已收盘处理。
+            interval_ms: 该周期的毫秒数，用于 ``close_time`` / ``is_closed``。
+                ``None`` 时**按 ``interval`` 解析**（不是「全部按已收盘处理」——
+                那条旧 docstring 是错的：``parse_ohlcv_rows`` 用它算
+                ``close_time = open_time + interval_ms - 1``，传 0 会让
+                ``close_time < open_time``，直接撞
+                :class:`~cpt.domain.models.CanonicalBar` 的不变量并抛
+                ``ValueError``，于是**默认调用必崩**）。
 
         Raises:
-            ValueError: 参数越界。
+            ValueError: 参数越界，或 ``interval_ms`` 解析不出周期长度。
             CcxtNotInstalledError: 未安装 ccxt。
             CcxtSourceError: 请求失败或响应结构不符。
         """
@@ -194,6 +201,12 @@ class CcxtKlineClient:
             raise ValueError(f"不支持的周期：{interval!r}（可选 {SUPPORTED_TIMEFRAMES}）")
         if not 1 <= limit <= MAX_LIMIT:
             raise ValueError(f"limit 必须在 1..{MAX_LIMIT}，实际 {limit}")
+        # 解析失败要**响亮**：SUPPORTED_TIMEFRAMES 全是定长周期，正常不会走到这；
+        # 真走到了（例如有人往元组里塞了 1M），宁可报错也不要拿 0 拼出一个
+        # 违反 ``open_time < close_time`` 的假 K 线。
+        ms = interval_ms if interval_ms is not None else resolve_interval_ms(interval)
+        if ms <= 0:
+            raise ValueError(f"interval_ms 必须 > 0，实际 {ms}")
 
         exchange = self._exchange()
         try:
@@ -207,7 +220,7 @@ class CcxtKlineClient:
         if not isinstance(rows, Sequence) or not rows:
             raise CcxtSourceError(f"ccxt 返回空 K 线：{self._exchange_id} {symbol}")
         now_ms = self._now_ms() if self._now_ms is not None else _system_now_ms()
-        return parse_ohlcv_rows(rows, interval_ms=interval_ms or 0, now_ms=now_ms)
+        return parse_ohlcv_rows(rows, interval_ms=ms, now_ms=now_ms)
 
     def probe(self) -> dict[str, Any]:
         """轻量探活：``fetch_time()``（不打 K 线、不消耗行情权重）。

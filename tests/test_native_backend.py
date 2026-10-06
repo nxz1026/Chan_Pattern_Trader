@@ -4,10 +4,24 @@ import json
 import subprocess
 import sys
 
+import pytest
 from cpt.adapters.native_chanlun import NativeChanlunBackend
 from cpt.adapters.reference_chanlun import ReferenceChanlunConfig
 from cpt.domain.config import RulesConfig
 from cpt.domain.models import make_canonical_bar
+
+
+class _OtherBar:
+    """``BarLike`` 协议的非 CanonicalBar 实现（混合输入里的「那一根」）。"""
+
+    open_time: int = 0
+    high: float = 0.0
+    low: float = 0.0
+
+    def __init__(self, index: int = 0) -> None:
+        self.open_time = 1_700_000_000_000 + index * 60_000
+        self.high = 101.0
+        self.low = 100.0
 
 
 def _bar(index: int, *, high: float, low: float) -> object:
@@ -78,6 +92,34 @@ def test_native_backend_maps_structures_back_to_raw_bar_indices() -> None:
     for bi in result.bi_list:
         assert bars[bi.start_bar].open_time in open_times
         assert bars[bi.end_bar].open_time in open_times
+
+
+def test_native_backend_rejects_mixed_bar_input() -> None:
+    """R52：**混合输入必须抛**，不能筛掉非 CanonicalBar 继续算。
+
+    原来这里是 ``[bar for bar in bars if isinstance(bar, CanonicalBar)]`` ——
+    产出的 ``bar_index`` / ``start_bar`` / ``end_bar`` 是**筛选后**列表的下标，
+    而下游 ``reference_chanlun._resolve_time`` 按**调用方给的原始 bars** 解析
+    时间 ⇒ 混合输入下所有锚点**静默错位**，产出「看起来正常的假结构」。
+    生产目前只传 CanonicalBar，所以这是潜在而非已发生的错位；但错位比报错贵。
+    """
+    bars = [
+        _bar(0, high=100, low=99),
+        _bar(1, high=110, low=108),
+        _bar(2, high=105, low=104),
+        _bar(3, high=112, low=110),
+        _bar(4, high=107, low=106),
+    ]
+    mixed: list = [*bars[:2], _OtherBar(), *bars[2:]]
+    with pytest.raises(ValueError, match="CanonicalBar"):
+        NativeChanlunBackend().compute_structures(mixed, ReferenceChanlunConfig())
+
+
+def test_native_backend_accepts_pure_canonical_bars() -> None:
+    """对照组：全是 CanonicalBar 时行为不变（空输入仍回空结构）。"""
+    backend = NativeChanlunBackend()
+    empty = backend.compute_structures([], ReferenceChanlunConfig())
+    assert (empty.fx_list, empty.bi_list, empty.zs_list) == ((), (), ())
 
 
 def test_replay_cli_native_backend(tmp_path) -> None:

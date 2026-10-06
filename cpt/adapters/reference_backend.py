@@ -36,7 +36,7 @@ R45 之前，**参照侧是一个没有名字的东西**：
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any, Final
 
 from cpt.adapters.reference_chanlun import (
@@ -150,7 +150,7 @@ class ReferenceChanlunBackend:
                 "而 ChanlunResult 要的是 bar 索引，硬转会丢锚点。"
                 "请改用 compute_domain_structures()（parity 层就走那条）。"
             )
-        return _from_domain(triples)
+        return _from_domain(triples, bars)
 
     # ── 领域对象三元组（parity 层直接用，**不丢时间锚点**）────────
     def compute_domain_structures(
@@ -319,9 +319,127 @@ def _rules_cfg(config: ReferenceChanlunConfig) -> RulesConfig:
     return RulesConfig(**payload)
 
 
-def _from_domain(triples: Sequence[Any]) -> ChanlunResult:
-    """领域对象三分组 → :class:`ChanlunResult`。"""
+def _time_of(obj: Any, field: str) -> int:
+    """取结构对象上的 ``start_time`` / ``end_time``，**属性对象和 dict 都认**。
+
+    与 :func:`_open_time_of` 同一个理由：这条链路上的结构既可能是领域对象
+    （:class:`~cpt.domain.models.Bi` / ``ZhongShu``），也可能是经
+    ``asdict`` 序列化后的 ``dict``（本仓多处投影都走这条路）。两种形态都支持，
+    免得调用方为了换算锚点先做一次无谓的转换。
+    """
+    if isinstance(obj, Mapping):
+        return int(obj[field])
+    return int(getattr(obj, field))
+
+
+def _open_time_of(bar: Any) -> int:
+    """取 bar 的 ``open_time``，**属性对象和 dict 都认**。
+
+    :class:`BarLike` 协议只承诺属性访问，但这条链路上 bars 实际有两种形态：
+    ``CanonicalBar`` 之类的属性对象，和经过 :mod:`cpt.application._bar_dict`
+    序列化后的 ``dict``（测试与部分调用方直接喂 dict）。两种都支持，别让调用方
+    为了满足锚点换算而多做一次转换。
+    """
+    if isinstance(bar, Mapping):
+        return int(bar["open_time"])
+    return int(bar.open_time)
+
+
+def _bar_index_by_open_time(bars: Sequence[BarLike]) -> dict[int, int]:
+    """``bar.open_time -> bar 下标``。
+
+    参照侧的结构对象（:class:`~cpt.domain.models.Bi` / ``ZhongShu``）只带
+    ``start_time`` / ``end_time``，而 :class:`BiRaw` / :class:`ZsRaw` 要的是
+    **bar 下标**，所以必须有一张时间 → 下标的表。
+
+    同一 ``open_time`` 出现两次属于数据异常（时间轴不唯一），此时**保留较早的**
+    下标并在 :func:`_anchor` 找不到时直接抛 —— 不静默取后者。
+    """
+    out: dict[int, int] = {}
+    for idx, bar in enumerate(bars):
+        out.setdefault(_open_time_of(bar), idx)
+    return out
+
+
+def _anchor(
+    index_of: Mapping[int, int], time_ms: Any, *, what: str
+) -> int:
+    """把 ``start_time`` / ``end_time`` 解析成 bar 下标，**解析不到就抛**。
+
+    绝不回落到 0：那正是本函数原来做的事，而 0 不是「缺省位置」，它是**第一根
+    K 线**——所有笔和中枢都被锚到同一根上，画出来的图看着「有结构」但每个位置
+    都错，比直接报错难查得多（R45 对腾讯路径就是这么处理的）。
+    """
+    key = int(time_ms)
+    try:
+        return index_of[key]
+    except KeyError:
+        raise IncompleteReferenceError(
+            f"{what} 的时间锚点 {key} 不在 bars 里，无法换算成 bar 下标。"
+            f"参照侧结构与 bars 不同源，不能硬猜下标 —— 请改用 "
+            f"compute_domain_structures()，它直接给带时间的结构。"
+        ) from None
+
+
+def _ids_of(obj: Any, field: str) -> tuple[str, ...]:
+    """取 ``source_ids`` / ``bi_ids``，属性对象和 dict 都认（同 :func:`_time_of`）。"""
+    if isinstance(obj, Mapping):
+        return tuple(obj.get(field) or ())
+    return tuple(getattr(obj, field, ()) or ())
+
+
+def _member_bi_indices(bis: Sequence[Any], z: Any) -> tuple[int, ...]:
+    """中枢成员笔在**笔序列中的位置**（与 native / czsc 后端同一语义）。
+
+    判定沿用 :meth:`cpt.adapters.native_chanlun.NativeChanlunBackend` 的做法 ——
+    拿 ``ZhongShu.bi_ids`` 与 ``Bi.source_ids[0]`` 做 **ID 匹配**，不比较时间窗，
+    也不返回 bar 下标（``bi_indices`` 一直是「第几笔」，下游 ``map_zhongshu``
+    按它拼 ``bi:{i}``）。这里唯一实现，别再写第二套判定。
+
+    原来这里是写死的 ``()``，与 ``start_bar=0`` 是同一类缺陷：中枢不知道由哪几笔
+    构成，``tests/test_czsc_backend.py`` 断言的「中枢至少吸 3 笔」对参照侧无效。
+    """
+    wanted = set(_ids_of(z, "bi_ids"))
+    return tuple(
+        index
+        for index, b in enumerate(bis)
+        if (ids := _ids_of(b, "source_ids")) and ids[0] in wanted
+    )
+
+
+def _from_domain(triples: Sequence[Any], bars: Sequence[BarLike]) -> ChanlunResult:
+    """领域对象三分组 → :class:`ChanlunResult`（**带真实 bar 锚点**）。
+
+    ## 2026-10-06 修：czsc 分支的「丢时间锚点」
+
+    原来这里对 ``bis`` / ``zhongshus`` 一律写 ``start_bar=0`` / ``end_bar=0``、
+    ``bi_indices=()``，而 ``fx_list`` 却用了真实的 ``fractal.bar_index``。R45
+    发现并修掉了**腾讯**路径（改成直接抛 :class:`IncompleteReferenceError`），
+    **czsc 路径却照旧落进来**，于是 ``--backend reference`` 走 czsc 时产出的是
+    一个「每笔每中枢都锚在第 0 根 K 线上」的 :class:`ChanlunResult`：下游
+    ``map_bi(bars=...)`` 把所有笔与中枢的时间解析成 ``bars[0].open_time``，
+    图看着有结构、位置全错。
+
+    现在两条路径一致：能算出下标就算，算不出就抛。
+    """
     fractals, bis, zhongshus = triples
+    index_of = _bar_index_by_open_time(bars)
+
+    bi_raw = tuple(
+        BiRaw(
+            direction=int(getattr(b, "direction", 0)),
+            start_bar=_anchor(index_of, _time_of(b, "start_time"), what=f"第 {n} 笔的起点"),
+            end_bar=_anchor(index_of, _time_of(b, "end_time"), what=f"第 {n} 笔的终点"),
+            high=float(getattr(b, "high", 0.0)),
+            low=float(getattr(b, "low", 0.0)),
+            level=int(getattr(b, "level", 0)),
+            power_price=float(getattr(b, "power_price", 0.0) or 0.0),
+            power_volume=float(getattr(b, "power_volume", 0.0) or 0.0),
+            length=int(getattr(b, "length", 0) or 0),
+        )
+        for n, b in enumerate(bis)
+    )
+
     return ChanlunResult(
         fx_list=tuple(
             FxRaw(
@@ -333,30 +451,17 @@ def _from_domain(triples: Sequence[Any]) -> ChanlunResult:
             )
             for f in fractals
         ),
-        bi_list=tuple(
-            BiRaw(
-                direction=int(getattr(b, "direction", 0)),
-                start_bar=0,
-                end_bar=0,
-                high=float(getattr(b, "high", 0.0)),
-                low=float(getattr(b, "low", 0.0)),
-                level=int(getattr(b, "level", 0)),
-                power_price=float(getattr(b, "power_price", 0.0) or 0.0),
-                power_volume=float(getattr(b, "power_volume", 0.0) or 0.0),
-                length=int(getattr(b, "length", 0) or 0),
-            )
-            for b in bis
-        ),
+        bi_list=bi_raw,
         zs_list=tuple(
             ZsRaw(
-                start_bar=0,
-                end_bar=0,
+                start_bar=_anchor(index_of, _time_of(z, "start_time"), what=f"第 {n} 个中枢的起点"),
+                end_bar=_anchor(index_of, _time_of(z, "end_time"), what=f"第 {n} 个中枢的终点"),
                 high=float(getattr(z, "high", 0.0)),
                 low=float(getattr(z, "low", 0.0)),
                 level=int(getattr(z, "level", 0)),
-                bi_indices=(),
+                bi_indices=_member_bi_indices(bis, z),
             )
-            for z in zhongshus
+            for n, z in enumerate(zhongshus)
         ),
         level_map={},
     )

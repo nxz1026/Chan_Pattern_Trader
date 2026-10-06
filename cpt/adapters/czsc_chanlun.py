@@ -24,6 +24,7 @@ from datetime import UTC, datetime
 from typing import Any, Final
 
 from cpt.adapters.binance_futures import INTERVAL_MS
+from cpt.adapters.native_chanlun import require_all_canonical_bars
 from cpt.adapters.reference_chanlun import (
     BiRaw,
     ChanlunResult,
@@ -164,11 +165,21 @@ class CzscChanlunBackend:
         ``config`` 只用于接口兼容；czsc 的笔口径由 ``min_bi_len`` 控制，
         与 ``ReferenceChanlunConfig`` 的历史字段（``use_fx_*`` / ``use_bi_type_new``）
         无关——czsc 的分型/笔规则固定，不接受这些开关。
+
+        czsc 需要 open/close/volume，而 ``BarLike`` 协议只有高低与时间；
+        与 ``NativeChanlunBackend`` 同口径，只接受 ``CanonicalBar``。
         """
+        # ⚠️ **混合输入直接抛**（共用 ``native_chanlun`` 里那一份实现）：原来这里是
+        # 「筛出 CanonicalBar 再按下标发 raw 记录」，而下游
+        # ``reference_chanlun._resolve_time`` 是按**未筛选的** bars 解析时间 ——
+        # 混合输入下所有 ``bar_index`` 静默错位，产出**看起来正常的假结构**。
+        #
+        # 这道检查放在 ``_import_czsc()`` **之前**：入参非法是调用方的错，
+        # 不该先要求对方装上可选依赖（czsc 未安装的 CI 也才测得到这一层）。
+        canonical: list[CanonicalBar] = require_all_canonical_bars(
+            bars, CanonicalBar, backend="czsc"
+        )
         czsc = _import_czsc()
-        # czsc 需要 open/close/volume，而 ``BarLike`` 协议只有高低与时间；
-        # 与 ``NativeChanlunBackend`` 同口径，只接受 ``CanonicalBar``。
-        canonical: list[CanonicalBar] = [bar for bar in bars if isinstance(bar, CanonicalBar)]
         if len(canonical) < 3:
             return ChanlunResult((), (), (), {})
 

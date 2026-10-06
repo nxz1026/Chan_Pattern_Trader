@@ -108,6 +108,37 @@ def test_fetch_klines_wraps_exchange_errors() -> None:
         client.fetch_klines("BTC/USDT:USDT", "1h")
 
 
+def test_fetch_klines_default_interval_ms_resolves_from_interval() -> None:
+    """**默认调用必须能用**（R52 回归）。
+
+    原来这里是 ``parse_ohlcv_rows(rows, interval_ms=interval_ms or 0, ...)``：
+    ``None`` 被折成 0 ⇒ ``close_time = open_time - 1`` ⇒ 违反
+    ``CanonicalBar.__post_init__`` 的 ``open_time < close_time`` 不变量 ⇒
+    **每次默认调用都抛** ``ValueError``。而 docstring 却写着「``None`` 表示全部
+    按已收盘处理」，那句承诺从未成立。
+
+    现在 ``interval_ms=None`` 会按 ``interval`` 解析出真实周期，K 线的
+    ``close_time`` / ``is_closed`` 才有意义。
+    """
+    client = CcxtKlineClient(factory=lambda *_: FakeExchange(_rows(2)))
+    bars = client.fetch_klines("BTC/USDT:USDT", "1h")
+    assert len(bars) == 2
+    assert bars[0].close_time == BASE_MS + HOUR_MS - 1
+    # 2 根都是历史 K 线（now_ms 走真实墙钟）⇒ 都已收盘
+    assert all(bar.is_closed for bar in bars)
+
+
+def test_fetch_klines_rejects_non_positive_interval_ms() -> None:
+    """显式传 0 也要**响亮**：0 拼出来的 ``close_time`` 一定早于 ``open_time``。
+
+    解析不出周期时抛 ``ValueError`` 而不是继续算 —— ``SUPPORTED_TIMEFRAMES``
+    全是定长周期，正常走不到；真走到了宁可报错也不要产出假 K 线。
+    """
+    client = CcxtKlineClient(factory=lambda *_: FakeExchange(_rows()))
+    with pytest.raises(ValueError, match="interval_ms"):
+        client.fetch_klines("BTC/USDT:USDT", "1h", interval_ms=0)
+
+
 def test_fetch_klines_empty_response_raises() -> None:
     client = CcxtKlineClient(factory=lambda *_: FakeExchange([]))
     with pytest.raises(CcxtSourceError, match="返回空 K 线"):

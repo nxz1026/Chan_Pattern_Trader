@@ -613,6 +613,15 @@ class AShareLocalClient:
                 )
                 factors = {row[0]: float(row[1]) for row in cur.fetchall()}
         except Exception as e:
+            # ⚠️ R52：必须 rollback。``_get_conn()`` **复用**同一条连接
+            # （lazy 连接只在第一次建），所以语句失败后连接停在 aborted 态，
+            # 这个客户端后续每一次 SQL 都报 ``current transaction is aborted`` ——
+            # 一次局部失败被放大成整条 A 股链路全废。与同文件
+            # ``check_t_plus_one_calendar`` 的回滚纪律一致。
+            try:
+                conn.rollback()
+            except Exception as rb_exc:  # noqa: BLE001 — 回滚失败也不能因此抛出
+                _LOG.debug("日线读取失败后回滚失败 %s: %s", bare_code, rb_exc)
             raise AShareLocalError(
                 f"DB 读取失败 {bare_code} {start_date}~{end_date}: {type(e).__name__}: {e}"
             ) from e

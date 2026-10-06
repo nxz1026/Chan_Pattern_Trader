@@ -270,14 +270,21 @@ class WindSourceClient:
         try:
             completed = self._runner(argv, self._cli_script.parent, self._timeout)
         except subprocess.TimeoutExpired as exc:
-            self._record(server_type, tool_name, params, ok=False, code="TIMEOUT", started=started)
+            # ⚠️ ``record=False`` 的调用（如纯探活/手工核对）**不许**记额度账 ——
+            # 原先这两条异常路径无条件记账，于是账本里混着「没打算计的调用」，
+            # 额度用完的时间点与真实用量对不上（``record`` 参数在这两处被忽略）。
+            if record:
+                self._record(
+                    server_type, tool_name, params, ok=False, code="TIMEOUT", started=started
+                )
             raise WindSourceError(
                 f"Wind 调用超时（{self._timeout}s）：{server_type}.{tool_name}"
             ) from exc
         except OSError as exc:  # node 不存在等
-            self._record(
-                server_type, tool_name, params, ok=False, code="SPAWN_ERROR", started=started
-            )
+            if record:
+                self._record(
+                    server_type, tool_name, params, ok=False, code="SPAWN_ERROR", started=started
+                )
             raise WindUnavailableError(f"无法执行 node：{exc}") from exc
 
         stdout = completed.stdout or ""

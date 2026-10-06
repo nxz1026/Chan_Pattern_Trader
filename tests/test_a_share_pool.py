@@ -289,3 +289,39 @@ def test_watchlist_creates_parent_directory(tmp_path: pathlib.Path):
     store = WatchlistStore(path)
     store.add("600519", "A")
     assert path.exists()
+
+
+def test_module_imports_without_fcntl(monkeypatch: pytest.MonkeyPatch, tmp_path) -> None:
+    """``import fcntl`` 曾经无条件写在模块顶层。
+
+    于是整个 ``a_share_pool`` 在 Windows 上 ImportError —— 而它同时被
+    ``/api/dashboard/a-share/pool`` 与自选路由依赖：不是「自选用不了」，是
+    **这个模块连带依赖它的路由一起起不来**。
+
+    这里按「顶层 import fcntl 会失败」重放一次导入：锁退化为无操作，但
+    原子替换 + JSON 解析都不依赖它，读写照常。
+    """
+    import builtins
+    import importlib
+
+    import cpt.adapters.a_share_pool as pool_mod
+
+    real_import = builtins.__import__
+
+    def _no_fcntl(name: str, *args: Any, **kwargs: Any) -> Any:
+        if name.split(".")[0] == "fcntl":
+            raise ImportError("No module named 'fcntl'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _no_fcntl)
+    try:
+        reloaded = importlib.reload(pool_mod)
+        assert reloaded.fcntl is None
+        store = reloaded.WatchlistStore(tmp_path / "wl.json")
+        store.add("600519", "A")
+        store.add("000001", "A")
+        assert [entry.code for entry in store.list()] == ["600519", "000001"]
+        assert store.remove("600519", "A") is True
+    finally:
+        monkeypatch.undo()
+        importlib.reload(pool_mod)

@@ -476,6 +476,29 @@ def test_short_input_returns_empty(czsc_module: object) -> None:
     )
 
 
+def test_mixed_input_raises_instead_of_misaligning_anchors() -> None:
+    """R52：混合输入**必须抛**，不能筛掉非 CanonicalBar 继续算。
+
+    原来这里是 ``[bar for bar in bars if isinstance(bar, CanonicalBar)]``：czsc
+    回吐的时间戳被反查成**筛选后**列表的下标，而下游
+    ``reference_chanlun._resolve_time`` 按**未筛选的** bars 解析时间 ⇒ 混合
+    输入下所有 ``bar_index`` 静默错位，产出「看起来正常的假结构」。
+
+    **不依赖 czsc**：入参检查在 ``_import_czsc()`` 之前，所以 CI 没装可选依赖
+    时这道防线照样能测到。
+    """
+    bars = _load_fixture(FIXTURE_DIR / "btcusdt_5m_2024-02-01.csv")
+
+    class _OtherBar:
+        open_time = 0
+        high = 1.0
+        low = 0.0
+
+    mixed: list = [*bars[:5], _OtherBar(), *bars[5:]]
+    with pytest.raises(ValueError, match="CanonicalBar"):
+        CzscChanlunBackend().compute_structures(mixed, CONFIG)
+
+
 def test_version_mismatch_raises(monkeypatch: pytest.MonkeyPatch, czsc_module: object) -> None:
     """版本不符必须响亮报错，而不是拿错版本静默出结果。"""
     import czsc as real_czsc

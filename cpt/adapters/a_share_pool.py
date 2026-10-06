@@ -15,12 +15,12 @@
 - 本模块**只读 DB**，不做任何写库。本模块只暴露**纯查询接口 + 自选 JSON
   读写**——后者是文件 IO，不走 DB 避免 schema 膨胀。
 - 自选 JSON 用 ``pathlib.Path`` + ``fcntl`` 文件锁，避免并发写损坏。
+  ``fcntl`` 只在 POSIX 存在，模块顶部有平台守卫（见 ``WatchlistStore``）。
 - 自选**没有用户概念**：单用户看板，全库一份。多用户要换成带 user 键的实现。
 """
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import pathlib
@@ -28,6 +28,16 @@ import tempfile
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+
+try:  # pragma: no cover - 平台分支
+    # ⚠️ ``fcntl`` 是 **POSIX 独有**。原来它在模块顶层无条件 import，于是整个
+    # ``a_share_pool`` 在 Windows 上直接 ImportError —— 而它同时被
+    # ``/api/dashboard/a-share/pool`` 与自选路由依赖，连「别的路由都起不来」。
+    # 生产是 Linux，锁的语义一个字都不改；这里只是让模块在别的平台**可导入**
+    # （锁退化为无操作，见 :meth:`WatchlistStore._lock`）。
+    import fcntl  # noqa: PLC0415
+except ImportError:  # pragma: no cover - Windows / 无 fcntl 的解释器
+    fcntl = None  # type: ignore[assignment]
 
 __all__ = [
     "HotPoolEntry",
@@ -179,6 +189,10 @@ class WatchlistStore:
     flock 锁挂在打开文件描述上，同机各进程独立 ``open`` 的 FD 之间正常互斥，
     因此**不止进程内安全**；但它不跨机、在 NFS 上不可靠——多机/网络盘需要换成
     走 DB 的实现。本接口设计为**可注入**，方便后续替换。
+
+    ⚠️ ``fcntl`` 只在 POSIX 存在（见模块顶部的平台守卫）。拿不到它时**仍可用**，
+    只是没有跨进程互斥：写入仍是「同目录临时文件 + ``os.replace``」的原子替换，
+    损坏/半截 JSON 的防护不受影响，受影响的只是并发写的最后写入者胜出。
     """
 
     def __init__(self, path: pathlib.Path | str) -> None:
@@ -199,12 +213,14 @@ class WatchlistStore:
         # inode 稳定，flock 的跨进程互斥始终成立。
         self._lock_path.touch(exist_ok=True)
         f = self._lock_path.open("a", encoding="utf-8")
-        fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        if fcntl is not None:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
         return f
 
     @staticmethod
     def _unlock(f: Any) -> None:
-        fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        if fcntl is not None:
+            fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         f.close()
 
     def _write_atomic(self, data: list[dict[str, Any]]) -> None:

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from typing import Any
+
 from cpt.adapters.reference_chanlun import (
     BiRaw,
     ChanlunResult,
@@ -15,6 +17,37 @@ from cpt.domain.first_buy import round_to_2_digit
 from cpt.domain.fractal import detect_fractals
 from cpt.domain.types import BarLike
 from cpt.domain.zhongshu import build_zhongshus
+
+
+def require_all_canonical_bars(
+    bars: list[BarLike], canonical: type[Any], *, backend: str
+) -> list[Any]:
+    """把 ``bars`` 原样交给流水线（**不筛**），混合输入则抛。
+
+    ``czsc_chanlun`` 共用这一份实现 —— 两个后端的锚点口径必须一致，抄两份
+    必然漂移（这正是 R45 那类「两份实现各有一份 bug」的成因）。
+
+    ## 为什么混合输入必须抛，而不是「筛掉非 CanonicalBar 继续算」
+
+    两个后端产出的 ``FxRaw.bar_index`` / ``BiRaw.start_bar`` / ``end_bar`` /
+    ``ZsRaw.*_bar`` 全是**下标**，下游
+    :func:`cpt.adapters.reference_chanlun._resolve_time` 拿它们去**调用方给的
+    原始 ``bars``** 里取 ``open_time``。一旦这里先筛一遍再按下标发出去，
+    两个列表长度就不同了 ⇒ 下标**整体错位** ⇒ 时间锚点指向别的 K 线，
+    而结构照常「算出来了」，不抛任何异常。
+
+    生产目前只传 ``CanonicalBar``，所以这是潜在而非已发生的错位；但错位的结果
+    是**看起来正常的假结构**，比直接报错贵得多 —— 所以这里宁可响亮地拒绝。
+    """
+    if all(isinstance(bar, canonical) for bar in bars):
+        return list(bars)
+    offenders = [type(bar).__name__ for bar in bars if not isinstance(bar, canonical)]
+    raise ValueError(
+        f"{backend} backend 只接受 {canonical.__name__}，收到混合输入 "
+        f"{len(offenders)}/{len(bars)} 根非 {canonical.__name__}"
+        f"（{sorted(set(offenders))}）：下标会被下游按**原始 bars** 解析，"
+        f"筛掉它们会让所有 bar_index 错位"
+    )
 
 
 class NativeChanlunBackend:
@@ -32,7 +65,7 @@ class NativeChanlunBackend:
     ) -> ChanlunResult:
         from cpt.domain.models import CanonicalBar
 
-        canonical_bars: list[CanonicalBar] = [bar for bar in bars if isinstance(bar, CanonicalBar)]
+        canonical_bars = require_all_canonical_bars(bars, CanonicalBar, backend="native")
         if not canonical_bars:
             return ChanlunResult((), (), (), {})
         merged = merge_contained_bars(canonical_bars)

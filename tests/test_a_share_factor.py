@@ -17,6 +17,7 @@ from typing import Any
 import pytest
 from cpt.adapters.a_share_factor import (
     SOURCE_TX,
+    CategorizedFactorUnavailableError,
     FactorRow,
     FactorUnavailableError,
     OnDemandFactorFetcher,
@@ -126,6 +127,58 @@ def test_fetch_marks_unsupported_separately_from_network(monkeypatch: pytest.Mon
     assert str(excinfo2.value).startswith("network:")
 
     monkeypatch.setattr(TencentKlineClient, "fetch_daily_bars", real_fetch)
+
+
+def test_fetch_raises_structured_error_with_category(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R52：分类是**属性**，不是从 message 里切出来的。
+
+    原来 ``ensure`` 用 ``str(exc).partition(":")`` 区分三类，而 detail 本身就含
+    冒号（腾讯回显的键名、``raw=… hfq=…``）⇒ 第一个冒号之后的内容被丢掉，
+    截断后的结论还会被 ``_unsupported`` **永久缓存**。
+    """
+    from cpt.adapters import a_share_factor
+    from cpt.adapters.a_share_public import AShareAdjustUnsupportedError, TencentKlineClient
+
+    def _fake(self: TencentKlineClient, code: str, *, limit: int = 180) -> Any:
+        if self.adjust == "bfq":
+            return (_Bar(0, 10.0),)
+        raise AShareAdjustUnsupportedError("key=qfqday: 无数据")
+
+    monkeypatch.setattr(TencentKlineClient, "fetch_daily_bars", _fake)
+    with pytest.raises(CategorizedFactorUnavailableError) as excinfo:
+        a_share_factor.fetch_factor_rows("301689")
+    assert excinfo.value.category == "unsupported"
+    # detail **原样**保留冒号后面的内容 —— 这正是被旧实现截断掉的部分
+    assert excinfo.value.detail == "key=qfqday: 无数据"
+
+
+def test_ensure_reads_category_attribute_not_message(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``ensure`` 必须按属性取分类：带冒号的 detail 不再被截断、且照样永久缓存。"""
+    fetcher, calls = _stub_fetcher(
+        CategorizedFactorUnavailableError("unsupported", "key=qfqday: 无数据")
+    )
+    first = fetcher.ensure("301689")
+    second = fetcher.ensure("301689")
+    assert first.reason == "unsupported"
+    assert first.detail == "key=qfqday: 无数据"
+    assert second.reason == "unsupported"
+    assert second.detail == "key=qfqday: 无数据", "永久缓存的结论不能再被截断"
+    assert calls == ["301689"]
+
+
+@pytest.mark.parametrize("category", ["unsupported", "network", "no_overlap"])
+def test_three_categories_still_work(category: str) -> None:
+    """三个分类名一个字都不能改（前端按 ``reason`` 分支）。"""
+    from cpt.adapters import a_share_factor
+
+    exc = CategorizedFactorUnavailableError(category, "detail")
+    assert exc.category == category
+    assert exc.detail == "detail"
+    assert str(exc).startswith(f"{category}:")
+    assert a_share_factor.factor_unavailable_category(exc) == (category, "detail")
+    assert category in a_share_factor.FACTOR_UNAVAILABLE_CATEGORIES
 
 
 def test_fetch_reports_no_overlap(monkeypatch: pytest.MonkeyPatch) -> None:

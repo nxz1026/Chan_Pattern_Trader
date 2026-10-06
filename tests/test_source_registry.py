@@ -265,10 +265,16 @@ def _install_fake_local(
 
     class _FakeClient:
         def __init__(self, *args: Any, **kwargs: Any) -> None:
-            pass
+            self.closed = 0
 
         def _get_conn(self) -> _FakeConn:
             return _FakeConn(cursor)
+
+        def close(self) -> None:
+            # ⚠️ R52：探活必须**配对** close —— `/api/dashboard/sources` 缓存 60s，
+            # 不关就是 ~1440 条/天/进程的净增连接。替身不实现 close 的话，
+            # 漏掉 finally 反而测不出来（异常被 ``_timed`` 折成 unavailable）。
+            self.closed += 1
 
     monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", _FakeClient)
     # 覆盖 autouse 的通用假探针，把**真实**的本地库探针接回来（DB 已被假游标替换）。
@@ -342,3 +348,57 @@ def test_local_probe_flags_low_coverage_day(monkeypatch: pytest.MonkeyPatch) -> 
     result = probe_source("a_share_local", use_cache=False)
     assert result.status == "ok"
     assert result.evidence["low_coverage_days"] == [{"date": "2026-09-23", "bars": 4000}]
+
+
+# --------------------------------------------------------------------------- #
+# R52：探活必须配对 close —— 这是全仓唯一一处「构造了却不关」的客户端
+# --------------------------------------------------------------------------- #
+
+
+class _CountingClient:
+    """记录 ``close()`` 次数的替身（``_install_fake_local`` 的简化版）。"""
+
+    instances: list[_CountingClient] = []
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        self.closes = 0
+        _CountingClient.instances.append(self)
+
+    def _get_conn(self) -> Any:
+        raise RuntimeError("boom")
+
+    def close(self) -> None:
+        self.closes += 1
+
+
+def test_a_share_local_probe_closes_client_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    """成功路径必须 close。
+
+    ``/api/dashboard/sources`` 的响应缓存 60s ⇒ 一天 ~1440 次探活 ⇒ 不关就是
+    ~1440 条/天/进程的净增连接，几小时后打满 ``max_connections``，届时**所有**
+    A 股数据源一起挂。
+    """
+    from datetime import date
+
+    per_day = [(date(2026, 9, 21), 10), (date(2026, 9, 22), 10)]
+    _install_fake_local(monkeypatch, per_day)
+    assert probe_source("a_share_local", use_cache=False).status == "ok"
+
+
+def test_a_share_local_probe_closes_client_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """失败路径**同样**要 close。
+
+    ``_timed`` 只把异常折成状态、不会替我们收尾 —— 少了 finally，DB 一抖就漏
+    一条连接，而那正是最需要连上的时刻。
+    """
+    monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", _CountingClient)
+    monkeypatch.setitem(
+        source_registry._PROBES,  # noqa: SLF001
+        "a_share_local",
+        lambda _q: source_registry._probe_a_share_local(),  # noqa: SLF001
+    )
+    _CountingClient.instances.clear()
+    result = probe_source("a_share_local", use_cache=False)
+    assert result.status == "unavailable"
+    assert len(_CountingClient.instances) == 1
+    assert _CountingClient.instances[0].closes == 1, "失败路径漏了 close()"
