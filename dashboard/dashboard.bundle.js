@@ -840,7 +840,20 @@
   // 数据确认新鲜：撤掉陈旧显示 + **重新计时**。
   // 两条加载路径（首屏 / 稳态后台刷新）都必须走这里 —— 少一条，那个路径就
   // 永远布不上防，页面会在阈值到点时谎报「数据陈旧」。
-  function markFresh(engineStatus) {
+  function markFresh(engineStatus, url) {
+    // 轮询自启动放在这里，而不是散在各条加载路径上 —— 2026-10-06 实测的坑：
+    // 起初只在「无缓存首屏」那条路径里调 startPolling，而首屏之后每次轮询都
+    // **命中缓存并提前 return**（见 loadSnapshot 的缓存分支），够不到启动代码
+    // ⇒ 页面永远不轮询、更新时间冻结、15s 后必然误报「数据陈旧」。
+    // markFresh 是两条路径的**唯一汇合点**，放这里才不会再漏。
+    //
+    // bundle 是单一作用域（builder 剥掉各文件 IIFE），所以裸标识符可达 ——
+    // 之前写的 `typeof startPolling === "function"` 守卫会把「不可达」静默吞掉，
+    // 那种守卫比没有更坏：它让死代码看起来是活的。取不到就抛。
+    if (typeof startPolling !== "function") {
+      throw new Error("startPolling 不可达：轮询是全站唯一实现，缺了它看板就永远不刷新");
+    }
+    startPolling(url, POLL_INTERVAL_MS);
     if (state.staleTimer !== null) {
       window.clearTimeout(state.staleTimer);
       state.staleTimer = null;
@@ -875,7 +888,7 @@
               setConnection("live", `后台刷新完成：${url}`);
               // 稳态路径也要撤防 + 把顶栏写回真实状态，否则 stale 标记永挂
               const es = fresh && fresh.engine_state;
-              markFresh(es && typeof es.status === "string" ? es.status : "live");
+              markFresh(es && typeof es.status === "string" ? es.status : "live", url);
             }
           })
           .catch(() => undefined);
@@ -895,27 +908,11 @@
         render(snapshot);
         setHidden("[data-testid=state-error]", true);
         setConnection("live", `已加载 snapshot：${url}`);
-        // 轮询**自启动**。2026-10-06 审计发现：startPolling 全仓只有「实时」按钮
-        // 一个调用点（在 dash-chrome.js 的 click 回调里），页面加载后从不启动轮询
-        // ⇒ 更新时间永远冻结，陈旧看门狗必然触发。
-        //
-        // ⚠️ 走 `globalThis.CPTDashboardOps` 而不是裸标识符：dash-*.js 各自是独立
-        // IIFE，裸标识符跨文件**不可达**。原先这里写的是
-        // `typeof startPolling === "function"` —— 它把「函数不可达」这件事
-        // **静默吞掉**了，页面照样不轮询、照样报陈旧，却一个错都不报。
-        // 这种守卫比没有更坏：它让死代码看起来是活的。取不到就直接抛。
-        const ops = typeof globalThis !== "undefined" ? globalThis.CPTDashboardOps : null;
-        if (!ops || typeof ops.startPolling !== "function") {
-          throw new Error(
-            "CPTDashboardOps.startPolling 不可达：dash-ops.js 的 IIFE 没有把轮询挂到 globalThis。" +
-              "跨文件必须走 globalThis 显式挂载（范式见 cpt_job.js 的 global.CPTJob）。",
-          );
-        }
-        ops.startPolling(url, POLL_INTERVAL_MS);
         markFresh(
           snapshot && snapshot.engine_state && typeof snapshot.engine_state.status === "string"
             ? snapshot.engine_state.status
             : "live",
+          url,
         );
         return snapshot;
       } catch (error) {
@@ -1701,13 +1698,7 @@
         // 走 globalThis：dash-*.js 各自独立 IIFE，裸标识符跨文件不可达
         // （2026-10-06 实测此处一直是死代码，点「实时」也没启动轮询）。
         // 取不到就抛 —— 静默跳过只会让页面停在旧数据上却看不出原因。
-        if (state.snapshotUrl) {
-          const ops = globalThis.CPTDashboardOps;
-          if (!ops || typeof ops.startPolling !== "function") {
-            throw new Error("CPTDashboardOps.startPolling 不可达（dash-ops.js 未挂到 globalThis）");
-          }
-          ops.startPolling(state.snapshotUrl);
-        }
+        if (state.snapshotUrl) startPolling(state.snapshotUrl);
       });
     }
   }
