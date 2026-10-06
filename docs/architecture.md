@@ -1,7 +1,7 @@
 # CPT 软件结构设计
 
 版本：v0.1 · 2026-09-22
-状态：替代旧文档 `docs/design-review.md` 与 `docs/architecture-reference-audit.md`（已删除）；规则口径以 `docs/rules.md` 为准，实施节奏见 `docs/implementation-plan.md`。
+状态：替代旧文档 `docs/design-review.md` 与 `docs/architecture-reference-audit.md`（已删除）；规则口径以 `docs/rules.md` 为准，历史实施节奏与产品路线见 `docs/archive/plans-and-acceptance.md`。
 
 ## 1. 设计目标
 
@@ -56,7 +56,7 @@
 
 | 层 | 文件 | 行数 | 复盘状态 |
 |---|---:|---:|---|
-| `storage/` | 8 | 1,977 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 门禁②；R24 只是恢复层+划边界，**不算复盘**。详见 `docs/review-storage-layer-r45.md`） |
+| `storage/` | 8 | 1,977 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 门禁②；R24 只是恢复层+划边界，**不算复盘**。详见 `docs/archive/reviews-r45.md`） |
 | `llm/` | 8 | 1,370 | ✅ **已做**（R45：全层勘察 + 3 个真 bug —— 清空进程环境 / 归类撒谎 / 单例丢弃审计回调） |
 | `adapters/` | 21 | 6,518 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 外部契约真机验证脚本 `scripts/verify_public_contracts.py`；R52 加占位行守卫；顺带实测更正了 handoff 里 K 线缺口的量级） |
 | `application/` | 32 | 5,218 | ✅ **已做**（R45：全层勘察 + 3 个真 bug —— DB 故障被报成「缺因子」两处 + CDN 护栏后门；R51 删 `canvas_wbt.py`；R52 占位行 WARNING + `placeholder_rows` reason） |
@@ -117,7 +117,7 @@
 外部触点密度实测（AST 扫网络/进程/DB）：`adapters` 6/19 文件（31.6%）、
 `web` 1/5、`llm` 1/8、`application` 1/32、`domain`/`storage` 均 0。
 
-> ⚠️ **一条已被推翻的旧结论**：`docs/audit/cpt-code-audit-20260930.md` 与 09-25 审计
+> ⚠️ **一条已被推翻的旧结论**：`docs/archive/audits-2026-09.md` 与 09-25 审计
 > 都写着「14 个 `dashboard_*` 模块无生产导入方」。2026-10-02 用 AST 逐个核对
 > `import` 后确认：**19 个全部有生产引用，孤儿数为 0**。它们在
 > `cpt/application/`（18）与 `cpt/storage/`（1），不是 `adapters/`。R16-5 四画布、
@@ -175,7 +175,7 @@ domain 不导入 pandas / httpx / ccxt / fastapi / sqlalchemy / torch / openai /
 历史回放走 `application/replay.py`。已按审核 P0-2 整层删除。
 
 原模块表**不再保留**：它描述的是从未存在的模块，留着只会让人以为"曾经有过又删了"，
-而不是"从没做过"。处置依据见 §2 与 `docs/audit/cpt-code-audit-20260925.md` §3.4。
+而不是"从没做过"。处置依据见 §2 与 `docs/archive/audits-2026-09.md` §3.4。
 
 ### 3.3 adapters/ — 外部数据接入（物理层）
 
@@ -347,12 +347,12 @@ dashboard/          前端静态产物（Nginx 从 /var/www/cpt-dashboard 提供
                         为什么不发 7 个请求：跨模块调用有 **88 处**，
                         拆成 7 个独立 IIFE 会**全部断掉**（实测
                         `startPolling is not defined`）。
-tests/              扁平布局：117 个 test_*.py 直接放 tests/ 下，仅一个 fixtures/
+tests/              扁平布局：118 个 test_*.py 直接放 tests/ 下，仅一个 fixtures/
                     人工构造案例；**没有** unit/ oracle/ e2e 子目录（见 §11）
 docs/               39 份 .md（**不含** archive/；rules.md / architecture.md /
                     progress-log.md / known-traps.md / web-api-reference.md /
-                    todo-r45-followups.md / review-*-r45.md 各一份 /
-                    audit/cpt-fix-audit-r46-r55.md 各轮修复总报告 / audit/ …）
+                    known-traps.md / archive/reviews-r45.md 各一份 /
+                    docs/archive/audits-2026-09.md 各轮修复总报告 / audit/ …）
 deploy/             nginx/  systemd/  cron/  env/  golden/  README.md
 references/         czsc @ 701e480a（可选 extra `chan`）  ~~wbt @ 39bb1e8a~~（R51 随画布 D 下线）
                     ⚠️ 「参照侧」= **czsc**，不是 references/ 里的某个独立实现

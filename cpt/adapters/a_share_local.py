@@ -31,7 +31,7 @@ OHLC，转为 :class:`~cpt.domain.models.CanonicalBar`。
 ``public.cpt_signal_event`` 与 ``public.cpt_dashboard_run`` 里有**用旧口径算出来的
 price / snapshot**。切到口径 B 后它们**不会自动复现**（结构判定已变）——
 比较时必须按时间点区分，别把「信号消失」当成 bug 排查一轮。
-详见 ``docs/post-cutover-plan.md``。
+详见 ``docs/archive/plans-and-acceptance.md``。
 
 重算只写暂存表 ``asel.ref_adjust_factor_v2``，**不碰生产表**（R37 起的纪律）；
 切换与否见 ``scripts/factor_report.py`` 的逐票结论。

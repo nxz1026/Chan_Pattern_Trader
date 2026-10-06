@@ -1,7 +1,7 @@
 """历史回放 CLI 与批量/单根回放接口。
 
 把 K 线跑过 chanlun 反腐层（含 InMemoryChanlunBackend 占位实现），产出结构序列
-并序列化为 schema v1 JSON（``docs/implementation-plan.md`` §7 M4）。
+并序列化为 schema v1 JSON（``docs/archive/plans-and-acceptance.md`` §7 M4）。
 
 三条入口的分工：
 
@@ -333,7 +333,7 @@ def replay_incremental(
     """逐根推进回放：对每个输入前缀各跑一次，返回等长 payload 元组。
 
     ``result[i]`` 是 ``bars[: i + 1]`` 的回放结果，用于"每来一根 K 线看一次结构"
-    的复盘/实时演练（``docs/implementation-plan.md`` §7：单根推进与历史模式共享
+    的复盘/实时演练（``docs/archive/plans-and-acceptance.md`` §7：单根推进与历史模式共享
     同一套 domain 算法）。
 
     流程与保证：

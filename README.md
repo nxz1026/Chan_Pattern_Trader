@@ -184,35 +184,37 @@ Wind 路径（`--source wind`）保留作交叉校验，但要积分 —— 实�
 
 ## 文档导航
 
+**权威文档**（改代码要同步改这些）
+
 | 文档 | 内容 |
 |---|---|
 | `docs/rules.md` | 规则口径唯一事实来源（含 §9 已冻结约定） |
 | `docs/architecture.md` | 软件结构设计（分层、模块、数据模型、复用映射、测试策略） |
-| `docs/implementation-plan.md` | 实施计划（M0–M6 垂直切片里程碑 + M-LLM 独立线） |
-| `docs/reference-audit.md` | 参考仓库许可证与复用边界 |
-| `docs/progress-log.md` | 逐轮进度日志（R13 起；更早见 `docs/archive/`） |
-| `docs/known-traps.md` | 已知陷阱与非缺陷清单（**30 条**"像 bug 其实不是"，每条附**判定命令**） |
-| `docs/web-api-reference.md` | 看板 HTTP 接口清单（路径 / 参数 / 返回形状，含 `llm/explain`、`llm/summarize`） |
-| `docs/db-inventory-and-cleanup.md` | 生产库表与索引清单 + 清理执行状态 |
+| `docs/known-traps.md` | 踩坑清单（**39 条**，每条含「踩过 → 为什么 → 判据」） |
+| `docs/web-api-reference.md` | 看板 HTTP 接口清单（26 个路由） |
 | `docs/pending-wiring.md` | 尚未接线模块清单（是产品决策，不是死代码） |
-| `docs/dashboard-product-roadmap.md` | 看板产品路线（Phase 1–5） |
-| `docs/todo-r45-followups.md` | **R45 收尾清单**（做掉的 / 明确不做的 / 剩下按什么顺序补） |
+| `docs/calibration-r56-min-bi-len.md` | `min_bi_len` 按 bar 间隔分档的定档依据（90 天真实样本） |
+| `docs/db-inventory-and-cleanup.md` | 生产库表与索引清单 + 清理执行状态 |
 | `deploy/README.md` | Nginx / systemd / cron / 静态看板部署说明（含权限坑） |
 
-### R45 复盘记录（2026-10-04，五轮）
-
-想了解「最近改了什么、为什么这么改」时按这个顺序读：
+**记录性文档**
 
 | 文档 | 内容 |
 |---|---|
-| `docs/review-domain-layer-r45.md` | domain 层复盘 + 冻结口径门禁 + reference 后端 |
-| `docs/review-adapters-layer-r45.md` | adapters 层复盘 + 外部契约真机验证 |
-| `docs/review-application-layer-r45.md` | application 层复盘（DB 故障被当成"缺因子"等） |
-| `docs/review-storage-layer-r45.md` | storage 层复盘（失败必须抛，附 `prune` 补测） |
-| `docs/review-llm-layer-r45.md` | llm 层复盘（3 个真 bug） |
-| `docs/review-web-layer-r45.md` | web 层复盘 |
-| `docs/review-dashboard-r45.md` | 看板**无头浏览器**实测（画布 D 空白真根因、parity 配色） |
-| `docs/review-deploy-r45.md` | deploy 层复盘（env 模版漏告警键、crontab 直连仓内） |
+| `docs/progress-log.md` | 按主题组织的工作记录 + 逐轮索引（R13 起） |
+| `docs/duplication-triage.md` | 去重判定归档 |
+
+**历史归档**（合并件，只读，用于追溯「为什么当初这么定」）
+
+| 文档 | 合并自 |
+|---|---|
+| `docs/archive/reviews-r45.md` | 9 份 R45 分层复盘（domain/adapters/application/storage/llm/web/dashboard/deploy + ensure-table） |
+| `docs/archive/handoffs-r44-r45.md` | 5 份交接单（R44 修复与切表、因子重算、快照批量） |
+| `docs/archive/audits-2026-09.md` | 6 份 2026-09 审计报告 |
+| `docs/archive/plans-and-acceptance.md` | 7 份实施计划 / 看板路线 / 切表计划 / 验收快照 |
+| `docs/archive/progress-log-至R12-2026-09-24.md` | R12 及之前的进度日志 |
+
+> 收敛前的完整状态在 git tag `pre-docs-consolidation`。
 
 ### R46–R55 修复总报告
 
@@ -222,10 +224,10 @@ R45 之后每一轮的修复都续写在同一份报告里（**查库实证 → 
 
 | 文档 | 内容 |
 |---|---|
-| `docs/audit/cpt-fix-audit-r46-r55.md` | R46 P0 门禁 / R47 质量门禁全绿 / R48 运维卫生 / R49–R50 门禁清单与两个失败真因 / R51 画布 D 下线 / R52 CI 恒红的 YAML 缩进真因 / R53 占位行守卫 / R54 文档全量对齐 / **R55 给 ①② 补门禁** |
+| `docs/archive/audits-2026-09.md` | R46 P0 门禁 / R47 质量门禁全绿 / R48 运维卫生 / R49–R50 门禁清单与两个失败真因 / R51 画布 D 下线 / R52 CI 恒红的 YAML 缩进真因 / R53 占位行守卫 / R54 文档全量对齐 / **R55 给 ①② 补门禁** |
 
 > 这份报告是**归档记录**：里面的行号是**当时现场**的证据（R54 整节讲的就是「行号漂移」），
-> 所以它放在 `docs/audit/` 下，不参与 `check_line_refs.py` 的现行行号校验。
+> 所以它放在 `docs/archive/` 下，不参与 `check_line_refs.py` 的现行行号校验。
 
 ### 运维脚本
 

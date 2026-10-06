@@ -239,7 +239,7 @@ tests/test_dashboard_http.py:22
 ## 8. 相关文档
 
 - `docs/audit/audit-20260925.json` —— 原始检测产物（**修复前快照**，勿当现状）
-- `docs/audit/cpt-code-audit-20260925.md` —— 原始审核报告
-- `docs/handoff-20260925-leftover-fixes.md` —— 本轮交接（F3-②③④ 的来源）
+- `docs/archive/audits-2026-09.md` —— 原始审核报告
+- `docs/archive/handoffs-r44-r45.md` —— 本轮交接（F3-②③④ 的来源）
 - `docs/export-schema-v1.md` —— 被 F3-② 守卫钉住的 schema 文档
 - `tests/conftest.py` —— F3-④ 的 `served()`

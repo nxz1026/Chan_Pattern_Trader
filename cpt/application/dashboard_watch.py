@@ -2,7 +2,7 @@
 
 **状态：已接线（R22，2026-09-30）**——落到 `snapshot.watch_metrics`
 （`dashboard_snapshot_v2.py::_watch_payload`，无 K 线时显式 `available: false`）；
-对应 `docs/dashboard-product-roadmap.md` Phase 4 P1「reconnect/stale」。
+对应 `docs/archive/plans-and-acceptance.md` Phase 4 P1「reconnect/stale」。
 """
 
 from __future__ import annotations

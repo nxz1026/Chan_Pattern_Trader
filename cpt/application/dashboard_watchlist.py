@@ -3,7 +3,7 @@
 **状态：已接线（R22，2026-09-30）**——`GET /api/dashboard/watchlist`
 （`cpt/web/app.py::_watchlist_payload`）的唯一实现，入参投影自 A 股候选池
 （`cpt/web/a_share_routes.py::pool_payload`）；对应
-`docs/dashboard-product-roadmap.md` Phase 4 P1「多交易对」。
+`docs/archive/plans-and-acceptance.md` Phase 4 P1「多交易对」。
 """
 
 from __future__ import annotations

@@ -3,7 +3,7 @@
 **状态：已接线（R22，2026-09-30）**——落到 `snapshot.level_tree`
 （`dashboard_snapshot_v2.py::_level_tree_payload`，三条活路径都汇聚到 v2），
 另经 `GET /api/dashboard/levels`（`cpt/web/app.py`）直接暴露；对应
-`docs/dashboard-product-roadmap.md` Phase 5 P1「级别递归树」。
+`docs/archive/plans-and-acceptance.md` Phase 5 P1「级别递归树」。
 """
 
 from __future__ import annotations

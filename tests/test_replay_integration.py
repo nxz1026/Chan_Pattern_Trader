@@ -1,6 +1,6 @@
 """M1 集成测试：replay + fixture + 同输入哈希稳定。
 
-这些测试覆盖 implementation-plan.md §4 的 M1 验收条件：
+这些测试覆盖 docs/archive/plans-and-acceptance.md §4 的 M1 验收条件：
 - 人工案例全过（每个 fixture 满足预期 bi count/direction）
 - 同输入导出哈希一致（hash stability）
 - 端到端 export → 重读 → schema v1
@@ -37,7 +37,8 @@ def test_fixture_passes_m4_entry(case_name: str) -> None:
     """每个 fixture 都能过 M4 新入口 ``replay_bars``（含 Binance K 线契约校验）。
 
     ``run_replay`` 是**低层**入口，不校验契约；fixture 历史上只被它跑到，
-    于是"600ms 演示时间边界 + OHLC 越界"能一路绿灯（m6-quality-report §3.1/§3.8）。
+    于是"600ms 演示时间边界 + OHLC 越界"能一路绿灯（见
+    ``docs/archive/plans-and-acceptance.md`` 的 M6 记录）。
     这里锚定 M4 推荐入口，把契约校验拉进回归网：
 
     - ``close_time == open_time + interval_ms - 1``（5m → +299999）

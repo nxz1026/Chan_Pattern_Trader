@@ -71,7 +71,12 @@ def all_code() -> list[Path]:
 
 
 def rel(p: Path) -> str:
-    return str(p.relative_to(ROOT))
+    # 必须 as_posix()：下面 HIST 的前缀是「docs/archive/」这种正斜杠写法，
+    # 而 str(PurePath) 在 Windows 上给反斜杠 ⇒ 历史快照豁免在 Windows 上**完全失效**，
+    # 整个 docs/archive/ 会被算成「现行文档」的真漂移。与 check_line_refs.py:159
+    # 是同一个坑（那天已修过一次），这里补上。判据：凡是用「相对路径字符串」去查
+    # 白名单/豁免表的地方，都要确认分隔符跨平台一致 —— 这个差别在 Linux 上看不出来。
+    return p.relative_to(ROOT).as_posix()
 
 
 #: 文档内容缓存 —— 40 份文档在 5 个类别里被反复重读，

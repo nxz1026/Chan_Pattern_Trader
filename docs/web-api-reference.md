@@ -3,8 +3,9 @@
 > **这份清单是从 `cpt/web/` 代码抽出来、并逐条打真机验证的**，不是手写的。
 > 生成脚本与实测记录见本文件末尾。
 >
-> R45 之前**全仓没有一份权威接口清单** —— `docs/dashboard-plan.md` 里那份是
-> 2026-09-23 的**计划**，其中 `/candles`、`/events` 从未作为独立接口实现
+> R45 之前**全仓没有一份权威接口清单** —— `docs/archive/plans-and-acceptance.md`
+> 收录的那份（原 `dashboard-plan.md`）是 2026-09-23 的**计划**，其中
+> `/candles`、`/events` 从未作为独立接口实现
 > （数据已并入 `/api/dashboard/snapshot`），`/api/dashboard/stats` 代码里没有。
 
 共 **26** 个接口（R45 新增 `a-share/recommendation` 与 `a-share/llm/summarize`），全部可达（状态码 2xx/4xx 均表示路由存在且按契约应答）。
@@ -82,13 +83,13 @@ HTML 表单 / `simple request` 发不出这个 CT，所以它挡住的是 CSRF�
 | `/api/dashboard/events` | 有 | ❌ 从未实现，数据在 `/snapshot` 的顶层 `events` |
 | `/api/dashboard/stats` | 有（另一处） | ❌ 代码里没有；`progress-log` 记过一次「猜错路径 404」 |
 
-`docs/dashboard-plan.md` 已加更正块指向本文档。
+`docs/archive/plans-and-acceptance.md` 收录件里已加更正块指向本文档。
 
 ## 复现方式
 
 ```bash
 python scripts/verify_public_contracts.py    # 外部契约（adapters 层）
-# web 接口清单：抽出 + 打真机，见 docs/review-web-layer-r45.md 记录的方法
+# web 接口清单：抽出 + 打真机，见 docs/archive/reviews-r45.md 记录的方法
 ```
 
 ## 已知不在本清单里的东西

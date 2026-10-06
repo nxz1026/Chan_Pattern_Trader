@@ -3,7 +3,7 @@
 **状态：已接线（R22，2026-09-30）**——`cpt/web/__main__.py` 的
 `_RealtimeProvider._cached_snapshot` 用它做 `(symbol, interval_ms)` 进程内 LRU
 命中判定，使带 `?symbol=&interval_ms=` 的请求不再等一个轮询周期；对应
-`docs/dashboard-product-roadmap.md` Phase 4 P1「SSE 或高效实时更新」。
+`docs/archive/plans-and-acceptance.md` Phase 4 P1「SSE 或高效实时更新」。
 """
 
 from __future__ import annotations

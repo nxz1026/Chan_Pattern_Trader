@@ -61,9 +61,8 @@ WINDOW = 3
 HISTORICAL: dict[str, str] = {
     "docs/duplication-triage.md": "2026-09-25 去重判定归档 —— 行号是当时快照的现场证据",
     "docs/progress-log.md": "逐轮开发日志 —— 记录每轮当时看到的行号",
-    "docs/handoff-20260925-leftover-fixes.md": "2026-09-25 交接单 —— 当时现场",
-    "docs/review-domain-layer-r45.md": "R45 审阅报告 —— 当时现场",
-    "docs/review-web-layer-r45.md": "R45 审阅报告 —— 当时现场",
+    "docs/archive/handoffs-r44-r45.md": "5 份交接单合并件 — 行号是当时快照的现场证据",
+    "docs/archive/reviews-r45.md": "9 份 R45 分层复盘合并件 — 当时现场",
 }
 
 _REF = re.compile(r"([A-Za-z0-9_/.-]+\.py):(\d+)")

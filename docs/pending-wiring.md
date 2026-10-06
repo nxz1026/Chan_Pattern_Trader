@@ -70,9 +70,10 @@ R22 的 9 个接线点（路由与调用方均已 grep 复核）：
    → **已失效（2026-09-30）**：该文件与整个 `cpt-audit/` 目录均已不存在。
    台账职责收归 `docs/progress-log.md` 的「2. 轮次记录」。
    本清单的去留判定**改以 `docs/progress-log.md` + 下条 roadmap 为准**。
-2. `docs/dashboard-product-roadmap.md`——`docs/dashboard-plan.md:151` 明确「**后续产品路线
-   以本文件 Phase 0-6 为准**」
-3. `docs/implementation-plan.md`——头部已声明自己是**历史记录**，**不作为**判据
+2. `docs/archive/plans-and-acceptance.md` §1.1（参照仓库与产品路线）——原
+   `dashboard-product-roadmap.md` / `dashboard-plan.md`，R56 收敛时合并至此。
+3. 该合并件 §3「已被取代的结论」——原 `implementation-plan.md` 已明确声明自己是
+   历史记录，**不作为**判据
 
 > ⚠️ **判据踩坑记录**：本次执行第一版只按「模块名是否出现在台账里」判定，把 12 个
 > `dashboard_*` 当无规划删掉了。装 P0-3 门禁时复查才发现 roadmap 的 Phase 3–6 用
@@ -347,7 +348,6 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:98` 的
 
 ## 相关
 
-- `docs/audit/cpt-code-audit-20260925.md` §3.4（孤儿层与死模块）、§5.1（dbconfig 三胞胎）
-- `docs/audit/verification-20260925.md` §4（P0 清单）
+- `docs/archive/audits-2026-09.md`（2026-09 审计合并件）§3.4（孤儿层与死模块）、§5.1（dbconfig 三胞胎）、§4（P0 清单）
 - `docs/architecture.md` §2（`engine/` 与 `storage/` 两层的删除说明）
-- `docs/dashboard-product-roadmap.md`（Phase 0-6 功能描述，判据 2）
+- `docs/archive/plans-and-acceptance.md`（Phase 0-6 功能描述，判据 2）

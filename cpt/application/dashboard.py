@@ -1,11 +1,11 @@
-"""Dashboard 只读 ViewModel（``dashboard.v1``，``docs/dashboard-plan.md`` D1）。
+"""Dashboard 只读 ViewModel（``dashboard.v1``，``docs/archive/plans-and-acceptance.md`` D1）。
 
 把一次计算的内部 dataclass（K 线 + 分型/笔/中枢/走势类型 + 一买信号 + 结构事件）
 投影为**稳定、可 JSON 化、带 schema 版本**的 ``dict``，供上层 HTTP 层直接返回，
 前端不接触领域对象。D0 已确认本仓库是纯 Python、无 Web 框架，故这里只交付
 application service，不引入任何 HTTP/第三方依赖。
 
-冻结契约（``docs/dashboard-plan.md`` D1）：
+冻结契约（``docs/archive/plans-and-acceptance.md`` D1）：
 
 * 顶层固定 8 个键：``schema_version`` / ``market`` / ``candles`` / ``overlays`` /
   ``signal`` / ``events`` / ``data_quality`` / ``runtime``；

@@ -1,7 +1,7 @@
 """Read-only A/B dashboard comparison helpers.
 
 **状态：已接线（R22，2026-09-30）**——`GET /api/dashboard/compare?left=&right=`
-（`cpt/web/app.py`）的唯一实现，对应 `docs/dashboard-product-roadmap.md` R5
+（`cpt/web/app.py`）的唯一实现，对应 `docs/archive/plans-and-acceptance.md` R5
 「两份 snapshot 字段级 diff」。入参是**本进程已记录的快照本体**
 （`dashboard_runs.run_body`），故进程重启后历史 run 不可比。
 """

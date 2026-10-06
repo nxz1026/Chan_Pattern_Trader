@@ -158,7 +158,7 @@ def ensure_table(conn: Any) -> None:
     21 条 NOT NULL 约束、``kind`` 取值全部对得上。
 
     复核命令与「为什么还没转成迁移文件」的裁决见
-    ``docs/review-ensure-table.md``。
+    ``docs/archive/reviews-r45.md``。
     """
     with conn.cursor() as cur:
         cur.execute(_DDL)
