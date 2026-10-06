@@ -155,7 +155,7 @@ def main() -> int:
     for doc in docs:
         if not doc.exists():
             continue
-        rel = str(doc.relative_to(ROOT))
+        rel = doc.relative_to(ROOT).as_posix()  # ← 必须 as_posix()
         if rel in HISTORICAL:
             skipped_hist += 1
             continue

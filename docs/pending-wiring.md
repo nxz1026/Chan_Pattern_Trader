@@ -155,7 +155,7 @@ R22 的 9 个接线点（路由与调用方均已 grep 复核）：
 数据其实齐了，只是没人把结构对象翻译成状态机的入参。
 `assess_first_buy` 需要 `has_two_centers` / `has_divergence_leg` / `has_reversal_bi`，
 这三个值只出现在 `signal.py` 自己、`cpt/domain/first_buy.py:12` 的 docstring 和本文件里；
-`TrendType`（`cpt/domain/models.py:179`）确实没有中心数/背驰笔/反转笔字段。
+`TrendType`（`cpt/domain/models.py:193`）确实没有中心数/背驰笔/反转笔字段。
 
 > **R20 处置：新增 `cpt/application/first_buy_bridge.py`（翻译层），接进 A 股主看板。**
 > - 桥输出 `FirstBuyFacts`（三事实 + `center_ids` + `structure_id` + `divergence_status`），
