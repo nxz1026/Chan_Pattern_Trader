@@ -241,7 +241,7 @@ def fx_bundle_sync(root: Path) -> tuple[str, str]:
     _write(
         root / "dashboard" / names[0],
         "// <<<HEAD\nconst A = 1;\n// >>>HEAD\n"
-        f"// <<<FUNCS\nfunction fn_0() {{ return A + 1; }}\n// >>>FUNCS\n"
+        "// <<<FUNCS\nfunction fn_0() { return A + 1; }\n// >>>FUNCS\n"
         + ("// <<<TAIL\nwindow.__boot = true;\n// >>>TAIL\n" if len(names) == 1 else ""),
     )
     return "build_dashboard_bundle.py", "不同步"

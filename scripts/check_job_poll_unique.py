@@ -100,7 +100,6 @@ def main() -> int:
     print("门禁⑦：**等任务**轮询的实现唯一性")
     print("═" * 72)
     offenders: list[str] = []
-    offenders: list[str] = []
     allowed: list[str] = []
     for p in sorted(DASH.glob("*.js")):
         if p.name in ALLOW or p.name in GENERATED:

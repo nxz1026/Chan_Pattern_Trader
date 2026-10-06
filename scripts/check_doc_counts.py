@@ -25,6 +25,7 @@ R45 一天里栽过三次：
 
 from __future__ import annotations
 
+import pathlib
 import re
 from pathlib import Path
 
@@ -68,7 +69,7 @@ def count_lines(rel: str) -> int:
 FRONT_SUFFIXES = (".js", ".css", ".html")
 
 
-def front_files(rel: str) -> list:
+def front_files(rel: str) -> list[pathlib.Path]:
     base = ROOT / rel
     if not base.is_dir():
         return []

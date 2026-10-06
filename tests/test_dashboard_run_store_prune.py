@@ -107,8 +107,7 @@ def test_run_index_orders_by_coalesce_not_bare_generated_at() -> None:
     sql = " ".join(drs._RUN_INDEX_SQL.split())
     assert "ORDER BY COALESCE(generated_at, created_at) DESC" in sql
     assert "ORDER BY generated_at DESC" not in sql, (
-        "裸 ORDER BY generated_at DESC 在 PostgreSQL 上是 NULLS FIRST，"
-        "NULL 行会占掉 LIMIT 的槽位"
+        "裸 ORDER BY generated_at DESC 在 PostgreSQL 上是 NULLS FIRST，NULL 行会占掉 LIMIT 的槽位"
     )
 
 
@@ -228,9 +227,7 @@ def test_cron_script_reads_keep_days_from_env() -> None:
     于是「一个只影响日志的配置变量比没有更坏」—— 看日志的人以为窗口改了，
     据此判断「表怎么没小下去」。
     """
-    script = (ROOT / "deploy" / "cron" / "dashboard-run-prune-daily.sh").read_text(
-        encoding="utf-8"
-    )
+    script = (ROOT / "deploy" / "cron" / "dashboard-run-prune-daily.sh").read_text(encoding="utf-8")
     assert "export KEEP_DAYS" in script, "KEEP_DAYS 没 export，内联 Python 读不到"
     assert 'os.environ.get("KEEP_DAYS"' in script, "内联 Python 仍在硬编码窗口"
     assert "CPT_PRUNE_DASHBOARD_RUN_DAYS" in script, "没有对外的覆盖变量"
@@ -243,9 +240,7 @@ def test_cron_script_reports_failure_loudly() -> None:
     dashboard 运行行会继续堆积``，按整行匹配会让「只是把提示语写长了」
     也变成测试失败 —— 那是断言范围比被钉住的行为大。
     """
-    script = (ROOT / "deploy" / "cron" / "dashboard-run-prune-daily.sh").read_text(
-        encoding="utf-8"
-    )
+    script = (ROOT / "deploy" / "cron" / "dashboard-run-prune-daily.sh").read_text(encoding="utf-8")
     assert "!!!!! 清理未完成" in script, "失败时没有醒目告警行"
     assert 'if [ "$rc" -ne 0 ]' in script, "告警行没有挂在失败分支上"
     assert "exit $rc" in script, "脚本没有按 rc 退出（失败会被当成成功）"

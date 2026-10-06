@@ -107,9 +107,7 @@ class NoTable(FakeConn):
     """表不存在（迁移没跑）。**读和写都失败**。"""
 
     def cursor(self) -> Any:
-        raise PgError(
-            'relation "public.cpt_structure_event" does not exist', _UNDEFINED_TABLE
-        )
+        raise PgError('relation "public.cpt_structure_event" does not exist', _UNDEFINED_TABLE)
 
 
 class DbDown(FakeConn):

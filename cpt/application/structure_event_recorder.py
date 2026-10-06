@@ -166,9 +166,7 @@ def record_structure_events(
                 # 都必须 rollback（except 分支统一处理）。
                 if not is_missing_table_error(exc):
                     raise
-                _LOG.warning(
-                    "结构事件表不存在（42P01，按「无历史」处理，迁移可能没跑）: %s", exc
-                )
+                _LOG.warning("结构事件表不存在（42P01，按「无历史」处理，迁移可能没跑）: %s", exc)
                 previous = {}
             events = diff_states(previous, states)
             if not events:
@@ -182,9 +180,7 @@ def record_structure_events(
                 # 写侧 best-effort 降级：异常被 store 吞掉、不冒泡，所以 except
                 # 分支进不来，只能在这里判。PG 里那条失败语句已把事务打成
                 # aborted，不救连接，调用方后续每条查询都失败。
-                _LOG.warning(
-                    "结构事件写入降级为 0 条（表缺失或 DB 故障），已回滚传入连接"
-                )
+                _LOG.warning("结构事件写入降级为 0 条（表缺失或 DB 故障），已回滚传入连接")
                 _rollback_quietly(db)
             else:
                 db.commit()  # ← store 层不 commit，边界在这里

@@ -56,7 +56,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import subprocess
 import sys
 import time
@@ -122,7 +121,10 @@ MUTATIONS: tuple[Mutation, ...] = (
         name="prune 失败抛错而非返回 0",
         rel="cpt/storage/dashboard_run_store.py",
         old='_LOG.warning("cpt_dashboard_run 清理失败 keep_days=%s: %s", keep, exc)',
-        new='_LOG.warning("cpt_dashboard_run 清理失败 keep_days=%s: %s", keep, exc)\n        return 0',
+        new=(
+            '_LOG.warning("cpt_dashboard_run 清理失败 keep_days=%s: %s", keep, exc)'
+            "\n        return 0"
+        ),
         tests=("tests/test_dashboard_run_store_prune.py",),
         why="返回 0 与「本来就没有过期行」同值，cron 无法分辨「干完了」"
         "还是「一条都没删掉」，慢性泄漏就在日志里静悄悄地继续",
@@ -131,7 +133,11 @@ MUTATIONS: tuple[Mutation, ...] = (
         name="store 层不替调用方 commit",
         rel="cpt/storage/dashboard_run_store.py",
         old="            cur.execute(sql, (keep,))\n            return int(cur.rowcount or 0)",
-        new="            cur.execute(sql, (keep,))\n            conn.commit()\n            return int(cur.rowcount or 0)",
+        new=(
+            "            cur.execute(sql, (keep,))"
+            "\n            conn.commit()"
+            "\n            return int(cur.rowcount or 0)"
+        ),
         tests=("tests/test_dashboard_run_store_prune.py",),
         why="事务边界归调用方（见 cpt/storage/__init__.py）。store 替它 commit "
         "会与调用方的多个写入拆成两个事务",
@@ -139,7 +145,10 @@ MUTATIONS: tuple[Mutation, ...] = (
     Mutation(
         name="清理作业真的登记在 crontab 里",
         rel="deploy/cron/crontab",
-        old="30 4 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/dashboard-run-prune-daily.sh",
+        old=(
+            "30 4 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/"
+            "dashboard-run-prune-daily.sh"
+        ),
         new="# (mutated) removed",
         tests=("tests/test_dashboard_run_store_prune.py",),
         why="R43 实测：run_inspection 从 R38 建好到 R43 从未被调度过，"
@@ -348,7 +357,8 @@ def main(argv: list[str] | None = None) -> int:
         pos, pos_detail, _ = check_one(MUTATIONS[0])
         neg, neg_detail, _ = check_one(SELFTEST_UNWATCHED)
         print(f"  {'✅' if pos else '❌'} 正控制：已知不变式被破坏 → 测试转红    {pos_detail}")
-        print(f"  {'✅' if not neg else '❌'} 负控制：无关改动 → 测试**仍绿**（应报存活） {neg_detail}")
+        neg_mark = "✅" if not neg else "❌"
+        print(f"  {neg_mark} 负控制：无关改动 → 测试**仍绿**（应报存活） {neg_detail}")
         if not pos:
             print("\n  ❌ 正控制失守：登记表第 1 条变异竟然没让测试变红。")
             print("     可能是那条测试也空转了 —— 登记表已不可信。")
@@ -378,8 +388,8 @@ def main(argv: list[str] | None = None) -> int:
             ok = False
             print(f"       ↓ {m.why}")
             print(f"       ↓ 变异：{m.rel} 里「{m.old[:48]}」→ 上面那组测试仍然全绿，")
-            print(f"       ↓ 说明这条不变式**没有任何测试在盯**。要么补测试，")
-            print(f"       ↓ 要么从登记表删掉并写明「刻意不设防」的理由。")
+            print("       ↓ 说明这条不变式**没有任何测试在盯**。要么补测试，")
+            print("       ↓ 要么从登记表删掉并写明「刻意不设防」的理由。")
 
     left = _dirty()
     print("─" * 72)
@@ -390,11 +400,7 @@ def main(argv: list[str] | None = None) -> int:
         print("   用 `git checkout -- .` 还原后请查这个脚本。")
         return 1
     print("工作区已还原干净 ✅")
-    print(
-        "登记的不变式**全部**有测试在盯 ✅"
-        if ok
-        else "有不变式**没有测试在盯** ❌"
-    )
+    print("登记的不变式**全部**有测试在盯 ✅" if ok else "有不变式**没有测试在盯** ❌")
     return 0 if ok else 1
 
 

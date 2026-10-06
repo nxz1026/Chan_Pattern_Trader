@@ -130,11 +130,18 @@ def test_gate_uses_merged_index_not_bar_index() -> None:
     真正能区分的是「包含合并让原始下标稀疏」的情形：把 bar_index 拉大到跨度 50，
     按原始下标算会**误判为够门槛**，按去包含后算才正确地合并。
     """
+
     def fx_split(kind: str, raw: int, merged: int, high: float, low: float) -> Fractal:
         return Fractal(
-            kind=kind, level=0, bar_index=raw,
-            start_time=merged * 1000, end_time=merged * 1000 + 999,
-            high=high, low=low, source_ids=(f"merged:{merged}",), merged_index=merged,
+            kind=kind,
+            level=0,
+            bar_index=raw,
+            start_time=merged * 1000,
+            end_time=merged * 1000 + 999,
+            high=high,
+            low=low,
+            source_ids=(f"merged:{merged}",),
+            merged_index=merged,
         )
 
     seq = [fx_split("bottom", 100, 0, 9, 4), fx_split("top", 150, 1, 20, 8)]
@@ -150,11 +157,17 @@ def test_gate_raises_when_merged_index_unknown() -> None:
     量纲错了笔数就会和参照后端对不上，而这种偏差在图表上看起来完全正常 ——
     比报错难查得多。
     """
+
     def fx_no_merged(kind: str, index: int) -> Fractal:
         return Fractal(
-            kind=kind, level=0, bar_index=index,
-            start_time=index * 1000, end_time=index * 1000 + 999,
-            high=1.0, low=1.0, source_ids=(f"m:{index}",),
+            kind=kind,
+            level=0,
+            bar_index=index,
+            start_time=index * 1000,
+            end_time=index * 1000 + 999,
+            high=1.0,
+            low=1.0,
+            source_ids=(f"m:{index}",),
         )
 
     seq = [fx_no_merged("bottom", 0), fx_no_merged("top", 9)]

@@ -54,7 +54,6 @@ from cpt.domain.config import RulesConfig
 from cpt.domain.models import Bi, CanonicalBar, Signal, ZhongShu
 from cpt.domain.signal import assess_first_buy, transition_first_buy, transition_first_sell
 from cpt.storage.signal_event_store import (
-    latest_status,
     load_previous_signal,
     record_signal_event,
 )
@@ -460,8 +459,15 @@ def _derive_first_buy_signal(
     *,
     client: Any = None,
     code: str = "",
-) -> Signal | None:
+) -> tuple[Signal | None, str | None]:
     """由结构对象推导一买信号（``None`` = 当前不评估）。
+
+    ⚠️ 返回的是**二元组** ``(signal, prev_status)``，不是单个 Signal
+    —— 2026-10-06 上线前审计更正：注解原先写 ``-> Signal | None``，
+    与 6 个 return（``None, None`` / ``signal, prev_status``）**全部不符**。
+    运行时没炸（Python 不校验注解），但它让 mypy strict 在这个文件上
+    完全失去作用：调用方的解包被报成 ``"Signal" object is not iterable``，
+    于是**这里若真有类型错误，mypy 也已经抓不出来了**。
 
     **趋势方向从数据推导，不硬编码**：取本级别**最后一笔**的方向作为「当前走势
     方向」。最后一笔向上时一买无意义，桥返回 ``None``，本函数也就**不产信号**——
@@ -556,8 +562,10 @@ def _derive_first_sell_signal(
     *,
     client: Any = None,
     code: str = "",
-) -> Signal | None:
+) -> tuple[Signal | None, str | None]:
     """由结构对象推导一卖信号（``_derive_first_buy_signal`` 的镜像）。
+
+    ⚠️ 同上：返回**二元组** ``(signal, prev_status)``，原注解 ``Signal | None`` 是错的。
 
     趋势方向从数据推导：取本级别**最后一笔**的方向。最后一笔向下时一卖
     无意义，桥返回 ``None``。

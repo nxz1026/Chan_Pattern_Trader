@@ -22,7 +22,6 @@ import pathlib
 from collections.abc import Sequence
 
 import pytest
-
 from cpt.adapters.backend_factory import resolve_backend
 from cpt.domain.bi import build_bis
 from cpt.domain.contain import merge_contained_bars
@@ -57,8 +56,10 @@ def _load_csv(path: pathlib.Path) -> list[CanonicalBar]:
         for row in csv.DictReader(fh):
             bars.append(
                 CanonicalBar(
-                    **{name: float(row[name]) if name not in _TIME_FIELDS else int(row[name])
-                       for name in _BAR_FIELDS},
+                    **{
+                        name: float(row[name]) if name not in _TIME_FIELDS else int(row[name])
+                        for name in _BAR_FIELDS
+                    },
                     is_closed=True,
                 )
             )
@@ -205,7 +206,9 @@ def test_span_measurement_matches_the_gates_own_unit(csv_path: pathlib.Path) -> 
     assert gated, f"{csv_path.name}: 门槛 {PROD_GATE} 之后一笔都不剩，样本不可用"
     spans = [_span_of(b, fractals) for b in gated]
     below = [s for s in spans if s < PROD_GATE]
-    assert not below, f"{csv_path.name}: 有 {len(below)} 笔跨度 < 门槛 {PROD_GATE} —— {_span_of} 与门槛不同量纲？"
+    assert not below, (
+        f"{csv_path.name}: 有 {len(below)} 笔跨度 < 门槛 {PROD_GATE} —— _span_of 与门槛不同量纲？"
+    )
     assert min(spans) == PROD_GATE, (
         f"{csv_path.name}: 最小跨度 {min(spans)} != 门槛 {PROD_GATE} —— "
         f"门槛合并的是「不足即并」，因此必有一笔恰好等于门槛。"
@@ -253,10 +256,9 @@ def test_lengths_are_merged_spans_not_raw_bar_counts(csv_path: pathlib.Path) -> 
     raw_spans = [int((b.end_time - b.start_time) // BAR_MS) + 1 for b in bis0]
     assert len(merged_spans) == len(raw_spans) == len(bis0)
 
-    for bi, m, r in zip(bis0, merged_spans, raw_spans):
+    for m, r in zip(merged_spans, raw_spans, strict=True):
         assert m <= r, (
-            f"{csv_path.name}: 去包含后跨度 {m} 大于原始跨度 {r} —— 物理上不可能，"
-            f"说明量错了量纲"
+            f"{csv_path.name}: 去包含后跨度 {m} 大于原始跨度 {r} —— 物理上不可能，说明量错了量纲"
         )
     merged_median = sorted(merged_spans)[len(merged_spans) // 2]
     raw_median = sorted(raw_spans)[len(raw_spans) // 2]
@@ -310,9 +312,7 @@ def test_calibration_table_is_written() -> None:
     #
     # 用字节写就没有任何换行翻译：``json.dumps`` 产出的换行本就是 ``\n``。
     out.write_bytes(
-        json.dumps(
-            {"gate": PROD_GATE, "rows": rows}, ensure_ascii=False, indent=2
-        ).encode("utf-8")
+        json.dumps({"gate": PROD_GATE, "rows": rows}, ensure_ascii=False, indent=2).encode("utf-8")
     )
     assert rows, "对照表为空"
     # 至少要有一行真的发生了变化，否则「需要重新校准」这个前提就不成立

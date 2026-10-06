@@ -46,7 +46,7 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, fields
-from typing import Any, Self
+from typing import Any, Final, Self
 
 __all__ = [
     "SCHEMA_VERSION",
@@ -151,7 +151,6 @@ class RulesConfig:
     divergence_compare: str = "area"
     levels: tuple[int, ...] = (5, 30)
     config_version: str = SCHEMA_VERSION
-
 
     def min_bi_len_for(self, interval: str | None) -> int:
         """按 **bar 间隔**取笔门槛；未登记的间隔回落到 :attr:`min_bi_len`。

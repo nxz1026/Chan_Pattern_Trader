@@ -7,7 +7,6 @@
 from __future__ import annotations
 
 import pytest
-
 from cpt.domain.config import RulesConfig
 
 
@@ -79,8 +78,6 @@ def test_a_share_and_crypto_can_diverge_without_touching_each_other() -> None:
     import dataclasses
 
     cfg = RulesConfig()
-    tweaked = dataclasses.replace(
-        cfg, min_bi_len_by_interval=(("1d", 6), ("5m", 30))
-    )
+    tweaked = dataclasses.replace(cfg, min_bi_len_by_interval=(("1d", 6), ("5m", 30)))
     assert tweaked.min_bi_len_for("1d") == 6, "改 5m 不该动日线"
     assert tweaked.min_bi_len_for("5m") == 30

@@ -98,8 +98,7 @@ def test_poll_interval_is_stricter_than_stale_threshold() -> None:
     poll = _const_ms(JS, "POLL_INTERVAL_MS")
     stale = _const_ms(JS, "STALE_AFTER_MS")
     assert poll < stale, (
-        f"轮询周期 {poll}ms 不小于陈旧阈值 {stale}ms —— "
-        f"页面必然在两次刷新之间误报「数据陈旧」"
+        f"轮询周期 {poll}ms 不小于陈旧阈值 {stale}ms —— 页面必然在两次刷新之间误报「数据陈旧」"
     )
 
 
@@ -120,12 +119,8 @@ def test_markfresh_rearms_the_stale_timer() -> None:
     但计时器仍在跑，下一次到点照样弹出来 —— 表现就是「闪一下又冒出来」。
     """
     body = _function_body(JS, "markFresh")
-    assert "clearTimeout(state.staleTimer)" in body, (
-        "markFresh 没有清掉上一轮的 stale 计时器"
-    )
-    assert "state.staleTimer = window.setTimeout(" in body, (
-        "markFresh 没有重新布防 stale 计时器"
-    )
+    assert "clearTimeout(state.staleTimer)" in body, "markFresh 没有清掉上一轮的 stale 计时器"
+    assert "state.staleTimer = window.setTimeout(" in body, "markFresh 没有重新布防 stale 计时器"
 
 
 def test_cache_hit_path_still_marks_fresh() -> None:

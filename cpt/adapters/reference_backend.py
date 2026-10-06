@@ -361,9 +361,7 @@ def _bar_index_by_open_time(bars: Sequence[BarLike]) -> dict[int, int]:
     return out
 
 
-def _anchor(
-    index_of: Mapping[int, int], time_ms: Any, *, what: str
-) -> int:
+def _anchor(index_of: Mapping[int, int], time_ms: Any, *, what: str) -> int:
     """把 ``start_time`` / ``end_time`` 解析成 bar 下标，**解析不到就抛**。
 
     绝不回落到 0：那正是本函数原来做的事，而 0 不是「缺省位置」，它是**第一根

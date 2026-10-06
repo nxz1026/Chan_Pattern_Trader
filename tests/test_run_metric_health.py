@@ -15,7 +15,6 @@
 from __future__ import annotations
 
 import pytest
-
 from cpt.application.run_metric import (
     HEALTH_DEGRADED,
     HEALTH_FAILING,
