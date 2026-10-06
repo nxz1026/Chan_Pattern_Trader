@@ -81,13 +81,21 @@ def _pipeline(bars: Sequence[CanonicalBar], gate: int | None):
 BAR_MS = 300_000
 
 
-def _lengths(bis) -> list[int]:
-    """每笔的跨度，单位是 **K 线根数**（不是毫秒）。
+def _lengths(bis, fractals) -> list[int]:
+    """每笔的跨度，单位是**去包含后**的 K 线根数 —— **与门槛同一量纲**。
 
-    第一次写成返回毫秒却拿去跟门槛（6 根）比，于是 ``v0_short_lt_gate`` 恒为 0
-    —— 差三个数量级的单位错配，测出来还是「全绿」。跨度必须换算成根数。
+    ⚠️ 2026-10-06 更正：原来这里返回的是**原始** bar 根数
+    （``(end_time - start_time) / BAR_MS``）。包含关系会合并 K 线，
+    去包含后根数 <= 原始根数，所以同一个门槛值在两个量纲里严格程度不同。
+    用原始根数定档会**低估门槛的真实严格度**：实测 BTCUSDT 5m 90 天样本上，
+    原始 p80 = 6，而门槛真正作用的 merged p80 = 4、p95 才是 6 ——
+    也就是说「门槛 6 ≈ p80 / 砍掉最短两成」是错的，实际是 p95 / 砍掉约 65%。
+
+    这份数字会被 :func:`test_calibration_table_is_written` 写进
+    ``docs/calibration-r56-min-bi-len.json``，所以**量纲错了会被自动
+    写进产物**，让文档重新漂回错误结论 —— 必须在这里改对，而不是改文档。
     """
-    return [max(1, round((b.end_time - b.start_time) / BAR_MS)) for b in bis]
+    return [_span_of(b, fractals) for b in bis]
 
 
 def _resolve(bars, gate: int | None):
@@ -129,15 +137,80 @@ def test_v1_has_no_short_bi_left(csv_path: pathlib.Path) -> None:
         assert span >= PROD_GATE, f"{csv_path.name}: 残留短笔 span={span}"
 
 
+def _merged_index_maps(fractals) -> tuple[dict[int, int], dict[int, int]]:
+    """分型的 ``merged_index`` 两张查找表：**起端点用 start_time，末端点用 end_time**。
+
+    ⚠️ 两者取自分型的**不同字段**（2026-10-06 实测更正）：``Bi.start_time`` 是
+    **起点分型的 start_time**（``middle.open_time``，结尾 ``000000``），
+    而 ``Bi.end_time`` 是**终点分型的 end_time**（``middle.close_time``，
+    结尾 ``999999``）—— 见 ``cpt/domain/bi.py::_make_bi`` 的
+    ``start_time=start.start_time, end_time=end.end_time``。
+
+    只建一张 ``{f.start_time: ...}`` 再拿 ``bi.end_time`` 去查，**永远查不到**
+    （结尾 000000 vs 999999）。这正是下面 ``_span_of`` 一直查不到端点的原因。
+    """
+    by_start = {f.start_time: f.merged_index for f in fractals if f.merged_index is not None}
+    by_end = {f.end_time: f.merged_index for f in fractals if f.merged_index is not None}
+    return by_start, by_end
+
+
 def _span_of(bi, fractals) -> int:
-    """按端点的 merged_index 算跨度（与 build_bis 内部同一口径）。"""
-    idx = {f.start_time: f.merged_index for f in fractals if f.merged_index is not None}
-    start = idx.get(bi.start_time)
-    end = idx.get(bi.end_time)
+    """按端点的 merged_index 算跨度（与 build_bis 内部同一口径）。
+
+    ⚠️ 原来查不到端点时返回 ``PROD_GATE``，于是调用方的
+    ``assert span >= PROD_GATE`` **恒真** —— 这条「门槛定义」测试从上线起
+    就没断言过任何东西（2026-10-06 实测：114/114 笔全部走兜底）。
+    静默兜底比报错贵：它让一条空测试看起来像一条通过的测试。
+    查不到就抛，让「量纲/映射写错了」当场暴露。
+    """
+    by_start, by_end = _merged_index_maps(fractals)
+    start = by_start.get(bi.start_time)
+    end = by_end.get(bi.end_time)
     if start is None or end is None:
-        # 端点是「同类取极端」替换后的分型，start_time 对不上就退回按 source_ids 找
-        return PROD_GATE  # 查不到就不假装通过不了，交给上面的主断言
-    return end - start + 1
+        raise AssertionError(
+            f"无法把笔映射回分型的 merged_index："
+            f"start_time={bi.start_time} end_time={bi.end_time}。"
+            f"多半是 _make_bi 的字段取法变了（起端点用 start_time、末端点用 "
+            f"end_time），而不是数据有问题 —— 请更新 _merged_index_maps。"
+        )
+    return int(end) - int(start) + 1
+
+
+@pytest.mark.parametrize("csv_path", _csv_files(), ids=lambda p: p.stem)
+def test_span_measurement_matches_the_gates_own_unit(csv_path: pathlib.Path) -> None:
+    """**口径自检**：证明 :func:`_span_of` 量的确实是门槛自己用的那个量。
+
+    ## 为什么需要这条
+
+    本文件两次栽在同一类错误上，且都**测不出来**：
+
+    1. :func:`_lengths` 一度返回毫秒，拿去跟「6 根」比 —— 差三个数量级，
+       ``v0_short_lt_gate`` 恒为 0，看着全绿。
+    2. :func:`_span_of` 用 ``{f.start_time: ...}`` 去查 ``bi.end_time``
+       （后者取自分型的 ``end_time``，结尾 999999），**永远查不到** ⇒
+       每次返回兜底的 ``PROD_GATE`` ⇒ 「门槛定义」那条断言**恒真**。
+       实测 114/114 笔全部走兜底，那条测试从上线起没断言过任何东西。
+
+    ⇒ **「断言通过」不能证明「量对了」。** 这条测试反过来用门槛的**定义**
+    来校验测量工具：门槛 ``G`` 的产出，最小跨度必须**恰好等于 G**、
+    且**零违反**。只要测量量纲和门槛不一致（或者映射坏了查不到端点），
+    这条立刻红。
+
+    ⚠️ 这不是「多测一遍同样的东西」：上面那条测的是「实现对不对」，
+    这条测的是「**我们以为在测的那个量**是不是真的那个量」。
+    """
+    bars = _load_csv(csv_path)
+    fractals = detect_fractals(merge_contained_bars(list(bars)), level=0)
+    gated = build_bis(fractals, level=0, min_bi_len=PROD_GATE)
+    assert gated, f"{csv_path.name}: 门槛 {PROD_GATE} 之后一笔都不剩，样本不可用"
+    spans = [_span_of(b, fractals) for b in gated]
+    below = [s for s in spans if s < PROD_GATE]
+    assert not below, f"{csv_path.name}: 有 {len(below)} 笔跨度 < 门槛 {PROD_GATE} —— {_span_of} 与门槛不同量纲？"
+    assert min(spans) == PROD_GATE, (
+        f"{csv_path.name}: 最小跨度 {min(spans)} != 门槛 {PROD_GATE} —— "
+        f"门槛合并的是「不足即并」，因此必有一笔恰好等于门槛。"
+        f"不相等说明测量量纲与门槛用的不是同一个量（merged_index vs 原始下标）"
+    )
 
 
 @pytest.mark.parametrize("csv_path", _csv_files(), ids=lambda p: p.stem)
@@ -157,15 +230,57 @@ def test_backend_factory_actually_forwards_the_gate(csv_path: pathlib.Path) -> N
     )
 
 
+@pytest.mark.parametrize("csv_path", _csv_files(), ids=lambda p: p.stem)
+def test_lengths_are_merged_spans_not_raw_bar_counts(csv_path: pathlib.Path) -> None:
+    """:func:`_lengths` 必须返回**去包含后**根数，而不是原始 bar 根数。
+
+    ## 为什么这条不能省
+
+    上一条自检（:func:`test_span_measurement_matches_the_gates_own_unit`）用的是
+    :func:`_span_of`，**绕过了** :func:`_lengths`。于是把 ``_lengths`` 单独改回
+    原始根数时，那条自检照样绿 —— 实测变异确认过：13 个用例**全绿**，
+    而 ``calibration-r56-min-bi-len.json`` 会被重新写回错误的量纲。
+    这正是本文件栽过的第三种「看起来测了、其实没测到」。
+
+    ⇒ 这条直接对着 ``_lengths`` 的**物理含义**断言：
+    包含关系会合并 K 线 ⇒ 去包含后根数 **<=** 原始根数；并且在这批样本上
+    **严格小于**（merged 中位 3 vs raw 中位 4）。把 ``_lengths`` 换回原始
+    根数，两者会相等 ⇒ 立刻红。
+    """
+    bars = _load_csv(csv_path)
+    fractals, bis0, _ = _pipeline(bars, None)
+    merged_spans = _lengths(bis0, fractals)
+    raw_spans = [int((b.end_time - b.start_time) // BAR_MS) + 1 for b in bis0]
+    assert len(merged_spans) == len(raw_spans) == len(bis0)
+
+    for bi, m, r in zip(bis0, merged_spans, raw_spans):
+        assert m <= r, (
+            f"{csv_path.name}: 去包含后跨度 {m} 大于原始跨度 {r} —— 物理上不可能，"
+            f"说明量错了量纲"
+        )
+    merged_median = sorted(merged_spans)[len(merged_spans) // 2]
+    raw_median = sorted(raw_spans)[len(raw_spans) // 2]
+    assert merged_median < raw_median, (
+        f"{csv_path.name}: merged 中位 {merged_median} == raw 中位 {raw_median} —— "
+        f"两者本应不同（包含关系会合并 K 线）。相等说明 _lengths 退回成了原始根数"
+    )
+
+
 def test_calibration_table_is_written() -> None:
-    """产出对照表并落盘 —— 这是「重新校准」要用的那份数据，不是测试的副产品。"""
+    """产出对照表并落盘 —— 这是「重新校准」要用的那份数据，不是测试的副产品。
+
+    ⚠️ 这里的 ``*_len`` 全部是**去包含后**根数（门槛量纲，见 :func:`_lengths`）。
+    每次跑测试都会**重写** ``docs/calibration-r56-min-bi-len.json`` ——
+    所以量纲一旦在这里写错，错误数字会被自动写进产物、并让
+    ``docs/calibration-r56-min-bi-len.md`` 重新漂回错误结论。
+    """
     rows = []
     for path in _csv_files():
         bars = _load_csv(path)
-        _, v0_bis, v0_zs = _pipeline(bars, None)
-        _, v1_bis, v1_zs = _pipeline(bars, PROD_GATE)
-        v0_len = sorted(_lengths(v0_bis))
-        v1_len = sorted(_lengths(v1_bis))
+        v0_fx, v0_bis, v0_zs = _pipeline(bars, None)
+        v1_fx, v1_bis, v1_zs = _pipeline(bars, PROD_GATE)
+        v0_len = sorted(_lengths(v0_bis, v0_fx))
+        v1_len = sorted(_lengths(v1_bis, v1_fx))
         rows.append(
             {
                 "file": path.name,
