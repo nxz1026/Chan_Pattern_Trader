@@ -210,14 +210,23 @@ def _dirty() -> list[str]:
 
 
 def _apply(path: Path, m: Mutation) -> None:
-    text = path.read_text(encoding="utf-8")
-    n = text.count(m.old)
+    """**字节级**注入变异。
+
+    ⚠️ 必须走二进制：仓里不少文件是 CRLF，而 ``read_text`` / ``write_text``
+    在文本模式下会做换行规范化（CRLF→LF）。第一版用文本模式，结果「还原」
+    把整个文件改成 LF，``git status`` 立刻变成满屏 modified ——
+    **一个专门用来安全还原的脚本，自己还原不干净**。这正是它要抓的那类 bug。
+    """
+    raw = path.read_bytes()
+    old = m.old.encode("utf-8")
+    new = m.new.encode("utf-8")
+    n = raw.count(old)
     if n != 1:
         raise AssertionError(
             f"变异锚点在 {m.rel} 里命中 {n} 次（要求恰好 1 次）。"
             f"代码变了、或锚点不再是唯一 —— 修登记表，别绕过。"
         )
-    path.write_text(text.replace(m.old, m.new), encoding="utf-8")
+    path.write_bytes(raw.replace(old, new))
 
 
 def _run(node_ids: Sequence[str]) -> tuple[bool, int, str]:
@@ -244,15 +253,19 @@ def _run(node_ids: Sequence[str]) -> tuple[bool, int, str]:
 
 
 def check_one(m: Mutation) -> tuple[bool, str]:
-    """注入 → 跑测试 → 还原。返回 (是否被抓到, 细节)。"""
+    """注入 → 跑测试 → 还原。返回 (是否被抓到, 细节)。
+
+    备份与还原都是**字节级**（见 :func:`_apply` 的说明）：文本模式的换行
+    规范化会让「还原」悄悄改写文件行尾，那不是还原。
+    """
     path = ROOT / m.rel
-    backup = path.read_text(encoding="utf-8")
+    backup = path.read_bytes()
     try:
         _apply(path, m)
         caught, rc, blob = _run(m.tests)
         return caught, f"rc={rc} " + (blob.strip().splitlines()[-1] if blob.strip() else "")
     finally:
-        path.write_text(backup, encoding="utf-8")
+        path.write_bytes(backup)
 
 
 def main(argv: list[str] | None = None) -> int:
