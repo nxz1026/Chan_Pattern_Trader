@@ -1,0 +1,73 @@
+# CPT 每日作业的 crontab（**本文件就是真相源** —— 不要只装在某人机器的 crontab 里）
+#
+# ## 为什么它必须在仓里
+#
+# R43 实测过一个很难查的失效：这两个作业此前**只存在于 oracle 的用户级 crontab**，
+# 仓里没有、文档里也没写全。后果是 `run_inspection.py` 从 R38 建好到 R43 之前
+# **从未被调度过** —— 表里只有手工验证时写的 6 行、相隔 66 秒。
+# 「跑没跑」这件事**只存在于 crontab 里**，而 crontab 不会被 review、不会被搜到、
+# 不会随仓库流转。⇒ 它必须是一个**被 git 跟踪的文件**。
+#
+# ## 安装
+#
+#   crontab deploy/cron/crontab
+#
+# ⚠️ 这会**整体替换**当前用户的 crontab。若你机器上还有别的作业，先备份：
+#
+#   crontab -l > /tmp/crontab.backup.$(date +%F)
+#
+# ## 核对线上 crontab 与本文件一致
+#
+# 装完之后、以及每次改本文件之后，跑这一条（它**滤掉注释与空行**后逐行 diff）：
+#
+#   diff <(crontab -l | grep -vE '^\s*(#|$)') <(grep -vE '^\s*(#|$)' deploy/cron/crontab) \
+#     && echo "✅ 线上 crontab 与仓内一致"
+#
+# 没有输出就说明一致；有输出**以本文件为准**（`crontab deploy/cron/crontab`）。
+# ⚠️ `diff <(...)` 是 **bash 进程替换**，要在 bash 里跑（`bash -c '...'`），
+#    在 sh/dash 下会报「No such file or directory」。
+#
+# ## 三个作业
+#
+# | 时间 | 脚本 | 干什么 |
+# |---|---|---|
+# | 02:20 | `factor-recompute-daily.sh` | 按公司行动重算复权因子（**只写暂存表**） |
+# | 03:40 | `run-inspection-daily.sh` | 读 `cpt_run_metric` + 源状态 → 状态变化/failing 时发飞书 |
+# | 04:10 | `run-metric-prune-daily.sh` | 清 `cpt_run_metric` 过期行（run 90 天 / inspection 30 天） |
+#
+# 三个时间**刻意错开**：巡检 03:40 跑在因子重算 02:20 之后、清理 04:10 之前 ——
+# 这样巡检读到的是「刚重算完」的因子状态，而清理不会与它抢同一批行。
+#
+# ## 为什么直接指向仓内路径、而不是 `install -m 755` 复制一份
+#
+# 复制之后仓内与 `/home/ubuntu/bin/` 就是**两份文件**，靠「人记得 scp」保持一致 ——
+# 忘了就静默跑旧版，**没有任何检查会报警**。直连仓内只有一份，git 是唯一真相源。
+# 前提是脚本**带执行位**（`100755`）：cron 不经过 shell，权限不对直接 Permission denied。
+#
+# ## 覆盖路径：CPT_REPO
+#
+# 下面写死 `/home/ubuntu/DSH/Chan_Pattern_Trader`，与脚本内的**默认值**一致。
+# 换机器时**改脚本里的默认值或设 `CPT_REPO` 环境变量**，并同步改这里 ——
+# 这里的路径是 crontab 侧的事实，脚本里的只是兜底，两边不一致时**以这里为准**。
+# 注意：cron 的环境极简，`CPT_REPO` 要写进 crontab 的 `VAR=value` 行才传得进去
+# （见下方示例，默认是**不设**，用脚本内默认值）。
+
+SHELL=/bin/bash
+PATH=/usr/local/bin:/usr/bin:/bin
+
+# 不设 CPT_REPO ⇒ 用脚本内默认 /home/ubuntu/DSH/Chan_Pattern_Trader
+# 换机器时取消注释并改成实际路径（两个都要改，别只改一处）：
+# CPT_REPO=/home/ubuntu/DSH/Chan_Pattern_Trader
+
+# ── 每日 02:20 复权因子重算（只写暂存表 asel.ref_adjust_factor_v2）──────────
+20 2 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/factor-recompute-daily.sh >> /home/ubuntu/logs/factor-recompute.log 2>&1
+
+# ── 每日 03:40 巡检（状态变化 / failing → 飞书告警）──────────────────────────
+# ⚠️ 缺 CPT_FEISHU_WEBHOOK 时脚本**非零退出**（R56 修复）：告警通道自己坏了
+#    绝不能报「成功」，否则会永远静默。webhook 只在 gitignore 的
+#    deploy/env/cpt-dashboard.env 里，本文件**不能**写它。
+40 3 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/run-inspection-daily.sh >> /home/ubuntu/logs/run-inspection.log 2>&1
+
+# ── 每日 04:10 清理 cpt_run_metric 过期行 ───────────────────────────────────
+# 窗口可用 CPT_PRUNE_RUN_DAYS / CPT_PRUNE_INSPECTION_DAYS 调整（见脚本头）。
+10 4 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/run-metric-prune-daily.sh >> /home/ubuntu/logs/run-metric-prune.log 2>&1

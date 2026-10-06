@@ -16,9 +16,8 @@
 # 混了两类（``KIND_RUN`` / ``KIND_INSPECTION``），巡检行是每天状态变化比对的
 # 依据，窗口短得多。所以按 kind 过滤，且 retention 分开配。
 #
-# 安装（oracle，用户级 crontab）—— **不需要复制脚本**：
-#   ( crontab -l | grep -v run-metric-prune-daily.sh; \
-#     echo '10 4 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/run-metric-prune-daily.sh >> /home/ubuntu/logs/run-metric-prune.log 2>&1' ) | crontab -
+# 安装：直接装仓内那份 crontab（**不要**手工 echo 一行，见 deploy/cron/crontab）：
+#   crontab deploy/cron/crontab
 #
 # ## 为什么不复制到 /home/ubuntu/bin/（R45 决策）
 #
@@ -40,7 +39,9 @@
 # 权限不对会直接 ``Permission denied``。R45 实测：另两个脚本当时是 ``100644``。
 set -uo pipefail
 
-REPO=/home/ubuntu/DSH/Chan_Pattern_Trader
+# 与 deploy/dashboard-sync.sh 同一个覆盖变量、同一个默认值 ——
+# 三个 cron 脚本此前各自硬编码 REPO，改了默认路径就得改三处，漏一处就静默跑错目录。
+REPO="${CPT_REPO:-/home/ubuntu/DSH/Chan_Pattern_Trader}"
 LOG=/home/ubuntu/logs/run-metric-prune.log
 LOCK=/home/ubuntu/logs/run-metric-prune.lock
 #: run 行保留天数。行情类行留 90 天够做同比；再久就没意义了（因子表才 2.75 年）。
@@ -55,27 +56,48 @@ fi
 
 cd "$REPO" || exit 1
 
+# ⚠️ 必须 export：下面的 Python 是 **heredoc 内联**的，没法像
+# factor-recompute-daily.sh 那样走命令行参数（``--keep-days``）——
+# 唯一能把它带过去的通道就是**进程环境**。
+#
+# 原来这里只把 $KEEP_RUN_DAYS 打进「开始」那行日志，而下面的 Python **硬编码**
+# keep_days=90/30 ⇒ ``CPT_PRUNE_RUN_DAYS`` 改多少都不影响行为，
+# 只有日志跟着变 —— **一个只影响日志的配置变量比没有更坏**：
+# 看日志的人以为窗口改了，于是据此判断「表怎么没小下去」。
+export KEEP_RUN_DAYS
+export KEEP_INSPECTION_DAYS="${CPT_PRUNE_INSPECTION_DAYS:-30}"
+
 {
-  echo "===== $(date -u +%FT%TZ) 开始（保留 run 行 $KEEP_RUN_DAYS 天）====="
+  echo "===== $(date -u +%FT%TZ) 开始（保留 run 行 $KEEP_RUN_DAYS 天 / inspection 行 $KEEP_INSPECTION_DAYS 天）====="
 } >> "$LOG"
 
 # ⚠️ store 层不 commit（事务边界归调用方，见 cpt/storage/__init__.py）——
 #    所以这里必须自己 commit，漏了就是静默回滚、删了跟没删一样。
 timeout 5m .venv/bin/python - <<'PY' >> "$LOG" 2>&1
+import os
 import sys
 sys.path.insert(0, ".")
 from cpt.adapters.a_share_local import AShareLocalClient
 from cpt.storage.run_metric_store import KIND_INSPECTION, KIND_RUN, prune
+
+# 窗口从环境读，不再写死（写死 = CPT_PRUNE_RUN_DAYS 形同虚设）。
+# ⚠️ 解析失败要**报错退出**而不是静默用默认值：cron 无人盯着，
+# 静默回落到 90 天只会让窗口慢慢漂回去，且日志里看不出任何异常。
+keep_run = int(os.environ.get("KEEP_RUN_DAYS", "90"))
+# inspection 行只做「每日状态变化比对」，比对只看相邻两天 ⇒ 窗口可以短得多。
+keep_insp = int(os.environ.get("KEEP_INSPECTION_DAYS", "30"))
+if keep_run < 1 or keep_insp < 1:
+    raise SystemExit(f"保留天数必须是正整数（run={keep_run} inspection={keep_insp}）")
 
 client = AShareLocalClient()
 try:
     conn = client._get_conn()
     # 分开配窗口：run 行是每轮一行的流水，inspection 是每天一次的状态比对。
     # prune 失败会抛（R45：失败与「没东西可删」不能同码），所以异常会冒到下面。
-    n_run = prune(conn, keep_days=90, kinds=[KIND_RUN])
-    n_insp = prune(conn, keep_days=30, kinds=[KIND_INSPECTION])
+    n_run = prune(conn, keep_days=keep_run, kinds=[KIND_RUN])
+    n_insp = prune(conn, keep_days=keep_insp, kinds=[KIND_INSPECTION])
     conn.commit()          # ⚠️ store 层不 commit，漏了就是静默回滚
-    print(f"已删除 run 行 {n_run}（>90 天）、inspection 行 {n_insp}（>30 天）")
+    print(f"已删除 run 行 {n_run}（>{keep_run} 天）、inspection 行 {n_insp}（>{keep_insp} 天）")
     if n_run + n_insp == 0:
         print("  （0 行 = 本来就没有过期数据，不是失败）")
 except Exception as exc:

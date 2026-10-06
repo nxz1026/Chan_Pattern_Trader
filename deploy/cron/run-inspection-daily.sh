@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # 每日巡检：读 public.cpt_run_metric + 数据源状态 → 状态变化或出现 failing 时发飞书。
 #
-# 安装（oracle，用户级 crontab）—— **不需要复制脚本**：
-#   ( crontab -l | grep -v run-inspection-daily.sh; \
-#     echo '40 3 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/run-inspection-daily.sh >> /home/ubuntu/logs/run-inspection.log 2>&1' ) | crontab -
+# 安装：直接装仓内那份 crontab（**不要**手工 echo 一行，见 deploy/cron/crontab）：
+#   crontab deploy/cron/crontab
 #
 # ## 为什么不复制到 /home/ubuntu/bin/（R45 决策）
 #
@@ -25,8 +24,22 @@
 # 权限不对会直接 ``Permission denied``。R45 实测：另两个脚本当时是 ``100644``。
 set -uo pipefail
 
-REPO=/home/ubuntu/DSH/Chan_Pattern_Trader
+# 与 deploy/dashboard-sync.sh 同一个覆盖变量、同一个默认值 ——
+# 三个 cron 脚本此前各自硬编码 REPO，改了默认路径就得改三处，漏一处就静默跑错目录。
+REPO="${CPT_REPO:-/home/ubuntu/DSH/Chan_Pattern_Trader}"
 ENV_FILE=$REPO/deploy/env/cpt-dashboard.env
+LOG=/home/ubuntu/logs/run-inspection.log
+LOCK=/home/ubuntu/logs/run-inspection.lock
+
+mkdir -p /home/ubuntu/logs
+exec 9>"$LOCK"
+# 与另两个脚本对齐：巡检慢起来时（网络卡/DB 锁）不能让上一轮还占着就起第二轮，
+# 两份巡检结论并发写飞书会变成互相矛盾的告警。
+if ! flock -n 9; then
+  echo "[$(date -u +%FT%TZ)] 上一轮巡检还在跑，跳过" >> "$LOG"
+  exit 0
+fi
+
 cd "$REPO" || exit 1
 
 # ⚠️ 必须加载 env —— 否则 CPT_FEISHU_WEBHOOK 不在环境里，每天的巡检只会往
@@ -38,7 +51,32 @@ if [ -f "$ENV_FILE" ]; then
   . "$ENV_FILE"
   set +a
 else
+  # ⚠️⚠️ 这里必须**非零退出**（R56 修复）。原来只往 stderr 写一行就继续往下跑，
+  # 而 scripts/run_inspection.py 在「一切正常且状态没变化」时返回 0 ——
+  # 于是 **webhook 丢了 = 每天报「成功」= 永远不告警**，
+  # 恰恰是 .env.example 警告的那一幕。告警通道自己坏了却报告成功，
+  # 是最坏的一种失效：外部看起来一切正常。
   echo "[$(date -u +%FT%TZ)] 找不到 $ENV_FILE，飞书告警不可用" >&2
+  echo "[$(date -u +%FT%TZ)] 找不到 $ENV_FILE，飞书告警不可用" >> "$LOG"
+  exit 78   # EX_CONFIG：配置缺失，与「跑挂了」区分开
 fi
 
-exec .venv/bin/python scripts/run_inspection.py
+# 再兜一层：文件在但**键是空的**同样等于没配（模板复制过来忘了填值最常见）。
+: "${CPT_FEISHU_WEBHOOK:?CPT_FEISHU_WEBHOOK 未设置 —— 巡检将无法告警，退出}"
+echo "[$(date -u +%FT%TZ)] 巡检开始" >> "$LOG"
+
+# ⚠️ 必须有 timeout —— 另两个脚本都有，只有这个没有。没有超时的话，
+# 一旦 DB/网络挂住，这一轮就永远挂着，而 cron 会在明天再起一个 ⇒ 并发叠加。
+timeout 30m .venv/bin/python scripts/run_inspection.py
+rc=$?
+
+{
+  echo "[$(date -u +%FT%TZ)] 巡检结束 rc=$rc"
+  # ⚠️ R44 教训（factor-recompute 同款）：「跑完了」和「跑挂了」不能同码。
+  # run_inspection.py 在「无异常且状态未变」时返回 0 —— 那是**正常的静默日**，
+  # 外部看门狗必须能靠这一行把「静默」和「死过」区分开。
+  if [ "$rc" -ne 0 ]; then
+    echo "!!!!! 本轮巡检未完成（rc=$rc）—— 可能没发出去告警 !!!!!"
+  fi
+} >> "$LOG"
+exit $rc

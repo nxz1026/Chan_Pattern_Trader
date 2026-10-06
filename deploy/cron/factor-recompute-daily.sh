@@ -2,9 +2,8 @@
 # 每日一轮：按公司行动重算后复权因子（**只写暂存表 asel.ref_adjust_factor_v2**，
 # 不碰生产表 asel.ref_adjust_factor —— 切换与否看 scripts/factor_report.py 的报告）。
 #
-# 安装（oracle，用户级 crontab）—— **不需要复制脚本**：
-#   ( crontab -l | grep -v factor-recompute-daily.sh; \
-#     echo '20 2 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/factor-recompute-daily.sh >> /home/ubuntu/logs/factor-recompute.log 2>&1' ) | crontab -
+# 安装：直接装仓内那份 crontab（**不要**手工 echo 一行，见 deploy/cron/crontab）：
+#   crontab deploy/cron/crontab
 #
 # ## 为什么不复制到 /home/ubuntu/bin/（R45 决策）
 #
@@ -26,7 +25,9 @@
 # 权限不对会直接 ``Permission denied``。R45 实测：另两个脚本当时是 ``100644``。
 set -uo pipefail
 
-REPO=/home/ubuntu/DSH/Chan_Pattern_Trader
+# 与 deploy/dashboard-sync.sh 同一个覆盖变量、同一个默认值 ——
+# 三个 cron 脚本此前各自硬编码 REPO，改了默认路径就得改三处，漏一处就静默跑错目录。
+REPO="${CPT_REPO:-/home/ubuntu/DSH/Chan_Pattern_Trader}"
 LOG=/home/ubuntu/logs/factor-recompute.log
 LOCK=/home/ubuntu/logs/factor-recompute.lock
 
