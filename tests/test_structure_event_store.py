@@ -266,12 +266,34 @@ def test_row_with_null_payload_still_usable() -> None:
     assert store.current_states(conn, ["bi:5:1"])["bi:5:1"].id == "bi:5:1"
 
 
-def test_latest_events_degrades_to_empty() -> None:
+def test_latest_events_raises_instead_of_lying() -> None:
+    """2026-10-06 改契约：``latest_events`` 从「降级成空」改成「原样抛出」。
+
+    原来这条断言锁的是「降级成 ``{}``」。改掉的理由比 ``timeline`` 更硬：
+
+    - recorder 传给 store 的**不是**它自己开的连接，而是调用方
+      （``a_share_snapshot``）**共享**的那条。PG 语义下任何一条语句失败都会把
+      整个事务打成 ``aborted``，而吞掉异常意味着这条连接带着 aborted 态交还给
+      调用方 —— 它后面十余处查询全部撞 ``current transaction is aborted``，
+      整轮快照逐只降级。一次读函数的降级炸穿了整张快照的构造。
+    - 降级成 ``{}`` 还会让 recorder 的 ``previous`` 变空，``diff_states`` 于是
+      把**全部**结构当成新建重写一遍 —— 「读失败」被当成了「首次」。
+
+    降级义务仍在 recorder：它 catch 后照常返回算出的事件（快照不该因 DB 故障
+    少显示一批变化），但**必须先把传入的连接 rollback 救回来**。
+    见 ``test_structure_event_recorder.py``。
+    """
+
     class Broken:
         def cursor(self) -> Any:
             raise RuntimeError("relation does not exist")
 
-    assert store.latest_events(Broken(), ["bi:5:1"]) == {}  # type: ignore[arg-type]
+    with pytest.raises(RuntimeError, match="relation does not exist"):
+        store.latest_events(Broken(), ["bi:5:1"])  # type: ignore[arg-type]
+
+    # current_states 是它的薄封装，必须同进同退 —— 不能一边抛一边降级。
+    with pytest.raises(RuntimeError, match="relation does not exist"):
+        store.current_states(Broken(), ["bi:5:1"])  # type: ignore[arg-type]
 
 
 def test_timeline_raises_instead_of_lying() -> None:

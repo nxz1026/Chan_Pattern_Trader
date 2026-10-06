@@ -7,20 +7,35 @@
 :func:`cpt.domain.structure_events.state_from_event`，把 domain 类型接回来了：
 R26 之前 ``StructureState`` 全仓零生产者、零消费者（见 progress-log R24 勘察）。
 
-## 降级纪律：写侧吞、读侧抛（不是不一致，是按调用方分的）
+## 降级纪律：写侧 best-effort，读侧一律抛
 
-同一个模块里两套相反的异常策略，这是**刻意**的，R27-2 才定下来：
+R27-2 定的原纪律是「写侧吞、读侧抛」，但它给 :func:`latest_events` /
+:func:`current_states` 开了一个口子，让它们也吞。**2026-10-06 关闭这个口子** ——
+那两个函数吞掉的不是「写不写」，而是「查不到」和「没有」的区别，而 recorder
+拿到的 ``{}`` 会让它把「读失败」当成「首次」，把全部结构重写成新事件。
 
-- :func:`append_events` —— **吞**，返回 0。调用方是 recorder（快照构造热路径），
-  写事件失败不该让整张快照构造失败。
-- :func:`latest_events` / :func:`current_states` —— **吞**，返回 ``{}``。调用方是
-  recorder，它自带 try/except 兜底；表不存在或连不通时降级成「无历史」，后续
-  append 也会失败，整体仍是 best-effort。
+更糟的是 PG 语义：任何一条语句失败都会让**整个事务进入 aborted 态**。recorder
+传的常是**共享连接**（``a_share_snapshot`` 侧），吞掉异常意味着这条连接带着
+aborted 态交还给调用方，后续每一条查询都撞 ``current transaction is aborted``，
+整轮逐只降级 —— 一个读函数的降级，炸穿了整张快照的构造。
+
+现在的规矩：
+
+- :func:`append_events` —— **best-effort**，返回 0。调用方是 recorder（快照构造
+  热路径），写事件失败不该让整张快照构造失败。但**必须 ERROR 级留痕**并区分
+  「表不存在」与「DB 故障」，别让降级变成静默。
+- :func:`latest_events` / :func:`current_states` —— **抛**。理由同
+  :func:`timeline`：读侧吞异常就是撒谎，且在共享连接上会污染事务。
 - :func:`timeline` / :func:`recent_events` —— **抛**。调用方是 HTTP 读接口，
   降级成空元组会让接口把「DB 挂了」谎报成「没有事件」。
 
 判据一句话：**吞掉异常会改变答案**时就得抛。写侧吞掉只影响「有没有落库」，
-读侧吞掉会让「查不到」变成「没有」—— 前端无从区分。
+读侧吞掉会让「查不到」变成「没有」—— 调用方无从区分。
+
+**传进来的连接归谁？** 本层不 commit，事务边界在调用方；因此调用方**必须**
+在用完后保证连接可继续使用（见 ``structure_event_recorder`` 的无条件
+``rollback``）。store 层不做这件事，它不知道连接是不是共享的。
+
 """
 
 from __future__ import annotations
@@ -38,6 +53,7 @@ _LOG = logging.getLogger(__name__)
 __all__ = [
     "append_events",
     "current_states",
+    "is_missing_table_error",
     "latest_events",
     "recent_events",
     "timeline",
@@ -65,6 +81,26 @@ def _row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
         name: _ms(value) if name in ("occurred_at", "created_at") else value
         for name, value in zip(_COLUMNS, row, strict=False)
     }
+
+
+#: PostgreSQL「表不存在」的 SQLSTATE。见
+#: https://www.postgresql.org/docs/current/errcodes-appendix.html
+_SQLSTATE_UNDEFINED_TABLE = "42P01"
+
+
+def is_missing_table_error(exc: BaseException) -> bool:
+    """``exc`` 是否是「表不存在」（PG SQLSTATE ``42P01``）。
+
+    **给调用方用的**，因为只有调用方知道该怎么区分处置：表不存在通常意味着
+    迁移没跑（部署问题，事件流本来就是空的，降级不算撒谎），而连接不通、
+    权限不足这类真故障则不能当成「没有历史」。
+
+    刻意**不** import psycopg 来做 ``isinstance``：本模块顶层只依赖 stdlib +
+    domain，``psycopg`` 是 ``[db]`` extra（CI 不一定装）。改用驱动都提供的
+    ``sqlstate`` 属性判断，缺属性时返回 ``False``（按「真故障」处理 ——
+    这个方向是安全的：宁可当故障，也不要把真故障误报成「表没建」）。
+    """
+    return getattr(exc, "sqlstate", None) == _SQLSTATE_UNDEFINED_TABLE
 
 
 def append_events(conn: Any, events: Sequence[StructureEvent]) -> int:
@@ -106,8 +142,20 @@ def append_events(conn: Any, events: Sequence[StructureEvent]) -> int:
             )
             return len(rows)
     except Exception as exc:
-        # best-effort：写事件失败不该让快照构造失败
-        _LOG.warning("写入结构事件失败 %s 条: %s", len(rows), exc)
+        # best-effort：写事件失败不该让整张快照构造失败（调用方 recorder 兜底）。
+        # 但**必须留痕** —— 原来这里是 warning 且不带 exc_info，栈被丢掉，
+        # 「表没建」和「DB 挂了」两种完全不同的现场在日志里长得一模一样。
+        # 表不存在（42P01）几乎总是部署漏跑迁移，DB 故障则是运维问题，
+        # 处置路径不同，日志必须能分开。
+        if is_missing_table_error(exc):
+            _LOG.error(
+                "写入结构事件失败 %s 条：表 public.cpt_structure_event 不存在"
+                "（42P01，通常是迁移没跑）",
+                len(rows),
+                exc_info=True,
+            )
+        else:
+            _LOG.error("写入结构事件失败 %s 条", len(rows), exc_info=True)
         return 0
 
 
@@ -119,7 +167,12 @@ def latest_events(conn: Any, structure_ids: Sequence[str]) -> dict[str, Structur
 
     :returns: ``structure_id -> StructureEvent``；不存在的 id **不在结果里**
         （区别于「存在但 payload 为空」——调用方据此判首次）。
+    :raises Exception: 读库失败**原样抛出**。理由同 :func:`timeline`，而且
+        更硬：recorder 传进来的常是**共享连接**，本函数吞掉异常等于把一条
+        aborted 事务交还给调用方，PG 语义下它后续每条查询都会失败
+        （2026-10-06 修）。表不存在也照抛 —— 「读不到」和「没有」必须分开。
     """
+
     ids = [str(i).strip() for i in structure_ids if str(i).strip()]
     if not ids:
         return {}
@@ -130,13 +183,10 @@ def latest_events(conn: Any, structure_ids: Sequence[str]) -> dict[str, Structur
          WHERE structure_id = ANY(%s)
          ORDER BY structure_id, revision DESC
     """
-    try:
-        with conn.cursor() as cur:
-            cur.execute(sql, (list(ids),))
-            found = cur.fetchall() or ()
-    except Exception as exc:
-        _LOG.warning("读取结构最新事件失败 %s 个: %s", len(ids), exc)
-        return {}
+    # 不吞：见 :raises:。空 ids 的早退是**契约**（不查库），与读失败不是一回事。
+    with conn.cursor() as cur:
+        cur.execute(sql, (list(ids),))
+        found = cur.fetchall() or ()
 
     out: dict[str, StructureEvent] = {}
     for row in found:

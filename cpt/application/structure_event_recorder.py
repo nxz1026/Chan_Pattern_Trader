@@ -57,6 +57,18 @@ def _connection(conn: Any | None) -> Iterator[Any]:
         opened.close()
 
 
+def _rollback_quietly(conn: Any) -> None:
+    """回滚传入的连接，**绝不**把异常抛出去。
+
+    这是救连接的最后一道：连接已经坏了，rollback 自己也可能失败（比如连接
+    已断）。这里失败就只记日志 —— 快照是热路径，救不回来也不能带崩它。
+    """
+    try:
+        conn.rollback()
+    except Exception as exc:  # noqa: BLE001 — 救不回来也不能带崩快照
+        _LOG.warning("结构事件 rollback 失败（连接可能已断）: %s", exc)
+
+
 def record_structure_events(
     *,
     market: MarketKey,
@@ -87,8 +99,8 @@ def record_structure_events(
 
     ## 写库失败时仍然返回事件 —— 这是刻意的
 
-    表不存在（迁移没跑）或连接不通时，``current_states`` 降级成 ``{}``，
-    ``append_events`` 写失败被吞，但**本函数照样把算出的事件返回**。
+    表不存在（迁移没跑）或连接不通时，``append_events`` 降级返回 0，
+    ``current_states`` 读失败会抛，但**本函数照样把算出的事件返回**。
 
     理由：``snapshot.events`` 回答的是「本次计算里什么结构变了」，这个事实与
     **能不能落库是两件事**。DB 故障不该把一个真实的数据字段清空 —— 那会让
@@ -98,16 +110,29 @@ def record_structure_events(
     代价要说清：这些事件**没有**进事件流，跨重启的追溯里查不到。所以
     ``status`` 会出现「快照说有 created、库里没有」的状态。
 
-    ⚠️ R45 补：``append_events`` 是「吞异常」型（见其
-    ``# gate: allow-silent``），若它在语句上失败，连接会停在
-    ``current transaction is aborted`` 态 —— 而上面 except 分支**原来不
-    rollback**。自己开的连接走 ``_connection`` 的 ``finally: close()`` 没事，
-    但**调用方传进来复用的那条**会被留在 aborted 态，
-    调用方后面每一个操作都报 ``current transaction is aborted``。
-    所以 except 分支必须把「传进来的连接」救回来。
+    ## 共享连接必须被救回来（2026-10-06 修）
+
+    两条降级路径都会让传入的连接停在 ``current transaction is aborted``：
+
+    1. ``current_states`` 读失败抛 —— 走下面的 ``except``。
+    2. ``append_events`` 写失败**吞掉**并返回 0 —— 异常不冒泡，**原来的
+       ``except`` 根本不会执行**（这就是 R45 补的 rollback 防御形同虚设的原因）。
+
+    PG 里任何一条语句失败都会把整个事务打成 aborted，而调用方
+    （``a_share_snapshot``）传进来的是**共享连接**、后面还有十余处查询要跑。
+    一次事件写入失败会连带整轮快照逐只降级。
+
+    修法：**失败时**无条件 rollback 传入的连接。**注意不是「每次都 rollback」**
+    —— 热路径常态是「无变化、不写库、不 commit」（上面 ``if not events`` 的
+    早退），此时共享连接上可能还挂着调用方自己的未提交事务，无差别 rollback
+    会把别人的工作销毁掉。所以只在「本次真的碰过库且碰坏了」时救。
     """
     from cpt.domain.structure_events import diff_states, states_from_structures
-    from cpt.storage.structure_event_store import append_events, current_states
+    from cpt.storage.structure_event_store import (
+        append_events,
+        current_states,
+        is_missing_table_error,
+    )
 
     try:
         states = states_from_structures(
@@ -125,7 +150,26 @@ def record_structure_events(
 
     try:
         with _connection(conn) as db:
-            previous = current_states(db, [s.id for s in states])
+            try:
+                previous = current_states(db, [s.id for s in states])
+            except Exception as exc:
+                # 读失败分两种，处置完全不同（2026-10-06）：
+                #
+                # - **表不存在**（42P01，多半是迁移没跑）：事件流本来就是空的，
+                #   「无历史」是**真的**，降级不算撒谎，快照照常产出变化。
+                # - **真 DB 故障**（连不通 / 权限 / 其它）：我们根本不知道历史
+                #   长什么样。此时若也降级成 ``{}``，``diff_states`` 会把**全部**
+                #   结构当成新建重写一遍 —— 把「读失败」谎报成「首次」。
+                #   所以这里重新抛出，交给下面的 except：本轮不产出事件。
+                #
+                # 注意 PG 语义：这条读失败已经把事务打成 aborted，两条分支
+                # 都必须 rollback（except 分支统一处理）。
+                if not is_missing_table_error(exc):
+                    raise
+                _LOG.warning(
+                    "结构事件表不存在（42P01，按「无历史」处理，迁移可能没跑）: %s", exc
+                )
+                previous = {}
             events = diff_states(previous, states)
             if not events:
                 return ()  # 热路径常态：不写库
@@ -133,18 +177,24 @@ def record_structure_events(
                 events = _with_cause(
                     db, events, market=market, symbol=symbol, fingerprint=fingerprint
                 )
-            append_events(db, events)
-            db.commit()  # ← store 层不 commit，边界在这里
+            written = append_events(db, events)
+            if written == 0:
+                # 写侧 best-effort 降级：异常被 store 吞掉、不冒泡，所以 except
+                # 分支进不来，只能在这里判。PG 里那条失败语句已把事务打成
+                # aborted，不救连接，调用方后续每条查询都失败。
+                _LOG.warning(
+                    "结构事件写入降级为 0 条（表缺失或 DB 故障），已回滚传入连接"
+                )
+                _rollback_quietly(db)
+            else:
+                db.commit()  # ← store 层不 commit，边界在这里
             return events
     except Exception as exc:  # noqa: BLE001 — 旁路失败不影响快照
         _LOG.warning("结构事件记录失败（不影响快照）: %s", exc)
-        # 传入的连接要救回来：``append_events`` 吞掉语句失败后，连接停在
-        # aborted 态，后续操作全废（自己开的那条由 _connection 的 close 兜住）。
+        # 自己开的连接由 _connection 的 finally: close() 兜住；只有调用方传进来
+        # 复用的那条需要在这里救。
         if conn is not None:
-            try:
-                conn.rollback()
-            except Exception as rb_exc:  # noqa: BLE001 — 救不回来也不能带崩快照
-                _LOG.warning("结构事件 rollback 失败: %s", rb_exc)
+            _rollback_quietly(conn)
         return ()
 
 
