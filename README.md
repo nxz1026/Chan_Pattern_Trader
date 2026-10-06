@@ -6,7 +6,7 @@ CPT 基于缠中说禅理论做结构分析：缠论K线 → 分型 → 新笔 �
 
 ## 设计原则
 
-1. **结构清晰**：单一职责分层，依赖方向由 import-linter 强制（4 条契约，CI 门禁之一）。
+1. **结构清晰**：单一职责分层，依赖方向由 import-linter 强制（**6 条契约**，CI 门禁之一）。
 2. **虚拟/物理分离**：缠论算法（domain）不知道交易所、数据库、绘图、LLM 的存在。
 3. **规则先行**：所有规则口径先冻结于 `docs/rules.md`，再写代码；配置集中在可序列化的 `RulesConfig`。
 4. **无未来函数**：实时输出只依赖当前时点之前的数据，候选/确认/失效全程可追溯。
@@ -16,19 +16,25 @@ CPT 基于缠中说禅理论做结构分析：缠论K线 → 分型 → 新笔 �
 
 ## 架构速览
 
-**5 层**（`engine/` 已于 2026-09-25 整层删除；`storage/` 于 2026-10-01 的 R24
-**恢复**；`llm/` 于 2026-10-02 的 R25 **落地**，8 文件 / 1,300 行）：
+**6 层**（`engine/` 已于 2026-09-25 整层删除；`storage/` 于 2026-10-01 的 R24
+**恢复**；`llm/` 于 2026-10-02 的 R25 **落地**，8 文件 / 1,370 行）：
 
 ```text
 web/           只读 HTTP adapter + 两个入口（加密 / A股）
 application/   用例编排（回放 / 查询 / 导出 / 快照构造）—— 不出现 SQL
+llm/           独立 LLM 服务层：配置 / 异步队列 / provider / 提示词（不碰 SQL）
 storage/       CPT 自有持久化：public.cpt_* 的读写。SQL 只许出现在这一层和 adapters
 adapters/      外部系统接入（行情源 + 共享数据源 emotion_core + 缠论后端委托）
 domain/        纯算法与领域模型（零第三方依赖，一套算法跨级别复用）
 ```
 
-依赖方向 `web → application → {storage, adapters} → domain`，`domain` 不导入任何
-上层，由 `.importlinter` 的 **4 条契约**强制（CI 门禁之一）。
+依赖方向 `web → application → llm → storage → adapters → domain`，`domain` 不导入任何
+上层，由 `.importlinter` 的 **6 条契约**强制（5 条 `forbidden` + 1 条 `layers`，CI 门禁之一）。
+
+> ⚠️ R56 更正：本节原先写「5 层」并画成 `web → application → {storage, adapters} → domain`，
+> **漏掉了 R25（2026-10-02）加入的 `llm` 层** —— 而下面那条 R45 复盘引用里
+> 又自己提到了 `cpt/llm/`，**同一份文件自相矛盾**。层数与依赖链均按 `.importlinter:67-73`
+> 与 `docs/architecture.md` §2 更正为 6 层。
 
 ### 分层的两条硬规矩
 
@@ -185,7 +191,7 @@ Wind 路径（`--source wind`）保留作交叉校验，但要积分 —— 实�
 | `docs/implementation-plan.md` | 实施计划（M0–M6 垂直切片里程碑 + M-LLM 独立线） |
 | `docs/reference-audit.md` | 参考仓库许可证与复用边界 |
 | `docs/progress-log.md` | 逐轮进度日志（R13 起；更早见 `docs/archive/`） |
-| `docs/known-traps.md` | 已知陷阱与非缺陷清单（**27 条**"像 bug 其实不是"，每条附**判定命令**） |
+| `docs/known-traps.md` | 已知陷阱与非缺陷清单（**30 条**"像 bug 其实不是"，每条附**判定命令**） |
 | `docs/web-api-reference.md` | 看板 HTTP 接口清单（路径 / 参数 / 返回形状，含 `llm/explain`、`llm/summarize`） |
 | `docs/db-inventory-and-cleanup.md` | 生产库表与索引清单 + 清理执行状态 |
 | `docs/pending-wiring.md` | 尚未接线模块清单（是产品决策，不是死代码） |
@@ -299,7 +305,7 @@ pytest tests -rsq
 ruff check cpt tests scripts
 ruff format --check cpt tests scripts
 mypy cpt scripts
-lint-imports                                    # 4 条分层契约
+lint-imports                                    # 6 条分层契约（5 forbidden + 1 layers）
 python scripts/check_sql_layering.py           # SQL 只许在 adapters/storage（R24 新增）
 python scripts/check_storage_failure_semantics.py   # 门禁②
 python scripts/check_doc_drift.py               # 门禁③

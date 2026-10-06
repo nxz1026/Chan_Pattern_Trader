@@ -7,7 +7,16 @@
 > 2026-09-23 的**计划**，其中 `/candles`、`/events` 从未作为独立接口实现
 > （数据已并入 `/api/dashboard/snapshot`），`/api/dashboard/stats` 代码里没有。
 
-共 **27** 个接口（R45 新增 `a-share/recommendation` 与 `a-share/llm/summarize`），全部可达（状态码 2xx/4xx 均表示路由存在且按契约应答）。
+共 **26** 个接口（R45 新增 `a-share/recommendation` 与 `a-share/llm/summarize`），全部可达（状态码 2xx/4xx 均表示路由存在且按契约应答）。
+
+> ⚠️ **原写 27，是数错了（R56 更正）**：多出来的那一个是
+> `/api/dashboard/a-share/` —— 它是 app.py 里的**路径前缀常量**，
+> **不是一个路由**（真正处理请求的是它下面那 6 个具体路径）。
+> `scripts/check_doc_drift.py:142` 明确把它 `discard` 掉了。
+> ⇒ 真实路由数 **26**，与下表行数一致。
+>
+> 复核命令（与 D 类门禁同一套正则）：
+> `python scripts/check_doc_drift.py`
 
 ## 接口一览
 
@@ -15,7 +24,9 @@
 |---|---|---:|---|---|
 | ~~`GET`~~ | ~~`/api/canvas/wbt`~~ | — | ~~画布 D：wbt 报告视图~~ **R51 已下线，回 404 `not_found`** | — |
 | `POST` | `/api/dashboard/a-share/llm/explain` | `200` | 提交一次 LLM 规则解释（写，fire-and-forget） | `app.py` |
+| `POST` | `/api/dashboard/a-share/llm/summarize` | `200` | 为结构判断配一段人话（写，fire-and-forget） | `app.py` |
 | `GET` | `/api/dashboard/a-share/pool` | `200` | A 股热门池 / 观察池 | `app.py` |
+| `GET` | `/api/dashboard/a-share/recommendation` | `200` | 结构判断摘要：动作 + 参考价 + 依据 | `app.py` |
 | `GET` | `/api/dashboard/a-share/snapshot` | `200` | A 股单只快照 | `app.py` |
 | `POST/DELETE` | `/api/dashboard/a-share/watchlist` | `400` | A 股自选增删（写） | `app.py` |
 | `GET` | `/api/dashboard/compare` | `200` | 两次运行的对比 | `app.py` |
@@ -33,11 +44,21 @@
 | `GET` | `/api/dashboard/runs` | `200` | 运行索引列表（ring 与 PG 表合并后的冷路径） | `app.py` |
 | `GET` | `/api/dashboard/signal-radar` | `200` | 信号雷达 | `app.py` |
 | `GET` | `/api/dashboard/signal-stats` | `200` | 信号状态跃迁统计 | `app.py` |
-| `GET` | `/api/dashboard/structure-events` | `200` | 结构事件流（append-only） | `app.py` |
+| `GET` | `/api/dashboard/snapshot` | `200` | **看板主数据**（K 线 / 结构 / 复现性一次取全） | `app.py` |
 | `GET` | `/api/dashboard/sources` | `200` | 数据源列表与探活状态 | `app.py` |
 | `GET` | `/api/dashboard/structure-events` | `200` | 结构事件流（append-only） | `app.py` |
 | `GET` | `/api/dashboard/structure-events/timeline` | `200` | 单个结构的完整时间线 | `app.py` |
 | `GET` | `/api/dashboard/watchlist` | `200` | 自选（读） | `app.py` |
+
+> **R56 更正的两处（R45 抄录时漏了/重了）**：
+> - 原文把 `structure-events` **列了两遍**（同一行重复），已去重；
+> - **漏了** `GET /api/dashboard/snapshot` —— 它是看板**取数的主入口**
+>   （下文「与计划文档的差异」里 `/candles`、`/events` 的数据全都并进了它的顶层字段），
+>   一份「接口清单」漏掉主入口，是最该补的一处。
+> - 一并核对补齐：`a-share/recommendation` / `a-share/llm/summarize`
+>   原先只在下方小节里讲、没进一览表。
+>
+> 现在本表 26 行 = 26 个真实路由（外加表头那行 R51 已下线的 `/api/canvas/wbt`）。
 
 ## 两个写接口的额外约束
 
