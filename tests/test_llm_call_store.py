@@ -261,6 +261,32 @@ def test_finish_sets_error_text_only_for_non_ok() -> None:
     assert params[6] is not None
 
 
+def test_finish_raises_on_db_error() -> None:
+    """R52：**写失败一律抛**（与 ``enqueue_call``、与本类的契约一致）。
+
+    ``finish_call`` 原来只记一条 warning 就返回 —— 于是「模型已经调过、token
+    已经花掉」这件事在审计表里消失了，调用方还当成功。类 docstring 明写
+    「**写失败一律抛**」，实现与自己的契约矛盾。
+    """
+
+    class _BrokenConn:
+        def cursor(self) -> Any:
+            class _C:
+                def __enter__(self) -> Any:
+                    return self
+
+                def __exit__(self, *a: Any) -> bool:
+                    return False
+
+                def execute(self, *a: Any, **k: Any) -> None:
+                    raise RuntimeError("simulated PG statement failure")
+
+            return _C()
+
+    with pytest.raises(LLMCallError, match="c1"):
+        finish_call(_BrokenConn(), "c1", status=STATUS_OK, result_text="x")
+
+
 # --------------------------------------------------------------------------- #
 # mark_interrupted
 # --------------------------------------------------------------------------- #

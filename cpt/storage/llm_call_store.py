@@ -208,7 +208,17 @@ def finish_call(
     prompt_tokens: int | None = None,
     completion_tokens: int | None = None,
 ) -> None:
-    """更新终态。``finished_at`` 只在终态写。"""
+    """更新终态。``finished_at`` 只在终态写。
+
+    :raises LLMCallError: 写失败。**与 :func:`enqueue_call` 同口径**：本模块的
+        契约是「写失败一律抛」（见 :class:`LLMCallError`），``finish_call`` 原来
+        只记 warning 就返回 —— 于是「模型已经调过、token 已经花掉」这件事在库里
+        消失了，调用方还当成功。审计记录写不进去却假装成功，比没有审计更糟。
+
+        调用方义务（三处都在 ``cpt/application/llm_cases.py`` / ``cpt/web``）：
+        ① 自己决定是吞是抛；② 吞的话必须 ``rollback``（事务里一条语句失败后，
+        同一连接后续语句全部报 ``current transaction is aborted``）。
+    """
     finished = datetime.now(UTC) if status in TERMINAL_STATUSES else None
     try:
         with conn.cursor() as cur:
@@ -227,6 +237,7 @@ def finish_call(
             )
     except Exception as exc:
         _LOG.warning("更新 LLM 调用状态失败 %s: %s", call_id, exc)
+        raise LLMCallError(f"更新 LLM 调用状态失败 {call_id}: {exc}") from exc
 
 
 def recent_calls(

@@ -313,14 +313,14 @@ def build_ashare_snapshot(
     # 把合成 id 挂到笔的 ``source_ids`` 上，让上层知道该把这笔画虚线。
     # 只注入 id、不改数值 —— 判据见 tests/test_a_share_rules.py::test_tags_do_not_change_structure。
     bis, tags_audit = _apply_daily_tags(active_client, code, start_ms, end_ms, raw_bis)
-    signal = _derive_first_buy_signal(
+    signal, signal_prev_status = _derive_first_buy_signal(
         bis,
         zhongshus,
         validated,
         client=active_client,
         code=code,
     )
-    signal_first_sell = _derive_first_sell_signal(
+    signal_first_sell, _sell_prev_status = _derive_first_sell_signal(
         bis,
         zhongshus,
         validated,
@@ -420,7 +420,7 @@ def build_ashare_snapshot(
     _attach_ashare_tags(snapshot, tags_audit)
     _attach_t_plus_one(snapshot, active_client)
     _attach_close_countdown(snapshot, active_client)
-    _attach_signal_change(snapshot, active_client)
+    _attach_signal_change(snapshot, active_client, prev_status=signal_prev_status)
     _attach_factor_epoch(snapshot, active_client)  # R45：口径纪元随快照下发
     _attach_dual_compare(snapshot, code, active_client)
     _attach_calendar_gaps(snapshot, active_client)
@@ -481,7 +481,7 @@ def _derive_first_buy_signal(
     level = config.levels[0] if config.levels else 0
     level_bis = [bi for bi in bis if bi.level == level]
     if not level_bis:
-        return None
+        return None, None
     facts = derive_first_buy_facts(
         level=level,
         trend_direction=level_bis[-1].direction,
@@ -489,7 +489,7 @@ def _derive_first_buy_signal(
         zhongshus=zhongshus,
     )
     if facts is None:
-        return None
+        return None, None
     last_bar = bars[-1] if bars else None
     structure_id = facts.structure_id or f"level{level}:empty"
     event_time = int(last_bar.close_time) if last_bar is not None else 0
@@ -535,8 +535,8 @@ def _derive_first_buy_signal(
         )
 
     # 记录状态跃迁（status 变化时才 append）
+    prev_status: str | None = previous.status if previous is not None else None
     if conn is not None and signal is not None:
-        prev_status = previous.status if previous is not None else None
         try:
             record_signal_event(conn, signal, prev_status, code, event_time)
             conn.commit()  # ← store 层不 commit，边界在这里
@@ -544,7 +544,9 @@ def _derive_first_buy_signal(
             _LOG.warning("提交信号事件失败 %s: %s", code, exc)
             _rollback_quietly(client, f"first_buy:{code}")
 
-    return signal
+    # 回传**写之前**的前值给 _attach_signal_change（2026-10-06）。它若自己再查一次
+    # 库，查到的必然是上面刚 commit 的这条 ⇒ signal_changed 恒 False。
+    return signal, prev_status
 
 
 def _derive_first_sell_signal(
@@ -567,7 +569,7 @@ def _derive_first_sell_signal(
     level = config.levels[0] if config.levels else 0
     level_bis = [bi for bi in bis if bi.level == level]
     if not level_bis:
-        return None
+        return None, None
     facts = derive_first_sell_facts(
         level=level,
         trend_direction=level_bis[-1].direction,
@@ -575,7 +577,7 @@ def _derive_first_sell_signal(
         zhongshus=zhongshus,
     )
     if facts is None:
-        return None
+        return None, None
     last_bar = bars[-1] if bars else None
     structure_id = facts.structure_id or f"level{level}:empty"
     event_time = int(last_bar.close_time) if last_bar is not None else 0
@@ -616,9 +618,9 @@ def _derive_first_sell_signal(
             event_time=event_time,
         )
 
-    # 记录状态跃迁
+    # 记录状态跃迁（与一买同一纪律：前值在写之前取，写完回传）
+    prev_status: str | None = previous.status if previous is not None else None
     if conn is not None and signal is not None:
-        prev_status = previous.status if previous is not None else None
         try:
             record_signal_event(conn, signal, prev_status, code, event_time)
             conn.commit()  # ← store 层不 commit，边界在这里
@@ -626,7 +628,7 @@ def _derive_first_sell_signal(
             _LOG.warning("提交信号事件失败 %s: %s", code, exc)
             _rollback_quietly(client, f"first_sell:{code}")
 
-    return signal
+    return signal, prev_status
 
 
 def _apply_daily_tags(
@@ -801,10 +803,28 @@ def _attach_close_countdown(snapshot: dict[str, Any], client: Any) -> None:
         }
 
 
-def _attach_signal_change(snapshot: dict[str, Any], client: Any) -> None:
+def _attach_signal_change(
+    snapshot: dict[str, Any], client: Any, *, prev_status: str | None
+) -> None:
     """检测 signal status 跨轮询变化 → 写 ``summary.signal_changed`` / ``signal_change_type``。
 
     前端据此弹「信号到达/变化」提醒。无 signal 或无变化 → ``signal_changed=False``。
+
+    :param prev_status: **本轮写入之前**库里的状态。由
+        :func:`_derive_first_buy_signal` / :func:`_derive_first_sell_signal` 在写
+        事件**之前**捕获后回传（见 :func:`_read_prev_status`）。
+
+    ## 为什么必须由调用方给（2026-10-06 修）
+
+    原来这里是**自己再查一次** ``latest_status(conn, signal_id)``。但调用顺序是
+    「``_derive_*`` 写事件并 commit（:542）→ 建快照 → 才到这里」，查到的
+    必然是**本轮刚写进去的那一条**。于是 ``prev_status == cur_status``，
+    ``signal_changed`` **恒为 False**、``signal_change_type`` 恒为 ``None`` ——
+    这个字段自 R21 起在生产里从来没生效过（R24 修好了 SQL 排序，功能仍然死）。
+
+    也**不**把 ``prev_status`` 做成可选、缺省时回退到查库：那条回退路径就是本
+    bug 本身，留着等于给下一个调用方埋同一个坑。所以它是**必填关键字参数** ——
+    拿不到前值就不许填这个字段。
     """
     signal = snapshot.get("signal")
     if not isinstance(signal, dict) or not signal.get("status"):
@@ -812,18 +832,6 @@ def _attach_signal_change(snapshot: dict[str, Any], client: Any) -> None:
         snapshot["summary"]["signal_change_type"] = None
         return
     try:
-        getter = getattr(client, "_get_conn", None)
-        conn = getter() if callable(getter) else None
-        if conn is None:
-            raise RuntimeError("no db conn")
-        # R24：SQL 下沉到 storage 层。同时**修掉一个活 bug** ——
-        # 原实现在这里内联 `ORDER BY event_time`，而 public.cpt_signal_event
-        # **没有 event_time 列**（真实列是 id / transition_time / created_time …），
-        # PG 报 `column "event_time" does not exist`，被 except 吞掉且只记 debug。
-        # 后果：「信号状态跨轮询变化」这个功能自 R21 起一直是死的，
-        # 前端永远拿不到 signal_changed=True。
-        # 现在走 storage 的 latest_status（1 列投影，ORDER BY id DESC）。
-        prev_status = latest_status(conn, str(signal.get("signal_id", "")))
         cur_status = signal.get("status")
         changed = prev_status is not None and prev_status != cur_status
         snapshot["summary"]["signal_changed"] = changed
@@ -840,6 +848,18 @@ def _attach_signal_change(snapshot: dict[str, Any], client: Any) -> None:
         _rollback_quietly(client, "signal_change")
         snapshot["summary"]["signal_changed"] = False
         snapshot["summary"]["signal_change_type"] = None
+
+
+def _read_prev_status(client: Any, code: str) -> str | None:
+    """**已弃用**：改用 :func:`_derive_first_buy_signal` 回传的 ``prev_status``。
+
+    保留仅为让 grep 能找到「为什么不能再查库」的说明。查库拿到的必然是本轮刚
+    commit 的那条（R24 之前就是这个 bug）。新代码不要调用它。
+    """
+    raise NotImplementedError(
+        "信号前值必须由 _derive_first_buy_signal 在写事件前捕获并回传；"
+        "事后查库只会查到自己刚写的那条，signal_changed 会恒为 False。"
+    )
 
 
 def _attach_factor_epoch(snapshot: dict[str, Any], client: Any) -> None:

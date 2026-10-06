@@ -78,6 +78,23 @@ def _write(conn: Any, fn: Any, *args: Any, **kwargs: Any) -> Any:
     return result
 
 
+def _record_failure(conn: Any, call_id: str, reason: str) -> None:
+    """把「这次调用没能跑起来」记成 error 状态；**记不上也不抛**。
+
+    2026-10-06：``finish_call`` 与 ``enqueue_call`` 统一成「写失败一律抛」
+    （``LLMCallError``）之后，下面两条**降级路径**就不能再用裸 ``_write`` 了 ——
+    ``_write`` 只负责 commit、不吞异常，于是「LLM 不可用」本来该回
+    ``available: False`` 的优雅降级，会因为审计行写不进去而**冒成 HTTP 500**。
+    把故障升级成 500 反而更难查：用户看到的是接口坏了，实际只是审计表写失败。
+
+    纪律与 :func:`on_llm_status` 一致：**落库失败绝不能杀死 worker / 请求**。
+    """
+    try:
+        _write(conn, finish_call, call_id, status="error", error_text=reason)
+    except Exception as exc:  # noqa: BLE001 — 审计写失败不该改变对外结论
+        _LOG.warning("LLM 失败态落库失败 %s（%s）: %s", call_id, reason, exc)
+
+
 def on_llm_status(call_id: str, status: str, detail: str, result: LLMResult | None = None) -> None:
     """``LLMQueue`` 的状态回调 —— worker 线程调它，落库在这里。
 
@@ -338,7 +355,7 @@ def _enqueue_and_submit(
 
     queue = _bootstrap()
     if queue is None:
-        _write(conn, finish_call, row["call_id"], status="error", error_text="llm_unavailable")
+        _record_failure(conn, row["call_id"], "llm_unavailable")
         return {
             "available": False,
             "call_id": row["call_id"],
@@ -352,13 +369,7 @@ def _enqueue_and_submit(
         Job(request=request, call_id=row["call_id"], metadata={"digest": digest})
     )
     if not submitted.accepted:
-        _write(
-            conn,
-            finish_call,
-            row["call_id"],
-            status="error",
-            error_text=submitted.reason or "submit_rejected",
-        )
+        _record_failure(conn, row["call_id"], submitted.reason or "submit_rejected")
         return {
             "available": False,
             "call_id": row["call_id"],

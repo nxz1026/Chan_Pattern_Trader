@@ -159,6 +159,20 @@ def metric_from_snapshot(
         health = HEALTH_FAILING
     elif stale or gap_count:
         health = HEALTH_FAILING
+    elif bool(runtime.get("degraded")):
+        # 2026-10-06 恢复（owner：之前是误删）。信号一直都在 ——
+        # ``cpt.web.__main__._degraded_snapshot`` 会往快照的 ``runtime`` 里写
+        # ``degraded=True`` 与 ``degraded_reason``（后端/数据源不可用但仍算出了
+        # 可展示的结果），只是本函数一直没读它，于是这一态**从未被记录过**。
+        #
+        # 后果不是「少一个枚举值」：``scripts/run_inspection.py`` 一直在消费它
+        # （``elif row["health"] == "degraded"``），常量也还在，唯独生产者没了 ——
+        # 于是「降级但可用」被静默记成 ``ok``，夜盘那种 41% 的降级轮次在告警
+        # 视角里全是绿的。
+        #
+        # 优先级放在 ``failing`` 之后：没有数据 / 陈旧 / 有缺口是**硬故障**，
+        # 那时说什么都是白说；有数据但带着降级标记才是「可用但别当正常」。
+        health = HEALTH_DEGRADED
     else:
         health = HEALTH_OK
 

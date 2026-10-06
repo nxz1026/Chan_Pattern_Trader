@@ -158,7 +158,19 @@ def test_rollback_quietly_tolerates_client_without_conn() -> None:
 # --------------------------------------------------------------------------- #
 
 
-def test_signal_change_failure_rolls_back() -> None:
+def test_signal_change_no_longer_touches_db() -> None:
+    """``_attach_signal_change`` 不再查库 ⇒ 也不会再因查库失败而中毒连接。
+
+    2026-10-06：原来它自己 ``latest_status(conn, signal_id)`` 查上一轮状态，
+    但那时 ``_derive_first_buy_signal`` 已经写完并 commit，查到的必然是**本轮
+    刚写的那条**，``signal_changed`` 恒 False。现在前值由 ``_derive_*`` 在写
+    之前捕获并回传，本函数只做比较 —— 于是「查库失败 → 必须 rollback 救连接」
+    这条纪律在这里**不再适用**，它归到了 ``_derive_first_buy_signal``（见
+    ``test_load_previous_signal_failure_does_not_propagate``）。
+
+    这里用同一个会毒化 ``cpt_signal_event`` 的连接反证：函数照常算出结果，
+    连接**一次都没被碰**，所以没有 rollback 可做，也没有留下 aborted 态。
+    """
     client = _AbortableClient(poison_on=["cpt_signal_event"])
     snapshot: dict[str, Any] = {
         "signal": {"status": "confirmed", "signal_id": "first_buy:1:abc"},
@@ -166,12 +178,13 @@ def test_signal_change_failure_rolls_back() -> None:
         "market": {"symbol": "000011"},
     }
 
-    mod._attach_signal_change(snapshot, client)
+    mod._attach_signal_change(snapshot, client, prev_status="structure_ready")
 
-    assert snapshot["summary"]["signal_changed"] is False
-    assert snapshot["summary"]["signal_change_type"] is None
-    assert client.conn.rollback_count >= 1
-    # 关键判据：后续查询没被毒死
+    # 前值是调用方给的，所以这里真的算出了「变了」—— 旧实现恒为 False
+    assert snapshot["summary"]["signal_changed"] is True
+    assert snapshot["summary"]["signal_change_type"] == "structure_ready→confirmed"
+    # 没查库 ⇒ 没被毒、也没多余 rollback
+    assert client.conn.rollback_count == 0
     assert _still_usable(client) is True
 
 
@@ -214,6 +227,42 @@ def test_security_name_failure_rolls_back() -> None:
     assert _still_usable(client) is True
 
 
+def test_fetch_validated_klines_failure_rolls_back() -> None:
+    """R52：日线读取失败**必须** rollback。
+
+    原来这一支只把异常包成 ``AShareLocalError`` 就抛，没有 rollback。而
+    ``AShareLocalClient._get_conn()`` 复用同一条连接（lazy，只在第一次建），
+    所以语句失败后连接停在 aborted 态 ⇒ **同一个客户端后续每一次 SQL 都废**
+    ⇒ 一次「某只票的查询失败」被放大成整条 A 股链路全废。这与同文件
+    ``check_t_plus_one_calendar`` 的回滚纪律是同一条。
+    """
+    from cpt.adapters.a_share_local import AShareLocalClient, AShareLocalError
+
+    conn = _AbortableConn(poison_on=["from public.daily_bar"])
+    client = AShareLocalClient(conn_factory=lambda: conn)
+
+    with pytest.raises(AShareLocalError):
+        client.fetch_validated_klines("600519", 0, 1)
+
+    assert conn.rollback_count == 1, "异常分支漏了 rollback"
+    assert conn.aborted is False
+    with conn.cursor() as cur:
+        cur.execute("SELECT 1 AS ok")
+        cur.fetchall()
+
+
+def test_fetch_validated_klines_rollback_failure_does_not_mask_the_error() -> None:
+    """rollback 自己失败也不能把原始错误换成别的异常。"""
+    from cpt.adapters.a_share_local import AShareLocalClient, AShareLocalError
+
+    conn = _AbortableConn(poison_on=["from public.daily_bar"])
+    conn.rollback_broken = True
+    client = AShareLocalClient(conn_factory=lambda: conn)
+
+    with pytest.raises(AShareLocalError, match="DB 读取失败"):
+        client.fetch_validated_klines("600519", 0, 1)
+
+
 # --------------------------------------------------------------------------- #
 # 读历史失败：不能冒泡成 500
 # --------------------------------------------------------------------------- #
@@ -252,7 +301,7 @@ def test_load_previous_signal_failure_does_not_propagate(
 
     monkeypatch.setattr(mod, "load_previous_signal", _boom)
 
-    signal = mod._derive_first_buy_signal([bi], [], (), client=client, code="000011")
+    signal, prev_status = mod._derive_first_buy_signal([bi], [], (), client=client, code="000011")
 
     assert signal is not None
     assert signal.status == "structure_ready"
@@ -271,7 +320,7 @@ def test_signal_event_commit_failure_rolls_back(monkeypatch: pytest.MonkeyPatch)
     monkeypatch.setattr(mod, "load_previous_signal", lambda *a, **kw: None)
     monkeypatch.setattr(mod, "record_signal_event", _boom)
 
-    signal = mod._derive_first_buy_signal(
+    signal, _prev = mod._derive_first_buy_signal(
         [types.SimpleNamespace(level=5, direction=-1)], [], (), client=client, code="000011"
     )
 

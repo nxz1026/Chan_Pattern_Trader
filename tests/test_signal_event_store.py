@@ -354,7 +354,7 @@ def test_derive_signal_with_client_invokes_load(monkeypatch) -> None:
     zhongshus = _make_two_centers()
     bars = _make_bars(40)
 
-    result = mod._derive_first_buy_signal(
+    result, prev_status = mod._derive_first_buy_signal(
         bis,
         zhongshus,
         bars,
@@ -371,6 +371,8 @@ def test_derive_signal_with_client_invokes_load(monkeypatch) -> None:
     assert record_calls[0]["prev_status"] is None
     assert record_calls[0]["status"] == "confirmed"
     assert result is not out_signal  # 推进后是新对象
+    # 2026-10-06：写之前的前值也一并回传，供 _attach_signal_change 用
+    assert prev_status is None
 
 
 def _make_bars(n: int) -> list[Any]:

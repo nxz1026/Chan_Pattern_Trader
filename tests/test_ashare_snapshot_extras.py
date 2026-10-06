@@ -116,46 +116,53 @@ def test_close_countdown_db_failure() -> None:
 
 def test_signal_changed_true() -> None:
     snapshot = {"signal": {"signal_id": "fb:1:abc", "status": "confirmed"}, "summary": {}}
-    conn = _conn_mock([("structure_ready",)])
-    client = _FakeClient(conn)
-    _attach_signal_change(snapshot, client)
+    _attach_signal_change(snapshot, _FakeClient(None), prev_status="structure_ready")
     assert snapshot["summary"]["signal_changed"] is True
     assert snapshot["summary"]["signal_change_type"] == "structure_ready→confirmed"
 
 
 def test_signal_changed_false_same_status() -> None:
     snapshot = {"signal": {"signal_id": "fb:1:abc", "status": "confirmed"}, "summary": {}}
-    conn = _conn_mock([("confirmed",)])
-    client = _FakeClient(conn)
-    _attach_signal_change(snapshot, client)
+    _attach_signal_change(snapshot, _FakeClient(None), prev_status="confirmed")
     assert snapshot["summary"]["signal_changed"] is False
     assert snapshot["summary"]["signal_change_type"] is None
 
 
 def test_signal_changed_new() -> None:
+    """首次（前值 ``None``）→ ``changed=False`` 但 ``change_type="new"``。"""
     snapshot = {"signal": {"signal_id": "fb:1:abc", "status": "structure_ready"}, "summary": {}}
-    conn = _conn_mock([(None,)])
-    client = _FakeClient(conn)
-    _attach_signal_change(snapshot, client)
+    _attach_signal_change(snapshot, _FakeClient(None), prev_status=None)
     assert snapshot["summary"]["signal_changed"] is False
     assert snapshot["summary"]["signal_change_type"] == "new"
 
 
 def test_signal_changed_no_signal() -> None:
     snapshot = {"signal": None, "summary": {}}
-    conn = _conn_mock([])
-    client = _FakeClient(conn)
-    _attach_signal_change(snapshot, client)
+    _attach_signal_change(snapshot, _FakeClient(None), prev_status="confirmed")
     assert snapshot["summary"]["signal_changed"] is False
     assert snapshot["summary"]["signal_change_type"] is None
 
 
-def test_signal_changed_db_failure() -> None:
+def test_signal_changed_ignores_db_entirely() -> None:
+    """⚠️ 核心回归：``_attach_signal_change`` **不再碰数据库**（2026-10-06）。
+
+    原来它自己 ``latest_status(conn, signal_id)`` 查「上一轮状态」，但调用顺序是
+    「``_derive_first_buy_signal`` 写事件并 commit → 建快照 → 才到这里」，查到的
+    必然是**本轮刚写的那条** ⇒ ``signal_changed`` 恒 ``False``，这个字段自 R21
+    起在生产里从未生效。
+
+    现在前值由 ``_derive_first_buy_signal`` 在**写之前**捕获并回传，本函数纯粹
+    做比较。所以这里传一个**会抛异常的连接**：如果实现又去查库，这条直接炸。
+    """
+
+    class _Exploding:
+        def _get_conn(self):  # noqa: ANN202
+            raise RuntimeError("本函数不该再查库")
+
     snapshot = {"signal": {"signal_id": "fb:1:abc", "status": "confirmed"}, "summary": {}}
-    conn = _conn_mock(raise_exc=True)
-    client = _FakeClient(conn)
-    _attach_signal_change(snapshot, client)
-    assert snapshot["summary"]["signal_changed"] is False
+    _attach_signal_change(snapshot, _Exploding(), prev_status="structure_ready")
+    assert snapshot["summary"]["signal_changed"] is True
+    assert snapshot["summary"]["signal_change_type"] == "structure_ready→confirmed"
 
 
 # ---------------------------------------------------------------------------
