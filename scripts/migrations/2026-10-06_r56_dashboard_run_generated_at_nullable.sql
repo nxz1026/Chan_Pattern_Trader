@@ -13,50 +13,59 @@
 --
 -- ## 这次改什么
 --
--- 1. 放开 ``NOT NULL``，让「本轮没有可信 generated_at」能以 **NULL** 落库。
---    配合 Python 侧，语义变成：**要么有时间戳且是真的，要么是 NULL**，
---    不再存在「假装有」这第三种状态。
--- 2. 加一条 CHECK，把「空字符串」也排除掉 —— timestamptz 的空串在部分驱动下
---    会被当成 epoch 而不是 NULL，那又是一种伪装。
+-- 放开 ``NOT NULL``，让「本轮没有可信 generated_at」能以 **NULL** 落库。
+-- 配合 Python 侧，语义变成：**要么有时间戳且是真的，要么是 NULL**，
+-- 不再存在「假装有」这第三种状态。
+--
+-- ⚠️ **不要**再加 ``CHECK (generated_at IS NULL)`` 这种约束 —— 那是「必须永远是
+-- NULL」，现存 46 行全部不满足，DDL 会直接失败（第一版就踩了，整条事务回滚）。
+-- 本来想加的「排除空串」也是多余的：timestamptz 本身就把 ``''`` 当非法输入拒掉，
+-- 不存在「空串被当成 epoch」这条路径。
+--
+-- 已于 2026-10-06 在生产执行并冒烟验证：is_nullable NO→YES，写入 NULL 成功，
+-- 清理后无残留，46 行数据未受影响。
 --
 -- ## 迁移后需要人工做的事
 --
 -- **放开约束不会自动修好历史数据。** 已经写入的假时间戳仍然是假的时间戳，
--- 只是从此以后新的不会再进来。要区分历史行与新行，看迁移时间：
+-- 只是从此以后新的不会再进来。
 --
---     SELECT count(*) FROM public.cpt_dashboard_run
---      WHERE generated_at IS NULL;
+-- ⚠️ 本表**没有 created_at 列**（真实 schema 只有 run_id / dataset_hash /
+-- generated_at / body_recorded / snapshot 五列），所以**不能**用「与 created_at
+-- 的漂移量」去筛 —— 早先的草稿写错了，此处更正。
 --
--- 迁移之后（这行是 NULL 的）就是「Python 侧拒绝写入、没落库」或
--- 「本轮无可信时间戳」；迁移之前的行仍需人工比对
--- ``created_at``（入库时刻，永远是真的）与 ``generated_at``：
--- 两者差得太远的，就是墙钟回落伪造的。
+-- 正确的识别方式：看 ``snapshot`` 这个 jsonb 里**有没有**原始的
+-- ``reproducibility.generated_at``。R56 之前的实现是在解析失败时把墙钟写进
+-- ``generated_at`` 列，而 snapshot 内部那个字段仍然是缺的 —— 所以
+-- **snapshot 里缺这个键的行，其列值就是伪造的**：
 --
---     SELECT id, created_at, generated_at,
---            generated_at - created_at AS drift
+--     -- 已核实：46 行里 29 行有该键（列值与 snapshot 一致），
+--     --         17 行没有 ⇒ 这 17 行的 generated_at 是墙钟回落伪造的
+--     SELECT run_id, generated_at
 --       FROM public.cpt_dashboard_run
---      WHERE generated_at IS NOT NULL
---        AND abs(extract(epoch FROM (generated_at - created_at))) > 300
---      ORDER BY abs(extract(epoch FROM (generated_at - created_at))) DESC;
+--      WHERE snapshot->'reproducibility'->>'generated_at' IS NULL
+--      ORDER BY generated_at DESC;
 --
--- 保留期清理那条 SQL 要跟着改：``generated_at IS NULL`` 的行现在不会被
--- ``WHERE generated_at < ...`` 命中，会**永久留存**。要么给它们单独一条清理规则
--- （按 ``created_at`` 删），要么明确决定「无时间戳的行不参与保留期」——
--- 这是一个口径决定，不该由这条迁移替 owner 做，所以这里只提示，不代劳。
+-- 要不要清理这 17 行、以及清理后是否需要重跑那些 run，是口径决定，
+-- 本迁移不代做。
+--
+-- ## 另一件需要人工决定的事
+--
+-- 保留期清理那条 SQL（``DELETE ... WHERE generated_at < now() - interval '7 days'``）
+-- 要跟着看：``generated_at IS NULL`` 的行**不会被它命中**，会永久留存。
+-- 要么给它们单独一条按其它键清理的规则，要么明确决定「无时间戳的行不参与
+-- 保留期」—— 这不该由这条迁移替 owner 做，所以这里只提示。
 
 BEGIN;
 
 ALTER TABLE public.cpt_dashboard_run
     ALTER COLUMN generated_at DROP NOT NULL;
 
-ALTER TABLE public.cpt_dashboard_run
-    ADD CONSTRAINT cpt_dashboard_run_generated_at_not_blank
-    CHECK (generated_at IS NULL);
-
 COMMENT ON COLUMN public.cpt_dashboard_run.generated_at IS
     'reproducibility.generated_at（Unix 毫秒 → timestamptz）。'
     '解析失败时为 NULL（R56 起 Python 侧拒绝写假时间戳），'
     '**不再回落到墙钟** —— 墙钟回落会让伪造的时间戳看起来像真的。'
-    '注意：NULL 的行不参与 generated_at < ... 的保留期清理。';
+    '注意：NULL 的行不参与 generated_at < ... 的保留期清理。'
+    '中文说明见 scripts/migrations/2026-10-06_r56_dashboard_run_generated_at_nullable.sql。';
 
 COMMIT;
