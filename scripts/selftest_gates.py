@@ -95,25 +95,38 @@ def fx_doc_counts(root: Path) -> tuple[str, str]:
 
 
 def fx_enqueue_unique(root: Path) -> tuple[str, str]:
-    """⑥ 入队骨架：故意加**第二份**入队逻辑。"""
-    body = (
-        "import ast, sys\n"
-        "from pathlib import Path\n"
-        "SRC = Path(__file__).resolve().parents[1] / 'cpt' / 'application' / 'llm_cases.py'\n"
-        "tree = ast.parse(SRC.read_text(encoding='utf-8'))\n"
-        "def cs(n):\n"
-        "    return [x.lineno for x in ast.walk(tree) if isinstance(x, ast.Call)\n"
-        "            and isinstance(x.func, ast.Name) and x.func.id == n]\n"
-        "print(len(cs('_enqueue_and_submit')), len(cs('enqueue_call')), len(cs('_bootstrap')))\n"
-        "sys.exit(0 if len(cs('_enqueue_and_submit')) == 2 else 1)\n"
-    )
-    _write(root / "scripts/check_enqueue_skeleton_unique.py", body)
+    """⑥ 入队骨架：故意加**第三份**入队调用点。
+
+    ⚠️ **这个夹具必须跑真门禁**（第一版把 ``check_enqueue_skeleton_unique.py``
+    整个覆盖成手写桩，桩只会数「== 2 就退出 0」，于是真门禁**能不能红从未被证明** ——
+    而 ``selftest_gates.py`` 报的是「抓到了 ✅」，比不测更坏）。
+    ⇒ 现在的做法：**只注入错例**（``llm_cases.py``），一个字节都不改门禁本身。
+
+    注入的 ``llm_cases.py`` 先按真门禁的 5 项判据**摆成全绿**，再加一处
+    「第三份入队」—— 这样红的原因只有一个（重复实现），不是夹具压根不合法。
+    """
     _pkg(
         root,
         "application/llm_cases.py",
-        "def _enqueue_and_submit(c, r, subject_id=''):\n    pass\n"
-        "def a(c, r):\n    _enqueue_and_submit(c, r); _enqueue_and_submit(c, r)\n"
-        "def b(c, r):\n    enqueue_call; _bootstrap(); _enqueue_and_submit(c, r)\n",
+        "def _enqueue_and_submit(conn, row, subject_id=''):\n"
+        "    _write(conn, enqueue_call, row)\n"
+        "    _existing_call_id(conn, row)\n"
+        "    _bootstrap(conn)\n"
+        "    submit(row)\n"
+        "    return None\n"
+        "\n"
+        "def _write(conn, fn, row):\n"
+        "    return None\n"
+        "\n"
+        "def explain_structure(conn, row):\n"
+        "    _enqueue_and_submit(conn, row)\n"
+        "\n"
+        "def summarize_recommendation(conn, row):\n"
+        "    _enqueue_and_submit(conn, row)\n"
+        "\n"
+        "def _legacy_explain(conn, row):\n"
+        "    # 抄了一份的入队入口 —— 真门禁应当抓到「3 ≠ 2」\n"
+        "    _enqueue_and_submit(conn, row)\n",
     )
     return "check_enqueue_skeleton_unique.py", ""
 
@@ -182,62 +195,38 @@ def fx_bundle_sync(root: Path) -> tuple[str, str]:
     """造一个**已生成**的 bundle，然后改源文件 ⇒ 必须报「不同步」。
 
     ⚠️ 这个夹具要**先生成**再改，否则 ``--check`` 找不到 bundle 会
-    因「文件不存在」而报错 —— 那是另一条路径，测不到「改���没重建」这个真问题。
+    因「文件不存在」而报错 —— 那是另一条路径，测不到「改了没重建」这个真问题。
+
+    ⚠️⚠️ **第一版把真门禁整个覆盖成了手写桩**（自己实现 ORDER、HEAD/FUNCS/TAIL
+    解析、比对），于是「真 builder 能不能报 STALE」**从未被证明**，而自检却报
+    「抓到了 ✅」。桩测的是桩，**比不测更坏**（它给出虚假的安心感）。
+    ⇒ 现在的做法：只造源文件，**跑真 builder**（``run_one`` 已把真脚本复制进来了），
+    一个字节都不改门禁本身。
+
+    真 builder 的前提（照抄它的契约，不简化）：7 个 ``ORDER`` 文件**全部**要有
+    ``// <<<HEAD`` / ``// <<<FUNCS`` 哨兵，且**至少一个**要有 ``// <<<TAIL``
+    （缺了它直接 ``SystemExit('没有模块带 <<<TAIL')``）。
     """
-    _write(
-        root / "dashboard/dash-core.js",
-        "// <<<HEAD\nconst A = 1;\n// >>>HEAD\n"
-        "// <<<FUNCS\nfunction f() { return A; }\n// >>>FUNCS\n",
-    )
-    _write(
-        root / "dashboard/dash-ops.js",
-        "// <<<HEAD\nconst A = 1;\n// >>>HEAD\n"
-        "// <<<FUNCS\nfunction g() { return A; }\n// >>>FUNCS\n})();\n",
-    )
-    # 先照它自己的 ORDER 生成一份，再改源文件
     import re as _re
 
     ords = _re.findall(
         r'^[A-Z_]+ = \(\n((?:    "[^"]+",\n)+)\)',
         (root / "scripts/build_dashboard_bundle.py").read_text(encoding="utf-8"),
+        _re.M,
     )
-    names = _re.findall(r'"([^"]+)"', ords[0]) if ords else ["dash-core.js", "dash-ops.js"]
-    (root / "scripts/build_dashboard_bundle.py").write_text(
-        "#!/usr/bin/env python3\n"
-        "import argparse, re\nfrom pathlib import Path\n"
-        "ROOT = Path(__file__).resolve().parents[1]\nDASH = ROOT / 'dashboard'\n"
-        f"ORDER = ({', '.join(repr(n) for n in names)},)\n"
-        "BANNER = '// generated\\n'\n"
-        "def build():\n"
-        "    h = f = ''\n    t = ''\n"
-        "    for i, n in enumerate(ORDER):\n"
-        "        x = (DASH / n).read_text(encoding='utf-8')\n"
-        "        mh = re.search(r'// <<<HEAD\\n(.*?)\\n// >>>HEAD\\n', x, re.S)\n"
-        "        mf = re.search(r'// <<<FUNCS\\n(.*?)\\n// >>>FUNCS\\n', x, re.S)\n"
-        "        mt = re.search(r'// <<<TAIL\\n(.*?)\\n// >>>TAIL', x, re.S)\n"
-        "        if not mh or not mf:\n"
-        "            raise SystemExit('缺哨兵')\n"
-        "        if i == 0:\n            h = mh.group(1)\n"
-        "        f += ('\\n' if f else '') + mf.group(1)\n"
-        "        if mt:\n            t = mt.group(1)\n"
-        "    return BANNER + chr(10) + h + chr(10) + chr(10)"
-        " + f + chr(10) + chr(10) + t + chr(10)\n"
-        "def main():\n"
-        "    ap = argparse.ArgumentParser()\n"
-        "    ap.add_argument('--check', action='store_true')\n"
-        "    a = ap.parse_args()\n"
-        "    out = build()\n"
-        "    b = DASH / 'dashboard.bundle.js'\n"
-        "    if a.check:\n"
-        "        cur = b.read_text(encoding='utf-8') if b.exists() else ''\n"
-        "        print('  OK' if cur == out else '  STALE')\n"
-        "        return 0 if cur == out else 1\n"
-        "    b.write_text(out, encoding='utf-8')\n    print('  BUILT')\n    return 0\n"
-        "if __name__ == '__main__':\n    raise SystemExit(main())\n",
-        encoding="utf-8",
-    )
+    names = _re.findall(r'"([^"]+)"', ords[0]) if ords else []
+    assert names, "读不到 builder 的 ORDER —— 夹具不能瞎猜文件清单"
+    for i, n in enumerate(names):
+        _write(
+            root / "dashboard" / n,
+            f"// <<<HEAD\nconst A = 1;\n// >>>HEAD\n"
+            f"// <<<FUNCS\nfunction fn_{i}() {{ return A; }}\n// >>>FUNCS\n"
+            # TAIL 放最后一个：builder 取「最后一个带 TAIL 的文件」。
+            + ("// <<<TAIL\nwindow.__boot = true;\n// >>>TAIL\n" if i == len(names) - 1 else ""),
+        )
     import subprocess as _sp
 
+    # 先用**真** builder 生成一份，再改源文件
     _sp.run(
         [sys.executable, str(root / "scripts/build_dashboard_bundle.py")],
         capture_output=True,
@@ -249,11 +238,12 @@ def fx_bundle_sync(root: Path) -> tuple[str, str]:
     # 改第二个文件的 HEAD **不进输出** ⇒ bundle 仍然同步 ⇒ 报 OK。
     # 第一版就这么写错了，夹具自己是个假阴性。
     _write(
-        root / "dashboard/dash-ops.js",
+        root / "dashboard" / names[0],
         "// <<<HEAD\nconst A = 1;\n// >>>HEAD\n"
-        "// <<<FUNCS\nfunction g() { return A + 1; }\n// >>>FUNCS\n})();\n",
+        f"// <<<FUNCS\nfunction fn_0() {{ return A + 1; }}\n// >>>FUNCS\n"
+        + ("// <<<TAIL\nwindow.__boot = true;\n// >>>TAIL\n" if len(names) == 1 else ""),
     )
-    return "build_dashboard_bundle.py", "STALE"
+    return "build_dashboard_bundle.py", "不同步"
 
 
 def fx_script_tags(root: Path) -> tuple[str, str]:

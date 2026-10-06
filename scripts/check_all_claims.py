@@ -189,6 +189,23 @@ def build_facts() -> dict[str, Any]:
             syms |= set(re.findall(r"\bfunction\s+([A-Za-z_]\w*)", txt))
             syms |= set(re.findall(r"\bconst\s+([A-Za-z_]\w*)\s*=", txt))
     # 全仓文本（用于查 env 键 / 表名）
+    #
+    # ⚠️⚠️ **这是有意为之，不是疏漏**（owner 裁决：「模板就是契约」）。
+    # 扫描范围**故意**包含 ``tests/``、``scripts/`` 与 ``*.example``
+    # （如 ``deploy/env/cpt-dashboard.env.example``），因此
+    # 「这个 key 存在吗」这一类断言，**只要 key 出现在模板里就算存在**。
+    #
+    # **后果（必须知道，别误读这个门禁的保护范围）**：
+    # 一个 key 如果从**真实代码/真实 env 文件**里删掉了、却仍留在
+    # ``.env.example`` 模板中，本门禁**抓不到** —— 它照样报「存在」。
+    # 也就是说：本门禁能证明「文档提到的 key 没被凭空发明」，
+    # 但**不能**证明「该 key 真的还在被生产代码读」。
+    # 后者由 ``deploy/cron/`` 里那些**缺变量即非零退出**的脚本负责
+    # （见 ``run-inspection-daily.sh``）—— 那是运行时兜底，不是静态检查。
+    #
+    # 保留 ``.example`` 的理由：模板是**部署契约的声明**。若代码已不再读某变量，
+    # 正确做法是把模板那一行**一起删掉**，而不是让门禁对着一份没人执行的
+    # 模板报错。代价就是上面那条「漏抓」，已明写在此。
     blob = "\n".join(
         p.read_text(encoding="utf-8", errors="ignore")
         for p in all_code()
