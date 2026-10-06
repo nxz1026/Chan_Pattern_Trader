@@ -45,6 +45,19 @@
 --    ``DELETE FROM public.cpt_dashboard_run WHERE generated_at < now() - interval '7 days'``。
 -- 3. 事件流天然 append-only，与 ``public.cpt_signal_event``（R21）口径一致。
 --
+-- ⚠️ **2026-10-07 前向注记：上面第 2 条的「不引入自动 GC」已经翻过来了。**
+--
+-- 「不放在 HTTP 路径上」这个顾虑是对的，脚本也真的没放；错的是**只留注释、
+-- 不建作业** —— 那条 SQL 从 R23（2026-10-01）到 R57（2026-10-07）**从未被
+-- 任何东西执行过**，而这张表一行约 79 kB（实测 60 行 / 4648 kB），
+-- 是一条确定的慢性泄漏。
+--
+-- 现在由 ``cpt/storage/dashboard_run_store.py::prune`` +
+-- ``deploy/cron/dashboard-run-prune-daily.sh``（每日 04:30，离线 cron）承接，
+-- 窗口默认 7 天（与本注释一致），键为
+-- ``COALESCE(generated_at, created_at)`` —— 见 R56/R57 两条迁移，
+-- 裸 ``generated_at`` 命中不了 NULL 行。**保留期仍然不在 HTTP 路径上**。
+--
 -- ## 与 in-process ring 的关系
 --
 -- 两套**并存**：ring 留给 hot-path（30s 内同 ``dataset_hash`` 命中同一份缓存

@@ -27,16 +27,22 @@
 # ⚠️ `diff <(...)` 是 **bash 进程替换**，要在 bash 里跑（`bash -c '...'`），
 #    在 sh/dash 下会报「No such file or directory」。
 #
-# ## 三个作业
+# ## 四个作业
 #
 # | 时间 | 脚本 | 干什么 |
 # |---|---|---|
 # | 02:20 | `factor-recompute-daily.sh` | 按公司行动重算复权因子（**只写暂存表**） |
 # | 03:40 | `run-inspection-daily.sh` | 读 `cpt_run_metric` + 源状态 → 状态变化/failing 时发飞书 |
 # | 04:10 | `run-metric-prune-daily.sh` | 清 `cpt_run_metric` 过期行（run 90 天 / inspection 30 天） |
+# | 04:30 | `dashboard-run-prune-daily.sh` | 清 `cpt_dashboard_run` 过期行（默认 7 天） |
 #
-# 三个时间**刻意错开**：巡检 03:40 跑在因子重算 02:20 之后、清理 04:10 之前 ——
+# 四个时间**刻意错开**：巡检 03:40 跑在因子重算 02:20 之后、两条清理 04:10/04:30 之前 ——
 # 这样巡检读到的是「刚重算完」的因子状态，而清理不会与它抢同一批行。
+#
+# ⚠️ 2026-10-06 新增第 4 条：R23 建表时把「7 天保留期」只写成迁移注释，
+#    **从未自动化**（全仓无 retention/cleanup 逻辑，线上也没有这条作业），
+#    于是 `cpt_dashboard_run` 是一条确定的慢性泄漏（实测约 79 kB/行）。
+#    与前三条不同，它不是「补一个漏登记的既有作业」，而是**第一次真正建这条保留期**。
 #
 # ## 为什么直接指向仓内路径、而不是 `install -m 755` 复制一份
 #
@@ -71,3 +77,9 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # ── 每日 04:10 清理 cpt_run_metric 过期行 ───────────────────────────────────
 # 窗口可用 CPT_PRUNE_RUN_DAYS / CPT_PRUNE_INSPECTION_DAYS 调整（见脚本头）。
 10 4 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/run-metric-prune-daily.sh >> /home/ubuntu/logs/run-metric-prune.log 2>&1
+
+# ── 每日 04:30 清理 cpt_dashboard_run 过期行 ─────────────────────────────────
+# R57 补了 created_at 之后，保留期键是 COALESCE(generated_at, created_at)，
+# 这样 R56 放开 NOT NULL 产生的 NULL 行也能过期（裸 generated_at 永远命中不了 NULL）。
+# 窗口可用 CPT_PRUNE_DASHBOARD_RUN_DAYS 调整（见脚本头）。
+30 4 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/dashboard-run-prune-daily.sh >> /home/ubuntu/logs/dashboard-run-prune.log 2>&1

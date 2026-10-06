@@ -65,7 +65,7 @@ class FakeCursor:
             self._result = [
                 (rid, row["snapshot"]) for rid, row in self.conn.rows.items() if rid in wanted
             ]
-        elif "FROM public.cpt_dashboard_run" in sql and "ORDER BY generated_at DESC" in sql:
+        elif "FROM public.cpt_dashboard_run" in sql and "SELECT run_id, dataset_hash" in sql:
             if self.conn.fetch_override is not None:
                 self._result = self.conn.fetch_override
             else:
@@ -88,6 +88,23 @@ class FakeCursor:
                         reverse=True,
                     )[: params[0]]
                 ]
+        else:
+            # ⚠️ R57：**不认识这条 SQL 必须当场喊出来**。
+            #
+            # 原来这里没有 else，于是「没匹配上任何分支」的表现是 `_result`
+            # 保持空列表 —— 5 个测试一起红在一个完全误导的症状上
+            # （「查不到运行行」），而不是「假连接不认识这条 SQL」。
+            #
+            # 更糟的是它长期**不会**响：分派条件写的是
+            # ``"ORDER BY generated_at DESC" in sql``，而 R57 把排序键改成了
+            # ``COALESCE(generated_at, created_at) DESC``（为了不让 NULL 行
+            # 吃掉 LIMIT 槽位）。这是**实现里的正当改动**，却让这个假实现
+            # 静默失配 —— 假实现与实现文本耦合，等于把「测试测的是行为」
+            # 退化成「测试测的是 SQL 字面量」。
+            #
+            # 所以现在按**投影列**（稳定语义）分派，并在兜底分支显式抛错：
+            # 将来再改 SQL，假实现要么跟上，要么**立刻**报错。
+            raise AssertionError(f"FakeCursor 不认识这条 SQL，请更新假实现：\n{sql}")
 
     rowcount: int = 0
     _result: list[tuple] = field(default_factory=list)

@@ -127,6 +127,16 @@ _RUN_INDEX_COLUMNS = (
 )
 
 #: 不读 jsonb 主体，只抽元数据。``->>`` 取 text，数值转换交给 Python（见 ``_to_int``）。
+#:
+#: ⚠️ 排序键是 ``COALESCE(generated_at, created_at)`` 而不是裸 ``generated_at``：
+#: PostgreSQL 的 ``DESC`` 默认 **NULLS FIRST**，所以裸 ``ORDER BY generated_at DESC``
+#: 会把「本轮没有可信时间戳」的行**顶到最前面**。它们本身没错（那正是「没有时间戳」
+#: 的诚实表示），但每一条都要吃掉 ``LIMIT`` 里的一个槽 —— 17 行 NULL 就让「最近 50 次
+#: 运行」只剩 33 条真实行，而且面板上表现为「最近几次运行莫名其妙少了一截」。
+#:
+#: 改用 ``COALESCE`` 有两个好处：NULL 行按**入库时刻**排在它真实的位置，
+#: 顺带命中 R57 建的 ``idx_cpt_dashboard_run_coalesce_time`` 索引
+#: （``btree (COALESCE(generated_at, created_at))``，反向扫描即 DESC）。
 _RUN_INDEX_SQL = """SELECT run_id, dataset_hash, generated_at, body_recorded,
                              snapshot->'market'->>'symbol'        AS symbol,
                              snapshot->'market'->>'interval_ms'   AS interval_ms,
@@ -135,7 +145,7 @@ _RUN_INDEX_SQL = """SELECT run_id, dataset_hash, generated_at, body_recorded,
                              snapshot->'runtime'->>'data_source'  AS source,
                              snapshot->'runtime'->>'status'      AS status
                       FROM public.cpt_dashboard_run
-                      ORDER BY generated_at DESC
+                      ORDER BY COALESCE(generated_at, created_at) DESC
                       LIMIT %s"""
 
 
@@ -286,3 +296,68 @@ def recent_runs(conn: Any, limit: int = 50) -> tuple[dict[str, Any], ...]:
         raise DashboardRunError(f"读取运行索引失败: {exc}") from exc
 
     return tuple(_row_to_run_index(row) for row in rows)
+
+
+def prune(conn: Any, *, keep_days: int = 7) -> int:
+    """删掉超出保留窗口的行，返回删除行数。**不 commit**。
+
+    ## 为什么必须有
+
+    R23 建表时写了「**append-only + 不自动 GC**」，理由是「避免在 HTTP 请求路径上
+    跑大 SQL」，并把手工清理的 SQL 留在迁移注释里：
+
+        DELETE FROM public.cpt_dashboard_run WHERE generated_at < now() - interval '7 days'
+
+    2026-10-06 实测：**这条注释从来没变成过任何自动化**。全仓无 retention/cleanup/
+    purge 逻辑，生产 crontab 三条 CPT 作业里也没有 —— 于是这张表是一条**确定的慢性
+    泄漏**。当时 60 行 / 4648 kB，**约 79 kB/行**（snapshot jsonb 很肥）。
+
+    清理放**离线 cron**，不放 HTTP 路径，正是 R23 当初的顾虑所指；那个顾虑是对的，
+    错的只是「以为留个注释就够了」。
+
+    ## 为什么用 ``COALESCE(generated_at, created_at)`` 而不是裸 ``generated_at``
+
+    R56 放开 ``generated_at`` 的 NOT NULL，让「本轮没有可信时间戳」能以 NULL 落库。
+    裸 ``generated_at < now() - ...`` **永远命中不了 NULL 行** —— 它们会永久留存，
+    正是当初迁移注释里点名要 owner 决定的那件事。
+
+    根因不是漏写 ``OR generated_at IS NULL``，而是这张表**压根没有第二个时间戳**。
+    R57 补了 ``created_at``（``DEFAULT now()``，数据库记的入库时刻，不可能伪造），
+    于是 ``COALESCE`` 既能覆盖 NULL 行，又命中
+    ``idx_cpt_dashboard_run_coalesce_time`` 索引（``btree (COALESCE(...))``）。
+
+    ## 失败**抛**，不返回 0
+
+    与 :func:`cpt.storage.run_metric_store.prune` 同一条纪律：失败返回 0 与「本来
+    就没有过期行」完全同值，调用方无法分辨自己是「干完了」还是「一条都没删掉」，
+    慢性泄漏就在日志里静悄悄地继续。改成抛之后，调用方
+    （``deploy/cron/dashboard-run-prune-daily.sh``）打 ``!!!!! 清理未完成 !!!!!``
+    并非零码退出 —— 失败才真的可见。
+
+    ⚠️ 存量行的 ``created_at`` 是 R57 加列时的**迁移时刻**，不是真实入库时刻。
+    对那批 2026-09/10 的陈旧行来说这正是想要的近似（误差方向：显得比实际新，
+    于是会**晚一点**被清而不是早一点被误删）。
+
+    Args:
+        conn: psycopg 连接（**不 commit**，事务边界由调用方控制）。
+        keep_days: 保留天数，<1 视为参数错误（夹到 1，与 run_metric 一致）。
+    Returns:
+        删除行数。
+    :raises DashboardRunError: 删除失败（含 ``keep_days`` 无法解释）。
+    """
+    try:
+        keep = max(1, int(keep_days))
+    except (TypeError, ValueError) as exc:
+        raise DashboardRunError(f"keep_days 必须是正整数，实测 {keep_days!r}") from exc
+
+    sql = (
+        "DELETE FROM public.cpt_dashboard_run "
+        "WHERE COALESCE(generated_at, created_at) < now() - make_interval(days => %s)"
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, (keep,))
+            return int(cur.rowcount or 0)
+    except Exception as exc:  # noqa: BLE001
+        _LOG.warning("cpt_dashboard_run 清理失败 keep_days=%s: %s", keep, exc)
+        raise DashboardRunError(f"cpt_dashboard_run 清理失败: {exc}") from exc
