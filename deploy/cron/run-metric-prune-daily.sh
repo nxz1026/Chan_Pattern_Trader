@@ -44,6 +44,21 @@ set -uo pipefail
 REPO="${CPT_REPO:-/home/ubuntu/DSH/Chan_Pattern_Trader}"
 LOG=/home/ubuntu/logs/run-metric-prune.log
 LOCK=/home/ubuntu/logs/run-metric-prune.lock
+
+# ⚠️ R57（2026-10-06 上线前审计补）：加载 env 文件。
+# 原因与代价见 factor-recompute-daily.sh 的同名注释：原来只有巡检脚本 source
+# 它，所以把 `CPT_PRUNE_*` 写进 env 是无声无效的。**必须插在这些
+# `${VAR:-默认}` 赋值之前**，否则 env 里的值永远读不到。
+# 与巡检不同：缺 env 不拦作业（只是用默认窗口）。
+ENV_FILE=$REPO/deploy/env/cpt-dashboard.env
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  . "$ENV_FILE"
+  set +a
+  _ENV_LOADED="yes"
+else
+  _ENV_LOADED="no"
+fi
 #: run 行保留天数。行情类行留 90 天够做同比；再久就没意义了（因子表才 2.75 年）。
 KEEP_RUN_DAYS="${CPT_PRUNE_RUN_DAYS:-90}"
 
@@ -68,7 +83,7 @@ export KEEP_RUN_DAYS
 export KEEP_INSPECTION_DAYS="${CPT_PRUNE_INSPECTION_DAYS:-30}"
 
 {
-  echo "===== $(date -u +%FT%TZ) 开始（保留 run 行 $KEEP_RUN_DAYS 天 / inspection 行 $KEEP_INSPECTION_DAYS 天）====="
+  echo "===== $(date -u +%FT%TZ) 开始（保留 run 行 $KEEP_RUN_DAYS 天 / inspection 行 $KEEP_INSPECTION_DAYS 天 env=$_ENV_LOADED）====="
 } >> "$LOG"
 
 # ⚠️ store 层不 commit（事务边界归调用方，见 cpt/storage/__init__.py）——

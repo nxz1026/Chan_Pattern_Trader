@@ -31,6 +31,29 @@ REPO="${CPT_REPO:-/home/ubuntu/DSH/Chan_Pattern_Trader}"
 LOG=/home/ubuntu/logs/factor-recompute.log
 LOCK=/home/ubuntu/logs/factor-recompute.lock
 
+# ⚠️ R57（2026-10-06 上线前审计补）：加载 env 文件。
+#
+# 原来**只有 `run-inspection-daily.sh`** 会 source 它 ⇒ 把 `CPT_RECOMPUTE_*`
+# 写进 `deploy/env/cpt-dashboard.env` 是**完全无效**的：下面这些
+# `${VAR:-默认}` 赋值在脚本读 env 之前就已经定死了。
+#
+# 这是「一个只影响日志的配置变量比没有更坏」的变种 —— 而且更隐蔽，
+# 它连日志都不影响，是**无声**地不生效：改了 env、脚本照跑、用的是默认值，
+# 从外面看一切正常。
+#
+# 与巡检的差别（别照抄巡检那套）：巡检缺 env 必须 `exit 78`，因为 webhook
+# 没了就永远不告警；本脚本缺 env 只是用默认取数源，**不该拦住作业**，
+# 所以是「有就加载、没有就用默认值」。
+ENV_FILE=$REPO/deploy/env/cpt-dashboard.env
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  . "$ENV_FILE"
+  set +a
+  _ENV_LOADED="yes"
+else
+  _ENV_LOADED="no"
+fi
+
 # 真值源：默认东财（免费、无额度）。用 CPT_RECOMPUTE_SOURCE=wind 切回 Wind 做交叉校验。
 SOURCE="${CPT_RECOMPUTE_SOURCE:-eastmoney}"
 # 单轮处理上限。⚠️ 东财无额度，这只是「别让一轮跑太久」的时间预算；
@@ -51,7 +74,7 @@ cd "$REPO" || exit 1
 export CPT_WIND_NODE="${CPT_WIND_NODE:-/home/ubuntu/.local/bin/node}"
 
 {
-  echo "===== $(date -u +%FT%TZ) 开始（源=$SOURCE scope=$SCOPE 上限 $MAX_CALLS）====="
+  echo "===== $(date -u +%FT%TZ) 开始（源=$SOURCE scope=$SCOPE 上限 $MAX_CALLS env=$_ENV_LOADED）====="
 } >> "$LOG"
 
 timeout 10h .venv/bin/python scripts/factor_recompute.py \

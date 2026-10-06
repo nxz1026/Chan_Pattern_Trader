@@ -83,3 +83,15 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # 这样 R56 放开 NOT NULL 产生的 NULL 行也能过期（裸 generated_at 永远命中不了 NULL）。
 # 窗口可用 CPT_PRUNE_DASHBOARD_RUN_DAYS 调整（见脚本头）。
 30 4 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/dashboard-run-prune-daily.sh >> /home/ubuntu/logs/dashboard-run-prune.log 2>&1
+
+# ── 每日 07:00 作业日志日报：扫上面 4 条的日志，发现失败发飞书 ─────────────────
+# R57 上线前审计发现：4 条作业失败时「非零退出 + 写一行日志」，但**没有任何消费者**
+# （无 MAILTO、无 logrotate、无 watchdog）。唯一有出口的飞书只覆盖业务巡检自己的
+# 结论，不看另外三条的死活 ⇒ 作业失败 = 表继续膨胀而外部毫无异常。
+#
+# ⚠️ **新增 cron 作业时，必须同步两处**，否则新作业的失败永远不会出现在日报里，
+# 而日报看起来一切正常：
+#   ① `scripts/cron_daily_report.py` 的 `JOBS`（扫哪些日志）
+#   ② 本文件下面这一行（什么时候扫）
+# 这与 `deploy/README.md` 里「合并安装清单必须与本文件一一对应」是同一类陷阱。
+30 7 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/cron-daily-report.sh >> /home/ubuntu/logs/cron-daily-report.log 2>&1

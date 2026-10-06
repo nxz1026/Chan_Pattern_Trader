@@ -60,7 +60,6 @@ from __future__ import annotations
 import argparse
 import json
 import logging
-import os
 import sys
 import time
 import urllib.error
@@ -89,7 +88,6 @@ from cpt.adapters.wind_source import (
     WindUnavailableError,
 )
 
-REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 #: 端点与 ``source`` 取值都取自 cpt 的**唯一**定义，脚本不再各留一份。
 #: 2026-09-25 之前脚本自带 ``TX_ENDPOINT``（与 ``TENCENT_KLINE_URL`` 逐字相同）与
 #: ``SOURCE_TX = "tx:fqkline"``（适配器写 ``tencent_fqkline``）—— 同一个腾讯接口
@@ -323,17 +321,6 @@ def list_incremental_codes() -> list[str]:
             covered = {r[0] for r in cur.fetchall() if r[0]}
 
     return sorted(hot | lad | fresh | covered)
-
-
-def latest_factor_date(conn: Any, code: str) -> str | None:
-    with conn.cursor() as cur:
-        cur.execute(
-            "SELECT max(trade_date) FROM asel.ref_adjust_factor WHERE code=%s",
-            (code,),
-        )
-        row = cur.fetchone()
-        d = row[0] if row else None
-    return d.isoformat() if d else None
 
 
 def unverifiable_dates(conn: Any, code: str) -> set[str]:

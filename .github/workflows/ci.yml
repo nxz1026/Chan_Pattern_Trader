@@ -166,4 +166,11 @@ jobs:
           # 不再 --exclude 'cpt/web/app.py'：那会连带隐藏 app.py 里对别处符号的真实
           # 使用（曾把 binance_futures.resolve_interval_label 误报为死代码）；
           # 改由 whitelist.py 逐条登记框架回调。
-          vulture --min-confidence 60 cpt whitelist.py
+          # 扫描范围含 `scripts/`（R57 上线前审计扩）：原先只扫 `cpt/`，
+          # 于是「调用方在 scripts/」的 6 个已接线符号被误报成死代码，只能靠
+          # whitelist 逐条豁免 —— 而豁免本身就是**掩盖未来真死代码**的机制。
+          # 扩范围后那 6 条豁免已撤销，同时真的挖出并删掉了 2 条死代码
+          # （`factor_backfill.py` 的 `REPO_ROOT` 与 `latest_factor_date`）。
+          # ⚠️ 再扩到 `tests/` 会把测试夹具也扫进来（大量有意为之的死代码），
+          #    属另一件事，要扩时先想清楚。
+          vulture --min-confidence 60 cpt scripts whitelist.py

@@ -324,10 +324,14 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:98` 的
 > R22 复核后按上表更正。
 
 > ⚠️ **这两个 Wind 符号在 `whitelist.py` §4c 里保留，但性质已变**：它们**不是待接线**，
-> 而是**门禁盲区**——CI 的 vulture 只扫 `cpt/`（`.github/workflows/ci.yml`），调用方在
-> `scripts/`，于是已接线的符号照样被报"未使用"。要摘这两条需把 vulture 范围扩到
-> `scripts/`，实测那样会另带出 `scripts/factor_backfill.py` 里 2 条真死代码
-> （`REPO_ROOT` 未使用变量、`latest_factor_date` 未使用函数），属本次范围外。
+> ✅ **2026-10-06（R57）已解除**：vulture 扫描范围已扩到 `cpt` + `scripts`，
+> 那 6 条「调用方在 scripts/ 所以被误判」的豁免已从 `whitelist.py` 撤销。
+> 扩范围时确实如旧注释预言地又挖出 2 条**真**死代码 ——
+> `scripts/factor_backfill.py` 的 `REPO_ROOT`（未使用变量）与
+> `latest_factor_date`（未使用函数）—— **均已删除**。
+>
+> 当初「先别扩范围」的结论本身没错（扩了要多处理 2 条真死代码），
+> 但把这件事**永远挂着**才是错的 —— 豁免本身会掩盖未来的真死代码。
 
 ---
 

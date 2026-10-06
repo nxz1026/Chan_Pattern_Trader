@@ -318,19 +318,22 @@ REPO=/home/ubuntu/DSH/Chan_Pattern_Trader
 # ⚠️ 这个清单**必须与 deploy/cron/crontab 的作业一一对应**（R57 新增第 4 条时
 # 这里漏过一次：循环里少了 dashboard-run-prune-daily ⇒ 照本段部署，
 # 保留期作业**根本不会进 crontab**，而看板对外毫无任何异常 —— 静默到下个月
-# 才可能被发现）。改 crontab 里的作业时，**同一个 commit 里改这里**。
+# 才可能被发现；R57 补第 5 条日报时同样要在这里加一行）。
+# 改 crontab 里的作业时，**同一个 commit 里改这里**。
+# 另有测试兜底：tests/test_cron_daily_report.py 会按日志名双向比对
+# crontab 与日报的 JOBS（「加了 cron 忘了登记日报」会被逮到）。
 for job in factor-recompute-daily run-inspection-daily \
-           run-metric-prune-daily dashboard-run-prune-daily; do
+           run-metric-prune-daily dashboard-run-prune-daily cron-daily-report; do
   crontab -l | grep -v "$job.sh" > /tmp/cron.new
   grep -E "^\S+ \S+ \* \* \* .*$job\.sh" "$REPO/deploy/cron/crontab" >> /tmp/cron.new
   crontab /tmp/cron.new
 done
-# 复核：四条 CPT 作业都在，且其它作业还在
-crontab -l | grep -cE '(factor-recompute|run-inspection|run-metric-prune|dashboard-run-prune)-daily'
+# 复核：五条 CPT 作业都在，且其它作业还在
+crontab -l | grep -cE '(factor-recompute|run-inspection|run-metric-prune|dashboard-run-prune|cron-daily-report)-daily'
 crontab -l   # 逐条看，别只看数量
 ```
 
-> 仓内 `deploy/cron/crontab` 只含 CPT 这**四条**作业，**不含**机器上其它项目
+> 仓内 `deploy/cron/crontab` 只含 CPT 这**五条**作业，**不含**机器上其它项目
 > （采集、看门狗等）的作业 —— 那些属于别的项目，不该进本仓的真相源。
 > 所以「仓内文件 = 线上完整 crontab」这个假设**不成立**，装之前必须先 `crontab -l`。
 
@@ -353,27 +356,53 @@ crontab -l   # 逐条看，别只看数量
 | 03:40 | `run-inspection-daily.sh` | 巡检水位+数据源 → 飞书告警 | 只写巡检结论行 |
 | 04:10 | `run-metric-prune-daily.sh` | 清 `cpt_run_metric` 过期行 | run 90 天 / inspection 30 天 |
 | 04:30 | `dashboard-run-prune-daily.sh` | 清 `cpt_dashboard_run` 过期行 | 默认 7 天（R57 新增） |
+| 07:00 | `cron-daily-report.sh` | 扫上面 4 条的日志，发现失败发飞书 | R57 新增 |
 
-刻意错开：两条清理依次排在巡检之后；A 股快照 timer 在 08:00 UTC。
+刻意错开：两条清理依次排在巡检之后；**日报排在全部作业跑完之后**，这样它报出来的
+每一条都已经过了完整的重试窗口仍不成立 —— 那才是真需要人看的东西。
+A 股快照 timer 在 08:00 UTC。
 
-### ⚠️ cron 必须自己 source env 文件 —— 但**只有巡检脚本会 source**
+### ⚠️ 日报补的是「做了记录 ≠ 有人会看」这个洞
+
+R57 上线前审计发现：作业失败时的行为是「非零退出 + 写一行 `!!!!!`」，然后
+**就没有然后了** —— crontab 无 `MAILTO`、全仓无 logrotate、**无任何消费者**。
+唯一有出口的飞书只覆盖业务巡检自己的结论，不看另外三条的死活。
+
+⇒ 因子重算或清理失败 = 表继续膨胀 / 数据继续陈旧，而**外部毫无异常**。
+这与 R23 那条「保留期只写在注释里、从没自动化」是同一个病。
+
+日报（`scripts/cron_daily_report.py`）扫最近 24 小时，按**行首时间戳**切窗口
+（不按行数——日志暴涨时按行数会给出错误结论），识别两类命中：`!!!!!` 标记，
+以及「上一轮还在跑，跳过」（它 `exit 0`，扫不到失败标记，但「今天没执行」
+和「跑了成功」必须能区分）。
+
+⚠️ **加 cron 作业时必须同步两处**，否则新作业的失败永远不出现���日报里，
+而日报看起来一切正常：
+1. `scripts/cron_daily_report.py` 的 `JOBS`（扫哪些日志）
+2. `deploy/cron/crontab`（什么时候扫）
+
+有测试兜底：`tests/test_cron_daily_report.py::test_every_cron_script_is_scanned_by_the_daily_report`
+按日志名双向比对 crontab 与 `JOBS`。
+
+### ⚠️ cron 必须自己 source env 文件 —— 现在**五个脚本都会 source**（R57 起）
 
 `CPT_FEISHU_WEBHOOK` 只存在于 `deploy/env/cpt-dashboard.env`（被 gitignore）。
 systemd 那边靠 `EnvironmentFile=`，**cron 没有等价物** —— 忘了 source 的话，
 每天只会往日志里写「未配置」，一条告警也发不出去，而且**不报错**。
-`run-inspection-daily.sh` 开头有 `set -a; . $ENV_FILE; set +a`。
 
-> ⚠️ **R57 审计更正（2026-10-06）**：另三条脚本**不** source env 文件。
-> ⇒ **把 `CPT_PRUNE_RUN_DAYS` / `CPT_PRUNE_INSPECTION_DAYS` /
-> `CPT_PRUNE_DASHBOARD_RUN_DAYS` 写进那个 env 文件是完全无效的** ——
-> 那三个变量只在**脚本自身定义的位置**生效，默认值写在脚本里。
-> 要改窗口，改脚本里的默认值，或在 crontab 里写 `VAR=value` 行
-> （cron 环境极简，不写进 crontab 就传不进去）。
->
-> 这正是 `run-metric-prune-daily.sh` 脚本头自己批评过的「一个只影响日志的
-> 配置变量比没有更坏」—— 只不过这次的形态是**放在一个压根没人读的容器里**。
-> 想根治就得让三条清理脚本也 source env；本轮没做（要判断 env 文件不存在时
-> 该报错还是继续用默认值），留给 owner。
+> ⚠️ **R57 审计发现的历史**：原来**只有 `run-inspection-daily.sh`** 会 source，
+> 另外三条把 `CPT_PRUNE_*` / `CPT_RECOMPUTE_*` 写进 env 是**完全无效**的 ——
+> 那些 `${VAR:-默认}` 赋值在脚本读 env 之前就定死了。
+> 这比「只影响日志的配置变量」更隐蔽：它连日志都不影响，是**无声**地不生效。
+
+R57 起五个脚本统一：
+
+- **env 文件存在** → `set -a; . $ENV_FILE; set +a`，env 里的值生效；
+- **env 文件不存在** → 用脚本内默认值，**继续跑**（清理/重算不该因为
+  缺一个可选配置文件就停摆；只有巡检与日报会因为「缺 webhook ⇒ 永远不告警」
+  而 `exit 78`）；
+- 每条脚本的「开始」日志都带 `env=yes|no` 与**生效值**，所以从日志就能看出
+  到底用的哪套窗口 —— 不必再去猜配置有没有被读到。
 
 验证（不打印值）：
 

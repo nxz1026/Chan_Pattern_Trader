@@ -66,10 +66,6 @@ def ref_sites(name: str) -> list[int]:
     return sorted(set(out))
 
 
-def defs(name: str) -> list[int]:
-    return [n.lineno for n in tree.body if isinstance(n, ast.FunctionDef) and n.name == name]
-
-
 checks = [
     ("_enqueue_and_submit 调用点", len(call_sites("_enqueue_and_submit")), 2),
     ("enqueue_call 引用点（函数引用）", len(ref_sites("enqueue_call")), 1),

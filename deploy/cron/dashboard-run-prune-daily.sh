@@ -43,6 +43,21 @@ set -uo pipefail
 REPO="${CPT_REPO:-/home/ubuntu/DSH/Chan_Pattern_Trader}"
 LOG=/home/ubuntu/logs/dashboard-run-prune.log
 LOCK=/home/ubuntu/logs/dashboard-run-prune.lock
+
+# ⚠️ R57（2026-10-06 上线前审计补）：加载 env 文件。
+# 原因与代价见 factor-recompute-daily.sh 的同名注释：原来只有巡检脚本 source
+# 它，所以把 `CPT_PRUNE_DASHBOARD_RUN_DAYS` 写进 env 是无声无效的。
+# **必须插在下面 `KEEP_DAYS="${...:-7}"` 赋值之前**，否则 env 里的值读不到。
+# 与巡检不同：缺 env 不拦作业（只是用默认 7 天）。
+ENV_FILE=$REPO/deploy/env/cpt-dashboard.env
+if [ -f "$ENV_FILE" ]; then
+  set -a
+  . "$ENV_FILE"
+  set +a
+  _ENV_LOADED="yes"
+else
+  _ENV_LOADED="no"
+fi
 #: 保留天数。R23 迁移注释写的是 7 天，与之保持一致。
 #: 依据：这张表的用途是「跨重启可比」，7 天约 2000 轮，远超 ring 的 50 条，
 #: 够做任意两次运行对比；而按实测 ~79 kB/行，7 天约 170 MB，是可以接受的常数。
@@ -64,7 +79,7 @@ cd "$REPO" || exit 1
 export KEEP_DAYS
 
 {
-  echo "===== $(date -u +%FT%TZ) 开始（保留 $KEEP_DAYS 天）====="
+  echo "===== $(date -u +%FT%TZ) 开始（保留 $KEEP_DAYS 天 env=$_ENV_LOADED）====="
 } >> "$LOG"
 
 # ⚠️ store 层不 commit（事务边界归调用方，见 cpt/storage/__init__.py）——

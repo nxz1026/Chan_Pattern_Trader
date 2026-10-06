@@ -33,7 +33,6 @@ ROOT = Path(__file__).resolve().parents[1]
 
 #: 「N 个文件」/「M 行」
 N_FILES = re.compile(r"`?(\d+)`?\s*个(?:代码)?文件")
-N_LINES = re.compile(r"`?(\d+)`?\s*行")
 
 #: 文档里显式写出的「目录 → 计数」对应表（人工核过、值得钉住的那种）
 #: 第四项是**非 .py** 的目录（前端），``None`` 表示「按 .py 数」。

@@ -67,16 +67,11 @@ occurred_at  # cpt/domain/models.py —— StructureEvent dataclass 字段
 # A 股主看板（adapters/a_share_local.py::AShareLocalClient.fetch_daily_tags →
 # application/a_share_snapshot.py::_apply_daily_tags），故不再豁免。
 t_plus_one_purchase_allowed  # domain/a_share_rules —— C4 T+1（待 signal 桥接线）
-# 4c. **门禁盲区**（不是待接线）：调用方在 `scripts/factor_backfill.py`，而 CI 的
-#     vulture 只扫 `cpt/`（`.github/workflows/ci.yml` → `vulture --min-confidence
-#     60 cpt whitelist.py`），所以这两个**已接线**的符号仍被报「未使用」。
-#     R22 接线点：`scripts/factor_backfill.py` 的 `--wind-fallback` 兜底路径
-#     （默认关闭）。
-#     要摘掉这两条豁免，得先把 vulture 的扫描范围扩到 `scripts/`；实测那样做会
-#     另带出 2 条真死代码（`REPO_ROOT` 未使用变量、`latest_factor_date` 未使用
-#     函数），属本次范围外，故不动门禁范围。
-_to_wind_code  # adapters/a_share_local —— Wind 代码转换（调用方在 scripts/）
-fetch_adjust_factors  # adapters/wind_source —— Wind 复权因子取数（调用方在 scripts/）
+# 4c. ~~门禁盲区~~ **R57 已消解**：vulture 的扫描范围已扩到 `scripts/`，
+#     所以下面这几个「调用方在 scripts/」的符号不再被误判为死代码，
+#     豁免随之撤销 —— 保留它们等于让白名单掩盖未来的真死代码。
+#     （扩范围时确实如旧注释预言地多带出 2 条**真**死代码：
+#      `factor_backfill.py` 的 `REPO_ROOT` 与 `latest_factor_date` —— 已删。）
 
 # --------------------------------------------------------------------------- #
 # 5. 仅测试使用的有意公开 API：无生产调用方，但是明确的窄接口，由测试直接驱动
@@ -85,20 +80,6 @@ fetch_validated_bars  # adapters/a_share_local —— 取数 + 校验的组合�
 call_count  # adapters/wind_source —— 调用计数，供测试断言节流行为
 clear_runs  # application/dashboard_runs —— 清空进程内运行环形缓冲（测试用）
 drain  # llm/queue —— 等异步队列排空（测试同步用；vulture 只扫 cpt/，看不见 tests/）
-
-# R37：重算因子的两个新入口 —— 都在 scripts/factor_recompute.py 里被调用，
-# 而 vulture 只扫 cpt/，所以它们在门禁眼里是死的（实际不是）。
-fetch_corporate_actions  # adapters/wind_source 供 scripts/factor_recompute.py 取公司行动
-hot_pool_codes  # adapters/a_share_factor 供 scripts/factor_recompute.py 排优先级
-
-# --------------------------------------------------------------------------- #
-# 6. R39：同样因为「vulture 只扫 cpt/，不扫 scripts/」而被误判为死代码
-# --------------------------------------------------------------------------- #
-# 真实调用方 scripts/factor_recompute.py（已接成 --source eastmoney 默认源）
-fetch_actions  # adapters/eastmoney_actions �� scripts/factor_recompute.py 取东财公司行动
-# 公开常量（在 __all__ 里）：它声明「四种原因的全集」，
-# 不是死代码。vulture 把它当未知变量，是工具的盲区。
-CAUSES  # application/run_metric �� __all__ 里的公开枚举（data/config/backend/code）
 
 # --------------------------------------------------------------------------- #
 # 7. R57（2026-10-06 上线前审计）：**有意保留的已弃用函数**，不是漏删的死代码
@@ -113,3 +94,29 @@ CAUSES  # application/run_metric �� __all__ 里的公开枚举（data/config
 # 若将来不再需要这段说明，正确做法是删函数 + 同步改那两处 :func: 引用，
 # 然后把本行删掉 —— 而不是在代码里留一个没人调用的函数装作还在用。
 _read_prev_status  # application/a_share_snapshot —— 已弃用，保留仅为让 grep 找到说明
+# --------------------------------------------------------------------------- #
+# 7. R57（2026-10-06 上线前审计）：vulture 扫描范围扩到 `scripts/` 后的新增登记
+# --------------------------------------------------------------------------- #
+# 扩范围消掉了 6 条「调用方在 scripts/ 所以被误判」的旧豁免（见上方 4c 的撤销说明），
+# 同时带出下面这些 —— **全部是工具的盲区，不是死代码**。
+#
+# 顺带一句：扩范围这件事本身就是上一条旧注释预言过的（「实测会另带出 2 条真死代码」）。
+# 预言成真的那 2 条（`factor_backfill.py` 的 `REPO_ROOT` 与 `latest_factor_date`）
+# 已删 —— **扩范围的收益不只是消误报，还有真的挖出死代码**。
+
+#: 公开常量，声明「四种原因的全集」，本身不是死代码。
+#: vulture 看不见 `Final` 常量的语义用途（它没有出现在任何调用点）。
+CAUSES  # application/run_metric —— 四种 cause 的全集（data/config/backend/code）
+
+#: `CodeReport` 是 **dataclass**，下面两个是它的**字段**：dataclass 会生成
+#: `__init__` 并自动接收它们，vulture 对「只有类型注解的类属性」有已知局限
+#: （与本文件第 3 节同一类）。而且它们**确实在用**：`factor_report.py:120`
+#: 用关键字传入 `bars_new`，`:122` 给 `new_down_jumps` 赋值。
+bars_new  # scripts/factor_report —— CodeReport 字段，:120 构造时传入
+new_down_jumps  # scripts/factor_report —— CodeReport 字段，:122 显式赋值
+
+#: 这不是未使用的变量，而是给**第三方对象**赋属性：
+#: `conn` 是 psycopg 的连接，`autocommit` 是它的真属性。vulture 只看
+#: 本模块的 AST，看不见外部类型有哪些属性 —— 于是任何 `obj.foo = x`
+#: 都会被报成「unused attribute」。
+autocommit  # scripts/verify_public_contracts —— psycopg 连接属性赋值，不是本地变量

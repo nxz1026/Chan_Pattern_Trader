@@ -262,8 +262,6 @@ def _allowed(key: str) -> str | None:
 
 # ── 断言抽取 ───────────────────────────────────────────────────
 PATHS = re.compile(r"`((?:cpt|tests|scripts|deploy|dashboard|docs)/[A-Za-z0-9_./-]*[A-Za-z0-9_])`")
-FUNCS = re.compile(r"`([A-Za-z_]\w*)\(\)`")
-CLASSES = re.compile(r"`([A-Z][A-Za-z0-9_]{2,})`")
 ENDPOINTS = re.compile(r"/api/(?:dashboard|canvas)/[a-z0-9/_-]+")
 TABLES = re.compile(r"\b((?:cpt|asel)\.[a-z_]+|(?<![\w.])cpt_[a-z_]+)\b")
 ENVKEYS = re.compile(r"\b(CPT_[A-Z0-9_]+|DB[A-Z_]{2,})\b")
