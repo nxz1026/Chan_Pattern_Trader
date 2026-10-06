@@ -252,20 +252,61 @@ def _run(node_ids: Sequence[str]) -> tuple[bool, int, str]:
     return proc.returncode != 0, proc.returncode, blob[-800:]
 
 
-def check_one(m: Mutation) -> tuple[bool, str]:
-    """注入 → 跑测试 → 还原。返回 (是否被抓到, 细节)。
+def _restore_side_effects() -> tuple[list[str], list[str]]:
+    """还原「跑测试时被测试自己改脏」的**其它**已跟踪文件。
+
+    ## 为什么需要
+
+    有些测试**有写副作用**且写在**被 git 跟踪**的文件里 ——
+    ``test_calibration_table_is_written`` 每次跑都重写
+    ``docs/calibration-r56-min-bi-len.json``。平时它算出同样的数字所以看不出；
+    一旦注入变异，它就会把**错误的数字**写进那份数据（实测：量纲变异会让
+    ``v0_median_len`` 从 3 退回 4、``v0_short_lt_gate`` 从 298 退回 232）。
+    ⇒ 那不只是「跑完目录脏了」，而是**变异真的污染了产物**。
+
+    ## 为什么可以放心 ``git checkout --``
+
+    因为启动时已断言工作区干净（见 :func:`main`）。⇒ **跑完任何变脏的路径，
+    必定是本次跑出来的**，不会是用户自己的改动。这是那个启动断言换来的安全前提。
+
+    返回 (已跟踪脏文件, 跑出来的未跟踪文件)。未跟踪文件**不自动删** ——
+    自动删是不可逆操作，万一判错代价太大，只报告。
+    """
+    tracked: list[str] = []
+    untracked: list[str] = []
+    for line in _dirty():
+        if line.startswith("??"):
+            untracked.append(line[3:].strip())
+            continue
+        tracked.append(line[3:].strip())
+    if tracked:
+        subprocess.run(
+            ["git", "checkout", "--", *tracked],
+            cwd=str(ROOT),
+            capture_output=True,
+            text=True,
+            timeout=120,
+        )
+    return tracked, untracked
+
+
+def check_one(m: Mutation) -> tuple[bool, str, list[str]]:
+    """注入 → 跑测试 → 还原。返回 (是否被抓到, 细节, 被测试写脏并已还原的产物)。
 
     备份与还原都是**字节级**（见 :func:`_apply` 的说明）：文本模式的换行
     规范化会让「还原」悄悄改写文件行尾，那不是还原。
+    还原完还要处理测试的写副作用（见 :func:`_restore_side_effects`）。
     """
     path = ROOT / m.rel
     backup = path.read_bytes()
     try:
         _apply(path, m)
         caught, rc, blob = _run(m.tests)
-        return caught, f"rc={rc} " + (blob.strip().splitlines()[-1] if blob.strip() else "")
+        detail = f"rc={rc} " + (blob.strip().splitlines()[-1] if blob.strip() else "")
     finally:
         path.write_bytes(backup)
+        polluted, _ = _restore_side_effects()
+    return caught, detail, polluted
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -296,8 +337,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if a.selftest:
         # 正控制必须被抓到，负控制必须被抓不到 —— 两个都对了，机制才算活着。
-        pos, pos_detail = check_one(MUTATIONS[0])
-        neg, neg_detail = check_one(SELFTEST_UNWATCHED)
+        pos, pos_detail, _ = check_one(MUTATIONS[0])
+        neg, neg_detail, _ = check_one(SELFTEST_UNWATCHED)
         print(f"  {'✅' if pos else '❌'} 正控制：已知不变式被破坏 → 测试转红    {pos_detail}")
         print(f"  {'✅' if not neg else '❌'} 负控制：无关改动 → 测试**仍绿**（应报存活） {neg_detail}")
         if not pos:
@@ -315,13 +356,16 @@ def main(argv: list[str] | None = None) -> int:
     for m in todo:
         started = time.time()
         try:
-            caught, detail = check_one(m)
+            caught, detail, polluted = check_one(m)
         except Exception as exc:  # noqa: BLE001
             print(f"  💥 {m.name:34s} 本脚本崩了: {type(exc).__name__}: {exc}")
             ok = False
             continue
         mark = "✅ 抓到了" if caught else "❌ **没人盯**"
-        print(f"  {mark:14s} {m.name}  ({time.time() - started:.1f}s, {detail})")
+        note = ""
+        if polluted:
+            note = f"  ⚠️ 并写脏了产物: {', '.join(polluted)}"
+        print(f"  {mark:14s} {m.name}  ({time.time() - started:.1f}s, {detail}){note}")
         if not caught:
             ok = False
             print(f"       ↓ {m.why}")
