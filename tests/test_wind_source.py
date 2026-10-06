@@ -221,6 +221,57 @@ def test_call_timeout_raises_source_error(tmp_path: Path) -> None:
         client.call("stock_data", "get_stock_kline", {})
 
 
+def _raising_client(tmp_path: Path, exc: Exception) -> WindSourceClient:
+    def runner(argv: Sequence[str], cwd: Path, timeout: float) -> subprocess.CompletedProcess[str]:
+        raise exc
+
+    cli = tmp_path / "cli.mjs"
+    cli.write_text("// fake", encoding="utf-8")
+    config = tmp_path / "config"
+    config.write_text("WIND_API_KEY=k\n", encoding="utf-8")
+    node = tmp_path / "node"
+    node.write_text("// fake", encoding="utf-8")
+    return WindSourceClient(
+        cli_script=cli,
+        config_path=config,
+        ledger_path=tmp_path / "ledger.jsonl",
+        node=str(node),
+        runner=runner,
+    )
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        subprocess.TimeoutExpired(cmd=["node"], timeout=1),
+        OSError("no such node"),
+    ],
+    ids=["timeout", "spawn_error"],
+)
+def test_failed_call_respects_record_false(tmp_path: Path, exc: Exception) -> None:
+    """``record=False`` 的失败调用**不许**记额度账。
+
+    两条异常路径（超时 / spawn 失败）原来无条件 ``_record``，``record`` 参数在这
+    两处被忽略 —— 于是账本里混着「没打算计的调用」，额度用完的时间点与真实用量
+    对不上，而这正是 ledger 存在的唯一理由。
+    """
+    client = _raising_client(tmp_path, exc)
+    ledger = tmp_path / "ledger.jsonl"
+
+    with pytest.raises((WindSourceError, WindUnavailableError)):
+        client.call("stock_data", "get_stock_kline", {}, record=False)
+    assert not ledger.exists() or ledger.read_text(encoding="utf-8") == ""
+
+    # 对照组：``record=True``（默认）时账要落 —— 否则上面那条就成了「压根不记账」
+    second = tmp_path / "b"
+    second.mkdir()
+    client2 = _raising_client(second, exc)
+    ledger2 = second / "ledger.jsonl"
+    with pytest.raises((WindSourceError, WindUnavailableError)):
+        client2.call("stock_data", "get_stock_kline", {})
+    assert ledger2.exists() and ledger2.read_text(encoding="utf-8").strip()
+
+
 def test_fetch_daily_bars_uses_hfq_and_parses_rows(tmp_path: Path) -> None:
     client, runner, _ = _client(tmp_path, [_success(KLINE_ROWS)])
     bars = client.fetch_daily_bars("600519.SH", begin_date="2026-09-01", end_date="2026-09-24")
