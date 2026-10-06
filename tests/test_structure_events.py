@@ -12,6 +12,7 @@ from __future__ import annotations
 import pytest
 from cpt.domain.models import Bi, StructureEvent, StructureState
 from cpt.domain.structure_events import (
+    EVENT_FOR_STATUS,
     diff_states,
     state_from_event,
     state_to_payload,
@@ -202,6 +203,36 @@ def test_reclassified_means_invalidated_structure_comes_back() -> None:
     current = _state(status="forming", revision=2)
     (event,) = diff_states({prior.id: prior}, [current])
     assert event.event_type == "reclassified"
+
+
+def test_confirmed_downgrade_to_forming_is_recorded() -> None:
+    """已确认的结构退回 forming **必须**落事件（2026-10-06 补）。
+
+    原来 ``EVENT_FOR_STATUS`` 缺 ``confirmed -> forming``，后果不是「少记一条
+    事件」，而是**对外报出一个不存在的状态**：``_event_type_for`` 走不到任何
+    映射（状态确实变了，所以「状态相同且 end_time 变 → updated」那条也不成立），
+    返回 ``None`` ⇒ 不写事件 ⇒ 事件流最后一条永远停在 ``confirmed`` ⇒
+    ``current_states`` / ``latest_events`` 派生出的状态也跟着永远报 confirmed，
+    而实际这一轮它是 forming。前端和巡检读到的是错的。
+    """
+    prior = _state(status="confirmed", revision=3)
+    current = _state(status="forming", revision=3)
+    (event,) = diff_states({prior.id: prior}, [current])
+    assert event.event_type == "reclassified"
+
+    # 反向（forming -> confirmed）本来就有，且事件类型不同，别被这次改动带歪。
+    back = diff_states({current.id: current}, [prior])
+    assert [e.event_type for e in back] == ["confirmed"]
+
+
+def test_confirmed_to_forming_is_not_silently_dropped() -> None:
+    """回归护栏：确认这条跃迁**不是** ``None``。
+
+    单测 ``diff_states`` 会把上面那条一起锁住；这条专门钉住映射表本身，
+    防止有人日后「清理」``EVENT_FOR_STATUS`` 时把这一项当成冗余删掉 ——
+    删掉之后所有相关测试都不会报错，只有生产上状态开始说谎。
+    """
+    assert ("confirmed", "forming") in EVENT_FOR_STATUS
 
 
 def test_end_time_growth_is_updated() -> None:

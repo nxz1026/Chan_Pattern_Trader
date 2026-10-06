@@ -144,7 +144,19 @@ def _resolve_price(price: float, fallback: float) -> float:
 
 
 def _structure_ready(trend_direction: int, has_two_centers: bool, has_divergence_leg: bool) -> bool:
-    """§8.2 结构准备：向下走势（一买）或向上走势（一卖）+ 两个同级中枢 + 背驰段。"""
+    """§8.2 结构准备：两个同级中枢 + 背驰段（**方向由调用方各自判**）。
+
+    ⚠️ 方向**不在**这里判。原来这个函数把 ``trend_direction`` 收下却完全不用，
+    于是 ``assess_first_buy(trend_direction=+1, ...)`` 照样能拿到
+    ``structure_ready`` / ``confirmed`` —— 与模块 docstring 第 1 条
+    「只处理向下走势…不为向上走势编造买点」直接矛盾，也与
+    :func:`assess_first_sell` 里那条 ``trend_direction == _UP`` 的镜像检查
+    不对称（一买因此比一卖宽松）。
+
+    现在两个 caller 各自显式带上自己的方向（:data:`_DOWN` / :data:`_UP`），
+    口径写在各自那一行，读代码的人不用跳进这个函数才知道一买要向下。
+    """
+    del trend_direction  # 方向是**调用方**的责任，见上面 docstring
     return has_two_centers and has_divergence_leg
 
 
@@ -237,7 +249,11 @@ def assess_first_buy(
 
     if previous is not None and previous.status == _STATUS_INVALIDATED:
         status = _STATUS_INVALIDATED
-    elif not _structure_ready(trend_direction, has_two_centers, has_divergence_leg):
+    elif not (
+        _structure_ready(trend_direction, has_two_centers, has_divergence_leg)
+        and trend_direction == _DOWN
+    ):
+        # ``trend_direction == _DOWN`` 是模块 docstring 第 1 条：向上走势不编造买点。
         status = _STATUS_INVALIDATED
     elif has_reversal_bi:
         status = _STATUS_CONFIRMED
@@ -351,7 +367,8 @@ def transition_first_buy(
     :param price: 当前价格；``None`` 表示沿用 ``previous.price``；``<= 0`` 同样
         视为未提供。负值或非有限值抛 ``ValueError``。
     :raises ValueError: ``event_time < 0``；``price`` 为负或非有限值；
-        ``previous`` 的 ``signal_type`` / ``status`` / ``divergence_status`` 非法。
+        ``previous`` 的 ``signal_type`` / ``status`` / ``divergence_status`` 非法
+        **或 ``previous.signal_type`` 不是 ``"first_buy"``**。
     :returns: 状态推进后的信号，``signal_id`` / ``structure_id`` / ``center_ids`` /
         ``divergence_status`` / ``source_revision`` 原样保持。推进规则：
         ``confirmed`` 在结构仍有效时保持 ``confirmed``，结构失效转 ``invalidated``；
@@ -359,6 +376,29 @@ def transition_first_buy(
         结构有效时转 ``confirmed``，否则保持原状态（其中 ``alert`` 无反向结构时转
         ``candidate``，即收盘后仍成立）；``invalidated`` 保持 ``invalidated``。
     """
+    # 上面那句「必须 ``signal_type="first_buy"``」原先**没有任何代码在管**
+    # （``_validate_previous`` 两种 signal_type 都收）⇒ 一卖信号会被套用一买的
+    # 推进规则。与 :func:`transition_first_sell` 的镜像检查成对，两边都堵。
+    _require_signal_type(previous, _SIGNAL_TYPE_BUY, fn="transition_first_buy")
+    return _advance(previous, reversal_closed, structure_valid, event_time, price)
+
+
+def _require_signal_type(previous: Signal, expected: str, *, fn: str) -> None:
+    """断言 ``previous.signal_type == expected``（两个 transition 共用一条规则）。"""
+    if previous.signal_type != expected:
+        raise ValueError(
+            f"{fn} 只接受 signal_type={expected!r} 的信号, 实测 {previous.signal_type!r}"
+        )
+
+
+def _advance(
+    previous: Signal,
+    reversal_closed: bool,
+    structure_valid: bool,
+    event_time: int,
+    price: float | None = None,
+) -> Signal:
+    """状态推进本体（**调用方已校验过 signal_type**）。"""
     _validate_previous(previous)
     _validate_event_time(event_time)
 
@@ -388,4 +428,21 @@ def transition_first_buy(
     )
 
 
-transition_first_sell = transition_first_buy
+def transition_first_sell(
+    previous: Signal,
+    reversal_closed: bool,
+    structure_valid: bool,
+    event_time: int,
+    price: float | None = None,
+) -> Signal:
+    """:func:`transition_first_buy` 的一卖镜像（推进规则完全相同）。
+
+    ⚠️ 原来这里是 ``transition_first_sell = transition_first_buy``（裸别名），
+    而 :func:`_validate_previous` 接受 ``first_buy`` / ``first_sell`` **两种**
+    ``signal_type`` ⇒ 一买的推进规则能被套到一卖信号上，而 docstring 明写
+    ``previous`` 必须 ``signal_type="first_buy"``。现在这层显式校验信号类型：
+    把一卖信号喂给一买推进（或反过来）在**这里**就炸，而不是产出一条
+    「信号类型是一卖、推进规则却是一买」的行。
+    """
+    _require_signal_type(previous, _SIGNAL_TYPE_SELL, fn="transition_first_sell")
+    return _advance(previous, reversal_closed, structure_valid, event_time, price)

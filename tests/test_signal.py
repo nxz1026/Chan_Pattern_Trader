@@ -151,3 +151,56 @@ def test_first_sell_invalidated_on_downward_trend() -> None:
 def test_first_sell_rejects_invalid_direction() -> None:
     with pytest.raises(ValueError, match="trend_direction"):
         sell_ready(trend_direction=0)
+
+
+# --------------------------------------------------------------------------- #
+# R52：方向检查的镜像性与信号类型的隔离
+# --------------------------------------------------------------------------- #
+
+
+def test_first_buy_invalidated_on_upward_trend() -> None:
+    """**向上走势不出买点**（模块 docstring 第 1 条）。
+
+    这条以前没人测，而且**测了会红**：``_structure_ready`` 收下
+    ``trend_direction`` 却完全不用，于是 ``assess_first_buy(trend_direction=1)``
+    照样给 ``structure_ready`` / ``confirmed`` —— 与 docstring 直接矛盾，
+    也与 :func:`assess_first_sell` 里那条 ``trend_direction == _UP`` 不对称。
+    """
+    result = ready(trend_direction=1)
+    assert result.status == "invalidated"
+    assert result.confirmed_time is None
+
+
+def test_first_buy_upward_trend_with_reversal_is_not_confirmed() -> None:
+    """有反向笔也不例外：方向不对时连 ``confirmed`` 都不给。"""
+    assert ready(trend_direction=1, has_reversal_bi=True).status == "invalidated"
+
+
+def test_transition_first_sell_rejects_a_first_buy_signal() -> None:
+    """一卖推进**不许**吃一买信号。
+
+    原来 ``transition_first_sell = transition_first_buy`` 是裸别名，而
+    ``_validate_previous`` 接受 ``first_buy`` / ``first_sell`` 两种
+    ``signal_type`` ⇒ 一买的推进规则能被套到一卖信号上，而它的 docstring 明写
+    ``previous`` 必须 ``signal_type="first_buy"``。
+    """
+    from cpt.domain.signal import transition_first_sell
+
+    with pytest.raises(ValueError, match="first_sell"):
+        transition_first_sell(ready(), True, True, 300)
+
+
+def test_transition_first_sell_advances_a_first_sell_signal() -> None:
+    """对照组：一卖信号走自己的推进规则。"""
+    from cpt.domain.signal import transition_first_sell
+
+    advanced = transition_first_sell(sell_ready(), True, True, 300)
+    assert advanced.status == "confirmed"
+    assert advanced.signal_type == "first_sell"
+    assert advanced.confirmed_time == 300
+
+
+def test_transition_first_buy_rejects_a_first_sell_signal() -> None:
+    """镜像方向同样要拦住（一买推进只认 ``first_buy``）。"""
+    with pytest.raises(ValueError, match="first_buy"):
+        transition_first_buy(sell_ready(), True, True, 300)

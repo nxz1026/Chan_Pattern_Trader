@@ -116,6 +116,18 @@ EVENT_FOR_STATUS: Mapping[tuple[StructureStatus, StructureStatus], EventType] = 
     ("forming", "invalidated"): "invalidated",
     ("confirmed", "invalidated"): "invalidated",
     ("invalidated", "forming"): "reclassified",
+    # 2026-10-06 补：原表缺这一项，后果是**状态说谎**。
+    #
+    # 结构从 confirmed 退回 forming（窗口右移后原确认依据不再成立）时，
+    # `_event_type_for` 走不到任何映射：状态确实变了，所以「状态相同且
+    # end_time 变 → updated」那条也不成立 ⇒ 返回 None ⇒ **不写事件**。
+    # 于是事件流里最后一条永远停在 confirmed，`current_states` / `latest_events`
+    # 派生出的状态也跟着永远报 confirmed，而实际这一轮它是 forming。
+    #
+    # 这比「多写一条事件」严重：前端和巡检读到的是一个**不存在的**结构状态。
+    # 已确认过的结构退回 forming 记 ``reclassified``，与 invalidated→forming
+    # 同一语义（分类变了），便于按类型聚合时只查 reclassified。
+    ("confirmed", "forming"): "reclassified",
 }
 
 
@@ -127,8 +139,10 @@ def _event_type_for(previous: StructureState, current: StructureState) -> EventT
     结构**（起点相同的中枢和笔），在 ``diff_states`` 眼里是 ``created`` 而非
     重分类 —— 加那条分支只会写出一段永远走不到的死代码。
 
-    ``reclassified`` 的真实含义在 ``EVENT_FOR_STATUS``：被 invalidated 的结构
-    重新 forming。
+    ``reclassified`` 的真实含义在 ``EVENT_FOR_STATUS``：结构的状态分类变了 ——
+    被 invalidated 的重新 forming，或**已 confirmed 的退回 forming**（后者是
+    2026-10-06 补的，缺了它事件流会永远停在 confirmed，对外报出一个不存在的
+    状态）。
     """
     mapped = EVENT_FOR_STATUS.get((previous.status, current.status))
     if mapped is not None:
