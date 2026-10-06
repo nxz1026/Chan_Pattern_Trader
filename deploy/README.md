@@ -275,17 +275,44 @@ DELETE FROM public.cpt_dashboard_run
 `run_inspection.py` 从 R38 建好到 R43 之前**从未被调度过**，
 `cpt_run_metric.kind='inspection'` 只有手工验证时那 6 行、相隔 66 秒）。
 
-脚本在 `deploy/cron/`，**直接跑仓内路径，不要复制**（R45 决策）：
+脚本在 `deploy/cron/`，**直接跑仓内路径，不要复制**（R45 决策）。
+**crontab 本体已在 `deploy/cron/crontab` 入仓**，它是这一节的唯一真相源。
 
 ```bash
 REPO=/home/ubuntu/DSH/Chan_Pattern_Trader
-( crontab -l | grep -v run-inspection-daily.sh; \
-  echo "40 3 * * * $REPO/deploy/cron/run-inspection-daily.sh >> /home/ubuntu/logs/run-inspection.log 2>&1" ) | crontab -
-( crontab -l | grep -v factor-recompute-daily.sh; \
-  echo "20 2 * * * $REPO/deploy/cron/factor-recompute-daily.sh >> /home/ubuntu/logs/factor-recompute.log 2>&1" ) | crontab -
-( crontab -l | grep -v run-metric-prune-daily.sh; \
-  echo "10 4 * * * $REPO/deploy/cron/run-metric-prune-daily.sh >> /home/ubuntu/logs/run-metric-prune.log 2>&1" ) | crontab -
+
+# ⚠️ 先备份、再看差异、最后才装。`crontab <file>` 是**整体替换**。
+crontab -l > /tmp/crontab.backup.$(date +%F)
+
+# 核对：仓内这份与线上现有的差在哪（bash 进程替换，sh/dash 不支持）
+diff <(crontab -l | grep -vE '^\s*(#|$)') \
+     <(grep -vE '^\s*(#|$)' "$REPO/deploy/cron/crontab")
+
+# ⚠️ 装之前**必须**确认：线上 crontab 里有没有**不属于 CPT 的其它作业**。
+# 有的话直接 `crontab deploy/cron/crontab` 会把它们**一起抹掉** ——
+# 2026-10-06 实测 oracle 上就还有采集（jc-ingest-run.sh，每 10 分钟）
+# 与 emotion-core-dash 看门狗（每 5 分钟）两条。**那种情况下不要整体替换**，
+# 用下面的逐条合并写法。
+crontab "$REPO/deploy/cron/crontab"
 ```
+
+**如果线上还有其它作业**（合并，而不是替换）：
+
+```bash
+REPO=/home/ubuntu/DSH/Chan_Pattern_Trader
+# 逐条 upsert：先删同名旧行（连日志重定向一起匹配），再追加仓内那行。
+# 保留 crontab 里其它所有行不动。
+for job in factor-recompute-daily run-inspection-daily run-metric-prune-daily; do
+  crontab -l | grep -v "$job.sh" > /tmp/cron.new
+  grep -E "^\S+ \S+ \* \* \* .*$job\.sh" "$REPO/deploy/cron/crontab" >> /tmp/cron.new
+  crontab /tmp/cron.new
+done
+crontab -l   # 复核：三条 CPT 作业在，且其它作业还在
+```
+
+> 仓内 `deploy/cron/crontab` 只含 CPT 这三条作业，**不含**机器上其它项目
+> （采集、看门狗等）的作业 —— 那些属于别的项目，不该进本仓的真相源。
+> 所以「仓内文件 = 线上完整 crontab」这个假设**不成立**，装之前必须先 `crontab -l`。
 
 > **为什么不再 `install -m 755` 复制到 `/home/ubuntu/bin/`**：
 > 复制之后，仓内与 `/home/ubuntu/bin/` 就是**两份文件**，

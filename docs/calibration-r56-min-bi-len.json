@@ -1,0 +1,47 @@
+{
+  "gate": 6,
+  "rows": [
+    {
+      "file": "btcusdt_5m_2024-02-01.csv",
+      "bars": 1000,
+      "v0_bi": 326,
+      "v1_bi": 114,
+      "drop_pct": 65.0,
+      "v0_zs": 33,
+      "v1_zs": 10,
+      "v0_min_len": 2,
+      "v0_median_len": 4,
+      "v1_min_len": 6,
+      "v1_median_len": 10,
+      "v0_short_lt_gate": 232
+    },
+    {
+      "file": "btcusdt_5m_2024-09-01.csv",
+      "bars": 1000,
+      "v0_bi": 356,
+      "v1_bi": 123,
+      "drop_pct": 65.4,
+      "v0_zs": 37,
+      "v1_zs": 12,
+      "v0_min_len": 2,
+      "v0_median_len": 4,
+      "v1_min_len": 6,
+      "v1_median_len": 9,
+      "v0_short_lt_gate": 280
+    },
+    {
+      "file": "btcusdt_5m_2025-04-01.csv",
+      "bars": 1000,
+      "v0_bi": 352,
+      "v1_bi": 127,
+      "drop_pct": 63.9,
+      "v0_zs": 40,
+      "v1_zs": 10,
+      "v0_min_len": 2,
+      "v0_median_len": 4,
+      "v1_min_len": 6,
+      "v1_median_len": 9,
+      "v0_short_lt_gate": 273
+    }
+  ]
+}
