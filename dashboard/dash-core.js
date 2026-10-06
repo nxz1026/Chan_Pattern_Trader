@@ -888,10 +888,21 @@
         setConnection("live", `已加载 snapshot：${url}`);
         // 轮询**自启动**。2026-10-06 审计发现：startPolling 全仓只有「实时」按钮
         // 一个调用点（在 dash-chrome.js 的 click 回调里），页面加载后从不启动轮询
-        // ⇒ 更新时间永远冻结，15s 后 stale 定时器必然触发，页面周期性地谎报
-        // 「数据陈旧」，而此时 health.ok / data_quality.stale 全是正常值。
-        // startPolling 内部先 stopPolling()，幂等，所以每次成功加载都调是安全的。
-        if (typeof startPolling === "function") startPolling(url, POLL_INTERVAL_MS);
+        // ⇒ 更新时间永远冻结，陈旧看门狗必然触发。
+        //
+        // ⚠️ 走 `globalThis.CPTDashboardOps` 而不是裸标识符：dash-*.js 各自是独立
+        // IIFE，裸标识符跨文件**不可达**。原先这里写的是
+        // `typeof startPolling === "function"` —— 它把「函数不可达」这件事
+        // **静默吞掉**了，页面照样不轮询、照样报陈旧，却一个错都不报。
+        // 这种守卫比没有更坏：它让死代码看起来是活的。取不到就直接抛。
+        const ops = typeof globalThis !== "undefined" ? globalThis.CPTDashboardOps : null;
+        if (!ops || typeof ops.startPolling !== "function") {
+          throw new Error(
+            "CPTDashboardOps.startPolling 不可达：dash-ops.js 的 IIFE 没有把轮询挂到 globalThis。" +
+              "跨文件必须走 globalThis 显式挂载（范式见 cpt_job.js 的 global.CPTJob）。",
+          );
+        }
+        ops.startPolling(url, POLL_INTERVAL_MS);
         markFresh(
           snapshot && snapshot.engine_state && typeof snapshot.engine_state.status === "string"
             ? snapshot.engine_state.status

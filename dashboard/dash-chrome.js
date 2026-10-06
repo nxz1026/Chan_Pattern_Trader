@@ -580,7 +580,16 @@
             if (snapshot) scheduleDraw();
           });
         }
-        if (state.snapshotUrl) startPolling(state.snapshotUrl);
+        // 走 globalThis：dash-*.js 各自独立 IIFE，裸标识符跨文件不可达
+        // （2026-10-06 实测此处一直是死代码，点「实时」也没启动轮询）。
+        // 取不到就抛 —— 静默跳过只会让页面停在旧数据上却看不出原因。
+        if (state.snapshotUrl) {
+          const ops = globalThis.CPTDashboardOps;
+          if (!ops || typeof ops.startPolling !== "function") {
+            throw new Error("CPTDashboardOps.startPolling 不可达（dash-ops.js 未挂到 globalThis）");
+          }
+          ops.startPolling(state.snapshotUrl);
+        }
       });
     }
   }

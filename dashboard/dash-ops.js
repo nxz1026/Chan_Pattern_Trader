@@ -800,4 +800,18 @@
 
   /* ---- Phase N2：术语即点即懂 ---- */
 // >>>FUNCS
+  // 本文件与其它 dash-*.js 各自是一个 **独立 IIFE**（bundle 把 7 段并列），
+  // 跨文件引用裸标识符**不可达** —— 2026-10-06 实测：dash-core.js 与
+  // dash-chrome.js 里的 startPolling() 调用全部静默失效，页面因此从不轮询，
+  // 每次加载后 15s 必然自己变成「数据陈旧」，而 health.ok 一直是 true。
+  //
+  // 跨文件共享的唯一正确机制是**显式挂 global**（与 cpt_job.js 的
+  // global.CPTJob 同一范式）。轮询是全站唯一实现（check_job_poll_unique
+  // 门禁守着这条），所以对外只暴露 startPolling / stopPolling 两个入口。
+  if (typeof globalThis !== "undefined") {
+    globalThis.CPTDashboardOps = Object.assign(globalThis.CPTDashboardOps || {}, {
+      startPolling: startPolling,
+      stopPolling: stopPolling,
+    });
+  }
 })();
