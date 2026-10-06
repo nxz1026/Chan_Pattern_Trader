@@ -100,3 +100,16 @@ fetch_actions  # adapters/eastmoney_actions �� scripts/factor_recompute.py �
 # 不是死代码。vulture 把它当未知变量，是工具的盲区。
 CAUSES  # application/run_metric �� __all__ 里的公开枚举（data/config/backend/code）
 
+# --------------------------------------------------------------------------- #
+# 7. R57（2026-10-06 上线前审计）：**有意保留的已弃用函数**，不是漏删的死代码
+# --------------------------------------------------------------------------- #
+# `_read_prev_status`（application/a_share_snapshot.py）已被
+# `_derive_first_buy_signal` / `_derive_first_sell_signal` 回传的 `prev_status`
+# 取代 —— 那两个函数在写事件**之前**捕获旧状态；查库拿到的必然是本轮刚写的值。
+# 它被保留，是为了让 `grep _read_prev_status` 能找到「为什么不能再查库」这段说明
+# （a_share_snapshot.py 里另有两处 :func: 引用也指着它，删掉会变成死链）。
+#
+# ⚠️ **本条不是「忽略告警」**：它登记的是一次**明确的取舍**。
+# 若将来不再需要这段说明，正确做法是删函数 + 同步改那两处 :func: 引用，
+# 然后把本行删掉 —— 而不是在代码里留一个没人调用的函数装作还在用。
+_read_prev_status  # application/a_share_snapshot —— 已弃用，保留仅为让 grep 找到说明
