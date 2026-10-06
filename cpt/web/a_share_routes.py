@@ -324,9 +324,13 @@ def submit_llm_summarize(code: str, rec: dict[str, Any]) -> dict[str, Any]:
     """
     from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
     from cpt.application.llm_cases import summarize_recommendation  # noqa: PLC0415
+    from cpt.storage.llm_call_store import LLMCallError  # noqa: PLC0415
 
-    client = AShareLocalClient()
+    # ⚠️ 构造在 try **里面**（同 ``submit_llm_explain``）：无 DB 配置时构造函数
+    # 就抛，放在外面会绕过这里承诺的「LLM 不可用 → available=False」。
+    client = None
     try:
+        client = AShareLocalClient()
         names = _names([code])
         return summarize_recommendation(
             client._get_conn(),
@@ -338,8 +342,21 @@ def submit_llm_summarize(code: str, rec: dict[str, Any]) -> dict[str, Any]:
             price=rec.get("raw_close") if rec.get("raw_close") is not None else rec.get("price"),
             disclaimer=str(rec.get("disclaimer") or ""),
         )
+    except LLMCallError as exc:
+        # ``finish_call`` 现在与 ``enqueue_call`` 同口径：写失败**抛**
+        # （见 ``llm_call_store.LLMCallError``）。本路由的契约是「LLM 只是旁路，
+        # 失败不抛给 HTTP」，所以在这里折成与 ``submit_llm_explain`` 相同的信封，
+        # 而不是让一条审计写失败把整页变成 500。
+        _LOG.warning("提交 LLM 摘要失败（审计落库失败）%s: %s", code, exc)
+        return {
+            "available": False,
+            "call_id": "",
+            "status": "error",
+            "reason": f"llm_submit_failed:{type(exc).__name__}",
+        }
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
 
 def _raw_close(code: str) -> float | None:
@@ -480,12 +497,17 @@ def pool_payload(
     from cpt.adapters.a_share_pool import fetch_hot_pool  # noqa: PLC0415
     from cpt.adapters.strategy_signal import fetch_strategy_top  # noqa: PLC0415
 
-    client = AShareLocalClient()
     db_error: str | None = None
     entries: list[Any] = []
     picks: list[Any] = []
     strategy_error: str | None = None
+    # ⚠️ 构造**必须在 try 里面**（R45 已修过 ``_signal_history`` 的同一处）：
+    # 无 DB 配置 / 缺 psycopg 时 ``AShareLocalClient()`` 自己就抛，那种情况下
+    # 没有连接可关，但**降级路径必须照样跑到** —— 构造在 try 外面时异常会直接
+    # 冒出去，这个函数承诺的「三个来源各自失败互不影响」当场失效。
+    client = None
     try:
+        client = AShareLocalClient()
         conn = client._get_conn()  # noqa: SLF001
         entries = fetch_hot_pool(conn, limit=hot_limit)
         try:
@@ -499,7 +521,8 @@ def pool_payload(
         picks = []
         strategy_error = None
     finally:
-        client.close()
+        if client is not None:
+            client.close()
 
     try:
         factors = _factor_codes()
@@ -558,14 +581,18 @@ def recent_closes(code: str) -> tuple[float, float] | None:
     start_ms = int((end - timedelta(days=CLOSE_LOOKBACK_DAYS)).timestamp() * 1000)
     end_ms = int(end.timestamp() * 1000)
 
-    client = AShareLocalClient()
+    # ⚠️ 构造在 try **里面**：无 DB 配置时构造函数就抛（见上面 docstring），
+    # 构造在外面会让「取不到价 → None」这个降级承诺当场失效、直接冒出去。
+    client = None
     try:
+        client = AShareLocalClient()
         bars = client.fetch_validated_klines(code, start_ms, end_ms).bars
     except Exception as exc:  # noqa: BLE001 — 逐票失败只代表这一票没价
         _LOG.debug("最近收盘价读取失败 code=%s: %s", code, exc)
         return None
     finally:
-        client.close()  # 无论成败都要放连接，池子里每只票都会走这里
+        if client is not None:
+            client.close()  # 无论成败都要放连接，池子里每只票都会走这里
 
     if len(bars) < 2:
         return None
@@ -633,8 +660,9 @@ def submit_llm_explain(code: str, structure: dict[str, Any]) -> dict[str, Any]:
         names = _names([normalized])
     except Exception:  # noqa: BLE001 — 名字是装饰，取不到就用代码
         names = {}
-    client = AShareLocalClient()
+    client = None
     try:
+        client = AShareLocalClient()
         return explain_structure(  # noqa: SLF001
             client._get_conn(),  # noqa: SLF001
             code=normalized,
@@ -652,4 +680,5 @@ def submit_llm_explain(code: str, structure: dict[str, Any]) -> dict[str, Any]:
             "reason": f"llm_submit_failed:{type(exc).__name__}",
         }
     finally:
-        client.close()
+        if client is not None:
+            client.close()

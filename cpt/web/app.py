@@ -972,7 +972,18 @@ def make_handler(
                     from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
                     from cpt.storage import run_metric_store as _rms  # noqa: PLC0415
 
-                    limit = int((query.get("limit") or ["60"])[0])
+                    limit_raw = (query.get("limit") or ["60"])[0]
+                    try:
+                        limit = int(limit_raw)
+                    except ValueError:
+                        # ⚠️ 参数非法是**调用错误**，不是 DB 抖动。原来 ``int()``
+                        # 裸调，``?limit=abc`` 会掉进下面的 except、回
+                        # ``inspection_unavailable`` —— 那个 reason 读起来像
+                        # 「库挂了」，排查的人会去查 DB，而真正的原因在 URL 里。
+                        self._write_json_error(
+                            HTTPStatus.BAD_REQUEST, "limit_not_int", "limit 必须是整数"
+                        )
+                        return
                     _client = AShareLocalClient()
                     try:
                         _conn = _client._get_conn()  # noqa: SLF001
@@ -1044,7 +1055,20 @@ def make_handler(
                 code_filter = (query.get("code") or [""])[0].strip() or None
                 payload = _signal_stats_payload(days, code_filter)
             elif path.path == "/api/dashboard/watchlist":
-                payload = _watchlist_payload()
+                # 只读旁路，纪律与同组的 /inspection 一致：DB 抖动不 500，
+                # 降级成 available=false + reason。原先这里**裸调**
+                # ``_watchlist_payload()``，任何冒出来的异常都会变成 500，
+                # 而这条路由的语义本来就是「缺省值优先」。
+                try:
+                    payload = _watchlist_payload()
+                except Exception as exc:  # noqa: BLE001
+                    _LOG.warning("watchlist unavailable: %s", exc)
+                    payload = {
+                        "schema_version": "dashboard_watchlist.v1",
+                        "available": False,
+                        "reason": "watchlist_unavailable",
+                        "rows": [],
+                    }
             # R51：画布 D（wbt 报告视图）与 `/api/canvas/wbt` 一并下线 ——
             # 按用户指示取消该画布，端点直接除名，外部调用拿到 404 not_found。
             # 留档：原实现见 git f7b0c5fe8:cpt/application/canvas_wbt.py。

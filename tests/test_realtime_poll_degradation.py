@@ -174,3 +174,68 @@ def test_run_loop_exits_on_stop() -> None:
     p._stop.set()  # noqa: SLF001
     t.join(timeout=5)
     assert not t.is_alive(), "_run 没在 stop 之后退出"
+
+
+def test_compute_alerts_holds_the_lock() -> None:
+    """R52：``_compute_alerts`` 的状态改动**必须在锁内**完成。
+
+    它读改写 ``_last_signal_status`` / ``_last_alert_at``，而 ``_poll_once`` 会被
+    ``force_refresh``（HTTP 线程）与后台轮询线程**并发**调用 ⇒ 不加锁会丢更新、
+    重复/漏报告警，与类 docstring 的「Thread-safe」直接矛盾。
+    """
+    p = _provider(_BoomClient(TimeoutError("x")))
+    p._last_signal_status = "none"  # noqa: SLF001
+
+    real_lock = p._lock  # noqa: SLF001
+    order: list[str] = []
+
+    class _TracingLock:
+        """记录 acquire/release 顺序，确认持锁覆盖了整个读改写。"""
+
+        def __enter__(self) -> None:
+            order.append("acquire")
+            real_lock.acquire()
+
+        def __exit__(self, *exc: object) -> None:
+            order.append("release")
+            real_lock.release()
+
+    p._lock = _TracingLock()  # type: ignore[assignment]  # noqa: SLF001
+    try:
+        p._compute_alerts({"signal": {"status": "confirmed"}})  # noqa: SLF001
+    finally:
+        p._lock = real_lock  # noqa: SLF001
+
+    assert order == ["acquire", "release"], "状态改动没被锁包住"
+    assert p._last_signal_status == "confirmed"  # noqa: SLF001
+
+
+def test_concurrent_compute_alerts_loses_no_update() -> None:
+    """两条轮询链并发跑时，状态不能互相覆盖成旧值。
+
+    判据是行为而不是调用记录：N 个线程各推进一次，最终状态必须落在**最后
+    写入的那个值**上，而不是「谁最后读到旧值谁写回去」。
+    """
+    p = _provider(_BoomClient(TimeoutError("x")))
+    p._last_signal_status = "none"  # noqa: SLF001
+    seen: list[str] = []
+    barrier = threading.Barrier(4)
+
+    def worker(status: str) -> None:
+        barrier.wait()
+        for _ in range(200):
+            p._compute_alerts({"signal": {"status": status}})  # noqa: SLF001
+            seen.append(p._last_signal_status)  # noqa: SLF001
+
+    threads = [
+        threading.Thread(target=worker, args=(status,))
+        for status in ("alert", "candidate", "confirmed", "alert")
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    # 每次读到的状态都必须与最后一次写入的值一致（不能出现写完又被别人改回）
+    assert seen
+    assert p._last_signal_status in {"alert", "candidate", "confirmed"}

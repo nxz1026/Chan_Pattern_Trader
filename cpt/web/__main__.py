@@ -925,21 +925,34 @@ class _RealtimeProvider:
         return normalize_24h(ticker)
 
     def _compute_alerts(self, snapshot: dict[str, Any]) -> list[dict[str, Any]]:
-        transition = alert_transition({"signal": {"status": self._last_signal_status}}, snapshot)
-        self._last_signal_status = transition["current_status"]
-        alerts: list[dict[str, Any]] = []
-        if transition["triggered"]:
-            self._last_alert_at = _time.monotonic()
-            alerts.append(
-                {
-                    "kind": "signal_transition",
-                    "status": transition["current_status"],
-                    "previous_status": transition["previous_status"],
-                    "reason": transition["reason"],
-                    "at": self._last_alert_at,
-                }
+        # ⚠️ 必须持 ``self._lock``：本方法**读改写** ``_last_signal_status`` /
+        # ``_last_alert_at``，而 ``_poll_once`` 会被 ``force_refresh``（HTTP 线程）
+        # 与后台轮询线程**并发**调用 —— 两条轮询链会各自读到同一个旧 status、各自
+        # 判出一次跃迁（重复告警），或互相覆盖（漏告警）。而
+        # :meth:`select_symbol` 也在锁内把这两个字段重置，于是切 symbol 与轮询
+        # 撞上时状态可能来自上一段走势。
+        #
+        # 本方法**自己**不持锁进入：唯一调用点是 :meth:`_poll_once`，它在
+        # 887 行调用前只短暂持过锁（810-812 读 symbol/interval），锁**已释放**
+        # （``self._lock`` 是普通 ``Lock``、不可重入，所以绝不能在别处先持再调）。
+        with self._lock:
+            transition = alert_transition(
+                {"signal": {"status": self._last_signal_status}}, snapshot
             )
-        return alerts
+            self._last_signal_status = transition["current_status"]
+            alerts: list[dict[str, Any]] = []
+            if transition["triggered"]:
+                self._last_alert_at = _time.monotonic()
+                alerts.append(
+                    {
+                        "kind": "signal_transition",
+                        "status": transition["current_status"],
+                        "previous_status": transition["previous_status"],
+                        "reason": transition["reason"],
+                        "at": self._last_alert_at,
+                    }
+                )
+            return alerts
 
 
 def realtime_snapshot(

@@ -238,6 +238,43 @@ def test_ashare_routes_survive_broken_crypto_provider(
 # ----------------------------------------------------------------------- 池
 
 
+def test_client_construction_failure_is_inside_the_try(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R52：**构造**也必须在 try 里面。
+
+    ``AShareLocalClient()`` 在无 DB 配置 / 缺 psycopg 时自己就抛。构造写在
+    try 外面时，异常直接冒出去，这个函数承诺的「三个来源各自失败互不影响」
+    当场失效 —— ``pool_payload`` 应该是回 ``db_error``，不是整页 500。
+    """
+    from cpt.adapters.a_share_local import AShareLocalError
+
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise AShareLocalError("psycopg 未安装")
+
+    monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", _boom)
+
+    payload = a_share_routes.pool_payload()
+    assert payload["db_error"], "构造失败必须落成 db_error，而不是往上抛"
+    assert payload["items"] == []
+
+    # 同样口径：取价失败只回 None（逐票降级），不让整张列表挂掉
+    assert a_share_routes.recent_closes("600519") is None
+
+
+def test_submit_llm_explain_survives_client_construction_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """构造在 try 外时，这个「旁路失败不拖垮写接口」的承诺当场失效。"""
+    from cpt.adapters.a_share_local import AShareLocalError
+
+    def _boom(*_a: Any, **_k: Any) -> Any:
+        raise AShareLocalError("psycopg 未安装")
+
+    monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", _boom)
+    out = a_share_routes.submit_llm_explain("600519", {"id": "bi:1"})
+    assert out["available"] is False
+    assert out["reason"].startswith("llm_submit_failed:")
+
+
 def test_pool_marks_drawable_and_uses_union(monkeypatch: pytest.MonkeyPatch) -> None:
     fake = _FakeClient(rows=[("002119", 1), ("000592", 2)], factors=["002119"])
     monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", lambda *a, **k: fake)

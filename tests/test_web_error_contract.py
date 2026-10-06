@@ -57,6 +57,9 @@ _BAD_REQUESTS = [
     ("/api/dashboard/compare?left=1", 400),
     ("/api/dashboard/structure-events/timeline", 400),
     ("/api/dashboard/signal-stats?days=abc", 400),
+    # R52：``?limit=abc`` 原来裸调 ``int()`` ⇒ 掉进 DB 降级分支、回
+    # ``inspection_unavailable``（读起来像「库挂了」）。参数非法是调用错误，回 400。
+    ("/api/dashboard/inspection?limit=abc", 400),
     ("/api/dashboard/nope", 404),
     # R51：画布 D 下线 ⇒ 端点除名。删路由后若错落到非 JSON 分支（send_error /
     # 静态目录兜底），这里立刻红 —— 正是本文件要守的那条契约。
