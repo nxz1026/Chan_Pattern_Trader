@@ -882,7 +882,16 @@
               markFresh(es && typeof es.status === "string" ? es.status : "live", url);
             }
           })
-          .catch(() => undefined);
+          // ⚠️ 这里原来也是 `.catch(() => undefined)` —— 2026-10-06 实测它把一个
+          // 真实异常整个吞掉：轮询回调 tick 了、然后什么都不再发生，而页面看起来
+          // 「只是没更新」。**静默 catch 让故障表现为「没动静」而不是「报错」**，
+          // 排查成本极高。后台刷新失败要落到可见的位置（状态区），不要装作无事发生。
+          .catch((err) => {
+            const msg = err && err.message ? String(err.message) : String(err);
+            document.documentElement.dataset.probeErr = msg.slice(0, 160);
+            setConnection("error", `后台刷新失败：${msg}`);
+            showError(`后台刷新失败：${msg}`);
+          });
         return cached;
       }
       // 没有缓存但有 in-flight fetch：复用同一个 Promise，避免重复网络请求
