@@ -206,6 +206,14 @@
   const PAD = { top: 12, right: 12, bottom: 18, left: 64 };
   const GRID_LEVELS = 4;
 
+  // 页面自己的刷新节奏（与服务端 --poll-seconds 无关：服务端轮询只更新它自己
+  // 的快照，不会推给页面，页面必须自己去取）。
+  const POLL_INTERVAL_MS = 5000;
+  // 陈旧阈值 = 容忍 3 次轮询落空。**不要写死**：写死会在轮询间隔被调大时
+  // 立刻变成周期性假警报（2026-10-06 审计实测：15s 阈值碰上从不启动的轮询，
+  // 页面每次加载后必然自己变成「数据陈旧」，而 health.ok 一直是 true）。
+  const STALE_AFTER_MS = POLL_INTERVAL_MS * 3;
+
   const state = {
     snapshot: null,
     fullSnapshot: null,
@@ -855,12 +863,18 @@
         render(snapshot);
         setHidden("[data-testid=state-error]", true);
         setConnection("live", `已加载 snapshot：${url}`);
+        // 轮询**自启动**。2026-10-06 审计发现：startPolling 全仓只有「实时」按钮
+        // 一个调用点（在 dash-chrome.js 的 click 回调里），页面加载后从不启动轮询
+        // ⇒ 更新时间永远冻结，15s 后 stale 定时器必然触发，页面周期性地谎报
+        // 「数据陈旧」，而此时 health.ok / data_quality.stale 全是正常值。
+        // startPolling 内部先 stopPolling()，幂等，所以每次成功加载都调是安全的。
+        if (typeof startPolling === "function") startPolling(url, POLL_INTERVAL_MS);
         if (state.staleTimer !== null) window.clearTimeout(state.staleTimer);
         state.staleTimer = window.setTimeout(() => {
           root.dataset.connection = "stale";
           setState(setText("[data-testid=topbar-status]", "stale"), "stale");
           setHidden("[data-testid=state-stale]", false);
-        }, 15000);
+        }, STALE_AFTER_MS);
         return snapshot;
       } catch (error) {
         // 与 D2 行为一致：错误只体现在状态区，不向调用方抛出。
