@@ -298,9 +298,21 @@ def test_calibration_table_is_written() -> None:
             }
         )
     out = ROOT / "docs" / "calibration-r56-min-bi-len.json"
-    out.write_text(
-        json.dumps({"gate": PROD_GATE, "rows": rows}, ensure_ascii=False, indent=2),
-        encoding="utf-8",
+    # ⚠️ 必须走 ``write_bytes``，不能用 ``write_text``（2026-10-06 修）。
+    #
+    # 文本模式在 Windows 上会把 ``\n`` 翻成 CRLF，而本仓 ``core.autocrlf=input``
+    # ⇒ git 检出/提交一律用 LF。于是**每跑一次测试就永久弄脏这个被跟踪的文件**：
+    # ``git status`` 一直报 M，内容却一字不差（``git diff --ignore-all-space``
+    # 为空）。没人发现，是因为 11 道门禁里没有一道查「跑完测试后工作区是否干净」。
+    #
+    # 这条是新增的门禁⑭（变异抽查）按设计拒绝在脏工作区上运行时暴露出来的 ——
+    # 它拒绝执行，理由是「无法区分是你改的还是我改的」。
+    #
+    # 用字节写就没有任何换行翻译：``json.dumps`` 产出的换行本就是 ``\n``。
+    out.write_bytes(
+        json.dumps(
+            {"gate": PROD_GATE, "rows": rows}, ensure_ascii=False, indent=2
+        ).encode("utf-8")
     )
     assert rows, "对照表为空"
     # 至少要有一行真的发生了变化，否则「需要重新校准」这个前提就不成立
