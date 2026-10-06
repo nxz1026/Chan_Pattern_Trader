@@ -224,17 +224,29 @@ ssh oracle 'sudo -n systemctl restart cpt-dashboard && sleep 3 && \
 装完 R23 后 `/api/dashboard/runs`、`/compare`、`/multi-run` 会**优先读表**；
 表不可用时自动回落到进程内环形缓冲（退化成 R20 行为，不会 500）。
 
-表是 **append-only 且不自动 GC**。realtime 30s 一轮 ≈ 2,880 行/天、jsonb
-平均 30KB，1 月约 2.5 GB（PG vacuum 后稳定）。运维想清理就手动：
-
-```sql
-DELETE FROM public.cpt_dashboard_run
-  WHERE generated_at < now() - interval '7 days';
-```
-
-> 本仓刻意不在 HTTP 请求路径上跑大 SQL 做自动 GC。
-> 回滚就是 `DROP TABLE IF EXISTS public.cpt_dashboard_run CASCADE;`——表无 FK，
-> 代价是 0。**不要 DROP `public.cpt_signal_event`**，那是 R21 的真数据。
+> ⚠️ **2026-10-06（R57）更正：表现在有自动保留期了，上面的「不自动 GC」已过期。**
+>
+> R23 建表时把清理 SQL 只写成注释、从未自动化。实测当时 60 行 / 4648 kB
+> （**约 79~106 kB/行**，jsonb 很肥），而增长由**数据变化**驱动而非轮询
+> （`record_run` 对 30s 内同 `(run_id, dataset_hash)` 去重）—— 慢，但方向确定。
+>
+> 现在由 `cpt/storage/dashboard_run_store.py::prune` +
+> `deploy/cron/dashboard-run-prune-daily.sh`（每日 **04:30**，离线 cron）承接，
+> 默认保留 **7 天**。**仍然不在 HTTP 请求路径上跑大 SQL** —— R23 那个顾虑是对的，
+> 错的只是「以为留个注释就够了」。
+>
+> ⚠️ 清理键是 `COALESCE(generated_at, created_at)`，**不是**裸 `generated_at`：
+> R56 放开 NOT NULL 后那批 NULL 行**永远不会被裸条件命中**，会永久留存。
+> R57 已补 `created_at` 列并建了对应索引。**手工清理时也要用 COALESCE**：
+>
+> ```sql
+> DELETE FROM public.cpt_dashboard_run
+>  WHERE COALESCE(generated_at, created_at) < now() - interval '7 days';
+> ```
+>
+> 纯回滚（要连历史一起没）仍然是
+> `DROP TABLE IF EXISTS public.cpt_dashboard_run CASCADE;`——表无 FK，代价是 0。
+> **不要 DROP `public.cpt_signal_event`**，那是 R21 的真数据。
 
 ## `/cpt/` 的 Basic Auth（R30 补上）与一个操作坑
 
@@ -302,15 +314,23 @@ crontab "$REPO/deploy/cron/crontab"
 REPO=/home/ubuntu/DSH/Chan_Pattern_Trader
 # 逐条 upsert：先删同名旧行（连日志重定向一起匹配），再追加仓内那行。
 # 保留 crontab 里其它所有行不动。
-for job in factor-recompute-daily run-inspection-daily run-metric-prune-daily; do
+#
+# ⚠️ 这个清单**必须与 deploy/cron/crontab 的作业一一对应**（R57 新增第 4 条时
+# 这里漏过一次：循环里少了 dashboard-run-prune-daily ⇒ 照本段部署，
+# 保留期作业**根本不会进 crontab**，而看板对外毫无任何异常 —— 静默到下个月
+# 才可能被发现）。改 crontab 里的作业时，**同一个 commit 里改这里**。
+for job in factor-recompute-daily run-inspection-daily \
+           run-metric-prune-daily dashboard-run-prune-daily; do
   crontab -l | grep -v "$job.sh" > /tmp/cron.new
   grep -E "^\S+ \S+ \* \* \* .*$job\.sh" "$REPO/deploy/cron/crontab" >> /tmp/cron.new
   crontab /tmp/cron.new
 done
-crontab -l   # 复核：三条 CPT 作业在，且其它作业还在
+# 复核：四条 CPT 作业都在，且其它作业还在
+crontab -l | grep -cE '(factor-recompute|run-inspection|run-metric-prune|dashboard-run-prune)-daily'
+crontab -l   # 逐条看，别只看数量
 ```
 
-> 仓内 `deploy/cron/crontab` 只含 CPT 这三条作业，**不含**机器上其它项目
+> 仓内 `deploy/cron/crontab` 只含 CPT 这**四条**作业，**不含**机器上其它项目
 > （采集、看门狗等）的作业 —— 那些属于别的项目，不该进本仓的真相源。
 > 所以「仓内文件 = 线上完整 crontab」这个假设**不成立**，装之前必须先 `crontab -l`。
 
@@ -329,17 +349,31 @@ crontab -l   # 复核：三条 CPT 作业在，且其它作业还在
 
 | 时间(UTC) | 作业 | 作用 | 写不写库 |
 |---|---|---|---|
-| 02:20 | `factor-recompute-daily.sh` | 按公司行动重算后复权因子 | **只写暂存表** `asel.ref_adjust_factor_v2` |
+| 02:20 | `factor-recompute-daily.sh` | 按公司行动重算复权因子 | **只写暂存表** `asel.ref_adjust_factor_v2` |
 | 03:40 | `run-inspection-daily.sh` | 巡检水位+数据源 → 飞书告警 | 只写巡检结论行 |
+| 04:10 | `run-metric-prune-daily.sh` | 清 `cpt_run_metric` 过期行 | run 90 天 / inspection 30 天 |
+| 04:30 | `dashboard-run-prune-daily.sh` | 清 `cpt_dashboard_run` 过期行 | 默认 7 天（R57 新增） |
 
-刻意错开：A 股快照 timer 在 08:00 UTC。
+刻意错开：两条清理依次排在巡检之后；A 股快照 timer 在 08:00 UTC。
 
-### ⚠️ cron 必须自己 source env 文件
+### ⚠️ cron 必须自己 source env 文件 —— 但**只有巡检脚本会 source**
 
 `CPT_FEISHU_WEBHOOK` 只存在于 `deploy/env/cpt-dashboard.env`（被 gitignore）。
 systemd 那边靠 `EnvironmentFile=`，**cron 没有等价物** —— 忘了 source 的话，
 每天只会往日志里写「未配置」，一条告警也发不出去，而且**不报错**。
-两份脚本开头都有 `set -a; . $ENV_FILE; set +a`。
+`run-inspection-daily.sh` 开头有 `set -a; . $ENV_FILE; set +a`。
+
+> ⚠️ **R57 审计更正（2026-10-06）**：另三条脚本**不** source env 文件。
+> ⇒ **把 `CPT_PRUNE_RUN_DAYS` / `CPT_PRUNE_INSPECTION_DAYS` /
+> `CPT_PRUNE_DASHBOARD_RUN_DAYS` 写进那个 env 文件是完全无效的** ——
+> 那三个变量只在**脚本自身定义的位置**生效，默认值写在脚本里。
+> 要改窗口，改脚本里的默认值，或在 crontab 里写 `VAR=value` 行
+> （cron 环境极简，不写进 crontab 就传不进去）。
+>
+> 这正是 `run-metric-prune-daily.sh` 脚本头自己批评过的「一个只影响日志的
+> 配置变量比没有更坏」—— 只不过这次的形态是**放在一个压根没人读的容器里**。
+> 想根治就得让三条清理脚本也 source env；本轮没做（要判断 env 文件不存在时
+> 该报错还是继续用默认值），留给 owner。
 
 验证（不打印值）：
 

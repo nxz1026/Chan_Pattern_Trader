@@ -237,8 +237,9 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:98` 的
 `cpt/application/dashboard_run_store.py`
 > ⚠️ **R45 更正**：该文件后来随 storage 层恢复**搬到了 `cpt/storage/dashboard_run_store.py`** ——
 > 本文记录的是 R23 当时的位置，跟着路径找会扑空。
-+ 表 `public.cpt_dashboard_run`（5 列：
-`run_id` PK / `dataset_hash` / `generated_at` / `body_recorded` / `snapshot` jsonb），
++ 表 `public.cpt_dashboard_run`（**6 列**：
+`run_id` PK / `dataset_hash` / `generated_at` / `body_recorded` / `snapshot` jsonb
+/ **`created_at`**），
 `record_run(..., on_recorded=...)` 在**真正 append 之后**同步双写（best-effort，
 写失败不反噬 HTTP），`/compare`、`/multi-run`、`/runs` 三条路由改成
 **表优先 → 进程内 deque 兜底**。
@@ -250,9 +251,16 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:98` 的
 > 重复请求的放大问题从来就不存在，所以「不建表」的理由不成立。
 > 真正让这个决策被推翻的是用户诉求：**跨重启可比**（2026-09-30）。
 >
-> 表是 append-only 且不自动 GC，运维按需
-> `DELETE WHERE generated_at < now() - interval '7 days'`。
-> 迁移与部署见 `deploy/README.md`「数据库迁移」小节。
+> ⚠️ **2026-10-06（R57）更正两处**：
+> ① 上面的「5 列」是 R23 建表时的样子；R57 补了第 6 列 **`created_at`**
+>    （`DEFAULT now()`，入库时刻，不可能是业务伪造的）。
+> ② 「append-only 且不自动 GC，运维按需 DELETE」**已过期** ——
+>    R23 把这条 SQL 只写成注释、从未自动化。现由
+>    `cpt/storage/dashboard_run_store.py::prune` +
+>    `deploy/cron/dashboard-run-prune-daily.sh`（每日 04:30）承接，保留 7 天。
+>    **清理键是 `COALESCE(generated_at, created_at)`，不是裸 `generated_at`** ——
+>    R56 放开 NOT NULL 后那批 NULL 行永远不会被裸条件命中。
+>    迁移与部署见 `deploy/README.md`「数据库迁移」小节。
 
 ---
 

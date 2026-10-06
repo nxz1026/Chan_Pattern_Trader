@@ -306,5 +306,10 @@ def mark_interrupted(conn: Any, before: datetime | None = None) -> int:
             )
             return int(cur.rowcount or 0)
     except Exception as exc:
-        _LOG.warning("标记中断的 LLM 调用失败: %s", exc)
+        # ⚠️ ``exc_info=True`` 不是可选项：本仓自己在
+        # ``structure_event_store.py`` 写过同一条纪律 ——「原来这里是 warning
+        # 且不带 exc_info，栈被丢掉，「表没建」和「DB 挂了」两种现场在日志里
+        # 长得一模一样」。这里同样：返回 0 与「没有待标记的行」同值，
+        # **只有栈能区分这两种**，而栈一旦丢了就再也补不回来。
+        _LOG.warning("标记中断的 LLM 调用失败: %s", exc, exc_info=True)
         return 0

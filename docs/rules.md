@@ -619,12 +619,23 @@ R45 由 `tests/test_domain_frozen_contract.py` 的门禁逮出并补齐。
 | `zs_level_count` | `1` | 中枢级别数 | |
 | `min_elements_for_higher_bi` | `5` | 高级别新笔最少**低级别结构元素**数 | §9.7，量纲≠下面那个 |
 | `min_bi_len` | `6` | 底层笔最少跨度，量纲＝**去包含后 K 线根数** | §9.8，与上面**不可混用** |
+| `min_bi_len_by_interval` | `(("1d", 6), ("5m", 6))` | **按 bar 间隔分档**的笔门槛；未登记的间隔回落到 `min_bi_len` | R56 新增。查值一律走 `min_bi_len_for(interval)`，**别直接索引字段** |
 | `macd_fast` | `12` | MACD 快线 | |
 | `macd_slow` | `26` | MACD 慢线 | |
 | `macd_signal` | `9` | MACD 信号线 | |
 | `divergence_compare` | `"area"` | 背驰比较：MACD **柱面积** | §9.6 |
 | `levels` | `(5, 30)` | 级别链 | ⚠️ **单位按市场而异**，见下 |
-| `config_version` | `"v0"` | 口径版本号，**只跟随代码** | 见下 |
+| `config_version` | `"v1"` | 口径版本号，**只跟随代码** | 见下 |
+
+> ⚠️ **2026-10-06 上线前审计更正两处**：
+> ① 上表原先只有 **14 行**，缺 R56 新增的 `min_bi_len_by_interval`；
+> ② `config_version` 原先写 `"v0"` —— 实际是 **`"v1"`**（`config.py:58
+> SCHEMA_VERSION = "v1"`）。同一文档 §9 另一处也写着「SCHEMA_VERSION 升到 v1」，
+> 自相矛盾。
+>
+> 这两处**门禁查不出来**：`check_doc_drift.py` 的 C 类只验「字段名在 rules.md
+> 出现过」，而 `min_bi_len_by_interval` 在别处出现过；`config_version` 的
+> **值**更是从不比对。**名字在 ≠ 值对**，这是那类门禁的结构性盲区。
 
 ### 9.10 `levels` 的单位按市场而异（最容易讲错的一条）
 

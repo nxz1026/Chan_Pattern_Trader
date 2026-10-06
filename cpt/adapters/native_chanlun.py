@@ -67,6 +67,13 @@ class NativeChanlunBackend:
         传，native 分支**静默丢弃**——而生产用的就是 native（``DEFAULT_BACKEND``
         就是它），所以这条门槛在生产里从未生效。backend_factory 的 docstring
         当时写的是「native 不参与（见后文）」，后文并没有实现，属于声明超前。
+
+        ⚠️ **那份 docstring 直到今天（2026-10-06 上线前审计）才改掉** ——
+        也就是说，门槛接线生效之后的**整整一天**里，``resolve_backend`` 的文档
+        仍在说「native 忽略本参数」。谁照着它读，就会得出「生产门槛没生效」
+        的**反向结论**，进而怀疑整套定档工作。文档撒谎的代价与它描述的
+        那个 bug 同量级，而且更隐蔽：真 bug 会让测试红，撒谎的文档只会
+        让人做出错误判断而不留任何痕迹。
         """
         if min_bi_len is not None and min_bi_len < 1:
             raise ValueError(f"min_bi_len 必须 >= 1 或 None, 实测 {min_bi_len}")

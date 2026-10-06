@@ -56,11 +56,11 @@
 
 | 层 | 文件 | 行数 | 复盘状态 |
 |---|---:|---:|---|
-| `storage/` | 8 | 2,052 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 门禁②；R24 只是恢复层+划边界，**不算复盘**。R57 补 `dashboard_run_store.prune`（保留期此前只存在于迁移注释，从未自动化）。详见 `docs/archive/reviews-r45.md`） |
+| `storage/` | 8 | 2,057 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 门禁②；R24 只是恢复层+划边界，**不算复盘**。R57 补 `dashboard_run_store.prune`（保留期此前只存在于迁移注释，从未自动化）。详见 `docs/archive/reviews-r45.md`） |
 | `llm/` | 8 | 1,370 | ✅ **已做**（R45：全层勘察 + 3 个真 bug —— 清空进程环境 / 归类撒谎 / 单例丢弃审计回调） |
-| `adapters/` | 21 | 6,518 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 外部契约真机验证脚本 `scripts/verify_public_contracts.py`；R52 加占位行守卫；顺带实测更正了 handoff 里 K 线缺口的量级） |
-| `application/` | 32 | 5,218 | ✅ **已做**（R45：全层勘察 + 3 个真 bug —— DB 故障被报成「缺因子」两处 + CDN 护栏后门；R51 删 `canvas_wbt.py`；R52 占位行 WARNING + `placeholder_rows` reason） |
-| `domain/` | 16 | 3,169 | ✅ **已做**（R30 语义契约门禁；R45 重扫 16 文件，**未发现需修问题** —— 递归/中枢/级别标签不变量实测通过。R57 更正 `min_bi_len` 量纲注释：门槛判的是去包含后根数，旧的「p80」分位取自原始根数） |
+| `adapters/` | 21 | 6,522 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 外部契约真机验证脚本 `scripts/verify_public_contracts.py`；R52 加占位行守卫；顺带实测更正了 handoff 里 K 线缺口的量级） |
+| `application/` | 32 | 5,222 | ✅ **已做**（R45：全层勘察 + 3 个真 bug —— DB 故障被报成「缺因子」两处 + CDN 护栏后门；R51 删 `canvas_wbt.py`；R52 占位行 WARNING + `placeholder_rows` reason） |
+| `domain/` | 16 | 3,168 | ✅ **已做**（R30 语义契约门禁；R45 重扫 16 文件，**未发现需修问题** —— 递归/中枢/级别标签不变量实测通过。R57 更正 `min_bi_len` 量纲注释：门槛判的是去包含后根数，旧的「p80」分位取自原始根数） |
 | `web/` | 5 | 3,178 | ✅ **已做**（R29 门禁仍成立；R45 重扫 5 文件，**未发现需修问题** —— 4 处候选经真机实证均为假阳性；R51 删 `/api/canvas/wbt` 路由分支） |
 | `dashboard/`（前端） | 17 | 15,010 | ⚠️ R45 勘察时只被画布 D 与几个面板碰过；**R51 画布 D 已下线**。⚠️ 本行**只算顶层 js/css/html，排除 `dashboard/vendor/`**（第三方库，不是本仓产物）；体积另见下方脚注 |
 | `engine/` | — | — | 🚫 2026-09-25 整层删除（四个孤儿文件，R24 未恢复） |
@@ -333,7 +333,7 @@ scripts/            运维入口（不在包内，但已在 CI 门禁覆盖范�
     selftest_gates.py                  ← **门禁自检**，必须排在 ①~⑦ 与 ⑩~⑬ 之前
     scan_doc_claims.py                 ← 「未兑现承诺」候选抽取（只报不判）
     report_coverage_gaps.py  run_coverage.sh  ← 覆盖率 + 「生产路径未测透」清单
-    migrations/（8 份幂等 SQL，R20 → R27）
+    migrations/（12 份幂等 SQL，R20 → R57（R57 新增 created_at 那条））
 
 dashboard/          前端静态产物（Nginx 从 /var/www/cpt-dashboard 提供，非包内）
     url_safety.js  ← ⚠️ **必须第一个 defer 加载**：凭据消毒的**唯一实现**
@@ -347,9 +347,9 @@ dashboard/          前端静态产物（Nginx 从 /var/www/cpt-dashboard 提供
                         为什么不发 7 个请求：跨模块调用有 **88 处**，
                         拆成 7 个独立 IIFE 会**全部断掉**（实测
                         `startPolling is not defined`）。
-tests/              扁平布局：118 个 test_*.py 直接放 tests/ 下，仅一个 fixtures/
-                    人工构造案例；**没有** unit/ oracle/ e2e 子目录（见 §11）
-docs/               39 份 .md（**不含** archive/；rules.md / architecture.md /
+tests/              扁平布局：120 个 test_*.py 直接放 tests/ 下，仅一个 fixtures/
+                    人工构造案例；**没有** unit/ oracle/ e2e 子目录（见 §12）
+docs/               11 份 .md（**不含** archive/；rules.md / architecture.md /
                     progress-log.md / known-traps.md / web-api-reference.md /
                     known-traps.md / archive/reviews-r45.md 各一份 /
                     docs/archive/audits-2026-09.md 各轮修复总报告 / audit/ …）
@@ -508,7 +508,7 @@ Web UI / 前端图表组件      LLM 参与结构判断或信号生成
 ```text
 tests/
 ├── fixtures/            人工构造案例（JSON，含预期结构序列与事件）
-└── test_*.py            72 个，按被测对象命名（test_signal.py / test_dashboard_*.py …）
+└── test_*.py            120 个，按被测对象命名（test_signal.py / test_dashboard_*.py …）
 ```
 
 > **本节早期版本列的 `tests/unit` / `tests/oracle` / `tests/e2e` 四个子目录从未建立**，

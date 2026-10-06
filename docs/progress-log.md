@@ -58,6 +58,11 @@
 | R54 | 全仓文档对齐；发现「门禁验错了属性」，新增 `check_line_refs.py` |
 | R55 | 给「门禁恒返回 0」「断言依赖本机环境」两类补专盯门禁 |
 | R56 | 全仓通读复审 26 项修复；`min_bi_len` 真正接到 native，`SCHEMA_VERSION` 升 `v1` |
+| R57 | 上线前 360° 审计：① 清 39 条未来结构事件 + 17 行假时间戳；② 修轮询陈旧误报（`startPolling` 收进 `markFresh`，补契约测试）；③ `cpt_dashboard_run` 保留期**首次真正自动化**（`prune` + 04:30 cron）；④ 更正 `min_bi_len` 定档的**量纲口径**（6 实为 p95~p97 而非 p80）；⑤ 新增门禁⑭「变异抽查」——不看测试写了什么，只看它会不会响 |
+
+> ⚠️ **2026-10-06 补记**：本表原先止于 R56，而 R57 当天已完成上述 5 项。
+> 缺口成因与 R43 那次一样：`docs/pending-wiring.md` 把本文指定为「唯一的轮次记录
+> 台账」，但**没有任何检查保证台账与实际轮次同步** —— 门禁全绿，台账却断档。
 
 ---
 
@@ -248,7 +253,11 @@ llm  独立于 web/application/storage，SQL 只经 cpt/storage
 - 迁移风格：`CREATE TABLE IF NOT EXISTS` / `ADD COLUMN IF NOT EXISTS`，可重复跑。
 - **不建状态表**：事件流是唯一真相，当前状态从事件流派生 —— 两张表必然出现
   「状态表说 A、事件表说 B」。
-- 列纪律：能从 jsonb 现抽的一律不建列（`cpt_dashboard_run` 只 5 列，12 列方案被叫停）。
+- 列纪律：能从 jsonb 现抽的一律不建列（`cpt_dashboard_run` 建表时只 5 列，12 列方案被叫停）。
+  ⚠️ **R57 补了第 6 列 `created_at`** —— 不是违反这条纪律，而是 R56 放开
+  `generated_at` 的 NOT NULL 之后，那批 NULL 行**没有任何字段能让它变老**，
+  保留期永远命中不了；`created_at`（`DEFAULT now()`，入库时刻）补上了这个缺口。
+  见 `scripts/migrations/2026-10-07_r57_dashboard_run_created_at.sql`。
 - `scripts/migrations/` 之外，仓里**没有任何 `.sql`**。
 
 ### 3.2 共享 A 股数据（只读）

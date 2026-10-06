@@ -78,3 +78,7 @@ graphflow-out/
 
 # 沙箱 TLS 代理证书（环境产物，见 known-traps #29）
 .git/git-proxy-ca.crt
+
+# 审计期间的临时产物（ruff 报告 / pytest 输出 / 片段文件）；绝不入库
+.tmp/
+.tmp/

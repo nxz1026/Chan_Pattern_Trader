@@ -5,11 +5,32 @@
 
 > **为什么补这份文档。** `EXPORT_SCHEMA_URL` 的值是
 > `https://github.com/nxz1026/Chan_Pattern_Trader/blob/main/docs/export-schema-v1.md`，
-> 而且它被**写进每一个导出产物**的 `schema_url` 字段（`export.py:98`）——
+> 而且它被**写进每一个导出产物**的 `schema_url` 字段（`export.py:88`）——
 > 但这份文件**一直不存在**。也就是说所有导出物都在指向一个 404。
 > schema 已冻结，所以正确的修法是**把文档写出来**，而不是改 URL。
 > 本文所有字段表都是从代码与真实产物里取的（`dataclasses.fields()` + 实跑
 > `export_dataset()`），不是照抄设计稿。
+
+> ## ⚠️ 冻结契约被**无声**改动过（2026-10-06 上线前审计发现）
+>
+> 本文写明「schema 已冻结，任何字段增删都必须升 v2」。但 R56 在**不升 v1** 的
+> 前提下改了两处：
+>
+> 1. `config` 子树从 14 个键变成 **15 个** —— 新增 `min_bi_len_by_interval`；
+> 2. `fractals[]` 从 8 字段变成 **9 字段** —— 新增 `merged_index`；
+> 3. `config_version` 的值从 `"v0"` 变成 **`"v1"`**（与本文顶部 `schema_version`
+>    不是一回事，见 §2 的备注）。
+>
+> 这三处**全部没有任何检查会发现**：`check_all_claims.py` 只验路径/符号/键的
+> **存在性**，不比对值也不比对数量。而**消费方正是照这份文档写校验的** ——
+> 文档少写一个字段，校验就少查一个字段，两边一起错，且互相印证。
+>
+> **为什么可以不算破坏性变更**：`config_version` 已从 v0 升到 v1，
+> 导出物里带着它，消费方能据此区分；`min_bi_len_by_interval` 与
+> `merged_index` 都是**新增可选信息**（缺省不影响旧逻辑），没有字段被删或改义。
+> **但「可以不升 schema_version」是当时的判断，不是本文授权的** ——
+> 若你的消费方把本文当权威契约，实现方就已经欠你一次显式的兼容性说明。
+> 详见 `docs/known-traps.md` 与 `docs/rules.md` §9.9。
 
 ---
 
@@ -44,7 +65,7 @@
 
 ---
 
-## 2. `config`（`RulesConfig.to_dict()`，14 个键）
+## 2. `config`（`RulesConfig.to_dict()`，**15 个键**）
 
 | 键 | 类型 | v0 默认值 | 含义 |
 |---|---|---|---|
@@ -55,13 +76,14 @@
 | `zs_wzgx` | `str` | `"zgd"` | 中枢构成规则 |
 | `zs_level_count` | `int` | `1` | 中枢所需级别数 |
 | `min_elements_for_higher_bi` | `int` | `5` | 高级别笔最少元素数 |
-| `min_bi_len` | `int` | `6` | 笔的最短 K 线数 |
+| `min_bi_len` | `int` | `6` | 笔的最短 K 线数（量纲＝**去包含后**根数） |
+| `min_bi_len_by_interval` | `tuple[tuple[str,int], ...]` | `[["1d",6],["5m",6]]` | **R56 新增**：按 bar 间隔分档的笔门槛，未登记间隔回落 `min_bi_len` |
 | `macd_fast` | `int` | `12` | MACD 快线 |
 | `macd_slow` | `int` | `26` | MACD 慢线 |
 | `macd_signal` | `int` | `9` | MACD 信号线 |
 | `divergence_compare` | `str` | `"area"` | 背驰比较口径（面积 / 力度） |
 | `levels` | `int[]` | `[5, 30]` | 参与的级别（分钟） |
-| `config_version` | `str` | `"v0"` | 规则版本。**与 `schema_version` 是两件事**：前者是算法口径版本，后者是文件格式版本 |
+| `config_version` | `str` | `"v1"` | 规则版本。**与 `schema_version` 是两件事**：前者是算法口径版本，后者是文件格式版本 |
 
 口径的权威定义在 `docs/rules.md`；本文只描述字段形状。
 
@@ -96,7 +118,7 @@
 > `export.py` 现在只是 `from cpt.application._bar_dict import bar_to_dict`。
 > 符号名与行号都已失效，请以函数名为准，不要按旧行号去 `export.py` 里找。
 
-### 3.2 `fractals[]` — 8 字段
+### 3.2 `fractals[]` — **9 字段**
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
@@ -106,6 +128,7 @@
 | `start_time` / `end_time` | `int` | 区间（ms） |
 | `high` / `low` | `float` | 区间高低点 |
 | `source_ids` | `str[]` | 来源对象 id（递归映射用） |
+| `merged_index` | `int` | **R56 新增**：在**去包含后**序列里的下标 —— 笔跨度门槛 `min_bi_len` 量的就是它，**不要拿 `bar_index` 当跨度用** |
 
 ### 3.3 `bis[]` — 10 字段
 

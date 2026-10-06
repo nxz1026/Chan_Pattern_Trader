@@ -94,10 +94,9 @@ def resolve_backend(
             参照侧回落到生产侧等于自己跟自己比）。
         code: 标的代码，**只有 ``"reference"`` 档用得上**（腾讯回落那条路
             需要它；``CanonicalBar`` 没有 ``code`` 字段，取不到就得显式传）。
-        min_bi_len: 传给 czsc 后端的笔门槛（去包含后 K 线根数）。``None``
-            时用 czsc 上游默认 6。**native 后端忽略本参数**——它的笔口径由
-            ``cpt/domain/bi.py`` 决定，不接受该门槛（量纲不同的
-            ``min_elements_for_higher_bi`` 是另一回事）。
+        min_bi_len: 底层笔的最少跨度，量纲＝**去包含后** K 线根数。``None`` 时用
+        默认 6。**native 与 czsc 两侧都真实生效**（见下方 Returns 附近的说明）。
+        量纲不同的 ``min_elements_for_higher_bi`` 是另一回事，不可混用。
 
     Returns:
         :class:`~cpt.adapters.reference_chanlun.ChanlunBackend` 实例。

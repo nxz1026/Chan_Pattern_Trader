@@ -244,11 +244,20 @@ def czsc_module() -> object:
 
 
 def test_real_fixture_bi_spacing_is_definitionally_possible(czsc_module: object) -> None:
-    """核心回归：笔端点跨度中位数必须回到正常量级。
+    """核心回归：**相邻笔起点间距**中位数必须回到正常量级。
 
-    CPT 自研笔在同样 3 个 fixture 上的中位跨度是 **2 根**原始K线、
-    66–74% 的笔跨度 < 4 根 —— 两根 3K 分型窗口重叠，按缠论定义不可能成笔。
-    换成 czsc 后中位跨度必须 ≥ 6 根。
+    ⚠️ 这里量的是「相邻两笔**起点**之差」，不是笔自己的跨度 ——
+    2026-10-06 上线前审计更正：docstring 原先把它写成「笔端点跨度」，
+    而代码算的是 ``(bis[i+1].start_time - bis[i].start_time) // BAR_MS_5M``。
+    两者不是一回事：间距 >= 每一笔的跨度，所以这个断言比「跨度 >= 6」更松。
+    函数名里的 ``spacing`` 一直是对的，只有 docstring 写错了。
+
+    它仍然是个有效的**退化检查**：CPT 自研笔在同样 3 个 fixture 上
+    起点间距中位数只有 2 根（66–74% 的间距 < 4 根），按缠论定义不可能成笔。
+    换成 czsc 后间距中位数必须 >= 6 根。
+
+    另注：``6`` 是这个退化检查自己定的阈值，**与** ``PROD_GATE``
+    （``min_bi_len``，量纲是去包含后根数）**无关联**，两者不可互相引用。
     """
     for path in _fixture_paths():
         bars = _load_fixture(path)
