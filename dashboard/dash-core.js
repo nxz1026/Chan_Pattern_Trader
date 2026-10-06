@@ -828,6 +828,26 @@
     return await response.json();
   }
 
+  // 数据确认新鲜：撤掉陈旧显示 + **重新计时**。
+  // 两条加载路径（首屏 / 稳态后台刷新）都必须走这里 —— 少一条，那个路径就
+  // 永远布不上防，页面会在阈值到点时谎报「数据陈旧」。
+  function markFresh(engineStatus) {
+    if (state.staleTimer !== null) {
+      window.clearTimeout(state.staleTimer);
+      state.staleTimer = null;
+    }
+    const key = engineStatus || "live";
+    root.dataset.connection = "live";
+    setState(setText("[data-testid=topbar-status]", key), key);
+    setHidden("[data-testid=state-stale]", true);
+    // 重新布防：接下来 STALE_AFTER_MS 内没有新鲜数据才算真陈旧
+    state.staleTimer = window.setTimeout(() => {
+      root.dataset.connection = "stale";
+      setState(setText("[data-testid=topbar-status]", "stale"), "stale");
+      setHidden("[data-testid=state-stale]", false);
+    }, STALE_AFTER_MS);
+  }
+
 
   async function loadSnapshot(url, { force = false } = {}) {
     if (!force) {
@@ -844,6 +864,9 @@
             if (state.snapshotUrl === url) {
               render(fresh);
               setConnection("live", `后台刷新完成：${url}`);
+              // 稳态路径也要撤防 + 把顶栏写回真实状态，否则 stale 标记永挂
+              const es = fresh && fresh.engine_state;
+              markFresh(es && typeof es.status === "string" ? es.status : "live");
             }
           })
           .catch(() => undefined);
@@ -869,12 +892,11 @@
         // 「数据陈旧」，而此时 health.ok / data_quality.stale 全是正常值。
         // startPolling 内部先 stopPolling()，幂等，所以每次成功加载都调是安全的。
         if (typeof startPolling === "function") startPolling(url, POLL_INTERVAL_MS);
-        if (state.staleTimer !== null) window.clearTimeout(state.staleTimer);
-        state.staleTimer = window.setTimeout(() => {
-          root.dataset.connection = "stale";
-          setState(setText("[data-testid=topbar-status]", "stale"), "stale");
-          setHidden("[data-testid=state-stale]", false);
-        }, STALE_AFTER_MS);
+        markFresh(
+          snapshot && snapshot.engine_state && typeof snapshot.engine_state.status === "string"
+            ? snapshot.engine_state.status
+            : "live",
+        );
         return snapshot;
       } catch (error) {
         // 与 D2 行为一致：错误只体现在状态区，不向调用方抛出。
