@@ -888,7 +888,6 @@
           // 排查成本极高。后台刷新失败要落到可见的位置（状态区），不要装作无事发生。
           .catch((err) => {
             const msg = err && err.message ? String(err.message) : String(err);
-            document.documentElement.dataset.probeErr = msg.slice(0, 160);
             setConnection("error", `后台刷新失败：${msg}`);
             showError(`后台刷新失败：${msg}`);
           });

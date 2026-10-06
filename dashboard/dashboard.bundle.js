@@ -897,7 +897,6 @@
           // 排查成本极高。后台刷新失败要落到可见的位置（状态区），不要装作无事发生。
           .catch((err) => {
             const msg = err && err.message ? String(err.message) : String(err);
-            document.documentElement.dataset.probeErr = msg.slice(0, 160);
             setConnection("error", `后台刷新失败：${msg}`);
             showError(`后台刷新失败：${msg}`);
           });
@@ -5051,14 +5050,6 @@
 
 
   function startPolling(url, intervalMs = 5000) {
-    // ⚠️ 诊断计数器必须是**纯整数**，细节另放一个属性。
-    // 2026-10-06 实测的坑：最初把计数和细节拼在一起写（`"1#pinned=false"`），
-    // 于是下一次 `Number()` 读到的是 NaN → `NaN || 0` → 0 → 永远写回 1，
-    // 两个计数器**恒显 1**，看起来像「轮询只跑了一次就停摆」，
-    // 实际是探针自己在骗人。计数器一旦带上非数字后缀就失去意义。
-    const el = document.documentElement;
-    el.dataset.probeStart = String((Number(el.dataset.probeStart) || 0) + 1);
-    el.dataset.probeStartInfo = String(intervalMs) + "#" + String(root.dataset.market);
     // A 股日线收盘后不再变，轮询纯属浪费（还会让"数据没变"看起来像卡住）。
     // 用 root.dataset.market 而不是另存一份 state，避免与 market_a_share.js 双头状态。
     if (root.dataset.market === "a_share") {
@@ -5068,20 +5059,10 @@
     stopPolling();
     state.snapshotUrl = url;
     state.pollTimer = window.setInterval(() => {
-      el.dataset.probeTick = String((Number(el.dataset.probeTick) || 0) + 1);
-      el.dataset.probeTickAt = String(Date.now());
-      el.dataset.probeTickInfo = "pinned=" + String(!!state.pinnedRange);
       if (state.pinnedRange) return;
-      // 后台刷新失败要能看见。loadSnapshot 内部已经吞掉异常并返回 null，
-      // 所以 Promise 几乎不会 reject —— 只记 resolve 值，等于记录「这一轮有没有拿到数据」。
-      loadSnapshot(url).then(
-        (snapshot) => {
-          el.dataset.probeTickOk = String(Date.now()) + ":" + (snapshot ? "ok" : "null");
-        },
-        (err) => {
-          el.dataset.probeTickErr = String((err && err.message) || err).slice(0, 120);
-        },
-      );
+      // loadSnapshot 内部已吞掉异常并返回 null，Promise 基本不会 reject；
+      // 失败会经 setConnection("error") / showError 落到状态区，不需要额外兜底。
+      loadSnapshot(url);
     }, Math.max(1000, Number(intervalMs) || 5000));
     return state.pollTimer;
   }
