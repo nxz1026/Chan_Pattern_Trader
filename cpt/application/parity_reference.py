@@ -85,9 +85,15 @@ def build_parity_snapshot_for(
     # ``TypeError``（该 dataclass 只有 use_fx_*/zs_wzgx/macd_*/fixed_commit），
     # 而 TypeError **不在** `except ReferenceUnavailableError` 里 ⇒ 抛穿出去。
     # ⇒ 它是**后端级**参数（同 code），走 resolve_backend。
+    #
+    # R56：走 ``min_bi_len_for("1d")`` 而不是直接 ``cfg.min_bi_len``。
+    # parity 的唯一生产调用方是 ``a_share_snapshot``（A 股日线），而**对照的
+    # 前提是两侧用同一个门槛** —— 参照侧与被参照侧一旦门槛不同，笔数差异会被
+    # 误读成算法差异。写死 "1d" 是把「parity 只服务日线」这个事实落到代码里，
+    # 免得以后有人把它接到分钟线上、对照结果变得无法解释。
     backend = cast(
         ReferenceChanlunBackend,
-        resolve_backend("reference", min_bi_len=cfg.min_bi_len),
+        resolve_backend("reference", min_bi_len=cfg.min_bi_len_for("1d")),
     )
     try:
         # ⚠️ 用 ``compute_domain_structures`` 而不是契约方法 ``compute_structures``：

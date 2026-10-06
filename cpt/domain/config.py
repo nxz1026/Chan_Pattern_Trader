@@ -57,6 +57,23 @@ __all__ = [
 #: 配置口径版本号，写入每个 JSON 导出元数据。
 SCHEMA_VERSION: str = "v1"
 
+#: **按 bar 间隔**分档的底层笔门槛（间隔标签 -> 去包含后 K 线根数）。
+#:
+#: | 间隔 | 值 | 依据 |
+#: |---|---:|---|
+#: | ``1d`` | 6 | 与 czsc 上游默认对齐（≈ 一周）。A 股就是日线，**不要动**。 |
+#: | ``5m`` | 6 | ⚠️ **暂定值**。实测 p80 = 6（砍掉最短两成），中位跨度 4→9 落在
+#:   v0 自然范围内，所以不是错值；但 6 是**为日线选的**，拿来做分钟线偏激进。
+#:   样本只有 1000 根 5m ≈ 3.5 天，不足以定档 —— 见
+#:   ``docs/calibration-r56-min-bi-len.md``。要改先看那份文档的选档方法。 |
+#:
+#: 间隔标签用 cron 风格（``1d`` / ``5m`` / ``1h`` …），与 :attr:`RulesConfig.levels`
+#: 的级别链是两回事 —— 那个是**级别**，这个是**数据粒度**。
+DEFAULT_MIN_BI_LEN_BY_INTERVAL: Final[tuple[tuple[str, int], ...]] = (
+    ("1d", 6),
+    ("5m", 6),
+)
+
 
 @dataclass(frozen=True, slots=True)
 class RulesConfig:
@@ -123,12 +140,39 @@ class RulesConfig:
     zs_level_count: int = 1
     min_elements_for_higher_bi: int = 5
     min_bi_len: int = 6
+    min_bi_len_by_interval: tuple[tuple[str, int], ...] = DEFAULT_MIN_BI_LEN_BY_INTERVAL
     macd_fast: int = 12
     macd_slow: int = 26
     macd_signal: int = 9
     divergence_compare: str = "area"
     levels: tuple[int, ...] = (5, 30)
     config_version: str = SCHEMA_VERSION
+
+
+    def min_bi_len_for(self, interval: str | None) -> int:
+        """按 **bar 间隔**取笔门槛；未登记的间隔回落到 :attr:`min_bi_len`。
+
+        ## 为什么要按间隔分档（2026-10-06）
+
+        ``min_bi_len`` 的量纲是「K 线根数」，而一根 K 线代表多长时间**取决于间隔**：
+        6 根**日线** ≈ 一周，6 根 **5m** ≈ 30 分钟。同一个数字在两个粒度下是两种
+        东西。czsc 上游那个默认 6 是**为日线设计的**，原封不动透传到分钟线上，
+        等于把日线门槛套在分钟线上。
+
+        实测（真实 BTCUSDT 5m，1034 笔）：门槛 6 大约砍掉最短两成（p80 = 6），
+        中位跨度 4 → 9，**落在 v0 自然范围（max 12~15）之内**，所以不是错值，
+        只是**为日线选的、拿来做分钟线偏激进**。真正的雷区是 gate >= 10：中位跨度
+        15 已经**超过 v0 的自然最大值**，那时门槛不再筛选而是在**制造**结构。
+
+        用不可变的 tuple of pairs 而不是 ``dict``：dataclass 不允许 mutable default，
+        而 ``MappingProxyType`` 会让 :meth:`to_dict` 里的 ``asdict`` deepcopy 炸掉。
+        查找走本方法，别直接索引字段。
+        """
+        if interval:
+            for key, value in self.min_bi_len_by_interval:
+                if key == interval:
+                    return value
+        return self.min_bi_len
 
     def to_dict(self) -> dict[str, Any]:
         """序列化为普通 ``dict``（含 ``config_version``）。"""

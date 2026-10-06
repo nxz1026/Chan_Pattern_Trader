@@ -257,7 +257,7 @@ class _FixtureProvider:
         self._config = RulesConfig()
         # R16-4：后端由 ``--backend`` 决定（默认 auto = 装了 czsc 就用 czsc）。
         self._backend: ChanlunBackend = backend or resolve_backend(
-            DEFAULT_BACKEND, min_bi_len=self._config.min_bi_len
+            DEFAULT_BACKEND, min_bi_len=self._config.min_bi_len_for(self._interval)
         )
         self._interval_ms = resolve_interval_ms(interval)
         # RLock：select_symbol() 持外层锁调用 _build_snapshot()，后者自取锁；
@@ -537,7 +537,7 @@ class _RealtimeProvider:
         self._config = RulesConfig()
         # R16-4：同 _FixtureProvider，后端走 ``--backend``（默认 auto）。
         self._backend: ChanlunBackend = backend or resolve_backend(
-            DEFAULT_BACKEND, min_bi_len=self._config.min_bi_len
+            DEFAULT_BACKEND, min_bi_len=self._config.min_bi_len_for(self._interval)
         )
         self._thread = threading.Thread(target=self._run, daemon=True, name="cpt-realtime")
         self._thread.start()

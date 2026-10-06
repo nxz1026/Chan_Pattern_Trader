@@ -304,7 +304,7 @@ def build_ashare_snapshot(
     # 一条笔都不画（实测两者都踩过）。
     # 走势类型（``trend_types``）是 CPT 自研、尚未接入 replay，保持空元组。
     active_backend = backend or resolve_backend(
-        DEFAULT_BACKEND, min_bi_len=RulesConfig().min_bi_len
+        DEFAULT_BACKEND, min_bi_len=RulesConfig().min_bi_len_for("1d")
     )
     fractals, raw_bis, zhongshus = compute_domain_structures(
         validated, RulesConfig(), active_backend

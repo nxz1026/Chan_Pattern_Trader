@@ -60,6 +60,12 @@ FROZEN: dict[str, object] = {
     "divergence_compare": "area",
     "levels": (5, 30),
     "config_version": "v1",
+    # 2026-10-06：新增「按 bar 间隔分档」的门槛表。**没有升 SCHEMA_VERSION** ——
+    # 各间隔的**有效值与改动前相同**（改动前是一个标量 6 透传给所有间隔，
+    # 现在是 1d→6 / 5m→6），所以算出来的结构逐位相同、与 v1 仍可比，
+    # 旧 fixture 缺这个键时用默认值填充即可 —— 不存在「静默用旧口径」。
+    # 纪律针对的是「口径结果变了」；真到改 5m 数值那天（笔数会变），必须升 v2。
+    "min_bi_len_by_interval": (("1d", 6), ("5m", 6)),
 }
 
 

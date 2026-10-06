@@ -60,7 +60,7 @@ class AShareSnapshotProvider:
         # 后端实例**只建一次**：czsc 后端每次构造都要走版本校验 + 导入，
         # 而 provider 是长驻对象（60s TTL 缓存），不该每轮重建。
         self._backend: ChanlunBackend = backend or resolve_backend(
-            DEFAULT_BACKEND, min_bi_len=RulesConfig().min_bi_len
+            DEFAULT_BACKEND, min_bi_len=RulesConfig().min_bi_len_for("1d")
         )
         self._cached: dict[str, Any] | None = None
         self._cached_at: float = 0.0
