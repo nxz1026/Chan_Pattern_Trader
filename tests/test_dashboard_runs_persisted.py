@@ -260,17 +260,40 @@ def test_upsert_run_missing_dataset_hash_stores_empty_string() -> None:
         (1_790_000_000_000, "unix 毫秒"),
         ("2026-09-30T23:59:59+00:00", "ISO 串"),
         (datetime(2026, 9, 30, tzinfo=UTC), "datetime"),
-        (None, "缺失回落墙钟"),
-        ("not-a-date", "不可解析回落墙钟"),
     ],
 )
-def test_upsert_run_accepts_every_generated_at_shape(generated_at: Any, label: str) -> None:
-    """``generated_at`` 是 NOT NULL：什么形态都得能落库，不能因为解析失败丢一次记账。"""
+def test_upsert_run_accepts_every_parsable_generated_at_shape(
+    generated_at: Any, label: str
+) -> None:
+    """能解析出来的形态（Unix 毫秒 / ISO 串 / datetime）都得落库。"""
     conn = FakeConn()
     assert upsert_run(
         conn, {"run_id": "r", "dataset_hash": "d", "generated_at": generated_at}, None
     )
     assert isinstance(conn.rows["r"]["generated_at"], datetime)
+
+
+@pytest.mark.parametrize("generated_at", [None, "not-a-date", "", 0, True])
+def test_upsert_run_refuses_unparsable_generated_at(
+    generated_at: Any, caplog: pytest.LogCaptureFixture
+) -> None:
+    """R52：**不写假时间戳**。
+
+    原来解析失败会回落墙钟（只记一条 warning）⇒ 索引里堆起一批看起来完全正常的
+    假 ``generated_at``：它们参与 ``ORDER BY generated_at DESC``、参与运维的
+    ``DELETE WHERE generated_at < ...`` 窗口，而事后没人能再分辨哪条是假的。
+
+    ``generated_at`` 是 ``NOT NULL`` 列，所以「写 NULL」在库里等价于「写不进去」；
+    这里在 Python 侧就明确拒绝 + 记 ``ERROR``，调用方 best-effort 吞掉即可。
+    """
+    conn = FakeConn()
+    row = {"run_id": "r", "dataset_hash": "d", "generated_at": generated_at}
+    with caplog.at_level("ERROR"):
+        assert upsert_run(conn, row, None) is False
+    assert conn.rows == {}, "解析不出 generated_at 时不该留下任何行"
+    assert any(
+        "generated_at" in r.getMessage() for r in caplog.records if r.levelname == "ERROR"
+    ), "必须留一条 ERROR —— 否则这个异常条件就彻底隐形了"
 
 
 def test_upsert_run_raises_dashboard_run_error() -> None:

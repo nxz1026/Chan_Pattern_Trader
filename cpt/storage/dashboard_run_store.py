@@ -49,14 +49,24 @@ class DashboardRunError(RuntimeError):
     """运行持久化表读写失败。"""
 
 
-def _ms_to_timestamptz(ms: Any) -> datetime:
-    """``generated_at`` → UTC ``datetime``。
+def _ms_to_timestamptz(ms: Any) -> datetime | None:
+    """``generated_at`` → UTC ``datetime``；**解析不出来返回 ``None``**。
 
     ``dashboard_runs.record_run`` 的口径是 Unix **毫秒**（int/float），但
     ``build_run_index`` 直接透传 ``reproducibility.generated_at``，而
-    fixtures / demo 模式下它可能是 ISO 字符串或 ``None``。这里逐个兜住：
-    任何解析不出来的情况都回落到**当前墙钟**——宁可时间戳略偏，也不要让
-    一行记账把主流程打挂（``generated_at`` 是 NOT NULL 列）。
+    fixtures / demo 模式下它可能是 ISO 字符串或 ``None``。
+
+    ⚠️ **这里原来回落墙钟**（只记一条 warning）。后果不是「时间戳略偏」，而是
+    索引里堆起一批**看起来完全正常的假时间戳**：它们参与 ``ORDER BY
+    generated_at DESC``、参与运维的 ``DELETE WHERE generated_at < ...`` 窗口，
+    没人能再分辨哪条是假的。所以解析不出来就**不写**（见 :func:`upsert_run`），
+    宁可少一行，也不要一个假的「这一轮跑在什么时候」。
+
+    Args:
+        ms: Unix 毫秒（int/float）/ ISO 串 / ``datetime`` / ``None``。
+    Returns:
+        UTC ``datetime``；任何解析不出来的形态（含 ``None`` / 空串 / 布尔 / 非正
+        毫秒）都给 ``None``。
     """
     if isinstance(ms, datetime):
         return ms if ms.tzinfo else ms.replace(tzinfo=UTC)
@@ -66,12 +76,12 @@ def _ms_to_timestamptz(ms: Any) -> datetime:
         try:
             parsed = datetime.fromisoformat(ms.strip().replace("Z", "+00:00"))
         except ValueError:
-            _LOG.warning("generated_at 不是可解析的 ISO 时间串 %r，回落墙钟", ms)
-        else:
-            return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
-    elif ms is not None:
-        _LOG.warning("generated_at 类型异常 %r，回落墙钟", type(ms).__name__)
-    return datetime.now(UTC)
+            _LOG.warning("generated_at 不是可解析的 ISO 时间串 %r", ms)
+            return None
+        return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
+    if ms is not None:
+        _LOG.warning("generated_at 类型异常 %r", type(ms).__name__)
+    return None
 
 
 def _timestamptz_to_ms(value: Any) -> int | None:
@@ -164,7 +174,8 @@ def upsert_run(conn: Any, row: dict[str, Any], body: dict[str, Any] | None) -> b
         ``dataset_hash`` / ``generated_at`` 三个键。
     :param body: 快照本体；``None`` 表示被 ``RUN_BODY_MAX_BYTES`` 闸门拒了，
         此时写 ``body_recorded=false`` + ``snapshot=NULL``。
-    :returns: ``True`` = 新增行；``False`` = ``run_id`` 已存在（``DO NOTHING`` 命中）。
+    :returns: ``True`` = 新增行；``False`` = ``run_id`` 已存在（``DO NOTHING`` 命中）
+        **或** 因 ``generated_at`` 解析不出而明确拒绝落库。
     :raises DashboardRunError: 写入失败。**调用方必须 best-effort 吞掉**——
         记一次账失败不该让用户的 HTTP 响应 500。
 
@@ -191,6 +202,19 @@ def upsert_run(conn: Any, row: dict[str, Any], body: dict[str, Any] | None) -> b
 
     dataset_hash = str(row.get("dataset_hash") or "")
     generated_at = _ms_to_timestamptz(row.get("generated_at"))
+    if generated_at is None:
+        # ⚠️ 「写 NULL」在这张表上等于「这一行写不进去」：``generated_at`` 是
+        # ``NOT NULL``（见 ``scripts/migrations/2026-10-02_r23_dashboard_run.sql``）。
+        # 与其让 PG 抛 ``null value in column "generated_at"``（看不出原值是什么），
+        # 不如在这里**明确拒绝**并留下一条 ERROR —— 这一次运行**不进**冷路径，
+        # 索引里也不会出现一个看起来很真的假时间戳。调用方 best-effort 吞掉即可
+        # （HTTP 不受影响，ring 里那份索引行仍在）。
+        _LOG.error(
+            "generated_at 解析不出（%r），不写入假时间戳，本次运行不进冷路径 run_id=%s",
+            row.get("generated_at"),
+            run_id,
+        )
+        return False
     body_recorded = body is not None
     # jsonb 用「json.dumps + %s::jsonb 强转」而不是 psycopg 的 Jsonb 包装器：
     # 后者要 import psycopg，而本模块刻意保持零 psycopg 依赖（见模块 docstring）。

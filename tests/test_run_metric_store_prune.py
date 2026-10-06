@@ -125,3 +125,104 @@ def test_prune_never_commits() -> None:
 
 def test_kind_constants_are_distinct() -> None:
     assert rms.KIND_RUN != rms.KIND_INSPECTION
+
+
+# --------------------------------------------------------------------------- #
+# R52：读失败不许冒充「没有上一轮」；批量写入的返回行数必须诚实
+# --------------------------------------------------------------------------- #
+
+
+class _AbortingCursor(_Cur):
+    def execute(self, sql: str, params: tuple = ()) -> None:
+        super().execute(sql, params)
+        raise RuntimeError("simulated PG statement failure")
+
+    def fetchall(self) -> list:
+        raise RuntimeError("simulated PG statement failure")
+
+
+class _AbortingConn(_Conn):
+    def __init__(self) -> None:
+        super().__init__()
+        self.rollbacks = 0
+
+    def cursor(self) -> _AbortingCursor:
+        return _AbortingCursor(self)
+
+    def rollback(self) -> None:
+        self.rollbacks += 1
+
+
+def test_latest_run_fingerprint_raises_on_read_failure() -> None:
+    """**读失败 ≠ 从没跑过**。
+
+    原来 ``latest_run_fingerprint`` catch 住异常返回 ``None``，而 ``None`` 的
+    正式含义是「这个标的从没跑过」（函数自己的 docstring 就在讲怎么区分这两
+    种情况）⇒ 库读不到被冒充成「第一轮」，:func:`explain_cause` 于是拿不到前
+    值、归因静默留空。调用方 ``structure_event_recorder`` 本来就整段包在
+    try/except 里，抛是安全的。
+    """
+    with pytest.raises(rms.RunMetricError, match="读取上一轮指纹失败"):
+        rms.latest_run_fingerprint(_AbortingConn(), market="a_share", symbol="600519")
+
+
+def test_latest_run_fingerprint_returns_none_when_no_rows() -> None:
+    """对照组：真的没有上一轮 → ``None``，不抛。
+
+    这两条一起，把「读不到」与「确实没有」钉成两种不同结果。
+    """
+
+    class _EmptyCursor(_Cur):
+        def execute(self, sql: str, params: tuple = ()) -> None:
+            super().execute(sql, params)
+
+        def fetchall(self) -> list:
+            return []
+
+    conn = _Conn()
+    conn.cursor = lambda: _EmptyCursor(conn)  # type: ignore[method-assign]
+    assert rms.latest_run_fingerprint(conn, market="a_share", symbol="600519") is None
+
+
+class _PartialFailCursor(_Cur):
+    """第 ``fail_at`` 条 INSERT 起抛 —— 模拟批量写到一半失败。"""
+
+    def __init__(self, conn: _Conn, fail_at: int) -> None:
+        super().__init__(conn)
+        self.inserts = 0
+        self.fail_at = fail_at
+
+    def execute(self, sql: str, params: tuple = ()) -> None:
+        super().execute(sql, params)
+        if "INSERT" in sql.upper():
+            if self.inserts >= self.fail_at:
+                raise RuntimeError("simulated PG statement failure")
+            self.inserts += 1
+
+
+def test_append_metrics_returns_rows_actually_inserted() -> None:
+    """中途失败的返回值**不许**撒谎。
+
+    第 n 行失败时前 n-1 行已经在**调用方的事务里**了（store 层不 commit），
+    返回 0 会让人以为「一行都没写」→ 重跑整批 → 前 n-1 行变重复行。
+    """
+    conn = _Conn()
+    conn.cursor = lambda: _PartialFailCursor(conn, 2)  # type: ignore[method-assign]
+    rows = [{"observed_at": i, "market": "a_share", "symbol": "600519"} for i in range(5)]
+    assert rms.append_metrics(conn, rows) == 2
+    assert conn.commits == 0
+
+
+def test_append_metrics_closes_cursor_as_context_manager() -> None:
+    """游标必须进上下文管理器 —— 原来 ``conn.cursor()`` 拿到就丢，一路泄漏到 GC。"""
+    closed: list[bool] = []
+
+    class _TrackingCursor(_Cur):
+        def __exit__(self, *exc: object) -> None:
+            closed.append(True)
+            return None
+
+    conn = _Conn()
+    conn.cursor = lambda: _TrackingCursor(conn)  # type: ignore[method-assign]
+    rms.append_metrics(conn, [{"observed_at": 1, "market": "a_share", "symbol": "600519"}])
+    assert closed == [True]

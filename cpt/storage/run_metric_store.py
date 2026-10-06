@@ -174,6 +174,9 @@ def append_metrics(conn: Any, rows: Sequence[RunMetric]) -> int:
     # 且已按此契约补上 rollback（R45）。
 
     **写入失败只记 warning、不抛** —— 观测数据丢了不该让计算路径跟着挂。
+    但**返回的行数是「已入事务的行数」**：第 n 行失败时前 n-1 行已经在调用方的
+    事务里了（store 层不 commit），谎报 0 会让人以为「一行都没写」→ 重跑整批 →
+    前 n-1 行变重复行。
 
     ⚠️ **值为 ``None`` 的列整列省略**（让 DB 的 ``DEFAULT`` 生效），而不是写 NULL。
     DEFAULT 只在"不写这一列"时生效，显式 NULL 照样触发 NOT NULL 违约。
@@ -184,31 +187,44 @@ def append_metrics(conn: Any, rows: Sequence[RunMetric]) -> int:
     """
     if not rows:
         return 0
-    with_conn = conn.cursor()
-    try:
-        for row in rows:
-            cols: list[str] = []
-            values: list[Any] = []
-            placeholders: list[str] = []
-            for col in _COLUMNS:
-                if row.get(col) is None:
-                    continue  # 整列省略 → DEFAULT
-                cols.append(col)
-                values.append(row.get(col))
-                # 转换写在**占位符**上（``%s::jsonb``），不是列名上 ——
-                # 列名里写 ``detail::jsonb`` 是语法错误（实测 ``syntax error at or
-                # near "::"``）。第一版用 executemany 时占位符是对的，
-                # 改成逐行插入时把这件事弄丢过一次。
-                placeholders.append("%s::jsonb" if col == "detail" else "%s")
-            with_conn.execute(
-                f"INSERT INTO public.cpt_run_metric ({', '.join(cols)})"
-                f" VALUES ({', '.join(placeholders)})",
-                values,
+    written = 0
+    # ⚠️ ``with conn.cursor() as cur``：原来只 ``conn.cursor()`` 不进上下文
+    # 管理器，游标一路泄漏到 GC（每个 batch 一个）。
+    with conn.cursor() as cur:
+        try:
+            for row in rows:
+                cols: list[str] = []
+                values: list[Any] = []
+                placeholders: list[str] = []
+                for col in _COLUMNS:
+                    if row.get(col) is None:
+                        continue  # 整列省略 → DEFAULT
+                    cols.append(col)
+                    values.append(row.get(col))
+                    # 转换写在**占位符**上（``%s::jsonb``），不是列名上 ——
+                    # 列名里写 ``detail::jsonb`` 是语法错误（实测 ``syntax error at or
+                    # near "::"``）。第一版用 executemany 时占位符是对的，
+                    # 改成逐行插入时把这件事弄丢过一次。
+                    placeholders.append("%s::jsonb" if col == "detail" else "%s")
+                cur.execute(
+                    f"INSERT INTO public.cpt_run_metric ({', '.join(cols)})"
+                    f" VALUES ({', '.join(placeholders)})",
+                    values,
+                )
+                written += 1
+        except Exception as exc:  # noqa: BLE001
+            # 返回值必须**诚实**：前 n-1 行已经在**调用方的事务里**了（store 层
+            # 不 commit），原来的 ``return 0`` 会让人以为「一行都没写」——
+            # 而重跑整批会把那 n-1 行写成重复行。所以报**已入事务**的行数。
+            _LOG.warning(
+                "cpt_run_metric 写入中断（%d/%d 行已入事务）：%s: %s",
+                written,
+                len(rows),
+                type(exc).__name__,
+                exc,
             )
-    except Exception as exc:  # noqa: BLE001
-        _LOG.warning("cpt_run_metric 写入失败（%d 行）：%s: %s", len(rows), type(exc).__name__, exc)
-        return 0
-    return len(rows)
+            return written
+    return written
 
 
 def _row_to_dict(row: Sequence[Any]) -> RunMetric:
@@ -288,12 +304,21 @@ def latest_run_fingerprint(conn: Any, *, market: str, symbol: str) -> dict[str, 
     「从没跑过」和「跑过但四个指纹都是空串」必须能区分：前者没有前值可比，
     归因应当留空（:func:`explain_cause` 返回 ``""``）；后者是真的四项全空。
     混成空 dict 会让首次运行被归到 ``code``，凭空指控算法。
+
+    :raises RunMetricError: **读失败**。这里原来 catch 住异常返回 ``None``，
+        与「确实没有上一轮」完全同值 —— 那正是上面这段要避免的事：
+        库读不到被冒充成「这个标的第一轮跑」，于是 :func:`explain_cause`
+        拿不到前值、归因留空，而连接还停在 aborted 态连累后面的查询。
+        本模块其余读（:func:`recent_metrics` / :func:`prune`）都不吞，
+        原来那句注释「与本模块其余读一致」是**假的**。
+        调用方 ``structure_event_recorder`` 整段包在 try/except 里且按「归因
+        失败就原样返回事件」处置，所以抛是安全的。
     """
     try:
         rows = recent_metrics(conn, kind=KIND_RUN, market=market, symbol=symbol, limit=1)
-    except Exception as exc:  # noqa: BLE001 — 读侧 best-effort，与本模块其余读一致
+    except Exception as exc:  # noqa: BLE001
         _LOG.warning("读取上一轮指纹失败 %s/%s: %s", market, symbol, exc)
-        return None
+        raise RunMetricError(f"读取上一轮指纹失败 {market}/{symbol}: {exc}") from exc
     if not rows:
         return None
     row = rows[0]
