@@ -26,6 +26,7 @@ __all__ = [
     "latest_status",
     "load_previous_signal",
     "load_signal_events",
+    "load_trade_decisions",
     "record_signal_event",
     "SignalEventError",
 ]
@@ -260,6 +261,73 @@ def _history_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
         else:
             out[name] = value
     return out
+
+
+def load_trade_decisions(
+    conn: Any,
+    *,
+    for_date: str,
+    statuses: tuple[str, ...],
+    limit: int = 50,
+) -> tuple[dict[str, Any], ...]:
+    """交易机决策取数：**某个自然日内状态发生跃迁**的信号事件。
+
+    与 :func:`load_signal_events` 的区别：后者是「回看 N 天的滚动窗口」，
+    给页面看历史用；这里要的是**某个指定日当天新发生的**决策，否则交易机
+    每天都会把同一条老信号重复下单（``ref`` 含日期 ⇒ 每天都是新的一笔）。
+
+    ⚠️ 2026-10-07 新增，为对接 LKL-Trade 的 Trade API。
+
+    取「当天跃迁」而非「截至当天最新状态」是刻意的：后者会让 09-30 的一条
+    confirmed 一买被重复投喂到每一个后续交易日。
+
+    :param for_date: ``YYYY-MM-DD``（按 ``transition_time`` 的**服务器时区**日期切分）。
+    :param statuses: 允许的状态白名单，如 ``("confirmed",)``。
+    :returns: ``dict`` 元组，含 ``code`` / ``signal_type`` / ``status`` / ``level`` /
+        ``price`` / ``transition_time`` / ``signal_id``。
+    读失败抛 :class:`SignalEventError`——「库读不到」不能冒充「今天没信号」。
+    """
+    if not statuses:
+        return ()
+    params: list[Any] = [for_date, for_date, tuple(statuses), limit]
+    sql = """SELECT code, signal_type, status, level, price, signal_id,
+                     transition_time, confirmed_time
+              FROM public.cpt_signal_event
+              WHERE transition_time >= %s::date
+                AND transition_time <  (%s::date + interval '1 day')
+                AND status = ANY(%s)
+              ORDER BY transition_time DESC, id DESC
+              LIMIT %s"""
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, tuple(params))
+            rows = cur.fetchall() or ()
+    except Exception as exc:
+        _LOG.warning("加载交易决策失败 for_date=%s statuses=%s: %s", for_date, statuses, exc)
+        raise SignalEventError(f"加载交易决策失败: {exc}") from exc
+
+    out: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for row in rows:
+        code, signal_type, status, level, price, signal_id, ts, confirmed = row
+        # 同一 (code, signal_type) 当天多条跃迁只保留最新的一条，
+        # 否则同一只票会因多次状态变化被投喂多笔（ref 只含 code+action）。
+        key = (str(code), str(signal_type))
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append({
+            "code": str(code),
+            "signal_type": str(signal_type),
+            "status": str(status),
+            "level": level,
+            "price": price,
+            "signal_id": signal_id,
+            "transition_time": ts,
+            "confirmed_time": confirmed,
+        })
+    return tuple(out)
 
 
 def load_signal_events(

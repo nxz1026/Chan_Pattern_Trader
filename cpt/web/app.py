@@ -10,7 +10,7 @@ from contextlib import contextmanager
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Protocol, runtime_checkable
-from urllib.parse import parse_qs, urlsplit
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 from cpt.adapters.binance_futures import resolve_interval_label
 from cpt.application.dashboard_compare import compare_snapshots
@@ -522,6 +522,13 @@ def make_handler(
             # 会先 send_error(500)，A 股路由永远走不到。
             if path.path.startswith("/api/dashboard/a-share/"):
                 self._handle_a_share_get(path.path, query)
+                return
+            # Trade API（对 LKL-Trade 交易机的决策投喂）必须排在 provider() **之前**，
+            # 理由同 A 股路由：否则 (a) 每次拉决策都白建一次加密快照，
+            # (b) 加密侧 provider 不可达时这里直接 500，交易机拿到的是「服务挂了」
+            # 而不是「今天没有信号」——两者在上游是**完全不同的处置**。
+            if path.path.startswith("/api/trade/"):
+                self._handle_trade_get(path.path, query)
                 return
             try:
                 if callable(provider) and not hasattr(provider, "snapshot_payload"):
@@ -1144,6 +1151,52 @@ def make_handler(
                 self._write_json(a_share_routes.watchlist_payload())
                 return
             self._write_json_error(HTTPStatus.NOT_FOUND, "not_found", "")
+
+        def _handle_trade_get(self, path: str, query: dict[str, list[str]]) -> None:
+            """Trade API 只读路由：decisions / results / health。
+
+            延迟导入 ``cpt.web.trade_api``，理由同 ``_handle_a_share_get``——
+            它要 psycopg 与本地库客户端，不能让加密侧看板顶层拖着。
+            """
+            from cpt.web import trade_api  # noqa: PLC0415 — 避免顶层拖入 psycopg
+
+            qs = urlencode({k: v[0] for k, v in query.items() if v})
+            handlers = {
+                "/api/trade/decisions": trade_api.handle_trade_decisions,
+                "/api/trade/results": trade_api.handle_trade_results_get,
+                "/api/trade/health": lambda _qs: trade_api.handle_trade_health(),
+            }
+            handler = handlers.get(path)
+            if handler is None:
+                self._write_json_error(HTTPStatus.NOT_FOUND, "not_found", "")
+                return
+            try:
+                payload, status = handler(qs)
+            except Exception:  # noqa: BLE001 — 上游异常必须变成状态码，不能让 handler 抛出去断连接
+                _LOG.exception("trade route failed: %s", path)
+                self._write_json_error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR, "trade_unavailable", "trade api error"
+                )
+                return
+            self._write_json_status(status, payload)
+
+        def _handle_trade_post(self) -> bool:
+            """``POST /api/trade/results``（交易机回执）；返回 False 表示不是 Trade 路由。"""
+            path = urlsplit(self.path).path
+            if path != "/api/trade/results":
+                return False
+            from cpt.web import trade_api  # noqa: PLC0415
+
+            try:
+                payload, status = trade_api.handle_trade_results_post(self._read_json_body())
+            except Exception:  # noqa: BLE001
+                _LOG.exception("trade results post failed")
+                self._write_json_error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR, "trade_unavailable", "trade api error"
+                )
+                return True
+            self._write_json_status(status, payload)
+            return True
 
         def _handle_a_share_write(self, method: str) -> bool:
             """A 股自选与 LLM 解释的写操作；返回 False 表示这不是 A 股路由。"""
