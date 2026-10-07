@@ -63,6 +63,15 @@ SELF = "selftest_gates.py"
 NOT_A_GATE: dict[str, str] = {
     "scan_doc_claims.py": "R45 的**一次性**普查工具，产出已并入 check_all_claims.py",
     "verify_public_contracts.py": "人工按需跑的对外契约抽查，依赖真实上游，不进 CI",
+    "check_shared_tables.py": (
+        "**需要真实数据库**的运行期检查，不是静态门禁：它查 emotion-core 写的 7 张"
+        "共享 A 股表在生产上停更了没有（2026-10-07 实测 Oracle 上确实没有任何东西"
+        "会写它们，详见 docs/shared-tables-contract.md）。CI 没有库，硬接进去只会"
+        "变成永远红或永远绿 —— 后者正是本文件要防的那种失效。它的执行点是"
+        " deploy/cron/cron-daily-report.sh（离线 cron，每日 07:00 UTC），"
+        "有问题发飞书；静态部分（契约 ⇄ 代码双向对齐）由"
+        " tests/test_shared_tables_contract.py 在 CI 里守。"
+    ),
 }
 
 _INVOKE = re.compile(r"\bscripts/([A-Za-z0-9_]+\.py)\b")

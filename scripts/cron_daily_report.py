@@ -115,6 +115,46 @@ def scan(path: str, since: dt.datetime) -> tuple[list[str], list[str], str]:
     return failures, skips, last_rc
 
 
+def _shared_table_problems() -> tuple[list[str], list[str]]:
+    """共享 A 股表的新鲜度（CPT 只读 emotion-core 写的 7 张表）。
+
+    2026-10-07 实测：Oracle 上 ``emotion-core-daily``/``-strategy`` 都是
+    inactive，**没有任何东西会写那 7 张表**。CPT 自己的 A 股快照能算出
+    ``data_quality.severity``，但那是给人看��� —— 没人盯面板就等于没有。
+    ⇒ 这里把「上游断了」变成一条会发飞书的失败。
+
+    契约见 ``docs/shared-tables-contract.md``；判定逻辑与退出码语义在
+    ``scripts/check_shared_tables.py``（0 新鲜 / 1 过期 / 2 查不到）。
+    「查不到」也算问题 —— 无法验证 ≠ 一切正常。
+    """
+    try:
+        from scripts import check_shared_tables as cst
+    except Exception as exc:  # noqa: BLE001
+        return [f"共享表检查无法导入: {type(exc).__name__}: {exc}"], []
+
+    try:
+        import psycopg
+        from cpt.adapters._dbconfig import connection_kwargs
+    except Exception as exc:  # noqa: BLE001
+        return [f"共享表检查缺依赖: {type(exc).__name__}: {exc}"], []
+
+    try:
+        conn = psycopg.connect(**connection_kwargs())
+    except Exception as exc:  # noqa: BLE001
+        return [f"共享表检查连不上库: {type(exc).__name__}: {exc}"], []
+    try:
+        problems, lines, expected = cst.check(conn)
+    except Exception as exc:  # noqa: BLE001
+        return [f"共享表检查查询失败: {type(exc).__name__}: {exc}"], []
+    finally:
+        conn.close()
+
+    detail = [f"共享表（期望交易日 {expected}）：", *lines]
+    if problems:
+        return [f"共享表不新鲜：{p}" for p in problems], detail
+    return [], detail
+
+
 def build_report(hours: int, logs_dir: str | None = None) -> dict[str, Any]:
     since = dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours)
     problems: list[str] = []
@@ -132,6 +172,14 @@ def build_report(hours: int, logs_dir: str | None = None) -> dict[str, Any]:
             lines += [f"  · {s}" for s in skips[-3:]]
         else:
             lines.append(f"{name}：正常 · {last_rc}")
+
+    # 共享 A 股表新鲜度：日志全绿但上游断更，是最需要告警的那种情况。
+    # 测试用 --logs-dir 时跳过（假日志目录 + 真实 DB 会混在一起，报出来没人看得懂）。
+    if logs_dir is None:
+        st_problems, st_lines = _shared_table_problems()
+        problems.extend(st_problems)
+        lines.extend(st_lines)
+
     return {
         "problems": problems,
         "lines": lines,
