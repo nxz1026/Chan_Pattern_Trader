@@ -104,9 +104,12 @@ def _load_state() -> dict[str, Any]:
     if not p.exists():
         return {"decisions": {}, "processed": []}
     try:
-        data = json.loads(p.read_text(encoding="utf-8"))
+        loaded = json.loads(p.read_text(encoding="utf-8"))
     except (ValueError, OSError) as exc:
         raise TradeStateError(f"决策状态文件损坏: {p}") from exc
+    if not isinstance(loaded, dict):
+        raise TradeStateError(f"决策状态文件不是对象: {p}")
+    data: dict[str, Any] = loaded
     data.setdefault("decisions", {})
     data.setdefault("processed", [])
     return data

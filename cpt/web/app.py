@@ -1161,7 +1161,7 @@ def make_handler(
             from cpt.web import trade_api  # noqa: PLC0415 — 避免顶层拖入 psycopg
 
             qs = urlencode({k: v[0] for k, v in query.items() if v})
-            handlers = {
+            handlers: dict[str, Callable[[str], tuple[dict[str, Any], int]]] = {
                 "/api/trade/decisions": trade_api.handle_trade_decisions,
                 "/api/trade/results": trade_api.handle_trade_results_get,
                 "/api/trade/health": lambda _qs: trade_api.handle_trade_health(),
@@ -1178,7 +1178,7 @@ def make_handler(
                     HTTPStatus.INTERNAL_SERVER_ERROR, "trade_unavailable", "trade api error"
                 )
                 return
-            self._write_json_status(status, payload)
+            self._write_json_status(HTTPStatus(status), payload)
 
         def _handle_trade_post(self) -> bool:
             """``POST /api/trade/results``（交易机回执）；返回 False 表示不是 Trade 路由。"""
@@ -1195,7 +1195,7 @@ def make_handler(
                     HTTPStatus.INTERNAL_SERVER_ERROR, "trade_unavailable", "trade api error"
                 )
                 return True
-            self._write_json_status(status, payload)
+            self._write_json_status(HTTPStatus(status), payload)
             return True
 
         def _handle_a_share_write(self, method: str) -> bool:
