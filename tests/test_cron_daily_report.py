@@ -241,3 +241,78 @@ def test_crontab_actually_schedules_the_report() -> None:
     )
     fields = line.split()
     assert len(fields) >= 5 and fields[4] == "*", f"日报 crontab 行格式异常：{line!r}"
+
+
+# ── ⑦ 共享表检查接进日报（治「上游断更没人知道」）─────────────────────────
+
+
+def _fake_run(returncode: int, stdout: str = ""):
+    class _P:
+        pass
+
+    # ⚠️ 类体里访问不到外层函数参数，必须在类外赋值
+    _P.returncode = returncode
+    _P.stdout = stdout
+    _P.stderr = ""
+
+    def _run(_argv, **_kw):  # noqa: ANN001, ANN003
+        return _P()
+
+    return _run
+
+
+def test_stale_shared_tables_become_an_alert(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """共享表检查返回 1（不新鲜）⇒ 日报必须**把它当问题**。
+
+    2026-10-07 实测 Oracle 上没有任何东西会写那 7 张表，而 CPT 自己的 A 股
+    快照虽能算出 ``data_quality.severity``，但那是**给人看**的 —— 没人盯面板
+    就等于没有。这条是那件事的报警出口，所以必须验它真的会响。
+    """
+    _seed_all_logs(tmp_path, ok=True)
+    monkeypatch.setattr(cdr, "webhook_configured", lambda: True)
+    sent: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(cdr, "notify_problem", lambda s, d: sent.append((s, d)) or True)
+    monkeypatch.setattr(
+        cdr.subprocess,
+        "run",
+        _fake_run(1, "daily_bar: 最新 2026-09-30（期望 ≥ 2026-10-10）"),
+    )
+
+    report = cdr.build_report(24, str(tmp_path), check_shared=True)
+    assert any("共享表" in p for p in report["problems"]), report["problems"]
+    assert cdr.main(["--logs-dir", str(tmp_path), "--check-shared"]) == 0
+    assert len(sent) == 1, "共享表断更却没有发告警 —— 这正是要治的那个洞"
+
+
+def test_unverifiable_shared_tables_are_also_a_problem(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """退出码 2（连不上库/查询出错）**也要算问题**。
+
+    「无法验证」与「一切正常」在日报里长得一模一样的话，等于没接这个检查 ——
+    上游断更 + 检查自己也断，两个故障会互相掩盖。
+    """
+    _seed_all_logs(tmp_path, ok=True)
+    monkeypatch.setattr(cdr, "webhook_configured", lambda: True)
+    sent: list[tuple[str, list[str]]] = []
+    monkeypatch.setattr(cdr, "notify_problem", lambda s, d: sent.append((s, d)) or True)
+    monkeypatch.setattr(cdr.subprocess, "run", _fake_run(2, "连不上库: 模拟失败"))
+
+    report = cdr.build_report(24, str(tmp_path), check_shared=True)
+    joined = " ".join(report["problems"])
+    assert "共享表" in joined and "无法验证" in joined, report["problems"]
+    assert cdr.main(["--logs-dir", str(tmp_path), "--check-shared"]) == 0
+    assert len(sent) == 1, "「无法验证」没有变成告警 —— 那等于没接这个检查"
+
+
+def test_fresh_shared_tables_add_no_problem(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: pathlib.Path
+) -> None:
+    """退出码 0 ⇒ 不产生问题，且明细仍进报告（能看到「查过了、结论是什么」）。"""
+    _seed_all_logs(tmp_path, ok=True)
+    monkeypatch.setattr(cdr.subprocess, "run", _fake_run(0, "共享表新鲜度：全部新鲜。"))
+    report = cdr.build_report(24, str(tmp_path), check_shared=True)
+    assert not any("共享表" in p for p in report["problems"]), report["problems"]
+    assert any("共享表新鲜度" in ln for ln in report["lines"])

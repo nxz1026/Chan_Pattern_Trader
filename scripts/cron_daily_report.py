@@ -159,7 +159,18 @@ def _shared_table_problems() -> tuple[list[str], list[str]]:
     return [f"共享表检查失败：{label}"], detail
 
 
-def build_report(hours: int, logs_dir: str | None = None) -> dict[str, Any]:
+def build_report(
+    hours: int,
+    logs_dir: str | None = None,
+    *,
+    check_shared: bool | None = None,
+) -> dict[str, Any]:
+    """汇总日报。
+
+    :param check_shared: 是否跑共享表新鲜度检查。默认「只在真实路径跑」——
+        传了 ``logs_dir``（测试用假日志目录）就默认跳过，避免假日志 + 真实库
+        混在一起报出没人看得懂的结果。测试要覆盖这条路径时显式传 ``True``。
+    """
     since = dt.datetime.now(dt.UTC) - dt.timedelta(hours=hours)
     problems: list[str] = []
     lines: list[str] = []
@@ -179,7 +190,11 @@ def build_report(hours: int, logs_dir: str | None = None) -> dict[str, Any]:
 
     # 共享 A 股表新鲜度：日志全绿但上游断更，是最需要告警的那种情况。
     # 测试用 --logs-dir 时跳过（假日志目录 + 真实 DB 会混在一起，报出来没人看得懂）。
-    if logs_dir is None:
+    # 默认「只在真实路径跑」：传了 logs_dir（测试用假日志目录）就跳过，避免
+    # 假日志 + 真实库混在一起报出没人看得懂的结果。测试要覆盖这条路径时
+    # 显式传 check_shared=True。
+    run_shared = check_shared if check_shared is not None else logs_dir is None
+    if run_shared:
         st_problems, st_lines = _shared_table_problems()
         problems.extend(st_problems)
         lines.extend(st_lines)
@@ -196,6 +211,13 @@ def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--hours", type=int, default=24, help="回看窗口（小时），默认 24")
     ap.add_argument("--logs-dir", default=None, help="日志目录（测试用，默认用 JOBS 里的绝对路径）")
+    ap.add_argument(
+        "--check-shared",
+        dest="check_shared",
+        action="store_true",
+        default=None,
+        help="强制跑/不跑共享表新鲜度检查；默认只在不指定 --logs-dir 时跑",
+    )
     a = ap.parse_args(argv)
 
     # 与另两个 cron 入口（run_inspection.py / factor_recompute.py）同款：
@@ -203,7 +225,7 @@ def main(argv: list[str] | None = None) -> int:
     # 且日志行没有时间戳与 logger 名 —— 而日报要靠时间戳切窗口。
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 
-    report = build_report(a.hours, a.logs_dir)
+    report = build_report(a.hours, a.logs_dir, check_shared=a.check_shared)
 
     print(f"扫描窗口：最近 {report['window_hours']} 小时")
     for line in report["lines"]:
