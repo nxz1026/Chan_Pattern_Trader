@@ -178,8 +178,18 @@ R22 的 9 个接线点（路由与调用方均已 grep 复核）：
 >   两个中枢（实测 60 组参数都造不出，`_extend` 会一路吞并），会「因为数据没结构」
 >   变红。`test_production_entry_calls_bridge` 用 monkeypatch 盯住「生产入口有没有
 >   调这个函数」，未接线时实测红（`assert []`），且不挑数据。
-> - **仍未接**：`transition_first_buy` 的状态推进（需持久化信号历史）、
->   `alert` 状态（需盘中反向 K 线）、一卖 `check_first_sell`、T+1 读取点。
+> - **`transition_first_buy` 的状态推进：已接（R21，本条为过期描述已更正）** ——
+>   `a_share_snapshot.py::_derive_first_buy_signal` 里调，配
+>   `load_previous_signal` / `record_signal_event` 做跨日持久化。
+> - **`alert` / `candidate` 不可达**（不是「待接线」）：`_advance` 只在
+>   `previous.status == alert` 时产出 `candidate`，而 `assess_first_buy` 从不产出
+>   `alert`；生产路径仅在「有反向笔 + 收盘确认」时推进，故 `structure_ready`
+>   **直接跳到 `confirmed`**。生产上 `status` 取值集合恒为
+>   `{structure_ready, confirmed, invalidated}`。真要接需要盘中反向 K 线，属**新增
+>   实时能力**而非补线；在此之前 `trade_api` 的白名单里不该出现这两个状态。
+>   已由 `tests/test_signal.py::test_structure_ready_stays_put_without_a_closed_reversal`
+>   钉住。
+> - **仍未接**：一卖 `check_first_sell`、T+1 读取点。
 
 ---
 

@@ -36,6 +36,27 @@ def test_reversal_confirms_first_buy() -> None:
     assert result.price == 101.0
 
 
+def test_structure_ready_stays_put_without_a_closed_reversal() -> None:
+    """⚠️ 这条钉住的是「``alert``/``candidate`` 在生产路径上不可达」这个事实。
+
+    ``_advance`` 的分支里只有 ``previous.status == alert`` 才产出 ``candidate``，
+    而 ``assess_first_buy`` **从不**产出 ``alert`` —— 于是
+    ``structure_ready`` 在没有收盘确认的反向笔时只能原地不动，
+    生产路径上 ``status`` 的取值集合恒为
+    ``{structure_ready, confirmed, invalidated}``。
+
+    这不是「还没接线」的中间态，而是**现状**：``docs/pending-wiring.md`` 与
+    ``trade_api.py`` 都据此措辞。若将来真接上盘中反向 K 线（让它产出
+    ``alert``），这条会红 —— 那正是该改文档的信号。
+    """
+    stayed = transition_first_buy(
+        ready(), reversal_closed=False, structure_valid=True, event_time=200
+    )
+    assert stayed.status == "structure_ready"
+    assert stayed.alert_time is None
+    assert stayed.candidate_time is None
+
+
 def test_transition_preserves_and_advances_states() -> None:
     initial = ready()
     confirmed = transition_first_buy(

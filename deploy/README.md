@@ -1,5 +1,20 @@
 # CPT 本地 Dashboard 部署
 
+## 线上更新顺序（别跳步）
+
+线上有**两份** CPT 代码，改完各归各位，漏一步就是「接口对、页面旧」：
+
+| # | 动作 | 命令 | 漏了会怎样 |
+|---|---|---|---|
+| 1 | 拉代码 | `git pull --ff-only origin main` | — |
+| 2 | 跑门禁 | `python scripts/selftest_gates.py` | 把坏代码推上线 |
+| 3 | 重启 API | `sudo systemctl restart cpt-dashboard` | 后端仍是旧逻辑（Python 启动时一次性 import） |
+| 4 | **同步前端** | `deploy/dashboard-sync.sh` | **页面仍是旧的，而 API 看起来完全正常** |
+
+第 4 步是最容易漏的：nginx 服务的是 `/var/www/cpt-dashboard` 这份**独立副本**，
+`git pull` 碰不到它。**只做完 1~3 步时，从 API 层看不出任何异常**——2026-10-07
+复权倍率上线就是这么"部署完了但页面没变"的。详见下方「部署静态看板」。
+
 ## 手工起 API（调试用）
 
 在仓库根目录执行：
@@ -40,8 +55,36 @@ curl http://127.0.0.1:8010/api/dashboard/snapshot
 
 ## 部署静态看板
 
-Nginx 的静态根是 `/var/www/cpt-dashboard`（见 `deploy/nginx/cpt-dashboard.conf`）。
-更新前端 = 把 `dashboard/` 下的产物拷进去：
+Nginx 的静态根是 `/var/www/cpt-dashboard`（见 `deploy/nginx/cpt-dashboard.conf`）——
+**它是一份独立副本，不是仓库目录**。`git pull` **不会**更新它。
+
+### 用脚本（唯一推荐路径）
+
+```bash
+cd /home/ubuntu/DSH/Chan_Pattern_Trader
+deploy/dashboard-sync.sh              # 同步 + 逐文件 md5 校验
+deploy/dashboard-sync.sh --verify     # 只校验，不改（排查线上是否落后）
+deploy/dashboard-sync.sh --http       # 再通过 HTTPS 取一次线上文件，确认线上拿到的就是这份
+```
+
+⚠️ **改过任何 `dashboard/` 下的文件就必须跑它，否则等于没部署。**
+本节下面那段手工 `cp` 是**脚本的等价展开**（脚本就是这么做的），只在脚本不可用时
+才照着做——它没有校验，正是「以为部署了」和「真部署了」长得一样的原因。
+
+实测记录：**2026-10-07 复权倍率上线就踩了这个坑**——仓库 pull 了、API 重启了、
+接口实测也确实返回了 `price_ratio`，但页面上的倍率始终不出现。原因是
+`/var/www/cpt-dashboard/market_a_share.js` 还停在 10-06，`grep -c price_ratio` = 0。
+后端对、前端旧，这种组合从 API 层**完全看不出来**。补跑脚本后 17 个文件
+md5 全对、线上 HTTP 取到的字节与部署目录一致，才算真上线。
+
+排查这类「接口有、前端没有」的问题，第一条命令就是：
+
+```bash
+grep -c '<新字段名>' /var/www/cpt-dashboard/market_a_share.js   # 0 = 前端没部署
+```
+
+<details>
+<summary>手工等价做法（脚本不可用时）</summary>
 
 ```bash
 # R51 更正：R45 拆分后线上加载的是 dash-*.js + dashboard.bundle.js，
@@ -56,6 +99,8 @@ sudo cp -r dashboard/vendor /var/www/cpt-dashboard/
 .venv/bin/python scripts/build_dashboard_bundle.py
 ```
 
+</details>
+
 > ⚠️ **从 Windows 部署必须先归一化换行**（2026-10-02 R34 实测踩了两次）。
 > Windows 检出的 `dash-*.js` 是 **CRLF**，仓里的规范内容与服务器都是 **LF**
 > （`git ls-files --eol` → `i/lf w/crlf`）。不归一化的话：
@@ -64,8 +109,10 @@ sudo cp -r dashboard/vendor /var/www/cpt-dashboard/
 >   「线上落后 4,761 字节」，而 4,761 正好是 CRLF 行数）；
 > - 反过来，scp 上去的就是 CRLF 版，**真的**把偏离部署进了生产。
 >
+> `dashboard-sync.sh` 内部已做 `tr -d '\r'`，走脚本就不用操心这一条。
+>
 > ```bash
-> # 在开发机上先归一化再 scp，或在服务器上：
+> # 手工做时：在服务器上归一化
 > tr -d '\r' < dashboard.bundle.js.new > dashboard.bundle.lf.js
 > sudo install -m 644 -o ubuntu -g ubuntu dashboard.bundle.lf.js \
 >   /var/www/cpt-dashboard/dashboard.bundle.js
@@ -74,7 +121,7 @@ sudo cp -r dashboard/vendor /var/www/cpt-dashboard/
 > `install -m 644` 而不是 `cp`：09-29 那 3 次 `run6.sh` 的 403 就是文件被给成
 > 0600 造成的（`error.log`：`open() failed (13: Permission denied)`）。
 
-**权限用 `X`（大写），不要写 `chmod 644 *`**：
+**权限用 `X`（大写），不要写 `chmod 644 *`**（脚本已含 `chown`，手工做才需要）：
 
 ```bash
 sudo chown -R ubuntu:ubuntu /var/www/cpt-dashboard
@@ -87,7 +134,8 @@ sudo chmod -R u=rwX,go=rX /var/www/cpt-dashboard   # X = 只给目录加执行�
 而 HTML/CSS 看起来完全正常，很容易误判成"前端代码写错了"。
 `u=rwX,go=rX` 对文件给 `rw-r--r--`、对目录给 `drwxr-xr-x`，一次就对。
 
-改完后按文件名逐个 `diff -q` 确认与仓库一致（`vendor/` 也要比对），再刷新页面。
+改完**必须**按文件名逐个 `diff -q` 确认与仓库一致（`vendor/` 也要比对）再刷新页面
+——走脚本的话这个校验已经自动做了。
 
 ## systemd
 

@@ -3,9 +3,25 @@
 **状态：部分接线（R20 接线，2026-09-30；R21 扩展一卖）**——`assess_first_buy` /
 `assess_first_sell` 已由 :mod:`cpt.application.first_buy_bridge` 补算三结构事实，
 并接进 A 股主看板。
-**仍未接**：:func:`transition_first_buy` 的状态推进（需持久化信号历史）、``alert``
-状态（需盘中反向 K 线）、一卖 :func:`cpt.domain.first_buy.check_first_sell`、
-T+1 读取点。背景与保守口径见 ``docs/pending-wiring.md``。
+
+:func:`transition_first_buy` / :func:`transition_first_sell` 的状态推进**也已接**
+（``a_share_snapshot.py`` 的 ``_derive_first_buy_signal``，配
+``load_previous_signal`` / ``record_signal_event`` 做持久化）——R21 之前这里写的是
+「仍未接」，R21 之后没回头改，属于过期描述。
+
+**仍未接**，且要分清两种「没接」：
+
+- ``alert`` / ``candidate`` **不可达**（不是「待接线」）。``_advance`` 只有在
+  ``previous.status == alert`` 时才产出 ``candidate``，而 ``assess_first_buy``
+  从不产出 ``alert``；生产路径只在「有反向笔且收盘确认」时推进，于是
+  ``structure_ready`` 直接跳到 ``confirmed``。生产上 ``status`` 的取值集合恒为
+  ``{structure_ready, confirmed, invalidated}``。要真接上需要盘中反向 K 线，
+  由实时引擎标注 —— 那是**新增能力**，不是补线。
+  （``tests/test_signal.py::test_structure_ready_stays_put_without_a_closed_reversal``
+  钉住了这条。）
+- 一卖 :func:`cpt.domain.first_buy.check_first_sell`、T+1 读取点。
+
+背景与保守口径见 ``docs/pending-wiring.md``。
 
 三事实的**算**在这里之外：:mod:`cpt.application.first_buy_bridge` 负责把
 ``ZhongShu`` / ``Bi`` 翻译成本模块要的入参，口径说明见该模块 docstring。

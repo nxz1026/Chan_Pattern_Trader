@@ -65,8 +65,12 @@ DEFAULT_TRADE_DIR = "/home/ubuntu/trade_cpt"
 #:
 #: **当前定位是「接出来看得见」，不是「拿来真下单」。** 交易机侧保持不接
 #: （未设 ``GM_SOURCE=cpt`` 的实例，LKL-Trade 默认 dry 演练），所以这批决策
-#: 不会产生任何真实委托。要上实盘前请先把下面的白名单调回只有 ``confirmed``，
-#: 或先补上 ``transition_first_buy`` 的 ``alert``/``candidate`` 中间档。
+#: 不会产生任何真实委托。要上实盘前请先把下面的白名单调回只有 ``confirmed``。
+#:
+#: ⚠️ 别指望「等 ``alert``/``candidate`` 接上再上实盘」——那两个状态在生产路径上
+#: **不可达**（``assess_first_buy`` 从不产出 ``alert``，``_advance`` 只消费它），
+#: 生产 ``status`` 恒为 ``{structure_ready, confirmed, invalidated}``。真要那两档
+#: 得新增盘中反向 K 线的实时能力，不是补线。详见 ``docs/pending-wiring.md``。
 DEFAULT_TRADE_STATUSES: tuple[str, ...] = ("confirmed", "structure_ready")
 
 #: 建议股数。⚠️ LKL-Trade 目前**只支持市价单**（``OrderType_Market, price=0``），
