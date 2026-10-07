@@ -289,7 +289,12 @@ def load_trade_decisions(
     """
     if not statuses:
         return ()
-    params: list[Any] = [for_date, for_date, tuple(statuses), limit]
+    # ⚠️ 2026-10-07：statuses 必须包成 **list** 才能被 psycopg 适配成 PG 数组。
+    # 传 tuple 会被适配成 `('confirmed')` 这样的文本，`status = ANY($3)` 直接报
+    # ``malformed array literal: "(confirmed)"``。
+    # 这个坑很隐蔽：单元测试把 `_fetch_signals` 整个 mock 掉了，恰好绕开这一行，
+    # 只有真机调用才暴露 —— 所以下面 test_trade_decisions_sql_params 补了回归。
+    params: list[Any] = [for_date, for_date, list(statuses), limit]
     sql = """SELECT code, signal_type, status, level, price, signal_id,
                      transition_time, confirmed_time
               FROM public.cpt_signal_event

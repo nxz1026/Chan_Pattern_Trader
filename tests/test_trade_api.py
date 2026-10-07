@@ -236,3 +236,87 @@ def test_today_default_date_is_iso(trade_dir, monkeypatch):
     monkeypatch.setattr(trade_api, "_fetch_signals", lambda d: seen.append(d) or ())
     trade_api.handle_trade_decisions("")
     assert seen == [date.today().isoformat()]
+
+
+# ── 真机才暴露的那一层：SQL 参数的 psycopg 适配 ─────────────────────
+
+
+class _FakeCursor:
+    """记录 execute() 收到的 SQL 与 params，并返回可控的行。"""
+
+    def __init__(self, rows):
+        self._rows = rows
+        self.calls = []
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, sql, params):
+        self.calls.append((sql, params))
+
+    def fetchall(self):
+        return self._rows
+
+
+class _FakeConn:
+    def __init__(self, cur):
+        self._cur = cur
+
+    def cursor(self):
+        return self._cur
+
+
+def test_statuses_param_is_a_list_so_psycopg_builds_an_array():
+    """★回归：`status = ANY(%s)` 的参数必须是 **list**。
+
+    传 tuple 时 psycopg 适配成 `('confirmed')` 这样的**文本**，
+    真机直接报 ``malformed array literal: "(confirmed)"`` → 决策端点 503。
+
+    这个 bug 在 mock 掉 `_fetch_signals` 的单元测试里看不见——所以这里用假游标
+    把参数原样抓出来断言形状，而不是再 mock 一层。
+    """
+    from cpt.storage.signal_event_store import load_trade_decisions
+
+    cur = _FakeCursor(rows=())
+    load_trade_decisions(_FakeConn(cur), for_date="2026-10-08", statuses=("confirmed",))
+    sql, params = cur.calls[0]
+    assert "status = ANY(%s)" in sql
+    status_param = params[2]
+    assert isinstance(status_param, list), (
+        f"statuses 必须是 list（psycopg3 只把 list 适配成 PG 数组），实为 {type(status_param)}"
+    )
+    assert status_param == ["confirmed"]
+
+
+def test_empty_statuses_short_circuits_without_touching_the_db():
+    """空白名单直接短路——不该为了「什么都不发」去连一次库。"""
+    from cpt.storage.signal_event_store import load_trade_decisions
+
+    cur = _FakeCursor(rows=())
+    assert load_trade_decisions(_FakeConn(cur), for_date="2026-10-08", statuses=()) == ()
+    assert cur.calls == []
+
+
+def test_dedupes_same_code_and_type_within_the_day():
+    """同一 (code, signal_type) 当天多条跃迁只留最新的一条。
+
+    行序必须**模拟真实 SQL 的 ORDER BY transition_time DESC, id DESC**——
+    假游标不排序，所以这里喂的顺序就是「最新在前」。若误把最旧的喂在前，
+    去重就会保留旧状态，且测试照样绿——那正是这个 bug 的形态。
+    """
+    from cpt.storage.signal_event_store import load_trade_decisions
+
+    # 最新在前：sig-a 的 confirmed(ts=3) 早于其 structure_ready(ts=1)
+    rows = (
+        ("600519", "first_buy", "confirmed", 3, 99.0, "sig-b", 9, 9),
+        ("601988", "first_buy", "confirmed", 2, 10.6, "sig-a", 3, 3),
+        ("601988", "first_buy", "structure_ready", 2, 10.5, "sig-a", 1, None),
+    )
+    cur = _FakeCursor(rows=rows)
+    out = load_trade_decisions(_FakeConn(cur), for_date="2026-10-08", statuses=("confirmed",))
+    assert [r["signal_id"] for r in out] == ["sig-b", "sig-a"]
+    assert out[1]["status"] == "confirmed", "同 signal_id 必须保留最新状态"
+    assert out[1]["price"] == 10.6

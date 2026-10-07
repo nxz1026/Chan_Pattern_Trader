@@ -56,7 +56,7 @@
 
 | 层 | 文件 | 行数 | 复盘状态 |
 |---|---:|---:|---|
-| `storage/` | 8 | 2,127 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 门禁②；R24 只是恢复层+划边界，**不算复盘**。R57 补 `dashboard_run_store.prune`（保留期此前只存在于迁移注释，从未自动化）。2026-10-07 加 `signal_event_store.load_trade_decisions`（Trade API 决策取数）。详见 `docs/archive/reviews-r45.md`） |
+| `storage/` | 8 | 2,132 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 门禁②；R24 只是恢复层+划边界，**不算复盘**。R57 补 `dashboard_run_store.prune`（保留期此前只存在于迁移注释，从未自动化）。2026-10-07 加 `signal_event_store.load_trade_decisions`（Trade API 决策取数）。详见 `docs/archive/reviews-r45.md`） |
 | `llm/` | 8 | 1,370 | ✅ **已做**（R45：全层勘察 + 3 个真 bug —— 清空进程环境 / 归类撒谎 / 单例丢弃审计回调） |
 | `adapters/` | 21 | 6,522 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 外部契约真机验证脚本 `scripts/verify_public_contracts.py`；R52 加占位行守卫；顺带实测更正了 handoff 里 K 线缺口的量级） |
 | `application/` | 32 | 5,222 | ✅ **已做**（R45：全层勘察 + 3 个真 bug —— DB 故障被报成「缺因子」两处 + CDN 护栏后门；R51 删 `canvas_wbt.py`；R52 占位行 WARNING + `placeholder_rows` reason） |
