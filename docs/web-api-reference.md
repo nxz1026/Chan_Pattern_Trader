@@ -148,6 +148,10 @@ GET /api/dashboard/a-share/recommendation?code=600519[&level=1d]
 | `reason` | 依据（信号状态 / 背驰 / 参考价） |
 | `price` | **后复权价**（与快照同口径，用于核对结构） |
 | `raw_close` | **不复权收盘价** —— 前端显示的「参考价」用这个 |
+| `price_ratio` | **复权倍率** = 复权收盘价 ÷ 不复权收盘价，即那一天的后复权因子。
+  前端在参考价旁显示「复权 ×N」，用户可自己换算：图上/K 线上的复权价 = 真实价 × N。
+  逐股不同（累计分红送转），实测 600519 = 7.06、000002 = 307.90。
+  **判不出同一天时给 `null`**（见下） |
 | `history` | 信号历史 + **口径分组**（`legacy_count` / `current_count`）。
   数据来自 `cpt_signal_event`（R45 实测 49 行 / 40 只票 / 切表前 43 · 切表后 6）。
   口径切换点取自 `cpt_factor_epoch.switched_at` |
@@ -155,6 +159,14 @@ GET /api/dashboard/a-share/recommendation?code=600519[&level=1d]
 
 **为什么需要 `raw_close`**：快照里的 K 线是**后复权价**（茅台会显示 8886，
 实际约 1258）。给「买卖 + 价格」的面板一个挂不了单的数字是错的。
+
+**`price_ratio` 为什么可能为 `null`**：分子取**快照最后一根 K 线**的收盘价，
+分母取 `daily_bar` 的不复权收盘价 —— 两者**必须同一天**。但快照会**拒绝缺复权
+因子的那一天**（宁可少一天也不填 1.0 造假跳空），所以最新那天恰好缺因子时
+`candles[-1]` 会早于 `daily_bar` 的最新一行；跨日相除会把区间内的除权因子变化
+一起算进去，得出一个**看起来完全正常的错数**。此时一律给 `null`，前端隐藏倍率。
+另一个 `null` 来源是无信号：此时 `price` 是 `None`，但图表照样画后复权 K 线，
+所以分子必须取 K 线而不是 `price`。
 
 ## R45 新增：`POST /api/dashboard/a-share/llm/summarize`
 

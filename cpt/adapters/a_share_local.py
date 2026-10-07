@@ -80,6 +80,7 @@ __all__ = [
     "check_t_plus_one_calendar",
     "fetch_daily_tags",
     "fetch_factor_codes",
+    "fetch_latest_raw_bar",
     "fetch_latest_raw_close",
     "fetch_security_names",
     "hfq_factor_on",
@@ -403,6 +404,48 @@ def connection_kwargs() -> dict[str, Any]:
     return kwargs
 
 
+def fetch_latest_raw_bar(code: str) -> tuple[date, float] | None:
+    """不复权收盘价的**交易日 + 价格**（``public.daily_bar`` 最新一行）。
+
+    为什么在 :func:`fetch_latest_raw_close` 之外多这一个：算「后复权倍率」必须
+    **分子分母同一天**。快照的 K 线会**拒绝缺因子的那一天**（见本模块「缺口处理」，
+    拒绝而非填 1.0），所以 ``candles[-1]`` 未必是 ``daily_bar`` 的最新一天 ——
+    最新那天缺因子时，快照会退到前一天，而 :func:`fetch_latest_raw_close` 仍返回
+    最新那天。两天的后复权因子在除权日之间会变，相除得到的倍率是错的。
+
+    把日期一起带出来，调用方才能判定「确实是同一天」再相除；判不了就不给倍率。
+
+    拿不到（无 psycopg / DB 不可达 / 该代码无数据 / close 为 NULL）返回 ``None``，
+    **不抛** —— 理由同 :func:`fetch_latest_raw_close`。
+
+    # gate: allow-silent: 拿不到就**不给倍率**，不崩 —— 消费方
+    # ``cpt/web/a_share_routes.py`` 的 price_ratio 分支把 None 当**正常分支**
+    # （就是「今天没有倍率」），不会拿它冒充「有值但算错」。且本函数自己
+    # ``with psycopg.connect(...)`` 建连、用完即弃，**不复用调用方的连接**，
+    # 所以吞掉不会把同连接后续语句拖进 aborted 事务（那才是门禁担心的放大路径）。
+    """
+    try:
+        import psycopg  # noqa: PLC0415
+
+        with psycopg.connect(**connection_kwargs()) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT date, close FROM public.daily_bar WHERE code=%s ORDER BY date DESC LIMIT 1",
+                (code,),
+            )
+            row = cur.fetchone()
+        if not row or row[1] is None:
+            return None
+        trade_date = row[0]
+        # 列是 date 但驱动可能回 datetime / str，统统归一成 date。
+        if isinstance(trade_date, datetime):
+            trade_date = trade_date.date()
+        elif isinstance(trade_date, str):
+            trade_date = date.fromisoformat(trade_date)
+        return trade_date, float(row[1])
+    except Exception:  # noqa: BLE001 — 拿不到就不给倍率，不崩
+        return None
+
+
 def fetch_latest_raw_close(code: str) -> float | None:
     """不复权收盘价（``public.daily_bar.close``，未复权）。
 
@@ -415,26 +458,10 @@ def fetch_latest_raw_close(code: str) -> float | None:
     拿不到（无 psycopg / DB 不可达 / 该代码无数据）返回 ``None``，**不抛**：
     调用方会退回后复权价。
 
-    # gate: allow-silent: 拿不到就退回后复权价，不崩 —— 与
-    # ``cpt/web/a_share_routes.py:154`` 的调用点契约一致：那里的消费方
-    # ``_summarize`` 显式写了 ``rec.get("raw_close") if ... is not None
-    # else rec.get("price")``，``None`` 是**被处理的正常分支**而非故障。
-    # 且本函数自己 ``with psycopg.connect(...)`` 开连接、用完即弃，
-    # **不复用调用方的连接**，所以吞掉不会把同连接后续语句拖进
-    # aborted 事务（那才是门禁担心的放大路径）。
+    实现在 :func:`fetch_latest_raw_bar`（那把交易日一起带回来）—— 本函数只要价格。
     """
-    try:
-        import psycopg  # noqa: PLC0415
-
-        with psycopg.connect(**connection_kwargs()) as conn, conn.cursor() as cur:
-            cur.execute(
-                "SELECT close FROM public.daily_bar WHERE code=%s ORDER BY date DESC LIMIT 1",
-                (code,),
-            )
-            row = cur.fetchone()
-        return float(row[0]) if row and row[0] is not None else None
-    except Exception:  # noqa: BLE001 — 拿不到就退回后复权价，不崩
-        return None
+    bar = fetch_latest_raw_bar(code)
+    return bar[1] if bar is not None else None
 
 
 class AShareLocalError(RuntimeError):

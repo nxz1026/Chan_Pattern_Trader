@@ -13,7 +13,7 @@ from __future__ import annotations
 import json
 import urllib.error
 import urllib.request
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -599,3 +599,90 @@ def test_fetch_security_names_empty_input_does_not_connect() -> None:
         raise AssertionError("不该建连接")
 
     assert fetch_security_names([], conn_factory=_boom) == {}
+
+
+# ── 复权倍率：分子分母必须**同一天** ────────────────────────────────
+# 后复权倍率 = 后复权收盘价 ÷ 不复权收盘价，看上去是个纯算术。真正的坑在
+# 两个价**未必来自同一天**：快照的 K 线会拒绝缺因子的那一天（宁可少一天也不填
+# 1.0 造假跳空），而 ``_raw_bar_for`` 取的是 daily_bar 的最新一行。
+# 最新那天恰好缺因子时，candles[-1] 早了一天，相除出来的倍率把区间内的除权
+# 因子变化也算了进去 —— 数字看着合理，其实错的。所以判不出同一天就不给倍率。
+
+#: 2026-09-30 09:30 CST == 01:30 UTC（快照的 open_time 就是开盘时刻）
+_OPEN_0930 = int(datetime(2026, 9, 30, 1, 30, tzinfo=UTC).timestamp() * 1000)
+_OPEN_0929 = int(datetime(2026, 9, 29, 1, 30, tzinfo=UTC).timestamp() * 1000)
+
+
+def _ratio_site(monkeypatch, *, open_time, adj_close, raw_day, raw_close):
+    """搭出 ``build_recommendation`` 的最小现场（全程离线，不碰 DB）。"""
+    monkeypatch.setattr(
+        a_share_routes,
+        "snapshot_payload",
+        lambda code: {"candles": [{"close": adj_close, "open_time": open_time}] * 30},
+    )
+    monkeypatch.setattr(
+        a_share_routes,
+        "_raw_bar_for",
+        lambda code: None if raw_day is None else (raw_day, raw_close),
+    )
+    monkeypatch.setattr(a_share_routes, "_signal_history", lambda code: {})
+    monkeypatch.setattr(a_share_routes, "_persist_recommendation", lambda *a: None)
+    return a_share_routes.build_recommendation("600519")
+
+
+def test_price_ratio_is_that_days_hfq_factor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同日时倍率就是**那一天的后复权因子**（实测 1258.62 x 7.06053932 = 8886.54）。"""
+    rec = _ratio_site(
+        monkeypatch,
+        open_time=_OPEN_0930,
+        adj_close=8886.54,
+        raw_day=date(2026, 9, 30),
+        raw_close=1258.62,
+    )
+    assert rec["raw_close"] == 1258.62
+    assert rec["price_ratio"] == round(8886.54 / 1258.62, 4)
+
+
+def test_price_ratio_is_none_when_the_two_days_differ(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⚠️ 核心守卫：**跨日绝不给数**。最新那天缺因子 → 快照退到前一天。
+
+    去掉日期校验这里就会拿到 7.0605 —— 一个看起来完全正常的错数。
+    """
+    rec = _ratio_site(
+        monkeypatch,
+        open_time=_OPEN_0929,
+        adj_close=8886.54,
+        raw_day=date(2026, 9, 30),
+        raw_close=1258.62,
+    )
+    assert rec["raw_close"] == 1258.62
+    assert rec["price_ratio"] is None
+
+
+def test_price_ratio_is_none_without_open_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """K 线没有 ``open_time`` ⇒ 判不出是哪天 ⇒ 不给倍率（而不是猜最新一根）。"""
+    rec = _ratio_site(
+        monkeypatch, open_time=None, adj_close=8886.54, raw_day=date(2026, 9, 30), raw_close=1258.62
+    )
+    assert rec["price_ratio"] is None
+
+
+def test_price_ratio_is_none_when_db_has_no_row(monkeypatch: pytest.MonkeyPatch) -> None:
+    """DB 读不到不复权价（``None``）⇒ 不做除法，且 ``raw_close`` 保持 None 让前端回退。"""
+    rec = _ratio_site(
+        monkeypatch, open_time=_OPEN_0930, adj_close=8886.54, raw_day=None, raw_close=None
+    )
+    assert rec["raw_close"] is None
+    assert rec["price_ratio"] is None
+
+
+def test_price_ratio_is_none_for_placeholder_close_zero(monkeypatch: pytest.MonkeyPatch) -> None:
+    """占位行 close=0（R52 实测上游写出过）⇒ 不除，零会让倍率变成 inf/异常。"""
+    rec = _ratio_site(
+        monkeypatch,
+        open_time=_OPEN_0930,
+        adj_close=8886.54,
+        raw_day=date(2026, 9, 30),
+        raw_close=0.0,
+    )
+    assert rec["price_ratio"] is None

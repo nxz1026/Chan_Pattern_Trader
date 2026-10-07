@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import logging
 import os
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -151,15 +151,41 @@ def build_recommendation(
     # 给的是后复权价，等于给了一个他下不了单的数字。
     # ⇒ 补一个**不复权收盘价**（raw_close）作为可执行参考价，
     #    后复权价保留在 raw 里以备核对。
-    out["raw_close"] = _raw_close(_normalize(code))
+    _bar = _raw_bar_for(_normalize(code))
+    _raw_day, _raw = _bar if _bar is not None else (None, None)
+    out["raw_close"] = _raw
     # 复权倍率 = 后复权价 ÷ 不复权收盘价。用户能自己换算：
     #   真实可成交价 = 显示价；图上/K 线上的复权价 = 真实价 × 倍率。
-    # 2026-10-07 实测：600519 8886.54 / 1258.62 = 7.06；
-    #                 000002 1311.70 / 4.26 = 307.9（送转频繁）。
-    # 倍率是**逐股**的（累计分红送转），所以必须现算，不能写死在文档里。
-    _adj, _raw = out.get("price"), out.get("raw_close")
-    if isinstance(_adj, int | float) and isinstance(_raw, int | float) and _raw > 0:
-        out["price_ratio"] = round(float(_adj) / float(_raw), 4)
+    # 2026-10-07 实测：600519 1258.62 x 因子 7.06053932 = 8886.54；
+    #                 000002 4.26 x 307.90 = 1311.70（送转频繁）。
+    # 倍率**就是那一天的后复权因子**，逐股不同（累计分红送转），必须现算。
+    #
+    # ⚠️ 分子取**快照最后一根 K 线的 close**，不是 ``out["price"]``：
+    # 无信号时 ``price`` 是 None（走 _degraded），而图表照样在画后复权 K 线——
+    # 那种情况下卡片说「参考价 4.26」、图上是 1311.70，没有倍率就成了纯误导。
+    #
+    # ⚠️ 分子还必须与 ``raw_close`` **同一天**才相除：快照会**拒绝缺因子的那一天**
+    # （a_share_local「缺口处理」是拒绝而非填 1.0），所以 candles[-1] 可能早于
+    # daily_bar 的最新一行 —— 跨日相除会把区间内的除权因子变化算进倍率里。
+    # 判不出同一天就**不给倍率**，绝不给一个看着像真的错数。
+    _candles = payload.get("candles") if isinstance(payload, dict) else None
+    _last = _candles[-1] if isinstance(_candles, list) and _candles else None
+    _adj_chart: float | None = None
+    _last_day: date | None = None
+    if isinstance(_last, dict):
+        try:
+            _adj_chart = float(_last["close"])
+            _last_day = datetime.fromtimestamp(_last["open_time"] / 1000, tz=UTC).date()
+        except (KeyError, TypeError, ValueError):
+            _adj_chart, _last_day = None, None
+    if (
+        _adj_chart
+        and isinstance(_raw, int | float)
+        and _raw > 0
+        and _last_day is not None
+        and _last_day == _raw_day
+    ):
+        out["price_ratio"] = round(_adj_chart / float(_raw), 4)
     else:
         out["price_ratio"] = None
     out["history"] = _signal_history(_normalize(code))
@@ -369,17 +395,19 @@ def submit_llm_summarize(code: str, rec: dict[str, Any]) -> dict[str, Any]:
             client.close()
 
 
-def _raw_close(code: str) -> float | None:
-    """不复权收盘价（``public.daily_bar.close``，未复权）。
+def _raw_bar_for(code: str) -> tuple[date, float] | None:
+    """不复权收盘价的 ``(交易日, 价格)``；拿不到返回 ``None``（**不抛**）。
 
     与快照的 ``candles[-1].close`` **口径不同**，别混用：
     快照那份是后复权价，用于画图（复权后价格连续，结构才连得上）。
+
+    要带着交易日，是因为算复权倍率必须**分子分母同一天**；只拿价格就判不了。
     """
     # R46：SQL 下沉到 adapters.a_share_local（web 层不再直接写 SQL，
     # 过 scripts/check_sql_layering.py 分层门禁）。
-    from cpt.adapters.a_share_local import fetch_latest_raw_close  # noqa: PLC0415
+    from cpt.adapters.a_share_local import fetch_latest_raw_bar  # noqa: PLC0415
 
-    return fetch_latest_raw_close(code)
+    return fetch_latest_raw_bar(code)
 
 
 def _factor_codes() -> set[str]:

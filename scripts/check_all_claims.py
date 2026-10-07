@@ -422,8 +422,14 @@ def main(argv: list[str] | None = None) -> int:
                 # ⚠️ 第一版对**每个**行号引用都跑一次 ``ROOT.rglob(fn)`` 全仓遍历 ——
                 # 实测单这一类就吃掉 100+ 秒（40 份文档 × 几十处引用 × 全仓 walk）。
                 # ⇒ 文件名 → 行数**建一次索引**，之后 O(1) 查。
+                # ⚠️ 这段 ``rglob`` **必须**过 SKIP_DIRS（本脚本其余每一处遍历都过了）。
+                # 漏掉时：本仓不存在的跨仓引用（如 ``data/loader.py:164``，那其实是
+                # emotion-core 的路径）会因为本机 ``.venv`` 里**恰好有个同名文件**而被
+                # 判成「行号越界」。CI 直接 pip install 不建 venv 所以看不出来，
+                # 但任何本地建了 venv 的开发机都会红 —— 结论还取决于装了哪个包，
+                # 比假阳性更糟的是它让「全绿」这件事变得不可复现。
                 if fn not in _linecount:
-                    hits = list(ROOT.rglob(fn))
+                    hits = [h for h in ROOT.rglob(fn) if not any(x in SKIP_DIRS for x in h.parts)]
                     if not hits:
                         _linecount[fn] = -1
                     else:
