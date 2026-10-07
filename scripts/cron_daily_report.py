@@ -43,6 +43,7 @@ import datetime as dt
 import logging
 import os
 import re
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any, Final
@@ -120,39 +121,42 @@ def _shared_table_problems() -> tuple[list[str], list[str]]:
 
     2026-10-07 实测：Oracle 上 ``emotion-core-daily``/``-strategy`` 都是
     inactive，**没有任何东西会写那 7 张表**。CPT 自己的 A 股快照能算出
-    ``data_quality.severity``，但那是给人看��� —— 没人盯面板就等于没有。
+    ``data_quality.severity``，但那是给人看的 —— 没人盯面板就等于没有。
     ⇒ 这里把「上游断了」变成一条会发飞书的失败。
 
-    契约见 ``docs/shared-tables-contract.md``；判定逻辑与退出码语义在
-    ``scripts/check_shared_tables.py``（0 新鲜 / 1 过期 / 2 查不到）。
-    「查不到」也算问题 —— 无法验证 ≠ 一切正常。
+    ## 为什么是**子进程**而不是 import
+
+    ``scripts/`` 没有 ``__init__.py``，而 ``mypy cpt scripts`` 把这里的每个
+    文件当**顶层模块**（``check_shared_tables``）。日报一旦写
+    ``from scripts import check_shared_tables``，同一个文件就有了第二个模块名
+    （``scripts.check_shared_tables``），mypy 直接报 ``Source file found twice
+    under different module names``。加 ``__init__.py`` 会改掉所有门禁脚本的
+    导入语义（牵连面大）；而按**退出码**调用本来就是这里的设计
+    （0 新鲜 / 1 过期 / 2 查不到），子进程把这条边界表达得更干净，
+    也不用在导入期碰 DB。
     """
+    script = Path(__file__).resolve().parent / "check_shared_tables.py"
+    if not script.exists():
+        return [f"共享表检查脚本缺失: {script}"], []
     try:
-        from scripts import check_shared_tables as cst
+        proc = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
     except Exception as exc:  # noqa: BLE001
-        return [f"共享表检查无法导入: {type(exc).__name__}: {exc}"], []
+        return [f"共享表检查执行失败: {type(exc).__name__}: {exc}"], []
 
-    try:
-        import psycopg
-        from cpt.adapters._dbconfig import connection_kwargs
-    except Exception as exc:  # noqa: BLE001
-        return [f"共享表检查缺依赖: {type(exc).__name__}: {exc}"], []
-
-    try:
-        conn = psycopg.connect(**connection_kwargs())
-    except Exception as exc:  # noqa: BLE001
-        return [f"共享表检查连不上库: {type(exc).__name__}: {exc}"], []
-    try:
-        problems, lines, expected = cst.check(conn)
-    except Exception as exc:  # noqa: BLE001
-        return [f"共享表检查查询失败: {type(exc).__name__}: {exc}"], []
-    finally:
-        conn.close()
-
-    detail = [f"共享表（期望交易日 {expected}）：", *lines]
-    if problems:
-        return [f"共享表不新鲜：{p}" for p in problems], detail
-    return [], detail
+    blob = (proc.stdout + proc.stderr).strip()
+    detail = ["共享表检查：", *blob.splitlines()] if blob else []
+    if proc.returncode == 0:
+        return [], detail
+    label = {1: "不新鲜", 2: "无法验证（连不上库或查询出错）"}.get(
+        proc.returncode, f"退出码 {proc.returncode}"
+    )
+    return [f"共享表检查失败：{label}"], detail
 
 
 def build_report(hours: int, logs_dir: str | None = None) -> dict[str, Any]:

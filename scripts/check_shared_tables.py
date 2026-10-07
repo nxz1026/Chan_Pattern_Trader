@@ -42,7 +42,7 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import sys
-from typing import Final
+from typing import Any, Final
 from zoneinfo import ZoneInfo
 
 #: A 股收盘时刻（北京时间）。收盘**前**不算「今天应该有数据」。
@@ -82,7 +82,7 @@ def expected_trade_day(now: dt.datetime, calendar: list[tuple[dt.date, bool]]) -
     return open_days[-2] if len(open_days) >= 2 else open_days[-1]
 
 
-def check(conn) -> tuple[list[str], list[str], dt.date | None]:
+def check(conn: Any) -> tuple[list[str], list[str], dt.date | None]:
     """返回 (问题列表, 状态行列表, 期望交易日)。"""
     problems: list[str] = []
     lines: list[str] = []
