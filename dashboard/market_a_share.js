@@ -367,9 +367,17 @@
           // ⚠️ 优先显示**不复权价** —— 快照里的 candles 是后复权价
           // （600519 会显示 8886，而实际约 1400），给用户当「参考价」是挂不了单的。
           const shown = rec.raw_close != null ? rec.raw_close : rec.price;
+          // 复权倍率**逐股不同**（累计分红送转），现算不给。只在「显示的是
+          // 不复权价、且确实存在复权价」时提示——否则用户会以为有东西要换算。
+          const ratio = (rec.raw_close != null && rec.price_ratio)
+            ? `（复权 ×${Number(rec.price_ratio).toFixed(2)}）`
+            : "";
           priceEl.textContent = shown == null
             ? "参考价 —"
-            : `参考价 ${formatPrice(shown)}`;
+            : `参考价 ${formatPrice(shown)}${ratio}`;
+          priceEl.title = ratio
+            ? `图表 K 线为后复权价 = 真实价 ×${Number(rec.price_ratio).toFixed(2)}`
+            : "";
         }
         headEl.textContent = rec.headline || "";
         if (reasonEl) reasonEl.textContent = rec.reason || "";

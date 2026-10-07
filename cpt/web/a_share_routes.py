@@ -152,6 +152,16 @@ def build_recommendation(
     # ⇒ 补一个**不复权收盘价**（raw_close）作为可执行参考价，
     #    后复权价保留在 raw 里以备核对。
     out["raw_close"] = _raw_close(_normalize(code))
+    # 复权倍率 = 后复权价 ÷ 不复权收盘价。用户能自己换算：
+    #   真实可成交价 = 显示价；图上/K 线上的复权价 = 真实价 × 倍率。
+    # 2026-10-07 实测：600519 8886.54 / 1258.62 = 7.06；
+    #                 000002 1311.70 / 4.26 = 307.9（送转频繁）。
+    # 倍率是**逐股**的（累计分红送转），所以必须现算，不能写死在文档里。
+    _adj, _raw = out.get("price"), out.get("raw_close")
+    if isinstance(_adj, int | float) and isinstance(_raw, int | float) and _raw > 0:
+        out["price_ratio"] = round(float(_adj) / float(_raw), 4)
+    else:
+        out["price_ratio"] = None
     out["history"] = _signal_history(_normalize(code))
     out["level"] = level or ""
 
