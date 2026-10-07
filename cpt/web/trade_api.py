@@ -52,13 +52,22 @@ DEFAULT_TRADE_DIR = "/home/ubuntu/trade_cpt"
 
 #: 允许进入决策批次的状态白名单。
 #:
-#: ⚠️ **默认只放 ``confirmed``**——这是「策略已经确认」的状态。2026-07 实测：
-#: ``first_buy`` 有 11 条停在 ``structure_ready``（结构形成，尚未确认）、
-#: 26 条已 ``invalidated``，**0 条 confirmed**。所以默认口径下**今天一单也不会发**。
+#: ⚠️ **为什么含 ``structure_ready``**：`confirmed`（反向笔已确认）在真实数据上
+#: **一买历史 0 条**，只用它的话端点永远返回空 actions，接通了也看不到东西。
+#: ``structure_ready`` 是「两个中枢 + 背驰段成立、方向向下」，是当前唯一能产出
+#: 买入决策的状态（2026-09-30 实测 11 条）。
 #:
-#: 要放宽到 ``structure_ready``（更早介入、更多信号）请显式设环境变量
-#: ``CPT_TRADE_BUY_STATUSES``，并清楚知道那是在「结构刚成形」时真金白银买入。
-DEFAULT_TRADE_STATUSES: tuple[str, ...] = ("confirmed",)
+#: ⚠️ **它的代价（必须知道再上实盘）**：``structure_ready`` 到 ``confirmed`` 之间
+#: 还隔着反向笔，而反向笔的门槛在这批数据上从未达成——历史上到达过
+#: ``structure_ready`` 的 9 个 signal_id，**8 个最终转 ``invalidated``**（约 89%）。
+#: 叠加 A 股 T+1（当日买入不可卖），按 ``structure_ready`` 买入意味着相当一部分
+#: 会被套至少一个交易日。
+#:
+#: **当前定位是「接出来看得见」，不是「拿来真下单」。** 交易机侧保持不接
+#: （未设 ``GM_SOURCE=cpt`` 的实例，LKL-Trade 默认 dry 演练），所以这批决策
+#: 不会产生任何真实委托。要上实盘前请先把下面的白名单调回只有 ``confirmed``，
+#: 或先补上 ``transition_first_buy`` 的 ``alert``/``candidate`` 中间档。
+DEFAULT_TRADE_STATUSES: tuple[str, ...] = ("confirmed", "structure_ready")
 
 #: 建议股数。⚠️ LKL-Trade 目前**只支持市价单**（``OrderType_Market, price=0``），
 #: 所以这里的 ``price`` 只能进 ``reason`` 供审计，**不会**成为委托价。

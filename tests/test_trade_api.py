@@ -45,10 +45,32 @@ def _row(code="601988", signal_type="first_buy", status="confirmed", price=10.5)
 # ── 状态白名单 ──────────────────────────────────────────────────────
 
 
-def test_default_statuses_are_confirmed_only():
-    """默认只认 confirmed —— 口径未由 owner 定案前，不得放宽。"""
-    assert trade_api.DEFAULT_TRADE_STATUSES == ("confirmed",)
-    assert trade_api._statuses() == ("confirmed",)
+def test_default_statuses_include_structure_ready():
+    """默认含 structure_ready —— 否则 confirmed 在真实数据上是 0 条，端点永远空。
+
+    ⚠️ 同时把它的代价钉在这里：structure_ready 到 confirmed 隔着反向笔，
+    历史上到达过该状态的 9 个 signal_id 里 8 个最终 invalidated（约 89%），
+    且 A股 T+1 下当日买入不可卖。**这是「接出来看得见」的口径，不是实盘口径。**
+    """
+    assert trade_api.DEFAULT_TRADE_STATUSES == ("confirmed", "structure_ready")
+    assert trade_api._statuses() == ("confirmed", "structure_ready")
+
+
+def test_structure_ready_emits_a_buy_decision(trade_dir, monkeypatch):
+    """结构就绪 → BUY/OPEN_POS，且能看得到（这是本轮的核心诉求）。"""
+    monkeypatch.setattr(
+        trade_api,
+        "_fetch_signals",
+        lambda d: (
+            _row(code="000011", signal_type="first_buy", status="structure_ready"),
+            _row(code="600519", signal_type="first_buy", status="structure_ready"),
+        ),
+    )
+    payload, status = trade_api.handle_trade_decisions("date=2026-09-30")
+    assert status == 200
+    assert payload["batch_id"], "有买入信号时必须生成 batch_id"
+    assert [a["code"] for a in payload["actions"]] == ["000011", "600519"]
+    assert all(a["action"] == "BUY" and a["exec"] == "OPEN_POS" for a in payload["actions"])
 
 
 def test_statuses_env_overrides(monkeypatch):
@@ -59,7 +81,7 @@ def test_statuses_env_overrides(monkeypatch):
 def test_empty_statuses_env_falls_back_to_default(monkeypatch):
     """配错成空串时回到默认值，而不是「什么都不发」以外的第三种行为。"""
     monkeypatch.setenv("CPT_TRADE_BUY_STATUSES", "  ")
-    assert trade_api._statuses() == ("confirmed",)
+    assert trade_api._statuses() == ("confirmed", "structure_ready")
 
 
 # ── 动作映射 ────────────────────────────────────────────────────────
@@ -220,7 +242,7 @@ def test_health_reports_source_identity(trade_dir):
     assert status == 200
     assert got["source"] == "cpt"
     assert got["service"] == "cpt_trade_api"
-    assert got["statuses"] == ["confirmed"]
+    assert got["statuses"] == ["confirmed", "structure_ready"]
 
 
 def test_corrupt_state_raises_rather_than_silent_reset(trade_dir):
