@@ -1335,6 +1335,10 @@ def make_handler(
             self.wfile.write(encoded)
 
         def do_POST(self) -> None:  # noqa: N802
+            # Trade 回执先于 A 股写路由判定：两者路径前缀不重叠，顺序无关，
+            # 但放在前面是为了让「Trade API 只 POST 一个端点」这件事在代码上一眼可见。
+            if self._handle_trade_post():
+                return
             if self._handle_a_share_write("POST"):
                 return
             self._write_json_error(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed", "")
