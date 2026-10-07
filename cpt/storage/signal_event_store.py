@@ -317,16 +317,18 @@ def load_trade_decisions(
         if key in seen:
             continue
         seen.add(key)
-        out.append({
-            "code": str(code),
-            "signal_type": str(signal_type),
-            "status": str(status),
-            "level": level,
-            "price": price,
-            "signal_id": signal_id,
-            "transition_time": ts,
-            "confirmed_time": confirmed,
-        })
+        out.append(
+            {
+                "code": str(code),
+                "signal_type": str(signal_type),
+                "status": str(status),
+                "level": level,
+                "price": price,
+                "signal_id": signal_id,
+                "transition_time": ts,
+                "confirmed_time": confirmed,
+            }
+        )
     return tuple(out)
 
 

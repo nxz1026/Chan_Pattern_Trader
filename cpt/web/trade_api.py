@@ -150,13 +150,15 @@ def _build_actions(rows: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
         if price is not None:
             # 只作审计信息：交易机目前只发市价单，price 不会成为委托价。
             reason = f"{reason} 参考价{float(price):.2f}" if reason else f"参考价{float(price):.2f}"
-        actions.append({
-            "code": str(row["code"]).zfill(6),
-            "action": action,
-            "exec": exec_,
-            "volume": _volume(),
-            "reason": reason,
-        })
+        actions.append(
+            {
+                "code": str(row["code"]).zfill(6),
+                "action": action,
+                "exec": exec_,
+                "volume": _volume(),
+                "reason": reason,
+            }
+        )
     return actions
 
 

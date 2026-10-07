@@ -11,6 +11,7 @@
 3. **「读不到」与「今天没信号」必须分开**：读不到回 503 + 明确错误，
    不能回一个空 actions 让交易机以为「今天没信号」而安静地什么都不做。
 """
+
 from __future__ import annotations
 
 from datetime import date
@@ -43,6 +44,7 @@ def _row(code="601988", signal_type="first_buy", status="confirmed", price=10.5)
 
 # ── 状态白名单 ──────────────────────────────────────────────────────
 
+
 def test_default_statuses_are_confirmed_only():
     """默认只认 confirmed —— 口径未由 owner 定案前，不得放宽。"""
     assert trade_api.DEFAULT_TRADE_STATUSES == ("confirmed",)
@@ -62,6 +64,7 @@ def test_empty_statuses_env_falls_back_to_default(monkeypatch):
 
 # ── 动作映射 ────────────────────────────────────────────────────────
 
+
 def test_first_buy_maps_to_open_pos(trade_dir, monkeypatch):
     monkeypatch.setattr(trade_api, "_fetch_signals", lambda d: (_row(),))
     payload, status = trade_api.handle_trade_decisions("date=2026-10-08")
@@ -77,8 +80,9 @@ def test_first_buy_maps_to_open_pos(trade_dir, monkeypatch):
 
 
 def test_first_sell_maps_to_close_all(trade_dir, monkeypatch):
-    monkeypatch.setattr(trade_api, "_fetch_signals",
-                        lambda d: (_row(code="600519", signal_type="first_sell"),))
+    monkeypatch.setattr(
+        trade_api, "_fetch_signals", lambda d: (_row(code="600519", signal_type="first_sell"),)
+    )
     payload, _ = trade_api.handle_trade_decisions("date=2026-10-08")
     (action,) = payload["actions"]
     assert action["action"] == "SELL"
@@ -87,8 +91,7 @@ def test_first_sell_maps_to_close_all(trade_dir, monkeypatch):
 
 def test_unknown_signal_type_is_skipped_not_guessed(trade_dir, monkeypatch):
     """★未知类型必须跳过——猜错就是把「不是买点」当买点发出去。"""
-    monkeypatch.setattr(trade_api, "_fetch_signals",
-                        lambda d: (_row(signal_type="third_buy"),))
+    monkeypatch.setattr(trade_api, "_fetch_signals", lambda d: (_row(signal_type="third_buy"),))
     payload, status = trade_api.handle_trade_decisions("date=2026-10-08")
     assert status == 200
     assert payload["actions"] == []
@@ -98,7 +101,8 @@ def test_unknown_signal_type_is_skipped_not_guessed(trade_dir, monkeypatch):
 def test_same_code_two_types_both_kept(trade_dir, monkeypatch):
     """同一只票同日的「一买 + 一卖」是两条不同信号，都要投喂。"""
     monkeypatch.setattr(
-        trade_api, "_fetch_signals",
+        trade_api,
+        "_fetch_signals",
         lambda d: (_row(signal_type="first_buy"), _row(signal_type="first_sell")),
     )
     payload, _ = trade_api.handle_trade_decisions("date=2026-10-08")
@@ -122,6 +126,7 @@ def test_volume_env_overrides(trade_dir, monkeypatch):
 
 
 # ── 缓存与幂等 ──────────────────────────────────────────────────────
+
 
 def test_decisions_are_cached_per_date(trade_dir, monkeypatch):
     calls = []
@@ -148,12 +153,14 @@ def test_state_file_is_not_shared_with_emotion_core(trade_dir, monkeypatch):
 
 # ── 「读不到」vs「今天没信号」 ────────────────────────────────────────
 
+
 def test_source_unavailable_returns_503_not_empty_actions(trade_dir, monkeypatch):
     """★库读不到必须回 503 + 明确错误，绝不能回空 actions。
 
     回空 actions 时交易机会认为「今天没信号」而安静地什么都不做——
     故障被伪装成正常，是这类接口最危险的失败形态。
     """
+
     def boom(for_date):
         raise RuntimeError("connection refused")
 
@@ -179,9 +186,13 @@ def test_invalid_date_returns_400(trade_dir, monkeypatch):
 
 # ── 回执 ────────────────────────────────────────────────────────────
 
+
 def test_results_posted_and_idempotent(trade_dir):
-    payload = {"batch_id": "b-1", "for_date": "2026-10-08",
-               "trades": [{"code": "601988", "status": "FILLED"}]}
+    payload = {
+        "batch_id": "b-1",
+        "for_date": "2026-10-08",
+        "trades": [{"code": "601988", "status": "FILLED"}],
+    }
     first, status = trade_api.handle_trade_results_post(payload)
     assert status == 200 and first["status"] == "ok"
     # 幂等：同一 batch 再来一次，不产生第二个文件
@@ -222,7 +233,6 @@ def test_corrupt_state_raises_rather_than_silent_reset(trade_dir):
 
 def test_today_default_date_is_iso(trade_dir, monkeypatch):
     seen = []
-    monkeypatch.setattr(trade_api, "_fetch_signals",
-                        lambda d: seen.append(d) or ())
+    monkeypatch.setattr(trade_api, "_fetch_signals", lambda d: seen.append(d) or ())
     trade_api.handle_trade_decisions("")
     assert seen == [date.today().isoformat()]
