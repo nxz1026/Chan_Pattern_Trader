@@ -54,10 +54,27 @@ OCT_2026: list[tuple[dt.date, bool]] = [
 ]
 
 
-def test_trading_day_after_close_expects_today() -> None:
-    """交易日收盘后 ⇒ 期望就是今天。"""
-    got = cst.expected_trade_day(_at(2026, 10, 8, 16, 0), OCT_2026)
-    assert got == dt.date(2026, 10, 8)
+def test_trading_day_after_upstream_run_expects_today() -> None:
+    """交易日 + **上游跑完之后** ⇒ 期望就是今天。
+
+    ⚠️ 2026-10-07 更正：原先写的是「收盘后（16:00）就期待今天」，那**漏了上游**
+    —— 共享表由 emotion-core 的盘后 pipeline（17:20 北京）写入，收盘（15:00）
+    到它跑之间「今天该有数据」是**错的**。按旧规则，日报排在 15:00 时
+    **每个交易日都会报一次假警**。
+    """
+    assert cst.expected_trade_day(_at(2026, 10, 8, 18, 0), OCT_2026) == dt.date(2026, 10, 8)
+
+
+def test_close_is_not_enough_upstream_must_have_run() -> None:
+    """边界钉在上游执行时刻（17:20），**不是**收盘时刻（15:00）。
+
+    收盘后到上游跑之间，今天的数据本来就不存在 —— 这一段判「陈旧」就是假警，
+    而假警比漏警更毒（一周内就没人看这个检查了）。
+    """
+    cal = [(dt.date(2026, 10, 7), True), (dt.date(2026, 10, 8), True)]
+    assert cst.expected_trade_day(_at(2026, 10, 8, 15, 0), cal) == dt.date(2026, 10, 7)
+    assert cst.expected_trade_day(_at(2026, 10, 8, 17, 19), cal) == dt.date(2026, 10, 7)
+    assert cst.expected_trade_day(_at(2026, 10, 8, 17, 20), cal) == dt.date(2026, 10, 8)
 
 
 def test_trading_day_before_close_expects_previous() -> None:
@@ -78,11 +95,14 @@ def test_trading_day_before_close_expects_previous() -> None:
     assert cst.expected_trade_day(_at(2026, 10, 8, 10, 0), cal) == dt.date(2026, 10, 7)
 
 
-def test_exactly_at_close_counts_as_passed() -> None:
-    """15:00 整算「已收盘」—— 收盘数据此刻才刚开始进库，早一秒会误报。"""
-    cal = [(dt.date(2026, 10, 7), True), (dt.date(2026, 10, 8), True)]
-    assert cst.expected_trade_day(_at(2026, 10, 8, 15, 0), cal) == dt.date(2026, 10, 8)
-    assert cst.expected_trade_day(_at(2026, 10, 8, 14, 59), cal) == dt.date(2026, 10, 7)
+def test_upstream_cutoff_is_pinned() -> None:
+    """钉住上游时刻常量 —— 它变了必须有人重新审这条推理。"""
+    assert cst.UPSTREAM_DAILY_BJT == dt.time(17, 20), (
+        "上游 emotion-core-daily 的时刻变了？改之前先确认 CPT 日报的时刻"
+        "（deploy/cron/crontab）仍晚于它，否则每个交易日都会假警。"
+    )
+    assert cst.EXPECT_TODAY_AFTER == dt.time(17, 20)
+    assert cst.EXPECT_TODAY_AFTER > cst.MARKET_CLOSE
 
 
 def test_holiday_expects_last_trading_day() -> None:

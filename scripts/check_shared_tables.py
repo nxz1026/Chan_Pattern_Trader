@@ -49,6 +49,23 @@ from zoneinfo import ZoneInfo
 MARKET_TZ: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
 MARKET_CLOSE: Final[dt.time] = dt.time(15, 0)
 
+#: 上游写数据的时刻（北京时间）—— **emotion-core-daily.timer 的 OnCalendar**。
+#:
+#: ⚠️ 这个下限是**跨仓依赖**，不是本仓能自己定的：共享表由 emotion-core 写，
+#: 它的盘后 pipeline 排在北京时间 17:20（R57 已把那个 timer 改成显式
+#: ``Asia/Shanghai``；此前它不带时区、被按 UTC 解释，整体偏了 8 小时）。
+#:
+#: 为什么不能只用 ``MARKET_CLOSE``：收盘（15:00）之后到上游跑（17:20）之间
+#: **今天的行情本来就没进库**。若那两个小时里跑本检查，每个交易日都会判
+#: 「今天该有数据」⇒ **每天一次假警**。假警比漏警更毒 —— 一周内就没人看了。
+#:
+#: ⇒ 「今天算期望」的时刻取 ``max(收盘, 上游执行时刻)``。
+#: CPT 的日报已排在 19:00（北京），所以正常情况下这个下限不生效；留在这里是
+#: 为了让本检查在**任何**运行时刻都正确 —— 万一有人把日报往前挪，
+#: 它降级成「上游还没到点」而不是「数据陈旧」。
+UPSTREAM_DAILY_BJT: Final[dt.time] = dt.time(17, 20)
+EXPECT_TODAY_AFTER: Final[dt.time] = max(MARKET_CLOSE, UPSTREAM_DAILY_BJT)
+
 #: CPT 读取、由 emotion-core 写入的共享表 → 该表「最新数据日期」列名。
 #: 与 docs/shared-tables-contract.md 一一对应；改这里必须同步改那份契约
 #: （有测试双向钉住，见 tests/test_shared_tables_contract.py）。
@@ -76,7 +93,7 @@ def expected_trade_day(now: dt.datetime, calendar: list[tuple[dt.date, bool]]) -
     ):
         # 今天不是交易日 ⇒ 期望上一个交易日
         return open_days[-1]
-    passed_close = now.astimezone(MARKET_TZ).time() >= MARKET_CLOSE
+    passed_close = now.astimezone(MARKET_TZ).time() >= EXPECT_TODAY_AFTER
     if passed_close:
         return today_local
     return open_days[-2] if len(open_days) >= 2 else open_days[-1]

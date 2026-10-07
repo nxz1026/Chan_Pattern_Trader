@@ -120,4 +120,13 @@ PATH=/usr/local/bin:/usr/bin:/bin
 #   ① `scripts/cron_daily_report.py` 的 `JOBS`（扫哪些日志）
 #   ② 本文件下面这一行（什么时候扫）
 # 这与 `deploy/README.md` 里「合并安装清单必须与本文件一一对应」是同一类陷阱。
-30 7 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/cron-daily-report.sh >> /home/ubuntu/logs/cron-daily-report.log 2>&1
+# ── 每日 11:00 UTC = 北京 19:00 作业日志日报 + 共享表新鲜度 ────────────
+# ⚠️ **这个时刻是被上游决定的，不能随手往前挪**（R57 踩过）：
+#   共享表由 emotion-core 写，它的 pipeline 排在北京时间 17:20
+#   （emotion-core-daily.timer，已显式写 Asia/Shanghai）。
+#   本日报里含「共享表新鲜度」检查 —— 在 17:20 之前跑，每个交易日
+#   都会判定「今天该有数据」而实际还没写 ⇒ **每天一次假警**。
+#   那种一周内就没人看的告警比没有更糟。
+#   另一条约束：必须晚于 emotion-core 的 18:05 watchdog，
+#   这样日报看到的是当天两个项目的**完整**结果。
+0 11 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/cron-daily-report.sh >> /home/ubuntu/logs/cron-daily-report.log 2>&1
