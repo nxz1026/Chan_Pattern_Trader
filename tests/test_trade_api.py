@@ -132,11 +132,16 @@ def test_same_code_two_types_both_kept(trade_dir, monkeypatch):
 
 
 def test_price_goes_to_reason_only(trade_dir, monkeypatch):
-    """交易机只发市价单，price 不能成为委托价，只能进 reason 供审计。"""
+    """交易机只发市价单，price 不能成为委托价，只能进 reason 供审计。
+
+    且必须标注「后复权 / 非可成交价」：实测 CPT 的 signal price 与 daily_bar.close
+    成因股而异的固定倍数（600519 7.06×、000002 307.9×），当展示价会误导一个数量级。
+    """
     monkeypatch.setattr(trade_api, "_fetch_signals", lambda d: (_row(price=12.34),))
     payload, _ = trade_api.handle_trade_decisions("date=2026-10-08")
     (action,) = payload["actions"]
     assert "12.34" in action["reason"]
+    assert "非可成交价" in action["reason"], "复权价必须显式标注，否则会被当委托价"
     assert "price" not in action
 
 

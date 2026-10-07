@@ -160,8 +160,16 @@ def _build_actions(rows: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
         price = row.get("price")
         reason = str(row.get("signal_id") or "")
         if price is not None:
-            # 只作审计信息：交易机目前只发市价单，price 不会成为委托价。
-            reason = f"{reason} 参考价{float(price):.2f}" if reason else f"参考价{float(price):.2f}"
+            # ⚠️ 2026-10-07 实测：`cpt_signal_event.price` 是**后复权价**，不是可成交价。
+            # 2026-09-30 实测：600519 信号价 8886.54 vs daily_bar.close 1258.62（7.06×）、
+            # 000002 1311.70 vs 4.26（307.9×）、301047 333.34 vs 159.00（2.10×）——
+            # 倍数因股而异（累计分红送转）。
+            # 市价单不受影响（价格不进委托），但**绝不能**当限价或展示价用，故标注清楚。
+            reason = (
+                f"{reason} 后复权参考价{float(price):.2f}（非可成交价）"
+                if reason
+                else f"后复权参考价{float(price):.2f}（非可成交价）"
+            )
         actions.append(
             {
                 "code": str(row["code"]).zfill(6),
