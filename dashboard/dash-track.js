@@ -10,7 +10,7 @@
 
   const LS_KEY = "cpt_track_user";
   const API = "/api/dashboard/track";
-  const FETCH_OPTS = { credentials: "omit" };
+  const FETCH_OPTS = { credentials: "same-origin" };
 
   // ── DOM 工具 ────────────────────────────────────────────────
 
@@ -480,7 +480,14 @@
       return;
     }
     setStatus(statusEl, "提交中…");
-    const [payload, status] = await apiAdd(code, note);
+    let payload, status;
+    try {
+      [payload, status] = await apiAdd(code, note);
+    } catch (exc) {
+      console.error("add 网络错误", exc);
+      setStatus(statusEl, `网络错误：${exc && exc.message ? exc.message : exc}`, "bad");
+      return;
+    }
     if (status === 200) {
       setStatus(statusEl, payload && payload.item && payload.item.note ? `已加入（${payload.item.note}）` : "已加入", "ok");
       form.elements["note"].value = "";
