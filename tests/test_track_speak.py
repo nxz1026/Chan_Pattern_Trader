@@ -205,3 +205,26 @@ def test_speak_400_on_invalid_code(monkeypatch: pytest.MonkeyPatch) -> None:
     payload, status = track_api.handle_track_speak("u", "abc")
     assert status == 400
     assert "error" in payload
+
+
+def test_speak_passes_cache_bucket(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⚠️ R52：真 6h 窗口靠 ``cache_bucket`` 进提示词改变 ``request_hash``。
+
+    不传的话幂等键与提示词无关地**永久**相同，"再讲一次人话"永远只会拿回旧缓存
+    （R45 的文档承诺是 6h，实现却是永久）。
+    """
+    _patch_db_h(monkeypatch, active_rows=[{"code": "600519", "note": None}])
+    _patch_snapshot_rec(monkeypatch)
+    _patch_llm(
+        monkeypatch,
+        {"available": True, "call_id": "call-3", "status": "queued", "reason": ""},
+    )
+    payload, status = track_api.handle_track_speak("u", "600519")
+    assert status == 200
+
+    import cpt.application.llm_cases as cases
+
+    last = cases.summarize_recommendation.last_kwargs  # type: ignore[attr-defined]
+    assert last["cache_bucket"] == track_api._speak_bucket()
+    # 桶宽度 = 对外承诺的 TTL
+    assert track_api.SPEAK_TTL_HOURS == 6

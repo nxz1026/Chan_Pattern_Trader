@@ -58,10 +58,40 @@ __all__ = [
 DEFAULT_USER_ID: Final[str] = "default"
 #: ``user_id`` 长度上限（避免日志/索引被异常长 header 撑爆）
 MAX_USER_ID_LEN: Final[int] = 64
-#: 「讲人话」缓存有效期（小时）。TTL 内同 ``(user_id, code)`` 不重提 LLM：
-#: 由 :func:`cpt.application.llm_cases.summarize_recommendation` 的 ``request_hash``
-#: 幂等机制保证（同一 digest 直接返 ``status=duplicate``）。
+#: 「讲人话」重新生成的窗口宽度（小时）。
+#:
+#: ⚠️ R52 更正：R45 的文档写「TTL 内不重提 LLM」，但当时的实现是**永久**内容去重
+#: （``request_hash`` = ``sha256(purpose+system+user)``，唯一索引
+#: ``idx_cpt_llm_call_request_hash (purpose, request_hash)``）——
+#: 同一票的人话**永远**只会生成一次，「再讲一次人话」其实只会拿回旧缓存。
+#:
+#: 现在真按窗口做：:func:`_speak_bucket` 把当前时刻切成 ``SPEAK_TTL_HOURS`` 宽的桶，
+#: 桶标识由 :func:`cpt.llm.prompts.summarize_request` 的 ``cache_bucket`` 写进提示词，
+#: 于是**同桶内** hash 相同 → ``status=duplicate`` 读缓存；
+#: **换桶** hash 不同 → 真调一次 LLM。
 SPEAK_TTL_HOURS: Final[int] = 6
+
+
+def _speak_bucket(now: datetime | None = None) -> str:
+    """当前时刻所属的 ``SPEAK_TTL_HOURS`` 宽时间桶（桶起点，UTC ISO 秒级）。
+
+    ``now`` 可注入，便于测试断言「同桶稳定 / 跨桶不同」。
+
+    用**桶起点**而不是桶序号：出问题时能直接在库里的提示词上看出是哪一段窗口。
+    """
+    moment = now or datetime.now(UTC)
+    width = SPEAK_TTL_HOURS * 3600
+    start = datetime.fromtimestamp((int(moment.timestamp()) // width) * width, UTC)
+    return start.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+#: 「讲人话」在 LLM 审计表里的 ``subject_id`` 前缀。
+#:
+#: ⚠️ 前后端必须**逐字**一致：后端 ``recent_calls`` 是 ``WHERE subject_id = %s``
+#: 精确匹配（见 :func:`cpt.storage.llm_call_store.recent_calls`），
+#: 前端 ``dash-track.js`` 查状态时用的也是这个**完整** subject。
+#: R52 修：前端曾只传前缀 ``track:{user}:``，于是永远查出 ``count=0``。
+_SPEAK_SUBJECT_PREFIX: Final[str] = "track"
 
 
 # ── 用户识别 ──────────────────────────────────────────────────────────
@@ -101,6 +131,68 @@ def _client() -> AShareLocalClient:
 
 def _conn() -> Any:
     return _client()._get_conn()  # noqa: SLF001 — 同 trade_api 用法
+
+
+def _subject_id(user_id: str, code: str) -> str:
+    """追踪页「讲人话」在 ``cpt_llm_call.subject_id`` 上的键（**唯一构造点**）。
+
+    前端 ``dash-track.js`` 的 ``apiLlmStatus`` 必须拼出同一个字符串。
+    """
+    return f"{_SPEAK_SUBJECT_PREFIX}:{user_id}:{code}"
+
+
+def _ms_to_iso(value: Any) -> str | None:
+    """Unix 毫秒 → ISO 字符串（前端 ``new Date(...)`` 可直接吃）。坏值返 None。"""
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        return datetime.fromtimestamp(float(value) / 1000.0, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    except (OverflowError, OSError, ValueError):
+        return None
+
+
+def _latest_human(user_id: str, code: str, *, limit: int = 20) -> dict[str, Any] | None:
+    """读最近一条**成功**的「人话」，供 advice 端点回填 ``human``。
+
+    R52 修：``handle_track_advice`` 原先把 ``"human"`` 写死 ``None``，注释说
+    「段 2 UI 上"再讲一次"才会调 LLM」—— 但人话**已经**生成过并躺在
+    ``cpt_llm_call`` 里，页面却永远显示「暂无人话」。这里把它读回来。
+
+    这是**旁路**（best-effort）：读不到 / 表还没建 / DB 抖动一律返 ``None``，
+    绝不能让「查一句缓存」把整个 advice 端点拖成 503。DB 不可达时上面的
+    追踪列表查询已经先炸了，这里再炸一次没有信息增量。
+
+    :returns: ``{text, call_id, model, purpose, generated_at}``；无人话时 ``None``。
+    """
+    from cpt.storage.llm_call_store import STATUS_OK, recent_calls  # noqa: PLC0415
+
+    conn: Any = None
+    try:
+        conn = _conn()
+        rows = recent_calls(conn, limit=limit, subject_id=_subject_id(user_id, code))
+    except Exception as exc:  # noqa: BLE001
+        _LOG.info("track human cache read skipped user=%s code=%s: %s", user_id, code, exc)
+        return None
+    finally:
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001, S110
+                pass
+    for row in rows:
+        text = (row.get("result_text") or "").strip()
+        if row.get("status") != STATUS_OK or not text:
+            continue
+        return {
+            "text": text,
+            "call_id": row.get("call_id"),
+            "model": row.get("model"),
+            "purpose": row.get("purpose"),
+            # 毫秒，与 ``cpt/web/app.py`` 的时间轴口径一致
+            "generated_at": row.get("finished_at") or row.get("created_at"),
+            "generated_at_iso": _ms_to_iso(row.get("finished_at") or row.get("created_at")),
+        }
+    return None
 
 
 # ── 列表与回收站 ──────────────────────────────────────────────────────
@@ -215,7 +307,8 @@ def handle_track_advice(user_id: str, code: str) -> tuple[dict[str, Any], int]:
     - 先查重：用户没追踪这票 → 404
     - 然后取 snapshot + recommendation + 算点
     - 写一条快照（**advice 端点触发即写**，避免用户刷列表看不到变化）
-    - LLM 段**不**调（段 2 才接 UI 上的"再讲一次"按钮）
+    - ``human`` 回填**最近一次成功**的人话（读 ``cpt_llm_call``，见 :func:`_latest_human`）；
+      本端点**自己不发** LLM 请求，生成走 ``POST .../speak``
     """
     try:
         bare = _normalize_code(code)
@@ -298,7 +391,8 @@ def handle_track_advice(user_id: str, code: str) -> tuple[dict[str, Any], int]:
             "what_would_invalidate": _invalidation_triggers(snapshot, rec),
         },
         "suggested_points": points,
-        "human": None,  # 段 2 UI 上"再讲一次"才会调 LLM
+        # 人话不是本端点算的，是读上一次成功结果的缓存（读不到就是 None）
+        "human": _latest_human(user_id, bare),
         "disclaimer": "结构状态翻译与参考位，不构成投资建议。T+1 持仓层由交易机负责。",
     }
 
@@ -334,9 +428,11 @@ def handle_track_speak(user_id: str, code: str) -> tuple[dict[str, Any], int]:
     但**不**写 ``cpt_track_snapshot``（人话是异步结果，写库要等 worker 回来；
     由前端轮询 LLM 状态拿结果后自行 update UI，不污染确定性快照历史）。
 
-    节流：``SPEAK_TTL_HOURS`` 内同 ``(user_id, code)`` 不重提 LLM。
-    实现机制是复用 :func:`cpt.application.llm_cases.summarize_recommendation`
-    的 ``request_hash`` 幂等 —— 同一 digest 走 ``status=duplicate`` 分支。
+    节流：同一个 :data:`SPEAK_TTL_HOURS` 时间桶内同 ``(user_id, code)`` 不重提 LLM。
+    实现是把 :func:`_speak_bucket` 的结果经 ``cache_bucket`` 写进提示词，
+    再复用 :func:`cpt.application.llm_cases.summarize_recommendation` 的
+    ``request_hash`` 幂等 —— 同一 digest 走 ``status=duplicate``（前端读缓存），
+    换桶则 digest 变化、真跑一次模型。
 
     :returns: ``{"ok": True, "call_id", "status", "reason", "expires_in_hours"}``。
     """
@@ -388,7 +484,8 @@ def handle_track_speak(user_id: str, code: str) -> tuple[dict[str, Any], int]:
         f"{note_segment}结构状态翻译与参考位，不构成投资建议。"
         "T+1 持仓层由交易机负责。"
     )
-    subject_id = f"track:{user_id}:{bare}"
+    subject_id = _subject_id(user_id, bare)
+    bucket = _speak_bucket()
 
     try:
         audit_conn = _conn()
@@ -403,6 +500,7 @@ def handle_track_speak(user_id: str, code: str) -> tuple[dict[str, Any], int]:
                 price=rec.get("price"),
                 disclaimer=disclaimer,
                 subject_id=subject_id,
+                cache_bucket=bucket,
             )
         finally:
             audit_conn.close()

@@ -139,6 +139,7 @@ def summarize_request(
     price: float | None = None,
     disclaimer: str = "",
     subject_id: str = "",
+    cache_bucket: str = "",
     max_tokens: int = 220,
 ) -> Any:
     """构造「给推荐配人话」的 :class:`~cpt.llm.base.LLMRequest`。
@@ -147,6 +148,8 @@ def summarize_request(
     :param headline: 确定性算出的结论。
     :param reason: 确定性算出的依据。
     :param price: **不复权**参考价（可挂单的那个），不是后复权价。
+    :param cache_bucket: 时间桶标识（如 ``2026-10-08T06:00Z``）。非空时在提示词
+        末尾追加一行**仅供去重分区**的系统标记，用来实现「每个时间窗重新生成一次」。
 
     ## 为什么提示词里**只有这三行**
 
@@ -159,6 +162,18 @@ def summarize_request(
     而看板上两个数字并排显示时，没人知道该信哪个。
 
     这条约束是本用例存在的全部意义，**不要为了「更聪明」而放宽**。
+
+    ## 为什么时间桶要写进提示词
+
+    幂等键是 ``sha256(purpose + system + user)``（见
+    :func:`cpt.storage.llm_call_store.request_hash`），
+    唯一索引落在 ``(purpose, request_hash)`` 上。也就是说「同一份提示词只调用一次模型」
+    是**永久**的，不由任何 TTL 决定。
+
+    要做到「6h 之后点按钮真能重新生成」，就只能让提示词本身随窗口变化 ——
+    :param:`cache_bucket` 就是那个变量。代价是模型会看到这一行，所以文案里
+    明确要求它**不得复述**；收益是 ``request_hash`` 仍是「提示词的纯函数」这一
+    不变量不被破坏（不需要改 ``request_hash`` 语义或唯一索引）。
     """
     from cpt.llm.base import LLMRequest
 
@@ -173,6 +188,10 @@ def summarize_request(
         lines.append(f"依据：{reason}")
     if disclaimer:
         lines.append(f"附注：{disclaimer}")
+    if cache_bucket:
+        # 只在**有窗口语义**的调用方（追踪页「再讲一次人话」）才出现。
+        # 主看板 submit_llm_summarize 不传，提示词与 R45 完全一致（向后兼容）。
+        lines.append(f"（系统标记 cache-bucket={cache_bucket}：仅用于去重分区，禁止复述）")
     user = "请把下面这个结构判断用不超过 3 句话说成人话。\n\n" + "\n".join(lines)
     return LLMRequest(
         purpose=PURPOSE_SUMMARIZE,

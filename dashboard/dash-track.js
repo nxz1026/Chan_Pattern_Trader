@@ -177,9 +177,15 @@
     return [body, r.status];
   }
 
-  async function apiLlmStatus(callId) {
+  async function apiLlmStatus(callId, code) {
+    if (!code) return null;
     const user = getUser();
-    const url = `/cpt/api/dashboard/llm/calls?subject_id=${encodeURIComponent(`track:${user}:`)}&limit=10`;
+    // ⚠️ subject 必须与后端 cpt/web/track_api.py::_subject_id 逐字一致 ——
+    //    cpt/storage/llm_call_store.py::recent_calls 是 `WHERE subject_id = %s`
+    //    **精确匹配**，不是前缀匹配。R52 修：此前只传前缀 `track:{user}:`，
+    //    于是永远查出 count=0，轮询必然走到超时，页面永远显示「等待超时」。
+    const subject = `track:${user}:${code}`;
+    const url = `/cpt/api/dashboard/llm/calls?subject_id=${encodeURIComponent(subject)}&limit=10`;
     const r = await fetch(url, withUser({ method: "GET" }));
     if (!r.ok) return null;
     const body = await r.json();
@@ -196,19 +202,26 @@
   // ── LLM 轮询 + 单卡刷新 ─────────────────────────────────────
 
   const TERMINAL = new Set(["ok", "succeeded", "failed", "error", "interrupted"]);
+  // DB 里成功终态是 "ok"（cpt/storage/llm_call_store.py 的 STATUS_OK），
+  // "succeeded" 只是历史遗留写法 —— 两个都认。
+  // R52 修：此前写 `row.status === "succeeded"`，而库里永远是 "ok"，
+  // 于是每次轮询都判失败，30s 后报「等待超时」。
+  const OK_STATUSES = new Set(["ok", "succeeded"]);
   const POLL_INTERVAL_MS = 2000;
-  const POLL_TIMEOUT_MS = 30000;
+  const POLL_TIMEOUT_MS = 60000;
 
-  async function pollSpeak(callId) {
+  async function pollSpeak(callId, code) {
     const deadline = Date.now() + POLL_TIMEOUT_MS;
-    while (Date.now() < deadline) {
-      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-      const row = await apiLlmStatus(callId);
+    for (;;) {
+      // 先查再睡：duplicate（同窗口已生成过）时第一次就能拿到终态，
+      // 不必白等一个 2s 周期。
+      const row = await apiLlmStatus(callId, code);
       if (row && TERMINAL.has(row.status)) {
-        return row.status === "succeeded";
+        return OK_STATUSES.has(row.status);
       }
+      if (Date.now() >= deadline) return false;
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
     }
-    return false;
   }
 
   async function refreshOne(code) {
@@ -334,7 +347,7 @@
         wrap.appendChild(el("div", { class: "hint", text: `生成于 ${fmtDate(human.generated_at)}` }));
       }
     } else {
-      wrap.appendChild(el("div", { class: "hint", text: "暂无人话（6h 缓存为空）。" }));
+      wrap.appendChild(el("div", { class: "hint", text: "本票还没有生成过人话，点下面按钮生成。" }));
     }
     const btn = el(
       "button",
@@ -567,22 +580,23 @@
       }
       const callId = payload && payload.call_id;
       const phase = payload && payload.status;
-      if (phase === "duplicate") {
-        if (speakStatus) setStatus(speakStatus, "6h 内已生成过，正在重新拉取…", "ok");
-        await refreshOne(code);
-        return;
-      }
       if (!callId) {
         if (speakStatus) setStatus(speakStatus, "提交成功但无 call_id，请刷新页面", "bad");
         return;
       }
-      if (speakStatus) setStatus(speakStatus, `生成中（call_id=${callId.slice(0, 8)}）…`);
-      const done = await pollSpeak(callId);
+      // duplicate = 本时间窗（后端按 SPEAK_TTL_HOURS 分桶）已经生成过：
+      // 它返回的 call_id 就是上一次的结果，去查它的状态即可，别盲刷 advice。
+      if (phase === "duplicate") {
+        if (speakStatus) setStatus(speakStatus, "本时间窗内已生成过，读取缓存…", "ok");
+      } else if (speakStatus) {
+        setStatus(speakStatus, `生成中（call_id=${callId.slice(0, 8)}）…`);
+      }
+      const done = await pollSpeak(callId, code);
       if (done) {
         if (speakStatus) setStatus(speakStatus, "已生成，正在刷新…", "ok");
         await refreshOne(code);
       } else if (speakStatus) {
-        setStatus(speakStatus, "等待超时（30s），可重试", "bad");
+        setStatus(speakStatus, "等待超时（60s），可重试", "bad");
       }
       return;
     }

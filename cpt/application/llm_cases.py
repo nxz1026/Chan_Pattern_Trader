@@ -271,6 +271,7 @@ def summarize_recommendation(
     price: float | None = None,
     disclaimer: str = "",
     subject_id: str = "",
+    cache_bucket: str = "",
 ) -> dict[str, Any]:
     """提交一次「给推荐配人话」的请求，**立刻返回**，不等模型。
 
@@ -278,6 +279,10 @@ def summarize_recommendation(
     差别只在**喂给模型的东西**：这里只给
     :func:`cpt.application.recommendation` 算出的三行事实，**不给结构明细** ——
     模型没有机会算出与确定性结果矛盾的判断。
+
+    :param cache_bucket: 时间桶（见 :func:`cpt.llm.prompts.summarize_request`）。
+        只有需要「按窗口重新生成」的调用方（追踪页「再讲一次人话」）才传；
+        主看板 ``a_share_routes.submit_llm_summarize`` 不传，保持 R45 的永久内容去重。
 
     :returns: ``{"available", "call_id", "status", "reason"}``，语义同 explain。
     """
@@ -290,6 +295,7 @@ def summarize_recommendation(
         price=price,
         disclaimer=disclaimer,
         subject_id=subject_id,
+        cache_bucket=cache_bucket,
     )
     return _enqueue_and_submit(conn, request, subject_id=subject_id)
 
