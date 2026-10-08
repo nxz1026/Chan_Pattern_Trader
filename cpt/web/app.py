@@ -1273,7 +1273,7 @@ def make_handler(
                     payload.get("detail") or payload.get("code", ""),
                 )
             else:
-                self._write_json(HTTPStatus(status), payload)
+                self._write_json_status(HTTPStatus(status), payload)
             return True
 
         def _handle_track_post(self) -> bool:
