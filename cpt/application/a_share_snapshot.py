@@ -43,6 +43,7 @@ from cpt.adapters.a_share_public import TENCENT_KLINE_URL
 from cpt.adapters.backend_factory import DEFAULT_BACKEND, resolve_backend
 from cpt.adapters.reference_chanlun import ChanlunBackend
 from cpt.adapters.validators import validate_ashare_bars
+from cpt.application import signal_notify
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
 from cpt.application.first_buy_bridge import derive_first_buy_facts, detect_structural_break
 from cpt.application.multi_level import build_multi_level, format_multi_level
@@ -549,6 +550,9 @@ def _derive_first_buy_signal(
         except Exception as exc:
             _LOG.warning("提交信号事件失败 %s: %s", code, exc)
             _rollback_quietly(client, f"first_buy:{code}")
+        else:
+            # 推送在 commit 之后（先入库后告知）；失败 best-effort，吞掉。
+            signal_notify.maybe_notify(signal, prev_status, code, event_time)
 
     # 回传**写之前**的前值给 _attach_signal_change（2026-10-06）。它若自己再查一次
     # 库，查到的必然是上面刚 commit 的这条 ⇒ signal_changed 恒 False。
@@ -635,6 +639,9 @@ def _derive_first_sell_signal(
         except Exception as exc:
             _LOG.warning("提交信号事件失败 %s: %s", code, exc)
             _rollback_quietly(client, f"first_sell:{code}")
+        else:
+            # 推送在 commit 之后（先入库后告知）；失败 best-effort，吞掉。
+            signal_notify.maybe_notify(signal, prev_status, code, event_time)
 
     return signal, prev_status
 
