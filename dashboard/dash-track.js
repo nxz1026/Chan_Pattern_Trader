@@ -148,10 +148,62 @@
     return [await r.json(), r.status];
   }
 
+  async function apiSpeak(code) {
+    const r = await fetch(
+      `${API}/${encodeURIComponent(code)}/speak`,
+      withUser({ method: "POST" }),
+    );
+    let body = null;
+    try {
+      body = await r.json();
+    } catch (_) {
+      body = null;
+    }
+    return [body, r.status];
+  }
+
+  async function apiLlmStatus(callId) {
+    const user = getUser();
+    const url = `/api/dashboard/llm/calls?subject_id=${encodeURIComponent(`track:${user}:`)}&limit=10`;
+    const r = await fetch(url, withUser({ method: "GET" }));
+    if (!r.ok) return null;
+    const body = await r.json();
+    if (!body || !Array.isArray(body.calls)) return null;
+    return body.calls.find((c) => c && c.call_id === callId) || null;
+  }
+
   function withUser(opts) {
     return Object.assign({}, FETCH_OPTS, opts, {
       headers: Object.assign({}, opts && opts.headers, { "X-CPT-User": getUser() }),
     });
+  }
+
+  // ── LLM 轮询 + 单卡刷新 ─────────────────────────────────────
+
+  const TERMINAL = new Set(["succeeded", "failed", "error", "interrupted"]);
+  const POLL_INTERVAL_MS = 2000;
+  const POLL_TIMEOUT_MS = 30000;
+
+  async function pollSpeak(callId) {
+    const deadline = Date.now() + POLL_TIMEOUT_MS;
+    while (Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+      const row = await apiLlmStatus(callId);
+      if (row && TERMINAL.has(row.status)) {
+        return row.status === "succeeded";
+      }
+    }
+    return false;
+  }
+
+  async function refreshOne(code) {
+    const card = document.querySelector(`[data-body="${code}"]`);
+    if (!card) return;
+    clear(card);
+    card.appendChild(el("div", { class: "hint", text: "拉取中…" }));
+    const [payload, status] = await apiAdvice(code);
+    clear(card);
+    card.appendChild(renderAdvice(code, payload, status));
   }
 
   // ── 卡片渲染 ─────────────────────────────────────────────────
@@ -293,10 +345,10 @@
     return card;
   }
 
-  function renderAdvice(code, payload) {
+  function renderAdvice(code, payload, status) {
     const wrap = el("div");
-    const status = payload.status || 200;
-    if (status >= 400) {
+    const httpStatus = status != null ? status : (payload && payload.status) || 200;
+    if (httpStatus >= 400) {
       wrap.appendChild(
         el("div", { class: "error", text: payload && payload.error ? payload.error : `HTTP ${status}` }),
       );
@@ -456,10 +508,38 @@
       return;
     }
     if (action === "speak-again") {
-      // 段 2 UI 没有调 LLM worker 端点：这里只是占位（human 缓存仍由
-      // 后续运维 cron 触发；前端"再讲一次"按钮当前只是刷新缓存视图）。
       const speakStatus = document.querySelector(`[data-status="speak-${code}"]`);
-      if (speakStatus) setStatus(speakStatus, "人话重写由运维 cron 触发，详见文档。", "ok");
+      if (speakStatus) setStatus(speakStatus, "提交中…");
+      const [payload, status] = await apiSpeak(code);
+      if (status !== 200) {
+        if (speakStatus) {
+          setStatus(
+            speakStatus,
+            payload && payload.error ? `失败：${payload.error}` : `失败 HTTP ${status}`,
+            "bad",
+          );
+        }
+        return;
+      }
+      const callId = payload && payload.call_id;
+      const phase = payload && payload.status;
+      if (phase === "duplicate") {
+        if (speakStatus) setStatus(speakStatus, "6h 内已生成过，正在重新拉取…", "ok");
+        await refreshOne(code);
+        return;
+      }
+      if (!callId) {
+        if (speakStatus) setStatus(speakStatus, "提交成功但无 call_id，请刷新页面", "bad");
+        return;
+      }
+      if (speakStatus) setStatus(speakStatus, `生成中（call_id=${callId.slice(0, 8)}）…`);
+      const done = await pollSpeak(callId);
+      if (done) {
+        if (speakStatus) setStatus(speakStatus, "已生成，正在刷新…", "ok");
+        await refreshOne(code);
+      } else if (speakStatus) {
+        setStatus(speakStatus, "等待超时（30s），可重试", "bad");
+      }
       return;
     }
   }

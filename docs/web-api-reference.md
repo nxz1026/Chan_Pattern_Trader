@@ -230,6 +230,7 @@ POST /api/dashboard/track/remove {code}                软删（90 天可恢复�
 POST /api/dashboard/track/restore {code}                回收站复活
 GET  /api/dashboard/track/{code}/advice                 完整建议（current + algorithm + points）
 GET  /api/dashboard/track/{code}/history?days=30        快照历史（默认 30 天）
+POST /api/dashboard/track/{code}/speak                  「再讲一次人话」—— LLM 异步重写 human（note 拼进 disclaimer 段；6h 内同 (user, code) 返 status=duplicate）
 ```
 
 **建议点**（`suggested_points` 字段）两个版本都返，与用户段 1 决定一致：

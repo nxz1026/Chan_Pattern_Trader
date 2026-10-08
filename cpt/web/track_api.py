@@ -41,6 +41,7 @@ _LOG = logging.getLogger(__name__)
 __all__ = [
     "DEFAULT_USER_ID",
     "MAX_USER_ID_LEN",
+    "SPEAK_TTL_HOURS",
     "extract_user_id",
     "handle_track_add",
     "handle_track_advice",
@@ -49,6 +50,7 @@ __all__ = [
     "handle_track_maintenance",
     "handle_track_remove",
     "handle_track_restore",
+    "handle_track_speak",
     "track_store",
 ]
 
@@ -56,6 +58,10 @@ __all__ = [
 DEFAULT_USER_ID: Final[str] = "default"
 #: ``user_id`` 长度上限（避免日志/索引被异常长 header 撑爆）
 MAX_USER_ID_LEN: Final[int] = 64
+#: 「讲人话」缓存有效期（小时）。TTL 内同 ``(user_id, code)`` 不重提 LLM：
+#: 由 :func:`cpt.application.llm_cases.summarize_recommendation` 的 ``request_hash``
+#: 幂等机制保证（同一 digest 直接返 ``status=duplicate``）。
+SPEAK_TTL_HOURS: Final[int] = 6
 
 
 # ── 用户识别 ──────────────────────────────────────────────────────────
@@ -319,6 +325,102 @@ def handle_track_advice(user_id: str, code: str) -> tuple[dict[str, Any], int]:
         payload["snapshot_recorded"] = True
 
     return payload, 200
+
+
+def handle_track_speak(user_id: str, code: str) -> tuple[dict[str, Any], int]:
+    """「再讲一次人话」—— 调 LLM 重写人话（异步，**立刻返回** ``call_id``）。
+
+    与 :func:`handle_track_advice` 同一前置链（查追踪 → 取数据 → 算 rec），
+    但**不**写 ``cpt_track_snapshot``（人话是异步结果，写库要等 worker 回来；
+    由前端轮询 LLM 状态拿结果后自行 update UI，不污染确定性快照历史）。
+
+    节流：``SPEAK_TTL_HOURS`` 内同 ``(user_id, code)`` 不重提 LLM。
+    实现机制是复用 :func:`cpt.application.llm_cases.summarize_recommendation`
+    的 ``request_hash`` 幂等 —— 同一 digest 走 ``status=duplicate`` 分支。
+
+    :returns: ``{"ok": True, "call_id", "status", "reason", "expires_in_hours"}``。
+    """
+    try:
+        bare = _normalize_code(code)
+    except ValueError as exc:
+        return {"error": str(exc), "field": "code"}, 400
+
+    # 1. 必须在追踪
+    try:
+        conn = _conn()
+        try:
+            track_store.ensure_table(conn)
+            active = track_store.list_active(conn, user_id)
+        finally:
+            conn.close()
+    except track_store.TrackStoreError as exc:
+        _LOG.exception("track speak store read failed user=%s code=%s", user_id, bare)
+        return {"error": "store_unavailable", "detail": str(exc)[:160]}, 503
+
+    if not any(r["code"] == bare for r in active):
+        return {"error": "not_tracked", "code": bare}, 404
+    user_note = next((r.get("note") for r in active if r["code"] == bare), None)
+
+    # 2. 取快照 + 建议（与 advice 同源）
+    from cpt.web import a_share_routes  # noqa: PLC0415
+
+    try:
+        snapshot = a_share_routes.snapshot_payload(bare)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "error": "snapshot_unavailable",
+            "detail": f"{type(exc).__name__}: {exc}"[:160],
+        }, 502
+    try:
+        rec = a_share_routes.build_recommendation(bare)
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "error": "recommendation_unavailable",
+            "detail": f"{type(exc).__name__}: {exc}"[:160],
+        }, 502
+
+    # 3. LLM 入队 —— note 作为「用户偏好」段拼进 disclaimer，
+    # 让模型语气贴近用户意图，但不参与动作判断（结构确定性结论来自 rec）。
+    from cpt.application import llm_cases  # noqa: PLC0415
+
+    note_segment = f"用户偏好：{user_note}。" if user_note else ""
+    disclaimer = (
+        f"{note_segment}结构状态翻译与参考位，不构成投资建议。"
+        "T+1 持仓层由交易机负责。"
+    )
+    subject_id = f"track:{user_id}:{bare}"
+
+    try:
+        audit_conn = _conn()
+        try:
+            result = llm_cases.summarize_recommendation(
+                audit_conn,
+                code=bare,
+                name=str(snapshot.get("name") or bare),
+                action_label=str(rec.get("action_label") or ""),
+                headline=str(rec.get("headline") or ""),
+                reason=str(rec.get("reason") or ""),
+                price=rec.get("price"),
+                disclaimer=disclaimer,
+                subject_id=subject_id,
+            )
+        finally:
+            audit_conn.close()
+    except Exception as exc:  # noqa: BLE001
+        _LOG.exception("track speak llm enqueue failed user=%s code=%s", user_id, bare)
+        return {
+            "error": "llm_unavailable",
+            "detail": f"{type(exc).__name__}: {exc}"[:160],
+        }, 503
+
+    return {
+        "ok": True,
+        "code": bare,
+        "call_id": result.get("call_id"),
+        "status": result.get("status"),
+        "reason": result.get("reason"),
+        "expires_in_hours": SPEAK_TTL_HOURS,
+    }, 200
 
 
 def handle_track_history(

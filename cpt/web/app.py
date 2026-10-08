@@ -1242,6 +1242,40 @@ def make_handler(
                 return
             self._write_json_status(HTTPStatus(status), payload)
 
+        def _handle_track_speak(self) -> bool:
+            """``POST /api/dashboard/track/{code}/speak`` —— LLM 重写人话。"""
+            from cpt.web import track_api as _track_api  # noqa: PLC0415
+
+            path = urlsplit(self.path).path
+            parts = [seg for seg in path.split("/") if seg]
+            if (
+                len(parts) != 5
+                or parts[0] != "api"
+                or parts[1] != "dashboard"
+                or parts[2] != "track"
+                or parts[4] != "speak"
+            ):
+                return False
+            user_id = _track_api.extract_user_id(self.headers)
+            try:
+                payload, status = _track_api.handle_track_speak(user_id, parts[3])
+            except Exception:  # noqa: BLE001
+                _LOG.exception("track speak failed path=%s user=%s", path, user_id)
+                self._write_json_error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR,
+                    "track_unavailable",
+                    "track speak api error",
+                )
+                return True
+            if status >= 400:
+                self._write_json_error(
+                    HTTPStatus(status), payload.get("error", "speak_failed"),
+                    payload.get("detail") or payload.get("code", ""),
+                )
+            else:
+                self._write_json(HTTPStatus(status), payload)
+            return True
+
         def _handle_track_post(self) -> bool:
             """我的追踪写操作：add / remove / restore。返回 False 表示不是 Track 写路由。"""
             path = urlsplit(self.path).path
@@ -1422,6 +1456,10 @@ def make_handler(
             # Trade 回执先于 A 股写路由判定：两者路径前缀不重叠，顺序无关，
             # 但放在前面是为了让「Trade API 只 POST 一个端点」这件事在代码上一眼可见。
             if self._handle_trade_post():
+                return
+            # Track 「再讲一次人话」是 POST + 路径里带 code，先于 _handle_track_post
+            # 判定（后者只认 /add /remove /restore 三条字面量）。
+            if self._handle_track_speak():
                 return
             if self._handle_track_post():
                 return
