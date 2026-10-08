@@ -56,9 +56,15 @@ ACTIONS: Final[dict[str, str]] = {
     ACTION_HOLD: "观望",
 }
 
-#: 信号状态 → 该状态有多「硬」。确认 > 候选 > 预警 > 失效。
+#: 信号状态 → 该状态有多「硬」。确认 > 结构具备/候选 > 预警 > 失效。
+#:
+#: ⚠️ ``structure_ready`` **必须在表里**：它是状态机里正常会出现的状态
+#: （结构条件已成立、只差反向笔确认），漏掉就会被下面那句「未知的信号状态」
+#: 降级成「暂无明确结构信号」。实测 000002 在 2026-10-05 就吃到过这条
+#: （库里 ``reason`` = 「未知的信号状态 'structure_ready'」）。
 _STATUS_RANK: Final[dict[str, int]] = {
     "confirmed": 3,
+    "structure_ready": 2,
     "candidate": 2,
     "alert": 1,
     "invalidated": 0,
@@ -119,10 +125,25 @@ def build_recommendation(snapshot: dict[str, Any]) -> dict[str, Any]:
     if status == "invalidated":
         # ⚠️ 也要带 price —— 失效**发生在某个价位**上，那个价是有用的上下文
         # （补测试时发现这里把 price 漏了，界面上会显示「—」而不是价位）。
+        #
+        # 两种 ``invalidated`` 的**人话完全不同**，不能都叫「已失效」：
+        # - 结构**从未成立**（同级中枢不足两个）⇒ 是「条件不成立」，不是「失效」；
+        #   说成「失效」会让用户以为「之前确认过的一买被打掉了」。
+        # - **曾经成立**（``center_ids`` 里有两个中枢）后被打掉 ⇒ 才是「已失效」。
+        # 判据是 ``center_ids`` 的条数；**缺这个 key** 说明是 R21 之前的老快照，
+        # 不猜，沿用「已失效」措辞 —— 不把「不知道」说成「没有」。
+        center_ids = signal.get("center_ids")
+        never_ready = isinstance(center_ids, (list, tuple)) and len(center_ids) < 2
+        if never_ready:
+            headline = "结构条件不成立"
+            reason = f"{_label(sig_type)}条件不成立（未形成两个同级中枢）—— 结构尚不足以判定。"
+        else:
+            headline = "信号已失效"
+            reason = f"{_label(sig_type)}已失效（不取反方向）—— 之前的结构判断不再成立。"
         out = _build(
             ACTION_HOLD,
-            "信号已失效",
-            f"{_label(sig_type)}已失效（不取反方向）—— 之前的结构判断不再成立。",
+            headline,
+            reason,
             price=_num(signal.get("price")) or _last_close(snapshot),
             status=status,
             signal_type=sig_type,
@@ -135,6 +156,10 @@ def build_recommendation(snapshot: dict[str, Any]) -> dict[str, Any]:
     rank = _STATUS_RANK[status]
     if rank >= _STATUS_RANK["confirmed"]:
         headline = f"{_label(sig_type)}**已确认**"
+    elif status == "structure_ready":
+        # 结构与方向都成立，只差反向笔确认。与「候选 / 预警」不是一回事，
+        # 给一句能自解释的文案（此前这条状态会直接掉进「未知状态」降级）。
+        action, headline = ACTION_WATCH, f"{_label(sig_type)}结构已具备（待反向笔确认）"
     elif status == "candidate":
         action, headline = ACTION_WATCH, f"{_label(sig_type)}候选（未确认）"
     else:

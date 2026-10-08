@@ -52,6 +52,7 @@ def snap(signal: dict | None, candles: list | None = None) -> dict:
     ("status", "expect", "label"),
     [
         ("confirmed", ACTION_BUY, "买入结构"),
+        ("structure_ready", ACTION_WATCH, "关注"),
         ("candidate", ACTION_WATCH, "关注"),
         ("alert", ACTION_WATCH, "关注"),
         ("invalidated", ACTION_HOLD, "观望"),
@@ -85,6 +86,75 @@ def test_invalidated_buy_is_NOT_sell() -> None:
     assert out["action"] == ACTION_HOLD
     assert out["action"] != ACTION_SELL
     assert "不取反" in out["reason"]
+
+
+# ── invalidated 的两种含义必须分开说 ──────────────────────────
+def test_invalidated_without_two_centers_says_condition_not_met() -> None:
+    """结构**从未成立**（同级中枢不足两个）⇒「条件不成立」，不是「已失效」。
+
+    实测 000002（2026-10-08）：日线只有一个中枢 → ``invalidated``，但界面上
+    写「一买已失效」会让用户以为「之前确认过的一买被打掉了」——
+    实际价格离中枢下沿还有 8%。
+    """
+    out = build_recommendation(
+        snap(
+            {
+                "status": "invalidated",
+                "signal_type": "first_buy",
+                "price": 28.5,
+                "center_ids": [],
+            }
+        )
+    )
+    assert out["headline"] == "结构条件不成立"
+    assert out["action"] == ACTION_HOLD
+    assert "两个同级中枢" in out["reason"]
+
+
+def test_invalidated_with_two_centers_says_expired() -> None:
+    """**曾经成立**（``center_ids`` 有两个中枢）后被打掉 ⇒ 才是「已失效」。"""
+    out = build_recommendation(
+        snap(
+            {
+                "status": "invalidated",
+                "signal_type": "first_buy",
+                "price": 28.5,
+                "center_ids": ["bi:4", "bi:8"],
+            }
+        )
+    )
+    assert out["headline"] == "信号已失效"
+    assert "不取反" in out["reason"]
+
+
+def test_invalidated_without_center_ids_keeps_old_wording() -> None:
+    """缺 ``center_ids`` 的快照 → 不猜，沿用旧措辞（不把「不知道」说成「没有」）。"""
+    out = build_recommendation(
+        snap({"status": "invalidated", "signal_type": "first_buy", "price": 1.0})
+    )
+    assert out["headline"] == "信号已失效"
+
+
+def test_structure_ready_is_watch_not_unknown_status() -> None:
+    """``structure_ready`` 是正常状态，不得降级成「暂无明确结构信号」。
+
+    实测 000002 在 2026-10-05 的库里 ``reason`` = 「未知的信号状态
+    'structure_ready'」—— 状态映射表漏了这一档。
+    """
+    out = build_recommendation(
+        snap(
+            {
+                "status": "structure_ready",
+                "signal_type": "first_buy",
+                "price": 28.5,
+                "center_ids": ["bi:4", "bi:8"],
+            }
+        )
+    )
+    assert out["available"] is True
+    assert out["action"] == ACTION_WATCH
+    assert out["status"] == "structure_ready"
+    assert "结构已具备" in out["headline"]
 
 
 def test_divergence_is_surfaced() -> None:

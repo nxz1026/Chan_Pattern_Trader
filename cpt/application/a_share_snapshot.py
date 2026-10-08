@@ -453,6 +453,20 @@ def build_ashare_snapshot(
     return snapshot
 
 
+def _empty_structure_id(level: int, code: str) -> str:
+    """结构不足两个中枢时的**兜底 structure_id**。
+
+    必须**带 code**：``signal_id`` 是 ``f"{signal_type}:{level}:{structure_id}"``，
+    而 :func:`cpt.storage.signal_event_store.load_previous_signal` **只按
+    signal_id 查** —— 兜底 id 不带 code 时，所有「结构不成立」的股票会共用同一行
+    历史（实测 ``first_buy:5:level5:empty`` 同时属于 600519 与 000002，000002 读到
+    的 ``previous`` 其实是 600519 那行）。带上 code 后各票各自成键。
+
+    ``code`` 为空（旧调用方 / 不带 code 的测试）时退回旧格式，避免静默改键。
+    """
+    return f"level{level}:empty:{code}" if code else f"level{level}:empty"
+
+
 def _derive_first_buy_signal(
     bis: Sequence[Bi],
     zhongshus: Sequence[ZhongShu],
@@ -498,7 +512,7 @@ def _derive_first_buy_signal(
     if facts is None:
         return None, None
     last_bar = bars[-1] if bars else None
-    structure_id = facts.structure_id or f"level{level}:empty"
+    structure_id = facts.structure_id or _empty_structure_id(level, code)
     event_time = int(last_bar.close_time) if last_bar is not None else 0
 
     # 加载上一状态（R21 信号历史持久化）
@@ -591,7 +605,7 @@ def _derive_first_sell_signal(
     if facts is None:
         return None, None
     last_bar = bars[-1] if bars else None
-    structure_id = facts.structure_id or f"level{level}:empty"
+    structure_id = facts.structure_id or _empty_structure_id(level, code)
     event_time = int(last_bar.close_time) if last_bar is not None else 0
 
     # 加载上一状态（R21 信号历史持久化）

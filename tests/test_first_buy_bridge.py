@@ -13,7 +13,11 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
-from cpt.application.a_share_snapshot import build_ashare_snapshot
+from cpt.application.a_share_snapshot import (
+    _derive_first_buy_signal,
+    _derive_first_sell_signal,
+    build_ashare_snapshot,
+)
 from cpt.application.first_buy_bridge import (
     derive_first_buy_facts,
     derive_first_sell_facts,
@@ -392,3 +396,42 @@ def test_break_detects_first_occurrence() -> None:
         _bi(-1, 20, 30, low=80),  # 向下, low=80 → 也跌破，但不应扫描到这里
     ]
     assert detect_structural_break(bis) is True
+
+
+# --------------------------------------------------------------------------- #
+# 空结构兜底 structure_id：**必须带 code**
+# --------------------------------------------------------------------------- #
+
+
+def test_empty_structure_id_is_code_scoped() -> None:
+    """结构不足两个中枢时的兜底 id 必须带 code，否则各票共用同一行信号历史。
+
+    实测（2026-10-08）：``first_buy:5:level5:empty`` 属于 600519、
+    ``first_sell:5:level5:empty`` 属于 300750，而 ``load_previous_signal``
+    **只按 signal_id 查** —— 000002 读到的 ``previous`` 其实是别的股票那行。
+    """
+    from cpt.domain.config import RulesConfig
+
+    level = RulesConfig().levels[0]
+    bars = [_make_canonical(1_700_000_000_000, 100.0)]
+
+    signal, prev = _derive_first_buy_signal([_bi(-1, 0, 10, level=level)], [], bars, code="000002")
+    assert signal is not None
+    assert signal.structure_id == f"level{level}:empty:000002"
+    assert signal.signal_id == f"first_buy:{level}:level{level}:empty:000002"
+    assert prev is None
+
+    sell, _ = _derive_first_sell_signal([_bi(1, 0, 10, level=level)], [], bars, code="300750")
+    assert sell is not None
+    assert sell.signal_id == f"first_sell:{level}:level{level}:empty:300750"
+
+
+def test_empty_structure_id_without_code_keeps_legacy_key() -> None:
+    """不带 code（旧调用方）→ 旧 key，不静默改已有历史行的主键。"""
+    from cpt.domain.config import RulesConfig
+
+    level = RulesConfig().levels[0]
+    bars = [_make_canonical(1_700_000_000_000, 100.0)]
+    signal, _ = _derive_first_buy_signal([_bi(-1, 0, 10, level=level)], [], bars)
+    assert signal is not None
+    assert signal.signal_id == f"first_buy:{level}:level{level}:empty"
