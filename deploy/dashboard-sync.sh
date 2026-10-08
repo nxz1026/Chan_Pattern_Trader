@@ -45,11 +45,11 @@ done
 # R51 更正：R45 拆分后 index.html 实际加载的是 dash-*.js + dashboard.bundle.js，
 # 而这份列表还停在拆分前（dashboard.js / canvas_*.js）—— 也就是说它一直在同步
 # **线上根本不加载**的文件。canvas_d.js 随画布 D 下线删除。
-FILES=(index.html dashboard.css url_safety.js cpt_job.js
+FILES=(index.html track.html dashboard.css url_safety.js cpt_job.js
        canvas_registry.js canvas_b.js canvas_c.js
        market_a_share.js inspection_panel.js
        dash-core.js dash-chrome.js dash-structure.js dash-signal.js
-       dash-chart.js dash-alert.js dash-ops.js
+       dash-chart.js dash-alert.js dash-ops.js dash-track.js
        dashboard.bundle.js)
 
 [ -d "$SRC" ] || { echo "仓库里没有 $SRC" >&2; exit 1; }

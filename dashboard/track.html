@@ -1,0 +1,128 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="color-scheme" content="light dark" />
+  <title>我的追踪 — CPT</title>
+  <style>
+    :root {
+      --bg: #ffffff;
+      --fg: #1f2328;
+      --muted: #59636e;
+      --border: #d0d7de;
+      --subtle: #f6f8fa;
+      --link: #0969da;
+      --ok: #1a7f37;
+      --bad: #cf222e;
+      --warn-bg: #fff8c5;
+      --warn-border: #bf8700;
+      color-scheme: light;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root {
+        --bg: #0d1117;
+        --fg: #e6edf3;
+        --muted: #9197ab;
+        --border: #30363d;
+        --subtle: #161b22;
+        color-scheme: dark;
+      }
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI",
+            "PingFang SC", "Noto Sans CJK SC", sans-serif;
+      background: var(--bg);
+      color: var(--fg);
+    }
+    a { color: var(--link); text-decoration: none; }
+    a:hover { text-decoration: underline; }
+    .wrap { max-width: 1012px; margin: 0 auto; padding: 24px 16px 56px; }
+    header { border-bottom: 1px solid var(--border); padding-bottom: 16px; margin-bottom: 24px; }
+    header h1 { margin: 0 0 8px; font-size: 24px; font-weight: 600; }
+    header .user-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; color: var(--muted); font-size: 13px; }
+    header .user-row input { padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--fg); font: inherit; }
+    header .user-row button { padding: 4px 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--subtle); color: var(--fg); cursor: pointer; }
+    header .user-row span[data-status] { font-size: 12px; }
+    header .toplinks { margin-top: 8px; font-size: 12px; }
+    section { margin-bottom: 24px; }
+    section h2 { margin: 0 0 8px; font-size: 16px; font-weight: 600; }
+    section .hint { color: var(--muted); font-size: 12px; margin-bottom: 8px; }
+    form#add-form { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+    form#add-form input { padding: 6px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--fg); font: inherit; }
+    form#add-form input[name="code"] { width: 120px; }
+    form#add-form input[name="note"] { flex: 1; min-width: 200px; }
+    form#add-form button { padding: 6px 16px; border: 1px solid var(--border); border-radius: 4px; background: var(--subtle); color: var(--fg); cursor: pointer; }
+    form#add-form [data-status] { font-size: 12px; color: var(--muted); }
+    .empty { padding: 12px; border: 1px dashed var(--border); border-radius: 4px; color: var(--muted); }
+    .error { padding: 12px; border: 1px solid var(--bad); border-radius: 4px; color: var(--bad); }
+    .card { border: 1px solid var(--border); border-radius: 6px; padding: 12px 16px; margin-bottom: 12px; background: var(--bg); }
+    .card-head { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; justify-content: space-between; }
+    .card-head .code { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 14px; font-weight: 600; }
+    .card-head .note { color: var(--muted); font-size: 12px; }
+    .card-head .meta { color: var(--muted); font-size: 12px; }
+    .card-actions { display: flex; flex-wrap: wrap; gap: 4px; }
+    .card-actions button { padding: 3px 10px; border: 1px solid var(--border); border-radius: 4px; background: var(--subtle); color: var(--fg); cursor: pointer; font-size: 12px; }
+    .card-actions button.danger { color: var(--bad); border-color: var(--bad); }
+    details.fold { border: 1px solid var(--border); border-radius: 4px; padding: 8px 12px; margin: 8px 0; background: var(--subtle); }
+    details.fold[open] { background: var(--bg); }
+    details.fold summary { cursor: pointer; font-size: 13px; font-weight: 500; }
+    details.fold pre { margin: 8px 0 0; font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+    table.points { width: 100%; border-collapse: collapse; font-size: 13px; }
+    table.points th, table.points td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; }
+    table.points th { background: var(--subtle); font-weight: 500; }
+    table.points td.num { font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, monospace; }
+    table.points td.null { color: var(--muted); }
+    .status-line { padding: 6px 0; font-size: 13px; }
+    .badge { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 11px; border: 1px solid var(--border); }
+    .badge.ok { background: #dafbe1; color: var(--ok); border-color: rgba(31,136,61,.4); }
+    .badge.bad { background: #ffebe9; color: var(--bad); border-color: rgba(207,34,46,.4); }
+    .badge.warn { background: var(--warn-bg); color: #735c0f; border-color: var(--warn-border); }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <header>
+      <h1>我的追踪</h1>
+      <div class="user-row">
+        <span>用户名（X-CPT-User）：</span>
+        <input id="user" maxlength="32" pattern="[A-Za-z0-9._-]*" placeholder="default" />
+        <button id="save-user" type="button">保存</button>
+        <span id="user-status" data-status></span>
+        <a class="toplinks" href="/cpt/">← 回到看板</a>
+        <a class="toplinks" href="/api/dashboard/track" target="_blank" rel="noopener">/api/dashboard/track</a>
+      </div>
+    </header>
+
+    <section id="add-section">
+      <h2>加入追踪</h2>
+      <p class="hint">6 位 A 股代码；note 可填"长期持有 / 关注中"，会显示在卡片上。</p>
+      <form id="add-form" autocomplete="off">
+        <input name="code" inputmode="numeric" pattern="[0-9]{6}" maxlength="6" placeholder="600519" required />
+        <input name="note" maxlength="200" placeholder="长期持有 / 关注中（可空）" />
+        <button type="submit">添加</button>
+        <span data-status></span>
+      </form>
+    </section>
+
+    <section id="list-section">
+      <h2>我的追踪</h2>
+      <div id="list"></div>
+    </section>
+
+    <section id="recycle-section">
+      <h2>回收站（90 天内可复活）</h2>
+      <div id="recycle"></div>
+    </section>
+
+    <section id="status-section">
+      <h2>运行状态</h2>
+      <p class="hint" id="last-update"></p>
+    </section>
+  </div>
+
+  <script src="./dash-track.js"></script>
+</body>
+</html>
