@@ -67,6 +67,21 @@
     if (kind) target.setAttribute("data-kind", kind);
   }
 
+  function formatErr(payload, status) {
+    // 后端错误响应有时是 `{"error": "code_required"}`（字符串），
+    // 有时是 `{"error": {"code": "...", "message": "..."}}`（结构化对象）。
+    // 直接 setStatus 会在后者情况下显示 "[object Object]"——用户看不到任何字。
+    const e = payload && payload.error;
+    if (typeof e === "string") return e;
+    if (e && typeof e === "object") {
+      const code = e.code || "";
+      const msg = e.message || "";
+      const out = code && msg ? `${code} (${msg})` : code || msg || JSON.stringify(e);
+      return `HTTP ${status}：${out}`;
+    }
+    return `HTTP ${status}`;
+  }
+
   // ── 用户名 ───────────────────────────────────────────────────
 
   function getUser() {
@@ -97,7 +112,7 @@
 
   async function apiAdd(code, note) {
     const r = await fetch(
-      API,
+      `${API}/add`,
       withUser({
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -109,11 +124,11 @@
 
   async function apiRemove(code) {
     const r = await fetch(
-      API,
+      `${API}/remove`,
       withUser({
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, op: "remove" }),
+        body: JSON.stringify({ code }),
       }),
     );
     let body = null;
@@ -127,11 +142,11 @@
 
   async function apiRestore(code) {
     const r = await fetch(
-      API,
+      `${API}/restore`,
       withUser({
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code, op: "restore" }),
+        body: JSON.stringify({ code }),
       }),
     );
     return [await r.json(), r.status];
@@ -349,9 +364,7 @@
     const wrap = el("div");
     const httpStatus = status != null ? status : (payload && payload.status) || 200;
     if (httpStatus >= 400) {
-      wrap.appendChild(
-        el("div", { class: "error", text: payload && payload.error ? payload.error : `HTTP ${status}` }),
-      );
+      wrap.appendChild(el("div", { class: "error", text: formatErr(payload, httpStatus) }));
       return wrap;
     }
     if (!payload || typeof payload !== "object") {
@@ -409,7 +422,7 @@
       listEl.appendChild(
         el("div", {
           class: "error",
-          text: payload && payload.error ? payload.error : `HTTP ${status}`,
+          text: formatErr(payload, status),
         }),
       );
       return;
@@ -473,7 +486,8 @@
       form.elements["note"].value = "";
       refresh();
     } else {
-      setStatus(statusEl, payload && payload.error ? payload.error : `HTTP ${status}`, "bad");
+      const errText = formatErr(payload, status);
+      setStatus(statusEl, errText, "bad");
     }
   }
 
@@ -513,11 +527,7 @@
       const [payload, status] = await apiSpeak(code);
       if (status !== 200) {
         if (speakStatus) {
-          setStatus(
-            speakStatus,
-            payload && payload.error ? `失败：${payload.error}` : `失败 HTTP ${status}`,
-            "bad",
-          );
+          setStatus(speakStatus, `失败：${formatErr(payload, status)}`, "bad");
         }
         return;
       }
