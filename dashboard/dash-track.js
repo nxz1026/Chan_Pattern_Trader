@@ -223,17 +223,23 @@
 
   // ── 卡片渲染 ─────────────────────────────────────────────────
 
+  function _priceOf(node) {
+    if (node == null) return null;
+    if (typeof node === "number") return Number.isFinite(node) ? node : null;
+    if (typeof node === "object" && typeof node.price_level === "number") return node.price_level;
+    return null;
+  }
+
+  function _formatPrice(node) {
+    const p = _priceOf(node);
+    return p == null ? "—" : p.toFixed(2);
+  }
+
   function renderPointsRow(label, pt) {
     const tr = el("tr");
     tr.appendChild(el("td", { text: label }));
-    const ref = pt && pt.reference;
-    const conf = pt && pt.confirmed;
-    tr.appendChild(
-      el("td", { className: ref == null ? "num null" : "num", text: ref == null ? "—" : ref.toFixed(2) }),
-    );
-    tr.appendChild(
-      el("td", { className: conf == null ? "num null" : "num", text: conf == null ? "—" : conf.toFixed(2) }),
-    );
+    tr.appendChild(el("td", { className: _priceOf(pt && pt.reference) == null ? "num null" : "num", text: _formatPrice(pt && pt.reference) }));
+    tr.appendChild(el("td", { className: _priceOf(pt && pt.confirmed) == null ? "num null" : "num", text: _formatPrice(pt && pt.confirmed) }));
     return tr;
   }
 
@@ -252,7 +258,11 @@
     const tr = el("tr");
     tr.appendChild(el("td", { text: "止损参考" }));
     tr.appendChild(
-      el("td", { className: stop == null ? "num null" : "num", colspan: "2", text: stop == null ? "—" : stop.toFixed(2) }),
+      el("td", {
+        className: _priceOf(stop) == null ? "num null" : "num",
+        colspan: "2",
+        text: _formatPrice(stop),
+      }),
     );
     tbl.appendChild(tr);
     return tbl;
@@ -361,6 +371,23 @@
   }
 
   function renderAdvice(code, payload, status) {
+    try {
+      return _renderAdviceInner(code, payload, status);
+    } catch (exc) {
+      console.error("renderAdvice crashed", exc, payload);
+      const errWrap = el("div");
+      errWrap.appendChild(
+        el("div", { class: "error", text: `建议渲染失败：${exc && exc.message ? exc.message : exc}` }),
+      );
+      try {
+        const raw = el("pre", { text: JSON.stringify(payload, null, 2) });
+        errWrap.appendChild(raw);
+      } catch (_) {}
+      return errWrap;
+    }
+  }
+
+  function _renderAdviceInner(code, payload, status) {
     const wrap = el("div");
     const httpStatus = status != null ? status : (payload && payload.status) || 200;
     if (httpStatus >= 400) {
