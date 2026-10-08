@@ -9,7 +9,7 @@
   "use strict";
 
   const LS_KEY = "cpt_track_user";
-  const API = "/api/dashboard/track";
+  const API = "/cpt/api/dashboard/track";
   const FETCH_OPTS = { credentials: "same-origin" };
 
   // ── DOM 工具 ────────────────────────────────────────────────
@@ -179,7 +179,7 @@
 
   async function apiLlmStatus(callId) {
     const user = getUser();
-    const url = `/api/dashboard/llm/calls?subject_id=${encodeURIComponent(`track:${user}:`)}&limit=10`;
+    const url = `/cpt/api/dashboard/llm/calls?subject_id=${encodeURIComponent(`track:${user}:`)}&limit=10`;
     const r = await fetch(url, withUser({ method: "GET" }));
     if (!r.ok) return null;
     const body = await r.json();
