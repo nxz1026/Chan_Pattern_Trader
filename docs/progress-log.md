@@ -58,7 +58,8 @@
 | R54 | 全仓文档对齐；发现「门禁验错了属性」，新增 `check_line_refs.py` |
 | R55 | 给「门禁恒返回 0」「断言依赖本机环境」两类补专盯门禁 |
 | R56 | 全仓通读复审 26 项修复；`min_bi_len` 真正接到 native，`SCHEMA_VERSION` 升 `v1` |
-| R57 | 上线前 360° 审计：① 清 39 条未来结构事件 + 17 行假时间戳；② 修轮询陈旧误报（`startPolling` 收进 `markFresh`，补契约测试）；③ `cpt_dashboard_run` 保留期**首次真正自动化**（`prune` + 04:30 cron）；④ 更正 `min_bi_len` 定档的**量纲口径**（6 实为 p95~p97 而非 p80）；⑤ 新增门禁⑭「变异抽查」——不看测试写了什么，只看它会不会响 |
+| R57 | 上线前 360° 审计：① 清 39 条未来结构事件 + 17 行假时间戳；② 修轮询陈旧误报（`startPolling` 收进 `markFresh`，补契约测试）；③ `cpt_dashboard_run` 保留期**首次真正自动化**（`prune` + 04:30 cron）；④ 更正 `min_bi_len` 定档的**量纲口径**（6 实为 p95~p97 而非 p80）；⑤ 新增门禁⑭「变异抽查」——只看它会不会响 |
+| R58 | 「我的追踪」段 1：数据 + API + 建议点。`cpt_track` + `cpt_track_snapshot` 两表（`X-CPT-User` 头提取，缺省 `default`，字符白名单 + 截断）；BUY/SELL **reference 与 confirmed 双版**（reference 永远有 = 中枢下沿/笔低 × 缓冲 ÷ 倍率；confirmed 仅 `status==confirmed`+动作匹配时填 = 最新结构位无缓冲）；30 天快照 / 6h 人话缓存 / 90 天回收站；缺 `price_ratio` 全 None（除零风险）。段 2（dashboard UI）与 3（飞书推送）未开工（用户选「段 1 完即停」） |
 
 > ⚠️ **2026-10-06 补记**：本表原先止于 R56，而 R57 当天已完成上述 5 项。
 > 缺口成因与 R43 那次一样：`docs/pending-wiring.md` 把本文指定为「唯一的轮次记录
@@ -906,3 +907,7 @@ whitelist.py`、`ruff check`、`ruff format --check`、`mypy cpt scripts`。
    **风险大于收益**，记此不拆。
 10. `?level=abc` 的行为随模式而变（realtime 回 400，demo/fixture 静默回 200）——
     要先决定「demo 模式收到不支持的参数该怎么办」，已写成显式测试钉住现状。
+11. **R58 「我的追踪」段 2 与段 3 未开工**（用户选「段 1 完即停」）。段 2 = dashboard
+    加「我的追踪」标签 + 加入表单 + 列表卡 + 折叠 current/algorithm/points/human +
+    「再讲一次人话」按钮 + 回收站区块；段 3 = 飞书推送（信号跃迁 + confirmed 首次
+    出现 + 24h 节流）。**等用户拍板再动**——后端 6 个端点已部署 oracle 并烟雾测试通过。
