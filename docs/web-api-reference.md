@@ -215,3 +215,41 @@ GET /api/dashboard/a-share/recommendation?code=600519&level=1d&history_days=30
 
 > 为什么值得做：因子表 R45 一天切了 **4 次**，而「切表前推荐长什么样」
 > 当时**没有答案**、现在也补不回来 ⇒ 至少让**今后的**这类变化**看得见**。
+
+## 2026-10-08 新增：我的追踪（Track）
+
+把 A 股推荐块从「一次性问答」扩到「持续追踪 + 完整建议」：用户加进追踪列表后，每次刷新
+都拿到该票当前的 **current / 算法 / 建议点**三段（人话段在 UI 上"再讲一次"才生成，避免
+每刷都调 LLM）。**多用户设计**：所有数据带 `user_id`，由 `X-CPT-User` 头传入；
+当前部署是单用户，缺省 `"default"`。
+
+```
+GET  /api/dashboard/track                              列表（活跃 + 回收站）
+POST /api/dashboard/track/add    {code, note?}         加入（幂等）
+POST /api/dashboard/track/remove {code}                软删（90 天可恢复）
+POST /api/dashboard/track/restore {code}                回收站复活
+GET  /api/dashboard/track/{code}/advice                 完整建议（current + algorithm + points）
+GET  /api/dashboard/track/{code}/history?days=30        快照历史（默认 30 天）
+```
+
+**建议点**（`suggested_points` 字段）两个版本都返，与用户段 1 决定一致：
+
+| 字段 | 语义 | 何时填 |
+|---|---|---|
+| `buy.reference.price_level` | 结构性参考买点（中枢下沿/笔低 × 缓冲 ÷ 倍率） | **永远**有（无结构数据时 `null` + 显式 condition） |
+| `buy.confirmed.price_level` | 当下应执行的买点（最新结构位，无缓冲） | 仅 `status == "confirmed" && action ∈ {buy, watch}` |
+| `sell.reference` / `sell.confirmed` | 同上，对称 | 同上 |
+| `stop_loss_reference` | `buy.reference × 0.95` | 仅 `note` 含"长期"/`long`/`hold` |
+
+**纪律**：
+
+- **写失败绝不返回空 actions**（`/advice`）：快照写失败时仍返 advice 主体，
+  payload 里 `snapshot_recorded=false` + 日志告警。
+- **降级 vs 故障 两种处置分开**：列表端点 DB 故障返 `{available: false, reason}`（**降级**，
+  让用户知道"暂时没有"）；advice 端点取不到快照就 502（**故障**，应让用户知道）。
+- **仓位层 T+1 不在 CPT**：`disclaimer` 显式标"持仓层 T+1 由交易机负责"。
+
+表：`public.cpt_track`（活跃+回收站）/ `public.cpt_track_snapshot`（30 天历史）。
+Storage 详见 `cpt/storage/track_store.py`，应用逻辑（点位计算）见
+`cpt/application/track_points.py`，端点 + 头解析见 `cpt/web/track_api.py`。
+

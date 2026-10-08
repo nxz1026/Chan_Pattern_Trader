@@ -530,6 +530,11 @@ def make_handler(
             if path.path.startswith("/api/trade/"):
                 self._handle_trade_get(path.path, query)
                 return
+            # 我的追踪（Track）也必须在 provider() 之前：与 A 股 / Trade 同理，
+            # 否则加密侧不可达时 500 把追踪路由挡在门外。
+            if path.path.startswith("/api/dashboard/track"):
+                self._handle_track_get(path.path, query)
+                return
             try:
                 if callable(provider) and not hasattr(provider, "snapshot_payload"):
                     snapshot = provider()
@@ -1198,6 +1203,85 @@ def make_handler(
             self._write_json_status(HTTPStatus(status), payload)
             return True
 
+        def _handle_track_get(self, path: str, query: dict[str, list[str]]) -> None:
+            """我的追踪：list / advice / history。
+
+            延迟导入 :mod:`cpt.web.track_api`，理由同 :meth:`_handle_a_share_get` —
+            psycopg 不能进加密侧看板的顶层。
+            """
+            from cpt.web import track_api  # noqa: PLC0415
+
+            user_id = track_api.extract_user_id(self.headers)
+            routed = track_api.route_for(path)
+            if routed is None:
+                self._write_json_error(HTTPStatus.NOT_FOUND, "not_found", "")
+                return
+            handler_name, code = routed
+            try:
+                if handler_name == "list":
+                    payload, status = track_api.handle_track_list(user_id)
+                elif handler_name == "advice":
+                    payload, status = track_api.handle_track_advice(user_id, code)
+                elif handler_name == "history":
+                    days_raw = (query.get("days") or [""])[0] or str(
+                        track_api.track_store.SNAPSHOT_RETENTION_DAYS
+                    )
+                    try:
+                        days = int(days_raw)
+                    except ValueError:
+                        days = track_api.track_store.SNAPSHOT_RETENTION_DAYS
+                    payload, status = track_api.handle_track_history(user_id, code, days=days)
+                else:
+                    self._write_json_error(HTTPStatus.NOT_FOUND, "not_found", "")
+                    return
+            except Exception:  # noqa: BLE001
+                _LOG.exception("track get failed path=%s user=%s", path, user_id)
+                self._write_json_error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR, "track_unavailable", "track api error"
+                )
+                return
+            self._write_json_status(HTTPStatus(status), payload)
+
+        def _handle_track_post(self) -> bool:
+            """我的追踪写操作：add / remove / restore。返回 False 表示不是 Track 写路由。"""
+            path = urlsplit(self.path).path
+            # 显式写三个路径字面量：让 ``check_doc_drift`` 的字面 grep 能找到，
+            # 也比 ``any(f"...{op}" ...)`` 一眼看出"这三条归这里管"。
+            if path == "/api/dashboard/track/add":
+                op = "add"
+            elif path == "/api/dashboard/track/remove":
+                op = "remove"
+            elif path == "/api/dashboard/track/restore":
+                op = "restore"
+            else:
+                return False
+
+            from cpt.web import track_api  # noqa: PLC0415
+
+            user_id = track_api.extract_user_id(self.headers)
+            try:
+                body = self._read_json_body()
+            except Exception:  # noqa: BLE001
+                self._write_json_error(
+                    HTTPStatus.BAD_REQUEST, "invalid_json", "request body must be valid JSON"
+                )
+                return True
+            try:
+                if op == "add":
+                    payload, status = track_api.handle_track_add(user_id, body)
+                elif op == "remove":
+                    payload, status = track_api.handle_track_remove(user_id, body)
+                else:  # op == "restore"
+                    payload, status = track_api.handle_track_restore(user_id, body)
+            except Exception:  # noqa: BLE001
+                _LOG.exception("track post failed path=%s user=%s", path, user_id)
+                self._write_json_error(
+                    HTTPStatus.INTERNAL_SERVER_ERROR, "track_unavailable", "track api error"
+                )
+                return True
+            self._write_json_status(HTTPStatus(status), payload)
+            return True
+
         def _handle_a_share_write(self, method: str) -> bool:
             """A 股自选与 LLM 解释的写操作；返回 False 表示这不是 A 股路由。"""
             path = urlsplit(self.path)
@@ -1338,6 +1422,8 @@ def make_handler(
             # Trade 回执先于 A 股写路由判定：两者路径前缀不重叠，顺序无关，
             # 但放在前面是为了让「Trade API 只 POST 一个端点」这件事在代码上一眼可见。
             if self._handle_trade_post():
+                return
+            if self._handle_track_post():
                 return
             if self._handle_a_share_write("POST"):
                 return
