@@ -195,7 +195,7 @@
 
   // ── LLM 轮询 + 单卡刷新 ─────────────────────────────────────
 
-  const TERMINAL = new Set(["succeeded", "failed", "error", "interrupted"]);
+  const TERMINAL = new Set(["ok", "succeeded", "failed", "error", "interrupted"]);
   const POLL_INTERVAL_MS = 2000;
   const POLL_TIMEOUT_MS = 30000;
 
