@@ -1934,7 +1934,19 @@ def make_handler(
             **连接被重置**，而不是一个能读的 400/500。这里兜住并回结构化 500。
 
             已经发过响应头就不再写第二遍（半截响应会污染 keep-alive 流）。
+
+            客户端提前断开（``BrokenPipeError`` / ``ConnectionResetError`` /
+            ``ConnectionAbortedError``）不是服务端异常：对端已经不读响应了，
+            再把整段栈记进 journal 只会淹掉真正的故障（2026-10-09 日志巡检 B 项：
+            7 天里好几条 Traceback 全是这一类）。这类异常降级成一行 WARNING，
+            **不带 exc_info**；其余异常照旧 ``_LOG.exception``。
             """
+            exc = sys.exc_info()[1]
+            if isinstance(exc, (BrokenPipeError, ConnectionResetError, ConnectionAbortedError)):
+                _LOG.warning(
+                    "客户端提前断开（%s %s path=%s）", method, type(exc).__name__, self.path
+                )
+                return
             _LOG.exception("%s 未捕获异常 path=%s", method, self.path)
             if self._response_started:
                 return
