@@ -335,28 +335,34 @@ def latest_run_fingerprint(conn: Any, *, market: str, symbol: str) -> dict[str, 
     return {name: _field(name) for name in FINGERPRINT_FIELDS}
 
 
-def waterline_trend(conn: Any, *, market: str, symbol: str, limit: int = 50) -> dict[str, Any]:
-    """把某标的的水位序列压成"趋势"（给前端/巡检看的极简形态）。
+#: 参与「趋势变化」判定的字段，顺序即 :func:`_trend_from_rows` 的 diff 顺序。
+_TREND_TRACKED_FIELDS: Final[tuple[str, ...]] = (
+    "bar_count",
+    "bi_count",
+    "zhongshu_count",
+    "gap_count",
+    "factor_coverage",
+    "last_bar_time",
+    "health",
+    "backend",
+    "dataset_hash",
+)
 
-    只给**变化了的**字段 —— 一串 50 行全等的水位对人是噪声。
-    """
-    rows = tuple(reversed(recent_metrics(conn, market=market, symbol=symbol, limit=limit)))
+#: 带表别名的列清单，只给 :func:`waterline_trends_bulk` 的 LATERAL 子查询用。
+#: ``_SELECT`` 不带别名，而子查询里 ``market``/``symbol`` 同时属于键表和
+#: 水位表，不加限定会直接 ``column reference is ambiguous``。
+_SELECT_QUALIFIED: Final[str] = ", ".join(f"m.{name}" for name in _COLUMNS)
+
+
+def _trend_from_rows(market: str, symbol: str, rows: Sequence[RunMetric]) -> dict[str, Any]:
+    """把**按时间升序**的水位行压成趋势；空序列返回零样本形态。"""
     if not rows:
         return {"market": market, "symbol": symbol, "samples": 0, "changes": []}
-    tracked = (
-        "bar_count",
-        "bi_count",
-        "zhongshu_count",
-        "gap_count",
-        "factor_coverage",
-        "last_bar_time",
-        "health",
-        "backend",
-        "dataset_hash",
-    )
     changes: list[dict[str, Any]] = []
     for prev, cur in zip(rows, rows[1:], strict=False):
-        diff = {k: [prev.get(k), cur.get(k)] for k in tracked if prev.get(k) != cur.get(k)}
+        diff = {
+            k: [prev.get(k), cur.get(k)] for k in _TREND_TRACKED_FIELDS if prev.get(k) != cur.get(k)
+        }
         if diff:
             changes.append({"at": cur.get("observed_at"), "changed": diff})
     return {
@@ -368,6 +374,79 @@ def waterline_trend(conn: Any, *, market: str, symbol: str, limit: int = 50) -> 
         "latest": rows[-1],
         "changes": changes[-20:],
     }
+
+
+def waterline_trend(conn: Any, *, market: str, symbol: str, limit: int = 50) -> dict[str, Any]:
+    """把某标的的水位序列压成"趋势"（给前端/巡检看的极简形态）。
+
+    只给**变化了的**字段 —— 一串 50 行全等的水位对人是噪声。
+    """
+    rows = tuple(reversed(recent_metrics(conn, market=market, symbol=symbol, limit=limit)))
+    return _trend_from_rows(market, symbol, rows)
+
+
+def waterline_trends_bulk(
+    conn: Any,
+    keys: Sequence[tuple[str, str]],
+    limit: int = 50,
+) -> dict[tuple[str, str], dict[str, Any]]:
+    """一次查询算出多个 ``(market, symbol)`` 的水位趋势（**只读**）。
+
+    ## R59（审计 M5）：为什么要有它
+
+    ``/api/dashboard/inspection`` 原先对每个 distinct 标的调一次
+    :func:`waterline_trend`，上限 20 个 key 就是 20 次往返（N+1）。
+    这里用一条 ``LATERAL`` 语句按 key 各取 ``limit`` 行，语义与逐个调用
+    **完全一致**（等价性由 ``tests/test_run_metric_store_trends_bulk.py`` 钉住）。
+
+    返回值为 ``{(market, symbol): trend}``；**每个请求到的 key 都必有条目**
+    （没数据的 key 是零样本形态），顺序不影响结果，重复 key 会先去重。
+
+    :param keys: ``(market, symbol)`` 序列；空序列直接返回空 dict（不发 SQL）。
+    :param limit: 每个 key 各取最近多少行，与 :func:`waterline_trend` 同口径。
+    """
+    capped = max(1, min(int(limit), 1000))
+    unique: list[tuple[str, str]] = []
+    seen: set[tuple[str, str]] = set()
+    for market, symbol in keys:
+        key = (str(market), str(symbol))
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(key)
+    empty = {key: _trend_from_rows(key[0], key[1], ()) for key in unique}
+    if not unique:
+        return empty
+
+    shape = ", ".join(["(%s::text, %s::text)"] * len(unique))
+    args: list[Any] = [value for key in unique for value in key]
+    args.append(capped)
+    sql = (
+        f"SELECT {_SELECT} "
+        f"FROM (VALUES {shape}) AS k(k_market, k_symbol) "
+        f"CROSS JOIN LATERAL ("
+        f"SELECT {_SELECT_QUALIFIED} FROM public.cpt_run_metric m "
+        f"WHERE m.market = k.k_market AND m.symbol = k.k_symbol "
+        f"ORDER BY m.observed_at DESC LIMIT %s"
+        f") AS t "
+        f"ORDER BY t.market, t.symbol, t.observed_at DESC"
+    )
+
+    grouped: dict[tuple[str, str], list[RunMetric]] = {}
+    with conn.cursor() as cur:
+        cur.execute(sql, args)
+        for raw in cur.fetchall():
+            metric = _row_to_dict(raw)
+            key = (str(metric.get("market") or ""), str(metric.get("symbol") or ""))
+            if key not in empty:
+                continue
+            grouped.setdefault(key, []).append(metric)
+
+    out: dict[tuple[str, str], dict[str, Any]] = {}
+    for key in unique:
+        rows = tuple(reversed(grouped.get(key, [])))
+        out[key] = _trend_from_rows(key[0], key[1], rows)
+    return out
 
 
 def prune(conn: Any, *, keep_days: int = 30, kinds: Sequence[str] | None = None) -> int:

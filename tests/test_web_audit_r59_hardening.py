@@ -566,7 +566,10 @@ def test_prune_processed_caps_and_keeps_newest(monkeypatch: pytest.MonkeyPatch) 
 def test_inspection_limit_clamped_and_truncation_reported(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """``?limit=99999`` 夹到 500；distinct (market,symbol) 超上限时标注截断。"""
+    """``?limit=99999`` 夹到 500；distinct (market,symbol) 超上限时标注截断。
+
+    R59（审计 M5 收尾）：趋势读的是**一条**批量查询，不再每个 key 一次往返。
+    """
     from cpt.storage import run_metric_store as rms
 
     class _FakeClient:
@@ -577,16 +580,24 @@ def test_inspection_limit_clamped_and_truncation_reported(
             return None
 
     rows = [{"market": "a_share", "symbol": f"{600000 + i:06d}"} for i in range(25)]
-    trend_calls: list[str] = []
+    bulk_calls: list[tuple[list[tuple[str, str]], int]] = []
 
-    def _fake_trend(_conn: object, *, market: str, symbol: str, limit: int) -> list[Any]:
-        trend_calls.append(f"{market}/{symbol}")
-        return []
+    def _fake_bulk(
+        _conn: object, keys: list[tuple[str, str]], limit: int
+    ) -> dict[tuple[str, str], dict[str, Any]]:
+        bulk_calls.append((list(keys), limit))
+        return {
+            key: {"market": key[0], "symbol": key[1], "samples": 0, "changes": []} for key in keys
+        }
+
+    def _bomb(*_args: Any, **_kwargs: Any) -> None:
+        raise AssertionError("N+1 回归：inspection 又逐个 key 调 waterline_trend 了")
 
     monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", _FakeClient)
     monkeypatch.setattr(rms, "latest_inspection", lambda conn: None)
     monkeypatch.setattr(rms, "recent_metrics", lambda conn, *, kind, limit: rows)
-    monkeypatch.setattr(rms, "waterline_trend", _fake_trend)
+    monkeypatch.setattr(rms, "waterline_trends_bulk", _fake_bulk)
+    monkeypatch.setattr(rms, "waterline_trend", _bomb)
 
     with _serve() as server:
         resp = _request(f"{_url(server)}/api/dashboard/inspection?limit=99999")
@@ -598,8 +609,11 @@ def test_inspection_limit_clamped_and_truncation_reported(
     assert payload["limits"]["max_limit"] == 500
     assert payload["limits"]["max_trend_keys"] == 20
     assert payload["limits"]["trend_keys_truncated"] == 5
-    # N+1 的规模被硬上限兜住：25 个 key 只查 20 次。
-    assert len(trend_calls) == 20
+    # 25 个 distinct key 被上限夹到 20 个，且只发一条 SQL（每个 key 各取 limit 行）。
+    assert len(bulk_calls) == 1
+    assert len(bulk_calls[0][0]) == 20
+    assert bulk_calls[0][1] == 500
+    assert len(payload["trends"]) == 20
 
 
 def test_structure_events_and_signal_stats_clamp(monkeypatch: pytest.MonkeyPatch) -> None:

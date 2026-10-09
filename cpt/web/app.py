@@ -1261,26 +1261,28 @@ def make_handler(
                         _conn = _client._get_conn()  # noqa: SLF001
                         latest = _rms.latest_inspection(_conn)
                         runs = _rms.recent_metrics(_conn, kind=_rms.KIND_RUN, limit=limit)
-                        trends: dict[str, Any] = {}
-                        seen: set[tuple[str, str]] = set()
                         # R59（审计 M5）：N+1 的规模由 distinct (market,symbol) 决定，
-                        # 而它随 run 行数增长。真正的修法是一条批量查询
-                        # （``waterline_trends_bulk(conn, keys, limit)``）—— 那要改
-                        # ``cpt/storage``（不在本批改动范围，已在回报里列出所需接口）。
-                        # 退而求其次：给 distinct key 数一个硬上限，并在响应里**标注截断**，
-                        # 绝不静默少给数据。
+                        # 而它随 run 行数增长。先按首次出现顺序收集 key（超过
+                        # _MAX_TREND_KEYS 的部分只计数、不查询），再用**一条**
+                        # 批量查询取回全部趋势 —— 20 个 key 从 20 次往返变成 1 次。
+                        keys: list[tuple[str, str]] = []
+                        seen: set[tuple[str, str]] = set()
                         truncated_keys = 0
                         for _row in runs:
-                            _key = (_row["market"], _row["symbol"])
+                            _key = (str(_row["market"]), str(_row["symbol"]))
                             if _key in seen:
                                 continue
-                            if len(seen) >= _MAX_TREND_KEYS:
+                            seen.add(_key)
+                            if len(keys) >= _MAX_TREND_KEYS:
+                                # 截断计数按**distinct key**算（旧实现在超限后
+                                # 才 add 进 seen，同一 key 每行都会再计一次）。
                                 truncated_keys += 1
                                 continue
-                            seen.add(_key)
-                            trends[f"{_key[0]}/{_key[1]}"] = _rms.waterline_trend(
-                                _conn, market=_key[0], symbol=_key[1], limit=limit
-                            )
+                            keys.append(_key)
+                        bulk = _rms.waterline_trends_bulk(_conn, keys, limit=limit)
+                        trends: dict[str, Any] = {
+                            f"{market}/{symbol}": bulk[(market, symbol)] for market, symbol in keys
+                        }
                         payload = {
                             "schema_version": "dashboard_inspection.v1",
                             "available": True,

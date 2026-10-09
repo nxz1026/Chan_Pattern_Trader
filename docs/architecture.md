@@ -56,12 +56,12 @@
 
 | 层 | 文件 | 行数 | 复盘状态 |
 |---|---:|---:|---|
-| `storage/` | 9 | 2,684 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 门禁②；R24 只是恢复层+划边界，**不算复盘**。R57 补 `dashboard_run_store.prune`（保留期此前只存在于迁移注释，从未自动化）。2026-10-07 加 `signal_event_store.load_trade_decisions`（Trade API 决策取数）。R59 审计：M15/M16/M17（清扫集合、终态守卫、advisory lock 去重）+ L12 索引 + 只读 `count_prunable_*`。详见 `docs/archive/reviews-r45.md`） |
+| `storage/` | 9 | 2,763 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 门禁②；R24 只是恢复层+划边界，**不算复盘**。R57 补 `dashboard_run_store.prune`（保留期此前只存在于迁移注释，从未自动化）。2026-10-07 加 `signal_event_store.load_trade_decisions`（Trade API 决策取数）。R59 审计：M15/M16/M17（清扫集合、终态守卫、advisory lock 去重）+ L12 索引 + 只读 `count_prunable_*` + `waterline_trends_bulk`（一条 SQL 取代 inspection 的 N+1，审计 M5 收尾）。详见 `docs/archive/reviews-r45.md`） |
 | `llm/` | 8 | 1,646 | ✅ **已做**（R45：全层勘察 + 3 个真 bug —— 清空进程环境 / 归类撒谎 / 单例丢弃审计回调。R59 审计：M6 响应体 512 KiB 上限 + 总 deadline、队列 `max_pending`，L6 只重试 5xx/连接错、**超时不重试**） |
 | `adapters/` | 21 | 6,853 | ✅ **已做**（R45：全层勘察 + 3 个真 bug + 外部契约真机验证脚本 `scripts/verify_public_contracts.py`；R52 加占位行守卫；顺带实测更正了 handoff 里 K 线缺口的量级。R59 审计：M7/M8/M19（NULL 守卫、占位行错误、缺键显式抛）+ L7/L8/L10（因子失败归因、坏记录跳过、负值拒绝）） |
 | `application/` | 34 | 5,939 | ✅ **已做**（R45：全层勘察 + 3 个真 bug —— DB 故障被报成「缺因子」两处 + CDN 护栏后门；R51 删 `canvas_wbt.py`；R52 占位行 WARNING + `placeholder_rows` reason。R59 审计：M22–M29 + L17/L18（历史信号 fail-closed、覆盖率不再恒 1.0、`rules.vN`、空样本 `match_rate=None`、节流表有界）） |
 | `domain/` | 17 | 3,290 | ✅ **已做**（R30 语义契约门禁；R45 重扫 16 文件，**未发现需修问题** —— 递归/中枢/级别标签不变量实测通过。R57 更正 `min_bi_len` 量纲注释：门槛判的是去包含后根数，旧的「p80」分位取自原始根数。R59 审计：H9 修 `build_bis` 伪笔、新增 `market_time.py`（时区唯一口径，H10/L11）） |
-| `web/` | 8 | 5,368 | ✅ **已做**（R29 门禁仍成立；R45 重扫，**未发现需修问题** —— 4 处候选经真机实证均为假阳性；R51 删 `/api/canvas/wbt` 路由分支。2026-10-07 加 `trade_api.py`（对 LKL-Trade 交易机的决策投喂，与 emotion-core 同协议、**独立状态目录**），GET/POST 路由都排在加密 provider 分发之前。R59 审计：H1–H4/M1–M5（限流、符号白名单、access log、并发上限、写库副作用显式）+ M18 维护端点分发） |
+| `web/` | 8 | 5,370 | ✅ **已做**（R29 门禁仍成立；R45 重扫，**未发现需修问题** —— 4 处候选经真机实证均为假阳性；R51 删 `/api/canvas/wbt` 路由分支。2026-10-07 加 `trade_api.py`（对 LKL-Trade 交易机的决策投喂，与 emotion-core 同协议、**独立状态目录**），GET/POST 路由都排在加密 provider 分发之前。R59 审计：H1–H4/M1–M5（限流、符号白名单、access log、并发上限、写库副作用显式）+ M18 维护端点分发 + M5 收尾（inspection 趋势改走 `waterline_trends_bulk` 单条 SQL）） |
 | `dashboard/`（前端） | 19 | 15,827 | ⚠️ R45 勘察时只被画布 D 与几个面板碰过；**R51 画布 D 已下线**。⚠️ 本行**只算顶层 js/css/html，排除 `dashboard/vendor/`**（第三方库，不是本仓产物）；体积另见下方脚注。R59：L2 去掉 `innerHTML` 逃生口、L4 入口指向 bundle、轮询并入 `CPTJob.poll`（门禁⑦） |
 | `engine/` | — | — | 🚫 2026-09-25 整层删除（四个孤儿文件，R24 未恢复） |
 
