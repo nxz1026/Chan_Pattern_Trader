@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
@@ -203,6 +204,20 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
             slots = self._slots
             if slots is not None:
                 slots.release()
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        """R59（2026-10-09 日志巡检 B）：客户端提前断连不该刷整段 Traceback。
+
+        ``socketserver`` 处理请求时抛出的任何异常都会走这里，默认实现用
+        ``traceback.print_exc()`` 往 stderr/journal 打一份完整栈。浏览器关标签页、
+        超时取消是**常态**，7 天 journal 里 CPT 由此留下 8 段 Traceback，真正的
+        故障信号被淹没。断连只记 DEBUG；其余异常仍交回默认实现（不吞真错）。
+        """
+        exc = sys.exc_info()[1]
+        if isinstance(exc, (BrokenPipeError, ConnectionResetError)):
+            _LOG.debug("客户端断连 %s: %s", client_address, type(exc).__name__)
+            return
+        super().handle_error(request, client_address)
 
     def _reject_overloaded(self, request: Any, client_address: Any) -> None:
         """在 accept 线程里直接回 503（不经 handler，故手写状态行）。"""
@@ -1631,11 +1646,16 @@ def make_handler(
             from cpt.web import track_api  # noqa: PLC0415
 
             user_id = track_api.extract_user_id(self.headers)
-            try:
-                body = self._read_json_body()
-            except Exception:  # noqa: BLE001
+            # R59（2026-10-09 日志巡检 A）：``_read_json_body`` 契约是「读不到就返回
+            # None、不抛」，原来用 try/except 兜 Exception 等于没兜住——body 为 None
+            # 会一路传进 handle_track_add 触发 AttributeError，被下面的宽 except 变成
+            # 500。畸形/空/非对象 body 是客户端问题，这里必须回 400。
+            body = self._read_json_body()
+            if not isinstance(body, dict):
                 self._write_json_error(
-                    HTTPStatus.BAD_REQUEST, "invalid_json", "request body must be valid JSON"
+                    HTTPStatus.BAD_REQUEST,
+                    "invalid_json",
+                    "request body must be a JSON object",
                 )
                 return True
             try:
