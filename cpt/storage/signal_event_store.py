@@ -153,6 +153,14 @@ def load_previous_signal(conn: Any, signal_id: str) -> Signal | None:
         raise SignalEventError(f"加载信号历史失败: {exc}") from exc
 
 
+#: ``pg_advisory_xact_lock`` 的命名空间键（审计 M17）。
+#:
+#: 锁键 = ``(hashtext(_SIGNAL_EVENT_LOCK_NAMESPACE), hashtext(signal_id))`` ——
+#: 同一 ``signal_id`` 上的写入被串行化，不同票互不阻塞。命名空间用固定字符串，
+#: 避免与仓里其它 advisory lock 使用者撞键。
+_SIGNAL_EVENT_LOCK_NAMESPACE = "cpt_signal_event"
+
+
 def record_signal_event(
     conn: Any,
     signal: Signal,
@@ -168,6 +176,15 @@ def record_signal_event(
     :param code: A 股 6 位代码。
     :param event_time: 本次评估的事件时间（Unix 毫秒）。
     :returns: ``True`` 表示写了一条新事件；``False`` 表示 status 未变、跳过。
+
+    **并发安全（审计 M17）**：原来只用 ``signal.status == prev_status`` 做纯
+    应用层去重，**先读后写不是原子的**。``ThreadingHTTPServer`` + 「每请求一连」
+    下，两个请求可以各自读到同一旧状态、各写一条 ``X→Y``，污染「当前状态 =
+    最新事件」这个真相源。r21 迁移**刻意不加** ``UNIQUE(signal_id, status)``
+    （同一 status 可合法再现，见迁移注释），所以用**事务级 advisory lock**
+    串行化而不是加约束/改表：按 ``signal_id`` 取 ``pg_advisory_xact_lock``，
+    **在锁内重读最新事件**，已是本次目标状态就跳过。锁随本事务 commit/rollback
+    自动释放，不泄漏、不需要显式解锁。
     """
     if signal.status == prev_status:
         return False
@@ -178,6 +195,24 @@ def record_signal_event(
 
     try:
         with conn.cursor() as cur:
+            # ① 事务级 advisory lock：锁键 = hashtext(命名空间)+hashtext(signal_id)。
+            #    r21 故意不加 UNIQUE，串行化是最贴合既有取舍的手段。
+            cur.execute(
+                "SELECT pg_advisory_xact_lock(hashtext(%s), hashtext(%s))",
+                (_SIGNAL_EVENT_LOCK_NAMESPACE, signal.signal_id),
+            )
+            # ② 必须在**锁内**重读再决定，否则串行化毫无意义：第二个事务拿到锁
+            #    时，对方可能已经提交了同一跃迁。
+            cur.execute(
+                "SELECT status FROM public.cpt_signal_event "
+                " WHERE signal_id = %s ORDER BY id DESC LIMIT 1",
+                (signal.signal_id,),
+            )
+            row = cur.fetchone()
+            current_status = row[0] if row else None
+            if current_status == signal.status:
+                # 本次跃迁已经是最新事件（并发事务写入 / 此前已落库）—— 不重复 append
+                return False
             cur.execute(
                 """INSERT INTO public.cpt_signal_event
                      (signal_id, code, signal_type, level, structure_id,

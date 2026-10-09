@@ -40,3 +40,38 @@ def test_bad_ohlc_and_close_boundary_are_rejected() -> None:
 
 def test_empty_input_is_allowed() -> None:
     assert validate_canonical_bars([]) == ()
+
+
+# --------------------------------------------------------------------------- #
+# 非负校验（R59 审计 L10）
+#
+# 改前只查 ``math.isfinite`` + OHLC 顺序：``close=-1``、``volume=-500`` 都是
+# 「数学合法、语义荒谬」，能一路进分型/笔/中枢且零报错。
+# --------------------------------------------------------------------------- #
+
+
+def test_negative_price_is_rejected() -> None:
+    """负价必须在校验层就拦下 —— 不能等它变成结构里的 high/low。"""
+    invalid = make_canonical_bar(0, -1.0, 12.0, -2.0, -1.0, 299999)
+    with pytest.raises(DataValidationError, match="为负数"):
+        validate_canonical_bars([invalid])
+
+
+def test_negative_volume_is_rejected() -> None:
+    """量/额同理：``volume=-500`` 会让背驰力度度量变成无意义的负数。"""
+    invalid = make_canonical_bar(0, 10.0, 12.0, 8.0, 10.0, 299999)
+    object.__setattr__(invalid, "volume", -500.0)
+    with pytest.raises(DataValidationError, match="volume"):
+        validate_canonical_bars([invalid])
+
+
+def test_zero_price_stays_allowed_by_the_validator_on_purpose() -> None:
+    """0 价**刻意**不在校验层拒绝（与 R52 的逐行占位行处理配套）。
+
+    判据若从 ``< 0`` 改成 ``<= 0``，一根脏行就能把**整只票**降级成
+    ``DataValidationError``：见 ``tests/test_a_share_local.py`` 的
+    ``test_zero_price_bar_would_have_passed_the_validator``。这条用例把那个
+    取舍钉在这里，提醒后人别把 0 与负数混为一谈。
+    """
+    zero = make_canonical_bar(0, 0.0, 0.0, 0.0, 0.0, 299999)
+    assert len(validate_canonical_bars([zero])) == 1

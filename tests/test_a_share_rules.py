@@ -329,6 +329,20 @@ def test_check_t_plus_one_calendar_db_error():
     assert result["reason"] == "calendar_check_failed"
 
 
+def test_check_t_plus_one_calendar_uses_market_date(monkeypatch):
+    """R59（审计 L11）：查 ``trade_calendar`` 用市场时区日期，不是宿主本地日期。"""
+    import cpt.adapters.a_share_local as a_share_local
+
+    monkeypatch.setattr(a_share_local, "market_today", lambda: date(2026, 10, 8))
+
+    client = _calendar_client(today_open=True)
+    result = check_t_plus_one_calendar(client)
+
+    assert result["today"] == "2026-10-08"
+    # 第一查的日期参数就是喂给 SQL 的那个 —— 钉住「日期来源于市场时区」
+    assert client.conn.cursor_obj.executed[0][1] == ("2026-10-08",)
+
+
 # --------------------------------------------------------------------------- #
 # 接线（R19）：本模块从「生产零导入」接进 A 股主看板
 # --------------------------------------------------------------------------- #

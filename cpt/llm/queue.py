@@ -1,4 +1,4 @@
-"""异步队列：fire-and-forget + 429 指数退避重入。
+"""异步队列：fire-and-forget + 指数退避重入。
 
 ## 为什么必须是异步
 
@@ -13,8 +13,10 @@
 - 不需要新的 systemd unit，不用管两个进程的部署顺序与启停顺序。
 
 **代价必须说清**：web 进程重启时**在途任务会丢**。所以 worker 启动时会把库里
-``status`` 处于 ``queued`` / ``running`` 的行标成 ``interrupted``，让 UI 能如实
-显示「这次没跑完」，而不是让调用方永远等一个不会来的结果。
+``status`` 处于 ``queued`` / ``running`` / ``rate_limited`` 的行标成
+``interrupted``，让 UI 能如实显示「这次没跑完」，而不是让调用方永远等一个
+不会来的结果（``rate_limited`` 是 2026-10-08 审计 M15 补上的：退避等待只在
+**内存队列**里，进程一被杀那行就永远停在 ``rate_limited``、``finished_at`` 恒 NULL）。
 
 ## 429 的处置（实测特征决定的设计）
 
@@ -29,6 +31,28 @@
    混进 ``error`` 会让看板天天报红。
 4. **401/403 等 4xx 不重试** —— key 无效重试一万次也没用。
 5. **有次数上限**，超过记 ``error`` + ``rate_limited_exhausted``，不无限重入。
+
+## 瞬时故障的重试边界（审计 L6）
+
+原来 ``max_attempts`` / 退避**只对 429 生效**，5xx / 连接错一次就终态，与
+provider 文档自相矛盾。现在只对**明确安全可重试**的错误退避重入 —— 判据是
+provider 打了 ``retryable`` 标记（见 ``providers/openai_compatible.py``）：
+
+- **5xx**：服务端瞬时故障，重试安全 ⇒ 重试；
+- **连接错**：请求根本没送达 ⇒ 重试；
+- **超时**：provider **刻意不打标记，不重试** —— 服务商可能已受理并计费，
+  重试会把一次调用算成两次（at-most-once 优先于可用性）。
+
+重试状态**复用 ``queued``**（而不是新造一个状态）：``queued`` 非终态，能被
+``mark_interrupted`` 一起清扫、能直接显示「排队中」，且不用改状态词表/迁移
+CHECK 约束。耗尽后记 ``error`` + ``retryable_exhausted``。
+
+## 队列是有界的（审计 M6）
+
+``_pending`` 原来是**无界** ``PriorityQueue``：worker 一旦卡死（例如服务端慢速
+吐字节），后续请求只会无限堆积内存。``submit()`` 现在超过 ``max_pending`` 就
+如实拒绝 ``llm_queue_full``。退避重入仍走无界 ``put`` —— 那是 worker 自己排回
+自己，限流会死锁。
 """
 
 from __future__ import annotations
@@ -104,6 +128,9 @@ class LLMQueue:
         ``(call_id, status, detail, result) -> None``；``result`` 只在
         ``status='ok'`` 时非 ``None``，落库方从它取 model / token 用量。
         落库由调用方在回调里做 —— **本模块不碰 SQL**（R24 门禁）。
+    :param max_pending: 待处理队列的硬上限（审计 M6）。超过时 ``submit()``
+        返回 ``accepted=False, reason='llm_queue_full'``，不再无界堆积内存。
+        退避重入不受此限 —— 见模块 docstring「队列是有界的」。
     """
 
     def __init__(
@@ -113,6 +140,7 @@ class LLMQueue:
         *,
         on_status: Callable[[str, str, str, LLMResult | None], None] | None = None,
         worker_count: int = 1,
+        max_pending: int = 100,
     ) -> None:
         self._client = client
         self._config = config
@@ -120,6 +148,8 @@ class LLMQueue:
         #: 保护 ``_on_status``：worker 线程读、HTTP 线程可能补注册（见 set_on_status）
         self._callback_lock = threading.Lock()
         self._pending: queue.PriorityQueue[tuple[float, int, Job]] = queue.PriorityQueue()
+        # 审计 M6：至少为 1，避免把队列配成"永远拒绝"这种自锁配置
+        self._max_pending = max(1, int(max_pending))
         self._seq = 0
         self._seq_lock = threading.Lock()
         self._stop = threading.Event()
@@ -186,11 +216,17 @@ class LLMQueue:
         防线），``submit`` 仍会返回 ``accepted=True`` —— 调用方据此把状态写成
         ``queued``，那一行就永远停在 queued 且**没有任何错误可查**。
         真机上就是这么丢过一次调用。
+
+        审计 M6：队列**有界**。worker 被慢速服务端卡住时，无界 ``_pending``
+        只会把内存吃光；超过 ``max_pending`` 就返回 ``llm_queue_full``，让
+        调用方如实告诉用户「忙」，而不是假装排上了队。
         """
         if not self._config.enabled:
             return SubmitResult(False, job.call_id, "llm_disabled")
         if not self._worker_alive():
             return SubmitResult(False, job.call_id, "llm_worker_unavailable")
+        if self._pending.qsize() >= self._max_pending:
+            return SubmitResult(False, job.call_id, "llm_queue_full")
         self._enqueue(job)
         return SubmitResult(True, job.call_id)
 
@@ -280,7 +316,8 @@ class LLMQueue:
         try:
             result = self._client.complete(job.request)
         except LLMRateLimited as exc:
-            if job.attempt + 1 >= self._config.max_attempts:
+            delay = self._retry_within_limit(job)
+            if delay is None:
                 self._emit(
                     job.call_id,
                     STATUS_ERROR,
@@ -288,8 +325,6 @@ class LLMQueue:
                     None,
                 )
                 return
-            job.attempt += 1
-            delay = self._backoff_delay(job.attempt)
             self._emit(
                 job.call_id,
                 STATUS_RATE_LIMITED,
@@ -299,7 +334,28 @@ class LLMQueue:
             self._enqueue(job, delay=delay)
             return
         except LLMError as exc:
-            self._emit(job.call_id, STATUS_ERROR, str(exc), None)
+            # 审计 L6：只有 provider **明确**打了 retryable 标记的瞬时故障才重入
+            # （5xx / 连接错）。超时**不打标记** → 一次终态，避免重复计费。
+            if not getattr(exc, "retryable", False):
+                self._emit(job.call_id, STATUS_ERROR, str(exc), None)
+                return
+            delay = self._retry_within_limit(job)
+            if delay is None:
+                self._emit(
+                    job.call_id,
+                    STATUS_ERROR,
+                    f"retryable_exhausted: {exc}",
+                    None,
+                )
+                return
+            # 重试复用 queued（非终态、可被 mark_interrupted 清扫），不新造状态
+            self._emit(
+                job.call_id,
+                STATUS_QUEUED,
+                f"transient: {exc}; retry_in={delay:.1f}s attempt={job.attempt}",
+                None,
+            )
+            self._enqueue(job, delay=delay)
             return
         except Exception as exc:  # noqa: BLE001 — worker 绝不能因为一个任务死掉
             self._emit(job.call_id, STATUS_ERROR, f"unexpected: {exc!r}", None)
@@ -308,3 +364,14 @@ class LLMQueue:
         # 结果整份传给回调：text 落 result_text 列，model / token 各有各的列
         # （architecture.md §4.1 约束 4：token 用量必须可审计）。
         self._emit(job.call_id, STATUS_OK, result.text, result)
+
+    def _retry_within_limit(self, job: Job) -> float | None:
+        """还有重试余量就 ``attempt += 1`` 并返回本次退避秒数；否则 ``None``。
+
+        ``None`` 表示已达到 ``max_attempts``，调用方按各自的终态文案记 ``error``。
+        429 与瞬时故障共用它，保证两条路径的重试计数与退避曲线完全一致。
+        """
+        if job.attempt + 1 >= self._config.max_attempts:
+            return None
+        job.attempt += 1
+        return self._backoff_delay(job.attempt)

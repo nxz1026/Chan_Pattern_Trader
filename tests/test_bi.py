@@ -84,18 +84,26 @@ def test_no_gate_is_the_v0_behaviour() -> None:
 
 
 def test_short_bi_is_merged_not_dropped() -> None:
-    """跨度不足时**合并端点**（终点顺延），不是丢掉那一笔。
+    """跨度不足时**合并端点**（终点顺延到下一个异类端点），不是丢掉那一笔。
 
     丢掉会让笔序列在时间轴上出空洞，后续中枢与背驰的分母就错了 —— 所以这里
-    断言的是「笔数不变、只是变长」。
+    断言的是「首尾覆盖不变、笔数变少」，而不是「一笔都不剩」。
+
+    ⚠️ 2026-10-08 审计 H9：原用例只有 3 个端点（底0/顶1/底2、门槛 3），断言产出
+    「底0→底2」一笔 —— 那**两端同类**，是伪笔。顺延只能落到异类分型上，所以这里
+    补一个够远的顶分型（5）来验证真正的「终点顺延」。
     """
-    # 端点 0 / 1 / 2：0→1 跨度 2、1→2 跨度 2，门槛 3 时两笔都不够
-    seq = [fx("bottom", 0, 9, 4), fx("top", 1, 14, 7), fx("bottom", 2, 10, 3)]
+    seq = [
+        fx("bottom", 0, 9, 4),
+        fx("top", 1, 14, 7),
+        fx("bottom", 2, 10, 3),
+        fx("top", 5, 30, 20),  # 起点 0 → 终点 5 跨度 6，够门槛 3；中间的 1/2 被吸收
+    ]
     ungated = build_bis(seq)
     gated = build_bis(seq, min_bi_len=3)
-    # 0→2 跨度 3，够门槛 ⇒ 一笔，且覆盖了原来两笔的全部时间
+    # 底0→顶5 一笔，且覆盖了原来三笔的全部时间
     assert len(gated) == 1
-    assert (_idx(gated[0]), int(gated[0].end_time) // 1000) == (0, 2)
+    assert (_idx(gated[0]), int(gated[0].end_time) // 1000) == (0, 5)
     # 关键：没有出现「中间被挖掉」—— 首尾时间范围与不设门槛时一致
     assert (int(ungated[0].start_time), int(ungated[-1].end_time)) == (
         int(gated[0].start_time),
@@ -103,19 +111,52 @@ def test_short_bi_is_merged_not_dropped() -> None:
     )
 
 
+def test_gate_never_emits_same_kind_endpoints() -> None:
+    """审计 H9 回归：门槛顺延**不得**产出两端同类的伪笔。
+
+    底0/顶1/底2、门槛 3：与底0 异类的候选只有顶1（跨度 2 < 3），再往后没有
+    异类端点 ⇒ 一笔都不成立。旧实现按 +1 步进会落到「底2」上，产出底0→底2。
+    """
+    seq = [fx("bottom", 0, 9, 4), fx("top", 1, 14, 7), fx("bottom", 2, 10, 3)]
+    assert build_bis(seq, min_bi_len=3) == ()
+
+    # 补一个够远的异类端点后笔才成立，且两端仍然一底一顶
+    by_index = {0: "bottom", 1: "top", 2: "bottom", 5: "top"}
+    gated = build_bis([*seq, fx("top", 5, 30, 20)], min_bi_len=3)
+    assert len(gated) == 1
+    for bi in gated:
+        start = int(bi.start_time) // 1000
+        end = int(bi.end_time) // 1000
+        assert by_index[start] != by_index[end], f"伪笔: {by_index[start]}→{by_index[end]}"
+
+
+def test_make_bi_rejects_same_kind_endpoints() -> None:
+    """两端同类必须在构造处就抛，而不是静默造出伪笔（审计 H9 的第二道闸）。"""
+    from cpt.domain.bi import _make_bi  # noqa: PLC0415 — 直接钉住不变量本身
+
+    with pytest.raises(ValueError, match="异类"):
+        _make_bi(fx("bottom", 0, 9, 4), fx("bottom", 2, 10, 3), None)
+
+
 def test_gate_keeps_long_bi_and_only_merges_short_ones() -> None:
-    """只有跨度不足的笔被合并，够长的原样保留。"""
+    """只有跨度不足的笔被合并，够长的原样保留。
+
+    ⚠️ 2026-10-08 审计 H9：原用例第 4 个端点是**顶**分型，于是「顺延」产出
+    顶10→顶30 的伪笔（方向标 -1 但两端都是顶）。补一个底分型（40）之后，第二笔
+    才是真正的「从顶10 顺延到下一个够远的异类端点」。
+    """
     seq = [
         fx("bottom", 0, 9, 4),
         fx("top", 10, 20, 8),  # 0→10 跨度 11，够门槛 5
         fx("bottom", 11, 12, 3),  # 10→11 跨度 2，不够
-        fx("top", 30, 25, 9),  # 11→30 跨度 20（吸收 11）
+        fx("top", 30, 25, 9),  # 与起点 10 同类，被 +2 跳过
+        fx("bottom", 40, 26, 18),  # 10→40 跨度 31，够门槛 ⇒ 终点顺延到 40
     ]
     gated = build_bis(seq, min_bi_len=5)
     assert len(gated) == 2
     assert (_idx(gated[0]), int(gated[0].end_time) // 1000) == (0, 10)
-    # 第二笔从 10 顺延到 30（吸收了不够格的 11），方向仍是向下
-    assert (_idx(gated[1]), int(gated[1].end_time) // 1000) == (10, 30)
+    # 第二笔从 10 顺延到 40（吸收了不够格的 11），方向向下（顶→底）
+    assert (_idx(gated[1]), int(gated[1].end_time) // 1000) == (10, 40)
     assert gated[1].direction == -1
 
 

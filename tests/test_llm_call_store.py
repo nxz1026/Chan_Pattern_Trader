@@ -287,6 +287,19 @@ def test_finish_raises_on_db_error() -> None:
         finish_call(_BrokenConn(), "c1", status=STATUS_OK, result_text="x")
 
 
+def test_finish_sql_guards_against_rewriting_terminal_rows() -> None:
+    """审计 M16：晚到回调不能把已终态（如 interrupted）的行改回 ``ok``。
+
+    多实例 / 滚动重启时 B 进程先标 ``interrupted``，A 进程的晚到 callback
+    再走一次 ``finish_call`` —— 无守卫时把行拉回 ``ok``，看板把一次没跑完的
+    调用显示成成功。守卫 = ``AND status NOT IN (终态)``（0 行更新）。
+    """
+    conn = FakeConn()
+    finish_call(conn, "c1", status=STATUS_OK, result_text="late")
+    sql, _params = conn.executed[0]
+    assert "AND status NOT IN ('ok', 'error', 'interrupted')" in sql
+
+
 # --------------------------------------------------------------------------- #
 # mark_interrupted
 # --------------------------------------------------------------------------- #
@@ -297,7 +310,9 @@ def test_mark_interrupted_only_touches_in_flight() -> None:
     assert mark_interrupted(conn) == 1
     sql, params = conn.executed[0]
     assert "status = 'interrupted'" in sql
-    assert "WHERE status IN ('queued', 'running')" in sql, "不能碰已终态的行"
+    # 审计 M15：清扫集合必须含 ``rate_limited`` —— 它真实落库但退避只在内存，
+    # 进程被杀后原来会永停 rate_limited、finished_at 恒 NULL。
+    assert "WHERE status IN ('queued', 'running', 'rate_limited')" in sql, "不能碰已终态的行"
     assert params
 
 

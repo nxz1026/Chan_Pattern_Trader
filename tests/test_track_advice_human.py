@@ -127,9 +127,7 @@ def test_advice_fills_human_from_ok_row(monkeypatch: pytest.MonkeyPatch) -> None
     calls: list[dict[str, Any]] = []
     _patch_advice_deps(
         monkeypatch,
-        recent=_capture_recent(
-            [_row(call_id="call-ok", status="ok", result_text=text)], calls
-        ),
+        recent=_capture_recent([_row(call_id="call-ok", status="ok", result_text=text)], calls),
     )
 
     payload, status = track_api.handle_track_advice("u", "000002")
@@ -258,9 +256,7 @@ def test_speak_bucket_is_stable_within_window_and_changes_across() -> None:
     assert track_api._speak_bucket(base) == track_api._speak_bucket(
         base + timedelta(hours=width - 1, minutes=59)
     )
-    assert track_api._speak_bucket(base) != track_api._speak_bucket(
-        base + timedelta(hours=width)
-    )
+    assert track_api._speak_bucket(base) != track_api._speak_bucket(base + timedelta(hours=width))
     # 桶起点可读（排查时能直接对上库里的提示词）
     assert track_api._speak_bucket(base).endswith("Z")
     assert track_api._speak_bucket(base) == "2026-10-08T12:00:00Z"

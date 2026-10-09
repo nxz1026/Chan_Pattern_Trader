@@ -9,7 +9,10 @@ from typing import Any
 from cpt.application.dashboard import build_dashboard_snapshot
 from cpt.application.dashboard_indicators import macd_series
 from cpt.application.dashboard_levels import level_tree
-from cpt.application.dashboard_reproducibility import reproducibility_metadata
+from cpt.application.dashboard_reproducibility import (
+    RULES_VERSION,
+    reproducibility_metadata,
+)
 from cpt.application.dashboard_runtime import runtime_panel
 from cpt.application.dashboard_watch import watch_metrics
 from cpt.domain.config import RulesConfig
@@ -94,7 +97,10 @@ def build_dashboard_snapshot_v2(
         "available": False,
         "reason": "upstream_aggregate_unavailable",
     }
-    v2["reproducibility"] = reproducibility_metadata(v2, config=config)
+    # R59（审计 M26）：**显式**传入口径号（``rules.v{SCHEMA_VERSION}``），
+    # 不再依赖函数默认值 —— 原默认值硬编码 "rules.v0"，而领域规则已是 v1。
+    # 显式传参让「这行依赖领域 SCHEMA_VERSION」在调用点就看得见。
+    v2["reproducibility"] = reproducibility_metadata(v2, config=config, rules_version=RULES_VERSION)
     v2["parity"] = parity or {"available": False, "reason": "oracle_reference_unavailable"}
     v2["runs"] = []
     v2["multi_level"] = multi_level or {

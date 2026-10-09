@@ -33,10 +33,13 @@ chan = ["czsc==1.0.1"]
 # 不再是本仓任何运行路径所需。留档：git f7b0c5fe8:pyproject.toml。
 # 加密第二通道（R17）：ccxt 公开端点。主通道 binance_futures 零依赖，
 # 未装 ccxt 时注册表把它标成 unavailable，不影响实时看板。
-crypto = ["ccxt>=4.0"]
+# R59（审计 L16）：原来只有下界（>=4.0）是开区间，部署时 `pip install -e ".[crypto]"`
+# 会把任意未来大版本直接装进生产；补上主版本上界，破坏性升级改为需人工改这里再上。
+crypto = ["ccxt>=4.0,<5"]
 # A 股本地数据层（R15-2 / R16-3）：只读连 PostgreSQL。
 # 核心 dependencies 同样保持为空；只有需要跑 A 股真实链路时才装本 extra。
-db = ["psycopg[binary]>=3.1"]
+# R59（审计 L16）：理由同 crypto —— psycopg 3.x 内允许，4.x 需显式评估后放开。
+db = ["psycopg[binary]>=3.1,<4"]
 
 [build-system]
 requires = ["setuptools>=68", "wheel"]

@@ -508,6 +508,10 @@ def _derive_first_buy_signal(
         trend_direction=level_bis[-1].direction,
         bis=bis,
         zhongshus=zhongshus,
+        # R59：必须带 code —— structure_id → signal_id 是
+        # ``load_previous_signal`` 的唯一查询键，不带 code 会让不同股票的
+        # 同级别同位置结构共用一行历史（线上实测 12 组串号）。
+        code=code,
     )
     if facts is None:
         return None, None
@@ -517,10 +521,18 @@ def _derive_first_buy_signal(
 
     # 加载上一状态（R21 信号历史持久化）
     #
-    # 读失败**不能**冒出去：上一状态缺失只意味着「本轮当成首次评估」，
-    # 信号照常产出；而冒出去会让整个快照 500，并且把连接留在 aborted 态
+    # 读失败**不能**冒出去：冒出去会让整个快照 500，并且把连接留在 aborted 态
     # 连累后面所有查询（见 _rollback_quietly）。
+    #
+    # R59（审计 M22）：「本轮没有历史行」与「历史查询失败」必须分开 ——
+    # ``load_previous_signal`` 返回 ``None`` 是**首次评估**（确定的事实），
+    # 抛异常是**状态未知**（没有值）。二者若都塌成 ``previous=None``，状态机会把
+    # 「未知」当成「首次」，在 ``has_reversal_bi`` 时直接给出 ``confirmed`` ⇒
+    # 一次瞬时读失败就能让已 ``invalidated`` 的终态**复活**：写 created 事件、
+    # 重开 revision、误推送。所以失败时用 ``history_known=False`` 标记，之后
+    # **fail-closed**（见下）。
     previous: Signal | None = None
+    history_known = True
     getter = getattr(client, "_get_conn", None)
     conn = getter() if callable(getter) else None
     if conn is not None:
@@ -528,6 +540,7 @@ def _derive_first_buy_signal(
         try:
             previous = load_previous_signal(conn, signal_id)
         except Exception as exc:  # noqa: BLE001
+            history_known = False
             _LOG.warning("加载一买历史失败 %s: %s", code, exc)
             _rollback_quietly(client, f"load_previous:first_buy:{code}")
 
@@ -554,6 +567,19 @@ def _derive_first_buy_signal(
             structure_valid=True,
             event_time=event_time,
         )
+
+    # R59（审计 M22）fail-closed：历史未知 ⇒ 本轮**不推进持久化状态机**。
+    # 取舍（三个可选做法里取最保守的）：
+    #   * 不能落库：把 unknown 写进去等于把「未知」固化成事实，下一轮读到的就是它；
+    #   * 不能写事件 / 不能推送：这正是审计指出的「误写事件、误推送」；
+    #   * 不能返回 ``prev_status=None``：``_attach_signal_change`` 把 None 读成
+    #     「新信号」会误报前端横幅（同样不是 fail-closed）。
+    # 故回传本轮评估出的 status 作为 prev_status —— 对 ``_attach_signal_change``
+    # 与 ``maybe_notify`` 而言变化恒为「无变化」。本轮快照里的 signal 只是一次
+    # 「不确定下不落库」的展示值；读失败若是瞬时的，下一轮读通后仍从**真实**
+    # previous 续算（保持可续期），不会永久卡住状态机。
+    if not history_known:
+        return signal, (signal.status if signal is not None else None)
 
     # 记录状态跃迁（status 变化时才 append）
     prev_status: str | None = previous.status if previous is not None else None
@@ -601,6 +627,9 @@ def _derive_first_sell_signal(
         trend_direction=level_bis[-1].direction,
         bis=bis,
         zhongshus=zhongshus,
+        # R59：同 first_buy —— 不带 code 会与他股共用 signal_id，
+        # ``load_previous_signal`` 会读到别只票的历史状态。
+        code=code,
     )
     if facts is None:
         return None, None
@@ -609,7 +638,11 @@ def _derive_first_sell_signal(
     event_time = int(last_bar.close_time) if last_bar is not None else 0
 
     # 加载上一状态（R21 信号历史持久化）
+    #
+    # R59（审计 M22）：与 ``_derive_first_buy_signal`` 同一纪律 ——
+    # 「无历史行」≠「查询失败」，后者标 ``history_known=False`` 并 fail-closed。
     previous: Signal | None = None
+    history_known = True
     getter = getattr(client, "_get_conn", None)
     conn = getter() if callable(getter) else None
     if conn is not None:
@@ -617,6 +650,7 @@ def _derive_first_sell_signal(
         try:
             previous = load_previous_signal(conn, signal_id)
         except Exception as exc:  # noqa: BLE001 — 同 first_buy：读失败只丢历史，不冒泡
+            history_known = False
             _LOG.warning("加载一卖历史失败 %s: %s", code, exc)
             _rollback_quietly(client, f"load_previous:first_sell:{code}")
 
@@ -643,6 +677,11 @@ def _derive_first_sell_signal(
             structure_valid=True,
             event_time=event_time,
         )
+
+    # R59（审计 M22）fail-closed：同 first_buy —— 历史未知则本轮不落库、不写事件、
+    # 不推送，并回传本轮 status 让变化检测恒为「无变化」。
+    if not history_known:
+        return signal, (signal.status if signal is not None else None)
 
     # 记录状态跃迁（与一买同一纪律：前值在写之前取，写完回传）
     prev_status: str | None = previous.status if previous is not None else None
@@ -745,6 +784,16 @@ def _attach_calendar_gaps(snapshot: dict[str, Any], client: Any) -> None:
     bar 还没出来」不会被误判成缺口。
 
     取不到日历时**不动**原值 —— 宁可保留一个可疑数字，也不把「查不到」写成「没有」。
+
+    ## 缺口形状必须与 ``quality_report`` 一致（R59 审计 M28）
+
+    ``dashboard_quality.quality_report`` 产出的每个 gap 是
+    ``{"from", "to", "delta"}``（相邻两根 bar 的 ``open_time`` 与毫秒差，见该模块 :27）。
+    本函数原来只写 ``{"date": ...}`` —— 同一个 ``data_quality.gaps`` 键上出现两种
+    schema：前端/下游按 ``from``/``to`` 读只会拿到 ``None``，而且 ``from/to/delta``
+    在日历路径上**永久丢失**。现在统一：日历缺口也带 ``from``/``to``/``delta``
+    （取缺口前后**最近在场** bar 的 ``open_time``；``delta`` 为二者毫秒差），
+    并额外保留 ``date`` 供「按日」展示。
     """
     from cpt.adapters.a_share_local import open_days_between
 
@@ -774,9 +823,48 @@ def _attach_calendar_gaps(snapshot: dict[str, Any], client: Any) -> None:
         if not expected:
             _LOG.debug("交易日历为空，保留原 gap_count（%s）", dates[-1])
             return
-        missing = sorted(d for d in expected if d.isoformat() not in set(dates))
+        # 缺口要报 from/to/delta，就得知道每根在场 bar 的 open_time。
+        # 同一交易日可能有多根 bar（异常/补数据），取**最早**那根作为锚点。
+        present: dict[str, int] = {}
+        for c in candles:
+            if not isinstance(c, dict) or not c.get("open_time"):
+                continue
+            day = _bar_date(c)
+            ts = int(c["open_time"])
+            if day not in present or ts < present[day]:
+                present[day] = ts
+        present_days = sorted(present)
+        missing = sorted(d for d in expected if d.isoformat() not in present)
+
+        def _neighbour_ts(target: str, *, before: bool) -> int | None:
+            """缺口前后最近的**在场** bar 的 open_time（ISO 日期可直接字典序比）。"""
+            pool = (
+                [p for p in present_days if p < target]
+                if before
+                else [p for p in present_days if p > target]
+            )
+            if not pool:
+                return None
+            return present[max(pool) if before else min(pool)]
+
+        gaps: list[dict[str, Any]] = []
+        for gap_day in missing:
+            day_iso = gap_day.isoformat()
+            from_ms = _neighbour_ts(day_iso, before=True)
+            to_ms = _neighbour_ts(day_iso, before=False)
+            gaps.append(
+                {
+                    "date": day_iso,
+                    "from": from_ms,
+                    "to": to_ms,
+                    # 与 quality_report 同一量纲：毫秒。缺任一侧就没有可比的区间。
+                    "delta": (to_ms - from_ms)
+                    if from_ms is not None and to_ms is not None
+                    else None,
+                }
+            )
         quality["gap_count"] = len(missing)
-        quality["gaps"] = [{"date": d} for d in missing]
+        quality["gaps"] = gaps
         quality["gap_basis"] = "trade_calendar"
         quality["expected_trade_days"] = len(expected)
         quality["severity"] = (
@@ -795,12 +883,15 @@ def _attach_close_countdown(snapshot: dict[str, Any], client: Any) -> None:
     """计算距 A 股收盘秒数（15:00），接 ``public.trade_calendar``。
 
     非交易日 / 收盘后 / 查询失败 → ``available=False``，前端隐藏倒计时。
+
+    R59（审计 H10）：锚点走 :mod:`cpt.domain.market_time` 的**北京时区**口径，
+    不再用宿主 ``datetime.now()`` —— 生产机是 ``Etc/UTC``，原先北京
+    15:00–23:00 之间仍报「开市」且 ``seconds_to_close`` 最长多约 8 小时。
     """
-    import datetime as _dt
-
     from cpt.adapters.a_share_local import is_trade_day
+    from cpt.domain.market_time import MARKET_CLOSE, market_today, seconds_to_close
 
-    today = _dt.date.today()
+    today = market_today()
     try:
         getter = getattr(client, "_get_conn", None)
         conn = getter() if callable(getter) else None
@@ -814,13 +905,11 @@ def _attach_close_countdown(snapshot: dict[str, Any], client: Any) -> None:
                 "reason": "not_a_trade_day" if is_open is not None else "calendar_unknown",
             }
             return
-        now = _dt.datetime.now()
-        close_time = now.replace(hour=15, minute=0, second=0, microsecond=0)
-        remaining = max(0, int((close_time - now).total_seconds()))
+        remaining = seconds_to_close()
         snapshot["close_countdown"] = {
             "available": True,
             "seconds_to_close": remaining,
-            "close_time": "15:00:00",
+            "close_time": MARKET_CLOSE.strftime("%H:%M:%S"),
             "is_open": remaining > 0,
         }
     except Exception as exc:  # noqa: BLE001

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
@@ -398,3 +399,70 @@ def test_to_wind_code_rejects_invalid_instead_of_guessing(bad: str) -> None:
     """
     with pytest.raises(ValueError):
         AShareLocalClient._to_wind_code(bad)
+
+
+# --------------------------------------------------------------------------- #
+# NULL 脏行守卫（R59 审计 M8）
+#
+# 改前只有 volume/quote_volume 做 ``is not None`` 兜底；O/H/L/close 任一为 NULL
+# 就 ``float(None)`` 抛 TypeError —— 不在 ``AShareLocalError`` 体系内，整只票的
+# K 线全拿不到。R52 的上游占位行是「全 0」，NULL 是同一类「采集写出废行」，
+# 按同一条降级纪律处理：跳过该行 + 可观测痕迹，绝不牵连整票。
+# --------------------------------------------------------------------------- #
+
+
+def test_null_ohlc_rows_are_skipped_instead_of_type_error(db_with_placeholders):
+    """O/H/L/close 遇 NULL ⇒ 跳过这一天，其余照常返回（改前整票 TypeError）。"""
+    conn = db_with_placeholders._get_conn()
+    conn.bars[:] = [
+        ("000002", date(2026, 9, 22), 3.0, 3.1, 2.9, 3.05, 100.0, 200.0),
+        ("000002", date(2026, 9, 23), None, 3.1, 2.9, 3.05, 100.0, 200.0),  # open NULL
+        ("000002", date(2026, 9, 24), 3.0, 3.1, 2.9, None, 100.0, 200.0),  # close NULL
+    ]
+    result = db_with_placeholders.fetch_validated_klines(
+        "000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24))
+    )
+    assert len(result.bars) == 1
+    assert [b.open_time for b in result.bars] == [ms(date(2026, 9, 22))]
+    # 与占位行同列：两者都是「采集写出废行」，对上游的指控一致
+    assert result.skipped_placeholder == ("2026-09-23", "2026-09-24")
+    assert result.skipped_no_factor == ()
+
+
+def test_null_ohlc_rows_leave_a_warning_trace(db_with_placeholders, caplog):
+    """跳过 NULL 脏行必须留痕迹 —— 否则序列凭空缺一天，排查时无据可查。"""
+    conn = db_with_placeholders._get_conn()
+    conn.bars[:] = [
+        ("000002", date(2026, 9, 22), 3.0, 3.1, 2.9, 3.05, 100.0, 200.0),
+        ("000002", date(2026, 9, 23), None, None, None, None, 0.0, 0.0),
+    ]
+    with caplog.at_level(logging.WARNING, logger="cpt.adapters.a_share_local"):
+        db_with_placeholders.fetch_validated_klines(
+            "000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24))
+        )
+    assert any("NULL" in record.getMessage() for record in caplog.records)
+
+
+def test_all_null_rows_raise_placeholder_error_with_null_reason(db_with_placeholders):
+    """整段都是 NULL ⇒ 仍是 ``ASharePlaceholderRowsError``（不是 TypeError），消息点明 NULL。"""
+    conn = db_with_placeholders._get_conn()
+    conn.bars[:] = [
+        ("000002", date(2026, 9, 22), None, None, None, None, 0.0, 0.0),
+        ("000002", date(2026, 9, 23), None, None, None, None, 0.0, 0.0),
+    ]
+    with pytest.raises(ASharePlaceholderRowsError, match="NULL"):
+        db_with_placeholders.fetch_validated_klines(
+            "000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24))
+        )
+
+
+def test_null_volume_and_amount_keep_existing_zero_fallback(db_with_placeholders):
+    """量/额为 NULL 的既有兜底不能被新守卫误伤：照旧填 0，bar 保留。"""
+    conn = db_with_placeholders._get_conn()
+    conn.bars[:] = [("000002", date(2026, 9, 22), 3.0, 3.1, 2.9, 3.05, None, None)]
+    result = db_with_placeholders.fetch_validated_klines(
+        "000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24))
+    )
+    assert len(result.bars) == 1
+    assert result.bars[0].volume == 0.0
+    assert result.bars[0].quote_volume == 0.0

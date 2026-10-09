@@ -27,17 +27,26 @@
 # ⚠️ `diff <(...)` 是 **bash 进程替换**，要在 bash 里跑（`bash -c '...'`），
 #    在 sh/dash 下会报「No such file or directory」。
 #
-# ## 四个作业
+# ## 六个作业
 #
-# | 时间 | 脚本 | 干什么 |
+# 时刻是**服务器本地时区**（当前这台是 `Etc/UTC`），与下面的 UTC↔北京对照表一致。
+# R58（审计 L3）：此前表里只有 4 条、日报还写成 07:00，与实际（第 5 条日报 11:00 UTC = 北京 19:00）
+# 漂移 —— 按旧表排障会把「日报缺失」误判成「还没到点」。以下已按实际排线补齐。
+# R58（审计 M18）：新增第 6 条 `track-maintenance-daily.sh`（07:30 UTC），表同步补行。
+#
+# | 时刻(UTC) | 脚本 | 干什么 |
 # |---|---|---|
 # | 02:20 | `factor-recompute-daily.sh` | 按公司行动重算复权因子（**只写暂存表**） |
 # | 03:40 | `run-inspection-daily.sh` | 读 `cpt_run_metric` + 源状态 → 状态变化/failing 时发飞书 |
 # | 04:10 | `run-metric-prune-daily.sh` | 清 `cpt_run_metric` 过期行（run 90 天 / inspection 30 天） |
 # | 04:30 | `dashboard-run-prune-daily.sh` | 清 `cpt_dashboard_run` 过期行（默认 7 天） |
+# | 07:30 | `track-maintenance-daily.sh` | 兜底清理「我的追踪」过期快照 30 天 / 回收站 90 天（调 loopback 维护端点，`?apply=1`） |
+# | 11:00 | `cron-daily-report.sh` | 扫上面 5 条作业日志 + 共享表新鲜度，异常发飞书（R57 第 5 条） |
 #
-# 四个时间**刻意错开**：巡检 03:40 跑在因子重算 02:20 之后、两条清理 04:10/04:30 之前 ——
-# 这样巡检读到的是「刚重算完」的因子状态，而清理不会与它抢同一批行。
+# 六个时间**刻意错开**：巡检 03:40 跑在因子重算 02:20 之后、两条清理 04:10/04:30 之前 ——
+# 这样巡检读到的是「刚重算完」的因子状态，而清理不会与它抢同一批行；
+# 追踪维护 07:30 放在 A 股 15:00（北京）收盘之后，避开盘中写入；
+# 日报 11:00 排在全部作业跑完之后（见其下方「被上游决定」说明）。
 #
 # ⚠️ 2026-10-06 新增第 4 条：R23 建表时把「7 天保留期」只写成迁移注释，
 #    **从未自动化**（全仓无 retention/cleanup 逻辑，线上也没有这条作业），
@@ -70,7 +79,8 @@ PATH=/usr/local/bin:/usr/bin:/bin
 #      03:40             11:40
 #      04:10             12:10
 #      04:30             12:30
-#      07:00             15:00
+#      07:30             15:30
+#      11:00             19:00
 #
 # 全部落在「A 股收盘之后、北京时间白天」，这是**有意**的（错开交易时段，
 # 且巡检 11:40 赶在两条清理之前）。但**这是巧合不是设计**：本文件早期按
@@ -110,8 +120,20 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # 窗口可用 CPT_PRUNE_DASHBOARD_RUN_DAYS 调整（见脚本头）。
 30 4 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/dashboard-run-prune-daily.sh >> /home/ubuntu/logs/dashboard-run-prune.log 2>&1
 
-# ── 每日 07:00 作业日志日报：扫上面 4 条的日志，发现失败发飞书 ─────────────────
-# R57 上线前审计发现：4 条作业失败时「非零退出 + 写一行日志」，但**没有任何消费者**
+# ── 每日 07:30 UTC = 北京 15:30 追踪表兜底清理（快照 30 天 / 回收站 90 天）────
+# 审计 M18：`track_store.prune_snapshots/prune_removed` 此前零调用方，
+# 唯一入口 `GET /api/dashboard/track/maintenance` 的 GET 分发尚未接上（今天会 404）。
+# 脚本打的是**本机 loopback** http://127.0.0.1:8010 —— 不经过 nginx，
+# 因此**不带任何凭据**（避免复制 M12 的「口令进 argv / 跳过 TLS」问题）。
+# ⚠️ 必须带 `?apply=1`：不带参数是 dry-run（只报计数不删），
+#    dry-run 不等于清理成功 —— 脚本会在日志里显式复核并失败告警。
+# 时刻：A 股 15:00（北京）收盘后半小时，避开盘中写入；排在 11:00 日报之前，
+# 失败能在**当天**日报里出现。见 deploy/cron/track-maintenance-daily.sh。
+30 7 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/track-maintenance-daily.sh >> /home/ubuntu/logs/track-maintenance.log 2>&1
+
+# ── 每日 11:00 UTC（= 北京 19:00）作业日志日报：扫上面 5 条的日志，失败发飞书 ──
+# R58（审计 L3）：标题原写 07:00，与下面实际行 0 11 * * * 不符，已更正。
+# R57 上线前审计发现：作业失败时「非零退出 + 写一行日志」，但**没有任何消费者**
 # （无 MAILTO、无 logrotate、无 watchdog）。唯一有出口的飞书只覆盖业务巡检自己的
 # 结论，不看另外三条的死活 ⇒ 作业失败 = 表继续膨胀而外部毫无异常。
 #

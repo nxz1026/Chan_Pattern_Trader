@@ -131,19 +131,40 @@ def record_epoch(
         )
 
 
+def _read_epoch_row(conn: Any) -> Any:
+    """执行纪元查询并返回原始行（形状校验交给 :func:`current_epoch`）。"""
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT switched_at, old_source, new_source, "
+            "       old_match_rate, new_match_rate, note "
+            "FROM public.cpt_factor_epoch WHERE id = 1"
+        )
+        return cur.fetchone()
+
+
 def current_epoch(conn: Any) -> FactorEpoch:
     """读当前纪元；表不存在或无记录 → 空 dict（``known`` 为 False）。
 
     **永不抛** —— 纪元是**说明性**的，缺了不该让看板 500。
+
+    ⚠️ R59：失败时必须**回退到保存点**（``conn.transaction()`` 嵌套即 SAVEPOINT）。
+    原来只在 ``except`` 里 log + 返回默认值，而 PG 里一句失败后**同一连接**会进
+    aborted 态（后续任何语句都报 ``current transaction is aborted``）—— 调用方
+    （``a_share_snapshot._attach_factor_epoch``、``a_share_routes._persist_recommendation``、
+    信号历史分组）随后复用同一连接做双轨对比 / 日历缺口 / 推荐留痕，于是**纪元读
+    失败会连锁把它们全部静默降级**。这与 R45 修的 ``load_previous_signal`` 同型。
+
+    这里**不能**照 ``load_previous_signal`` 直接抛（纪元是说明性的，抛出去就是
+    看板 500），所以用保存点：只回退本函数自己那句查询，不牵连调用方已开启的
+    事务。假连接（测试替身）没有 ``transaction()`` 时退回老路径读，替身照旧可用。
     """
     try:
-        with conn.cursor() as cur:
-            cur.execute(
-                "SELECT switched_at, old_source, new_source, "
-                "       old_match_rate, new_match_rate, note "
-                "FROM public.cpt_factor_epoch WHERE id = 1"
-            )
-            row = cur.fetchone()
+        txn = getattr(conn, "transaction", None)
+        if callable(txn):
+            with txn():  # 嵌套 transaction ⇒ SAVEPOINT；异常时 ROLLBACK TO SAVEPOINT
+                row = _read_epoch_row(conn)
+        else:
+            row = _read_epoch_row(conn)
         # ⚠️ 取值也必须在 try 内：测试替身常返回**短元组**（按查询顺序硬编码），
         # `row[5]` 会抛 IndexError 逃出函数 —— 而本函数的契约是**永不抛**。
         if not row or len(row) < 6:

@@ -5,6 +5,8 @@ DB 部分用 mock（不依赖 psycopg），自选 JSON 部分用 ``tmp_path``。
 
 from __future__ import annotations
 
+import json
+import logging
 import pathlib
 from dataclasses import dataclass, field
 from datetime import date
@@ -325,3 +327,105 @@ def test_module_imports_without_fcntl(monkeypatch: pytest.MonkeyPatch, tmp_path)
     finally:
         monkeypatch.undo()
         importlib.reload(pool_mod)
+
+
+# --------------------------------------------------------------------------- #
+# ``max(date)`` 的 NULL 守卫（R59 审计 M7）
+#
+# 改前 ``hot_date = cur.fetchone()[0]`` 直接取用：空表时它是 NULL，被塞进
+# ``WHERE date = %s``（变成永远查不到行的 ``= NULL``），或者驱动连行都没返回时
+# 在 ``None[0]`` 上抛 TypeError。同文件 ``fetch_limit_pool_marks`` 早有正确守卫。
+# --------------------------------------------------------------------------- #
+
+
+class _RecordingConn:
+    """返回**同一个** ``FakeCursor`` 的连接 —— 便于断言实际下发的 SQL/参数。"""
+
+    def __init__(self, rows: list[tuple]) -> None:
+        self._cursor = FakeCursor(rows=rows)
+
+    def cursor(self) -> FakeCursor:
+        return self._cursor
+
+
+def test_fetch_hot_pool_never_queries_with_null_date() -> None:
+    """空表 ⇒ 不得下发 ``WHERE date = NULL``（改前会下发，参数是 ``(None,)``）。"""
+    conn = _RecordingConn(rows=[])
+    assert fetch_hot_pool(conn) == []
+    params = [p for _sql, p in conn._cursor.executed]
+    assert (None,) not in params, "不得把 NULL 当日期参数去查第二张表"
+
+
+def test_fetch_hot_pool_tolerates_fetchone_returning_none() -> None:
+    """驱动返回 ``None``（无行）⇒ 旧代码 ``cur.fetchone()[0]`` 抛 TypeError。"""
+    conn = _RecordingConn(rows=[])
+    conn._cursor.fetchone = lambda: None  # type: ignore[method-assign]
+    assert fetch_hot_pool(conn) == []
+
+
+def test_fetch_hot_pool_keeps_ladder_when_hot_rank_is_empty() -> None:
+    """一个源为空不得影响另一个源 —— 守卫只跳过空源自己的查询。"""
+    rows = [
+        ("ladder_date", date(2026, 9, 21)),
+        ("ladder", date(2026, 9, 21), "001234", 2),
+    ]
+    conn = _RecordingConn(rows=rows)
+    entries = fetch_hot_pool(conn)
+    assert [e.code for e in entries] == ["001234"]
+    assert entries[0].as_of == date(2026, 9, 21).isoformat()
+
+
+# --------------------------------------------------------------------------- #
+# 自选记录的形状校验（R59 审计 L8）
+#
+# 改前 ``WatchlistEntry(**item)`` / ``e.get(...)``：一条非 dict 记录就让整个自选
+# 列表抛 TypeError、非对象行更是 AttributeError，都不是 ``WatchlistError``。
+# 现在：只读路径逐条校验 + 跳过 + warning；写路径抛 ``WatchlistError``。
+# --------------------------------------------------------------------------- #
+
+_MALFORMED_RECORDS: list[Any] = [
+    "oops",  # 非对象 → 旧代码 `WatchlistEntry(**"oops")` TypeError
+    {"code": "000001", "market": "A"},  # 缺 added_at
+    {"code": "000002", "market": "A", "added_at": "2026-10-01", "extra": 1},  # 未知字段
+    {"code": 123, "market": "A", "added_at": "2026-10-01"},  # code 不是字符串
+]
+
+
+def test_watchlist_list_skips_malformed_records_with_warning(
+    tmp_path: pathlib.Path, caplog: pytest.LogCaptureFixture
+) -> None:
+    path = tmp_path / "watchlist.json"
+    path.write_text(
+        json.dumps(
+            [{"code": "600519", "market": "A", "added_at": "2026-10-01T00:00:00+00:00"}]
+            + _MALFORMED_RECORDS
+        ),
+        encoding="utf-8",
+    )
+    store = WatchlistStore(path)
+    with caplog.at_level(logging.WARNING, logger="cpt.adapters.a_share_pool"):
+        items = store.list()
+    assert [i.code for i in items] == ["600519"]
+    skipped = [r for r in caplog.records if "已跳过" in r.getMessage()]
+    assert len(skipped) == len(_MALFORMED_RECORDS), "每条坏记录都要留一条可观测痕迹"
+
+
+def test_watchlist_write_paths_raise_domain_error_on_malformed_record(
+    tmp_path: pathlib.Path,
+) -> None:
+    """写路径**不跳过**坏记录：``_write_atomic`` 会把跳过的那条永久抹掉（R45）。"""
+    import cpt.adapters.a_share_pool as pool_mod
+
+    # ⚠️ 从模块属性取异常类，而不是顶层 import 的名字：本文件末尾的
+    # ``test_module_imports_without_fcntl`` 会 ``importlib.reload`` 本模块，
+    # 重载后 ``WatchlistError`` 是**新的类对象**，顶层名字就接不住了。
+    error_cls = pool_mod.WatchlistError
+    path = tmp_path / "watchlist.json"
+    path.write_text(json.dumps(_MALFORMED_RECORDS), encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+    store = WatchlistStore(path)
+    with pytest.raises(error_cls, match="未做任何修改"):
+        store.add("600002", "A")
+    with pytest.raises(error_cls, match="未做任何修改"):
+        store.remove("000001", "A")
+    assert path.read_text(encoding="utf-8") == before, "报错时不得改写文件"

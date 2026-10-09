@@ -16,8 +16,12 @@
 |---|---|
 | 正常 | 拿到历史 + 按口径分组 |
 | 纪元读不到 | **仍拿历史**，只是不分组（`epoch_ms=None`） |
-| 事件读失败（``SignalEventError``） | ``available=False`` + 写明原因 |
-| 整个函数炸了 | ``available=False`` + 写明异常类型 |
+| 事件读失败（``SignalEventError``） | ``available=False`` + 稳定代号（原文只进日志） |
+| 整个函数炸了 | ``available=False`` + 稳定代号（原文只进日志） |
+
+⚠️ R59（审计 M4）：这两条降级路径早先把 ``str(exc)`` / 异常类名**直接回给客户端**，
+现在只回 ``signal_event_store_unavailable`` / ``internal_error``，原文进 ``_LOG.warning``。
+测试同时钉「原文不出现在响应里」与「原文出现在日志里」—— 只钉前一半会退化成「把错误吞掉」。
 
 ⚠️ 关键：**纪元读不到 ≠ 历史丢**。纪元只是用来分「切表前/后」的，
 拿不到就退化成「不分组」，**不该把历史一起丢掉**。
@@ -27,6 +31,7 @@
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 
@@ -121,13 +126,16 @@ def test_epoch_unavailable_still_returns_history(monkeypatch, client) -> None:
     assert all(i["legacy"] is False for i in out["items"])
 
 
-def test_events_read_failure_is_reported_not_faked(monkeypatch, client) -> None:
-    """事件读失败 ⇒ available=False + 写明原因，**不能返回空列表冒充「没历史」**。"""
+def test_events_read_failure_is_reported_not_faked(monkeypatch, client, caplog) -> None:
+    """事件读失败 ⇒ available=False + 稳定代号，**不能返回空列表冒充「没历史」**。"""
     _patch(monkeypatch, epoch=_Epoch(3_000), events=[], events_exc=SignalEventError("db down"))
     out = a_share_routes._signal_history("600519")  # noqa: SLF001
     assert out["available"] is False
     assert out["reason"] == "signal_history_unavailable"
-    assert "db down" in out["detail"]
+    assert out["detail"] == "signal_event_store_unavailable"
+    # R59（审计 M4）：异常原文只进日志，不进响应。
+    assert "db down" not in json.dumps(out, ensure_ascii=False)
+    assert "db down" in caplog.text
 
 
 def test_no_history_is_empty_not_error(monkeypatch, client) -> None:
@@ -138,7 +146,7 @@ def test_no_history_is_empty_not_error(monkeypatch, client) -> None:
     assert out["count"] == 0
 
 
-def test_outer_failure_still_degrades(monkeypatch, client) -> None:
+def test_outer_failure_still_degrades(monkeypatch, client, caplog) -> None:
     """整个函数炸了（建连接就失败）⇒ 降级，**不能带崩推荐接口**。"""
     import cpt.adapters.a_share_local as local
 
@@ -148,4 +156,7 @@ def test_outer_failure_still_degrades(monkeypatch, client) -> None:
     out = a_share_routes._signal_history("600519")  # noqa: SLF001
     assert out["available"] is False
     assert out["reason"] == "signal_history_error"
-    assert "RuntimeError" in out["detail"]
+    assert out["detail"] == "internal_error"
+    # R59（审计 M4）：类名与原文都只进日志。
+    assert "RuntimeError" not in json.dumps(out, ensure_ascii=False)
+    assert "RuntimeError" in caplog.text and "no db" in caplog.text

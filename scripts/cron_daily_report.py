@@ -69,10 +69,12 @@ JOBS: Final[tuple[tuple[str, str], ...]] = (
     ("run-inspection", "/home/ubuntu/logs/run-inspection.log"),
     ("run-metric-prune", "/home/ubuntu/logs/run-metric-prune.log"),
     ("dashboard-run-prune", "/home/ubuntu/logs/dashboard-run-prune.log"),
+    ("track-maintenance", "/home/ubuntu/logs/track-maintenance.log"),
     ("cron-daily-report", "/home/ubuntu/logs/cron-daily-report.log"),
 )
 
-#: 四条脚本统一使用的失败标记。改这个标记要同时改这四处。
+#: 各脚本统一使用的失败标记。改这个标记要同时改**所有**用它的脚本
+#: （含上面 JOBS 里每条作业，以及日报自己）。
 FAIL_MARKER: Final[str] = "!!!!!"
 
 #: 「上一轮还在跑，跳过」—— exit 0，所以 FAIL_MARKER 扫不到，得单独认。

@@ -67,6 +67,20 @@ class MockConn:
         self.committed = True
 
 
+def _insert_call(conn: MockConn) -> tuple[str, tuple[Any, ...]]:
+    """从 mock 连接里按语义挑出 INSERT 语句。
+
+    审计 M17 后 ``record_signal_event`` 先取 ``pg_advisory_xact_lock``、再重读最新
+    状态，最后才 INSERT，所以 ``executed[0]`` 不再是 INSERT。断言若继续钉下标，
+    实现一加守卫就碎；这里按语句内容定位。
+    """
+    for cur in conn.cursors:
+        for sql, params in cur.executed:
+            if "INSERT INTO public.cpt_signal_event" in sql:
+                return sql, params
+    raise AssertionError("record_signal_event 没有发出 INSERT")
+
+
 def _make_signal(
     *,
     signal_id: str = "first_buy:0:level0:zs1",
@@ -190,7 +204,7 @@ def test_record_signal_event_writes_on_status_change() -> None:
     )
     assert written is True
     assert len(conn.cursors) == 1
-    sql, params = conn.cursors[0].executed[0]
+    sql, params = _insert_call(conn)
     assert "INSERT INTO public.cpt_signal_event" in sql
     assert params[0] == "first_buy:0:level0:zs1"  # signal_id
     assert params[1] == "600519"  # code
@@ -225,7 +239,7 @@ def test_record_signal_event_first_event_prev_status_none() -> None:
         event_time=1704067200000,
     )
     assert written is True
-    sql, params = conn.cursors[0].executed[0]
+    sql, params = _insert_call(conn)
     assert params[5] is None  # prev_status
 
 
@@ -272,7 +286,7 @@ def test_record_signal_event_zero_time_falls_back() -> None:
         event_time=0,
     )
     assert written is True
-    sql, params = conn.cursors[0].executed[0]
+    sql, params = _insert_call(conn)
     assert isinstance(params[7], datetime)
     assert params[7].tzinfo == UTC
 
@@ -311,11 +325,15 @@ def test_derive_signal_with_client_invokes_load(monkeypatch) -> None:
             "divergence_status": "detected",
         },
     )
-    monkeypatch.setattr(
-        mod,
-        "derive_first_buy_facts",
-        lambda level, trend_direction, bis, zhongshus: FakeFacts(),
-    )
+    # ⚠️ 替身签名必须跟真函数一致（含 R59 新增的 ``code``）：用 ``**kwargs`` 兜住
+    # 会让「调用点忘了传 code」这种漂移无声通过 —— 而那正是 S3 的病灶。
+    facts_calls: list[dict[str, Any]] = []
+
+    def fake_facts(*, level: int, trend_direction: int, bis: Any, zhongshus: Any, code: str = ""):
+        facts_calls.append({"level": level, "code": code})
+        return FakeFacts()
+
+    monkeypatch.setattr(mod, "derive_first_buy_facts", fake_facts)
 
     # Mock assess_first_buy 返回一个信号
     out_signal = _make_signal(status="structure_ready")
@@ -365,6 +383,9 @@ def test_derive_signal_with_client_invokes_load(monkeypatch) -> None:
     # 验证 load 被调用
     assert len(load_calls) == 1
     assert load_calls[0] == "first_buy:0:level0:zs1"
+    # R59（S3）：code 必须一路传到 derive_first_buy_facts —— 主路径的 structure_id
+    # 靠它区分股票；漏传就等于退回「不同股票共用一行信号历史」。
+    assert facts_calls[0]["code"] == "600519"
     # 验证 record 被调用（首次评估，prev_status=None）
     # has_reversal_bi=True 触发状态推进：structure_ready → confirmed
     assert len(record_calls) == 1

@@ -31,6 +31,8 @@ __all__ = [
     "RECYCLE_RETENTION_DAYS",
     "TrackStoreError",
     "add",
+    "count_prunable_removed",
+    "count_prunable_snapshots",
     "ensure_table",
     "list_active",
     "list_removed",
@@ -300,14 +302,112 @@ def list_snapshots(
 # ── 清理 ──────────────────────────────────────────────────────────────
 
 
-def prune_snapshots(conn: Any, retention_days: int = SNAPSHOT_RETENTION_DAYS) -> int:
-    """删 ``as_of < now - retention_days`` 的快照。返回删除行数。"""
+def _snapshot_scope(
+    retention_days: int, user_id: str | None, code: str | None
+) -> tuple[str, tuple[Any, ...]]:
+    """``cpt_track_snapshot`` 的清理谓词 —— ``prune`` 与 ``count`` **共用同一份**。
+
+    审计 M18：dry-run 的对外承诺是「报的计数 == 真删的行数」，两处各写一套
+    SQL 正是最容易让 dry-run 骗人的地方，所以只在这里拼一次。片段全是字面量，
+    值一律走 ``%s``（与仓库既有 ``_COLUMNS`` 拼接同一写法，非注入）。
+    """
     cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+    where = ["as_of < %s"]
+    params: list[Any] = [cutoff]
+    if user_id is not None:
+        where.append("user_id = %s")
+        params.append(user_id)
+    if code is not None:
+        where.append("code = %s")
+        params.append(code)
+    return " AND ".join(where), tuple(params)
+
+
+def _removed_scope(retention_days: int, user_id: str | None) -> tuple[str, tuple[Any, ...]]:
+    """``cpt_track`` 回收站行的清理谓词 —— 同上，``prune`` 与 ``count`` 共用。"""
+    cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+    where = ["removed_at IS NOT NULL", "removed_at < %s"]
+    params: list[Any] = [cutoff]
+    if user_id is not None:
+        where.append("user_id = %s")
+        params.append(user_id)
+    return " AND ".join(where), tuple(params)
+
+
+def count_prunable_snapshots(
+    conn: Any,
+    retention_days: int = SNAPSHOT_RETENTION_DAYS,
+    *,
+    user_id: str | None = None,
+    code: str | None = None,
+) -> int:
+    """**只数不删**：``prune_snapshots`` 会删掉多少行（审计 M18 的 dry-run 计数）。
+
+    与 :func:`prune_snapshots` 共用 :func:`_snapshot_scope` —— 同一时间窗、同一
+    作用域，保证 dry-run 报的数字与随后真删的行数一致。**只读**：不 commit、
+    不 rollback。失败语义与写路径同口径（抛 :class:`TrackStoreError`）。
+    """
+    where, params = _snapshot_scope(retention_days, user_id, code)
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "DELETE FROM public.cpt_track_snapshot WHERE as_of < %s",
-                (cutoff,),
+                f"SELECT count(*) FROM public.cpt_track_snapshot WHERE {where}",
+                params,
+            )
+            row = cur.fetchone()
+    except Exception as exc:
+        raise TrackStoreError(f"count_prunable_snapshots failed: {exc}") from exc
+    return int(row[0]) if row else 0
+
+
+def count_prunable_removed(
+    conn: Any,
+    retention_days: int = RECYCLE_RETENTION_DAYS,
+    *,
+    user_id: str | None = None,
+) -> int:
+    """**只数不删**：``prune_removed`` 会删掉多少行（审计 M18 的 dry-run 计数）。
+
+    谓词与 :func:`prune_removed` 共用 :func:`_removed_scope`；只读、不 commit。
+    失败抛 :class:`TrackStoreError`。
+    """
+    where, params = _removed_scope(retention_days, user_id)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"SELECT count(*) FROM public.cpt_track WHERE {where}",
+                params,
+            )
+            row = cur.fetchone()
+    except Exception as exc:
+        raise TrackStoreError(f"count_prunable_removed failed: {exc}") from exc
+    return int(row[0]) if row else 0
+
+
+def prune_snapshots(
+    conn: Any,
+    retention_days: int = SNAPSHOT_RETENTION_DAYS,
+    *,
+    user_id: str | None = None,
+    code: str | None = None,
+) -> int:
+    """删 ``as_of < now - retention_days`` 的快照。返回删除行数。
+
+    :param user_id: 可选，只清该用户的快照。
+    :param code: 可选，只清该票的快照。
+
+    不传两者即**全库清理**（生产保留期作业的默认行为）。**测试必须传**
+    ``user_id`` / ``code``：这条 SQL 没有任何主体过滤，而 ``conn`` 在测试里
+    指向的正是真实库 —— 2026-10-08 审计记为 H6（证据：``tests/test_track.py``
+    原先调用 ``prune_snapshots(pg_conn, retention_days=31)`` 后只清自己那一行，
+    ``finally`` 里的 ``rollback`` 也救不回来，因为本函数自己 ``commit``）。
+    """
+    where, params = _snapshot_scope(retention_days, user_id, code)
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"DELETE FROM public.cpt_track_snapshot WHERE {where}",
+                params,
             )
             affected = cur.rowcount
         conn.commit()
@@ -317,17 +417,24 @@ def prune_snapshots(conn: Any, retention_days: int = SNAPSHOT_RETENTION_DAYS) ->
     return int(affected)
 
 
-def prune_removed(conn: Any, retention_days: int = RECYCLE_RETENTION_DAYS) -> int:
-    """删 ``removed_at < now - retention_days`` 的回收站行。返回删除行数。"""
-    cutoff = datetime.now(UTC) - timedelta(days=retention_days)
+def prune_removed(
+    conn: Any,
+    retention_days: int = RECYCLE_RETENTION_DAYS,
+    *,
+    user_id: str | None = None,
+) -> int:
+    """删 ``removed_at < now - retention_days`` 的回收站行。返回删除行数。
+
+    ``user_id`` 可选收窄；不传即全库清理。作用域语义与
+    :func:`prune_snapshots` 一致（审计 H6：破坏性 DELETE 不允许在无作用域下被测试调用）。
+    与 :func:`count_prunable_removed` 共用谓词，保证 dry-run 计数一致。
+    """
+    where, params = _removed_scope(retention_days, user_id)
     try:
         with conn.cursor() as cur:
             cur.execute(
-                """
-                DELETE FROM public.cpt_track
-                WHERE removed_at IS NOT NULL AND removed_at < %s
-                """,
-                (cutoff,),
+                f"DELETE FROM public.cpt_track WHERE {where}",
+                params,
             )
             affected = cur.rowcount
         conn.commit()

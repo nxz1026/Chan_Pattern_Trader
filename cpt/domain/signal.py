@@ -58,6 +58,13 @@
 7. **信号标识**：``signal_id`` 固定为 ``first_buy:{level}:{structure_id}``，同级别
    同结构恒等、重复调用可复现；它被设计为**稳定的 upsert 主键**，便于将来接入
    仓储时让一条信号随状态演进原地更新，而不是每步产生新行。
+   ⚠️ ``structure_id`` **必须自带股票代码**：``signal_event_store`` 的
+   ``load_previous_signal`` / ``latest_status`` 都**只按 signal_id 查**，而结构 id
+   里的中枢代表 id 只是笔的**位置下标**（``bi:{i}``）—— 不带 code 时不同股票的
+   同级别同位置结构会共用一行历史，状态机互相串味（2026-10-09 审计 S3，线上实测
+   12 组 signal_id 跨股票共用）。A 股链路由
+   :func:`cpt.application.first_buy_bridge._scoped_structure_id` 统一拼
+   ``level{level}:{center_id}:{code}``；``code`` 为空时保持旧格式（向后兼容）。
 
 本模块是纯函数状态机：**不**检测背驰（只记录三态）、**不**自行判断结构准备以外的
 结构有效性（``has_two_centers`` / ``has_divergence_leg`` / ``structure_valid`` 由

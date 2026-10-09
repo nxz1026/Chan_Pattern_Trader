@@ -181,7 +181,13 @@ def build_parity_view(
             "extra": sum(r["status"] == "extra" for r in rows),
             "mismatched": sum(r["status"] == "mismatched" for r in rows),
             "total": total,
-            "match_rate": round(matched / total, 4) if total else 1.0,
+            # R59（审计 L17）：``total == 0`` 时**没有样本可比**，原来写 1.0 等于
+            # 「空对照 = 100% 一致」—— 这是本面板最不该有的假阳性（parity 的全部
+            # 意义就是暴露差异）。改成 ``None`` 表示「无样本」，并显式给
+            # ``match_rate_available``：下游不用靠 ``None`` 猜是「没样本」还是
+            # 「快照版本老、字段缺失」。
+            "match_rate": round(matched / total, 4) if total else None,
+            "match_rate_available": total > 0,
             # R35：容差内差异的规模（实测 600519 最大 0.54%）—— 面板据此说明
             # 「结构对上了，数值只差这么多」，而不是笼统说"不一致"。
             "drifted": sum(1 for r in rows if r["value_diffs"]),

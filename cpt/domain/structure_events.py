@@ -128,6 +128,20 @@ EVENT_FOR_STATUS: Mapping[tuple[StructureStatus, StructureStatus], EventType] = 
     # 已确认过的结构退回 forming 记 ``reclassified``，与 invalidated→forming
     # 同一语义（分类变了），便于按类型聚合时只查 reclassified。
     ("confirmed", "forming"): "reclassified",
+    # R59（审计 M29）：补 ``invalidated → confirmed``。
+    #
+    # 原表缺这一档，而 ``_event_type_for`` 的后备分支只处理「同状态 + end_time 变」，
+    # 状态确实从 invalidated 变成 confirmed 时**两条都不命中** ⇒ 返回 None ⇒
+    # 不写事件。于是事件流里该结构最后一条永远停在 invalidated，
+    # ``current_states`` / ``latest_events`` 派生出的状态也跟着报 invalidated ——
+    # 正是 2026-10-06 那条 ``confirmed → forming`` 缺失时的同一个坑，只是方向相反。
+    # 现在 A 股的 producer 还没接上 invalidated（都走 confirmed/forming），
+    # 所以这是**为下一步铺路**：等 producer 接上，事件流不会永远卡在 invalidated。
+    #
+    # 值取 ``confirmed`` 而不是 ``reclassified``：invalidated **不是**结构的终态
+    # （表里已有 invalidated→forming→…的复活路径），结构重新成立时对外的事实就是
+    # 「它现在是 confirmed」，按类型聚合查 ``confirmed`` 才拿得到它。
+    ("invalidated", "confirmed"): "confirmed",
 }
 
 

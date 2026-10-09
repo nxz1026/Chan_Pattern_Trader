@@ -23,10 +23,17 @@ def signal_statistics(signals: Sequence[dict[str, Any]]) -> dict[str, Any]:
         divergence = str(signal.get("divergence_status", "unknown"))
         divergences[divergence] = divergences.get(divergence, 0) + 1
     total = len(signals)
+    confirmed = statuses.get("confirmed", 0)
     return {
         "total": total,
         "status_counts": statuses,
         "divergence_counts": divergences,
-        "alert_to_confirmed_rate": statuses.get("confirmed", 0) / total if total else None,
+        # R59（审计 M27）：原名 ``alert_to_confirmed_rate`` 名实不符 —— 分子是
+        # ``confirmed`` 事件的条数，分母是**全部事件**条数。它不是「预警后来被
+        # 确认的比例」（事件流里没有从 alert 出发的配对），也不是「确认 / 预警」。
+        # 数据源是**状态跃迁事件**（见模块 docstring），故诚实口径是
+        # 「confirmed 事件占全部事件的比例」。名字与前端标签
+        # （``dashboard/dash-signal.js``）必须同步改，否则面板仍把占比当转化率讲。
+        "confirmed_rate": confirmed / total if total else None,
         "invalidated_count": statuses.get("invalidated", 0),
     }

@@ -118,6 +118,55 @@ def test_record_epoch_is_idempotent() -> None:
     assert "INSERT INTO public.cpt_factor_epoch" in sql
 
 
+class _FakeConn:
+    """最小连接替身：可注入「查询抛异常」，并记录 ``transaction()`` 的进/出。
+
+    ``with_txn=False`` 模拟**没有 ``conn.transaction()`` 的旧替身**（本仓大量
+    测试替身只有 ``cursor()``）——``current_epoch`` 必须照旧能用。
+    """
+
+    def __init__(self, row: object, *, with_txn: bool = True) -> None:
+        self._row = row
+        self.events: list[str] = []
+        if with_txn:
+            self.transaction = self._transaction  # type: ignore[attr-defined]
+
+    def _transaction(self) -> object:
+        conn = self
+
+        class _Ctx:
+            def __enter__(self) -> object:
+                conn.events.append("enter")
+                return conn
+
+            def __exit__(self, exc_type: object, exc: object, tb: object) -> bool:
+                # 关键断言点：异常路径必须回退（SAVEPOINT → ROLLBACK），
+                # 否则连接残留 aborted 态，后续语句全线报错。
+                conn.events.append("rollback" if exc_type is not None else "release")
+                return False
+
+        return _Ctx()
+
+    def cursor(self) -> object:
+        conn = self
+
+        class _Cur:
+            def __enter__(self) -> object:
+                return self
+
+            def __exit__(self, *exc: object) -> bool:
+                return False
+
+            def execute(self, *args: object) -> None:
+                if isinstance(conn._row, BaseException):
+                    raise conn._row
+
+            def fetchone(self) -> object:
+                return conn._row
+
+        return _Cur()
+
+
 def test_current_epoch_never_raises() -> None:
     """纪元是**说明性**的，缺表/无权限都不得让看板 500。"""
     import inspect
@@ -125,6 +174,46 @@ def test_current_epoch_never_raises() -> None:
     src = inspect.getsource(current_epoch)
     assert "except Exception" in src
     assert "return FactorEpoch()" in src
+
+
+def test_current_epoch_failure_rolls_back_to_savepoint() -> None:
+    """读失败必须回退到保存点，不能把共享连接留在 aborted 态（R59 / 审计 H5）。
+
+    原来的 ``except`` 只 log + 返回默认值：PG 里一句失败后**同一连接**后续所有
+    语句都报 ``current transaction is aborted``，调用方的双轨对比 / 日历缺口 /
+    推荐留痕会连锁静默降级 —— 表面看只是「纪元没有记录」。
+    """
+    boom = RuntimeError('relation "public.cpt_factor_epoch" does not exist')
+    conn = _FakeConn(boom)
+
+    epoch = current_epoch(conn)
+
+    assert epoch.known is False
+    assert conn.events == ["enter", "rollback"], f"没有回退保存点: {conn.events}"
+
+
+def test_current_epoch_success_releases_savepoint() -> None:
+    """成功路径正常读出纪元，且保存点被 release（不是静默吞掉）。"""
+    conn = _FakeConn((SWITCHED, "tx:fqkline", "eastmoney:events", 0.2263, 1.0, "note"))
+
+    epoch = current_epoch(conn)
+
+    assert epoch.known is True
+    assert epoch.new_source == "eastmoney:events"
+    assert conn.events == ["enter", "release"]
+
+
+def test_current_epoch_keeps_working_with_transactionless_doubles() -> None:
+    """没有 ``conn.transaction()`` 的旧替身走老路径 —— 不许因为本次加固变哑。"""
+    conn = _FakeConn(
+        (SWITCHED, "tx:fqkline", "eastmoney:events", 0.2263, 1.0, "note"), with_txn=False
+    )
+
+    epoch = current_epoch(conn)
+
+    assert epoch.known is True
+    assert epoch.new_source == "eastmoney:events"
+    assert conn.events == []
 
 
 def test_migration_script_matches_store_ddl() -> None:

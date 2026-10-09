@@ -16,8 +16,12 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import logging
 import os
+import threading
+import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -71,6 +75,18 @@ DEFAULT_WATCHLIST_PATH: Path = Path(
     os.getenv("CPT_WATCHLIST", "~/.cache/cpt/watchlist.json")
 ).expanduser()
 
+#: 具名用户的自选文件名前缀（``R59（审计 L5）``）。
+_WATCHLIST_USER_PREFIX: str = "watchlist-"
+
+#: LLM 审计的 ``subject_id`` 命名空间前缀（``R59（审计 H1）``）。
+#:
+#: 前缀与 :data:`cpt.web.track_api._SPEAK_SUBJECT_PREFIX`（``track``）**必须不同**：
+#: 两边的读取端都是 ``recent_calls(subject_id=...)`` 精确匹配，共用命名空间就等于
+#: 允许一侧往另一侧的窗口里写。``a_share:`` 是服务端按路由语义构造的，
+#: 请求体再也影响不到它。
+_LLM_SUBJECT_EXPLAIN_PREFIX: str = "a_share:explain:"
+_LLM_SUBJECT_SUMMARIZE_PREFIX: str = "a_share:summarize:"
+
 _MARKET: str = "A"
 
 
@@ -78,10 +94,37 @@ class InvalidCodeError(ValueError):
     """代码格式不合法 → 路由返回 400（而不是让 handler 抛异常断连接）。"""
 
 
-def _store(path: Path | None = None) -> Any:
+def watchlist_path_for(user: str = "") -> Path:
+    """按用户算自选文件路径（``R59（审计 L5）``）。
+
+    修前：全站共用 :data:`DEFAULT_WATCHLIST_PATH` **一个文件**，两个用户（
+    ``X-CPT-User: alice`` / ``bob``）互相看到并互相删对方的手输自选 ——
+    自选是"用户自己的选择"，串号比丢一条更难受。
+
+    - 空 / ``"default"`` → :data:`DEFAULT_WATCHLIST_PATH`（**老路径原样保留**）
+    - 具名用户 → 同目录 ``watchlist-<user>.json``
+
+    为什么 default 不动：老单文件里已经存着那份自选。把"第一个具名用户"认领它，
+    等于把 default 身份的数据交给别人；而 default 路径零变化，老数据一条不丢，
+    具名用户从空列表开始（需要时重新加，**不会静默丢别人的数据**）。
+
+    ⚠️ 这**不是鉴权**：``user`` 来自自报的 ``X-CPT-User``（审计 S2，不在本批范围）。
+    这里只做"不同用户名各自一份文件"的隔离，防串号，不防伪造身份的攻击者 ——
+    真正的隔离要等 S2 定了身份模型之后。
+    """
+    if not user or user == "default":
+        return DEFAULT_WATCHLIST_PATH
+    # 白名单过滤只防路径穿越（`../`、绝对路径、隐藏文件）；extract_user_id 已先过滤过一遍，
+    # 这里是"即使被别的调用方直接调用也不会写坏路径"的第二道。
+    safe = "".join(c if c.isascii() and (c.isalnum() or c in "._-") else "_" for c in user)
+    safe = safe[:64].strip(".") or "default"
+    return DEFAULT_WATCHLIST_PATH.with_name(f"{_WATCHLIST_USER_PREFIX}{safe}.json")
+
+
+def _store(path: Path | None = None, *, user: str = "") -> Any:
     from cpt.adapters.a_share_pool import WatchlistStore  # noqa: PLC0415
 
-    return WatchlistStore(path or DEFAULT_WATCHLIST_PATH)
+    return WatchlistStore(path or watchlist_path_for(user))
 
 
 def _normalize(code: str) -> str:
@@ -96,22 +139,49 @@ def _normalize(code: str) -> str:
     return normalized[2:]
 
 
-def snapshot_payload(code: str, *, width_k: int = DEFAULT_WIDTH_K) -> dict[str, Any]:
+def snapshot_payload(
+    code: str,
+    *,
+    width_k: int = DEFAULT_WIDTH_K,
+    ensure_factors: bool | None = None,
+) -> dict[str, Any]:
     """构造 A 股 v2 snapshot。失败时返回 degraded 占位快照（不抛）。
 
-    **按需补因子在这里显式开启**（``default=True``）：用户输入代码 → 本地没有因子
-    就去腾讯拉一次并落库 → 重新生成快照。application 层的默认是关闭的，所以直接
-    调用 ``build_ashare_snapshot`` 的代码（含测试）不会联网、不会写库。
+    ``R59（审计 M1）``：**GET 默认只读**。修前这里硬编码
+    ``ensure_factors=factor_ensurer_from_env(default=True)`` —— 一次
+    ``GET /api/dashboard/a-share/snapshot?code=...`` 只要本地缺该票因子，就会
+    联网（腾讯）拉几百行并**写生产库**。GET 带写副作用本身就是缺陷：任何能发请求
+    的东西（爬虫、浏览器预取、插件、误点刷新）都能远程触发写库，还要为它付网络
+    延迟；而"用户要看的图"并不需要为每一个来路不明的代码都补一份因子。
+
+    三档语义（`ensure_factors`）：
+    - ``None``（默认，即 GET 不带宽参数）：只有环境变量
+      ``CPT_ASHARE_ONDEMAND_FACTOR`` **显式**开启才补因子 —— 运维若确实想让
+      看板自愈，设一次环境变量即可恢复旧行为（部署侧开关，审计要的就是这个）；
+    - ``True``（``?ensure_factors=1``）：这条请求显式要求补因子（"用户输入了一个
+      本地没有的代码，现在就要算"），**仍受环境变量 kill-switch 约束**
+      （env 显式 ``0/false/off`` 时该请求也只读）；
+    - ``False``（``?ensure_factors=0``）：永不补，只读。
+
+    被拒方案：把 web 层的 ``default=True`` 直接删成 ``default=False`` 就完事 ——
+    那会连"用户主动输入代码"的交互也一起砍掉（前端没有别的入口），且没有留下
+    任何显式开关；现在的写法让"写"必须由请求或部署显式要求。
     """
     from cpt.application.a_share_snapshot import (  # noqa: PLC0415
         build_ashare_snapshot,
         factor_ensurer_from_env,
     )
 
+    if ensure_factors is True:
+        ensurer = factor_ensurer_from_env(default=True)
+    elif ensure_factors is False:
+        ensurer = None
+    else:
+        ensurer = factor_ensurer_from_env(default=False)
     return build_ashare_snapshot(
         _normalize(code),
         width_k=width_k,
-        ensure_factors=factor_ensurer_from_env(default=True),
+        ensure_factors=ensurer,
     )
 
 
@@ -258,8 +328,87 @@ def _recommendation_history(code: str, *, days: int) -> dict[str, Any]:
     }
 
 
+#: 参与留痕内容去重的字段（``R59（审计 M1）``）。
+#:
+#: 刻意**不含** ``history`` / ``recommendation_history``：信号历史每次都在长/在变，
+#: 算进摘要等于永不命中。这里要回答的是"这次推荐本身和上次一样吗"。
+_REC_PERSIST_STABLE_KEYS: tuple[str, ...] = (
+    "available",
+    "action",
+    "action_label",
+    "headline",
+    "reason",
+    "price",
+    "status",
+    "signal_type",
+    "divergence_status",
+    "raw_close",
+    "price_ratio",
+    "level",
+    "data_quality",
+)
+
+#: 内容一直没变时的**心跳**间隔（秒）：6 小时至少留一行，别让历史断档。
+_REC_PERSIST_HEARTBEAT_S: float = 6 * 3600.0
+#: 去重表 key 数上限（key 是 ``(code, level)``）。上限存在只是防"池子越拉越大"，
+#: 正常部署里被看过的票是几十只量级，512 足够。
+_REC_PERSIST_MAX_KEYS: int = 512
+
+#: ``(code, level) -> (上次真正写入的 monotonic 时刻, 内容摘要)``。
+_rec_persist_seen: dict[tuple[str, str], tuple[float, str]] = {}
+_rec_persist_lock = threading.Lock()
+
+
+def _should_persist_recommendation(code: str, level: str, rec: dict[str, Any]) -> bool:
+    """这次推荐该不该写一行？（``R59（审计 M1）``，规则见 ``_persist_recommendation``）
+
+    用 ``time.monotonic``：墙上时钟被 NTP 回拨不会让心跳提前/永久跳过。
+    测试可 monkeypatch :data:`_REC_PERSIST_HEARTBEAT_S` 或直接清
+    :data:`_rec_persist_seen`，**不需要 sleep**。
+    """
+    stable = {k: rec.get(k) for k in _REC_PERSIST_STABLE_KEYS}
+    stable["code"], stable["level"] = code, level
+    digest = hashlib.sha256(
+        json.dumps(stable, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+    now = time.monotonic()
+    key = (code, level)
+    with _rec_persist_lock:
+        previous = _rec_persist_seen.get(key)
+        if (
+            previous is not None
+            and previous[1] == digest
+            and (now - previous[0]) < _REC_PERSIST_HEARTBEAT_S
+        ):
+            return False
+        # 只有"真写"才刷新时间戳：跳过时不动它，心跳才会到点触发。
+        _rec_persist_seen[key] = (now, digest)
+        if len(_rec_persist_seen) > _REC_PERSIST_MAX_KEYS:
+            # 淘汰"最久没写过"的那个 key（上限很小，线性扫足够）
+            oldest = min(_rec_persist_seen, key=lambda k: _rec_persist_seen[k][0])
+            _rec_persist_seen.pop(oldest, None)
+    return True
+
+
 def _persist_recommendation(code: str, rec: dict[str, Any], level: str) -> None:
-    """把这次推荐落一行。**失败只记日志**，不让它带崩推荐接口。"""
+    """把这次推荐落一行。**失败只记日志**，不让它带崩推荐接口。
+
+    ``R59（审计 M1）``：加**内容去重**。修前每次 GET 推荐都无条件 INSERT 一行
+    （原注释自述"写没有去重：同一只票每次刷新写一行"）—— 而看板是定时刷新的，
+    同一份内容一天能写几百行，表只涨不消。
+
+    去重规则（"时间序列"语义**保留**，只是不再记重复内容）：
+    1. 与上一次**真正写入**的内容摘要相同、且距上次写入不足
+       :data:`_REC_PERSIST_HEARTBEAT_S` → 跳过（同一份推荐没带来新信息）；
+    2. 内容变了（新信号/新价格/新动作）→ 照写；
+    3. 内容一直没变也至少每 :data:`_REC_PERSIST_HEARTBEAT_S` 写一行 ——
+       否则"历史"会在长时间横盘里凭空断档，读端会以为系统没跑。
+
+    被拒方案：①在 SQL 里去重（`WHERE NOT EXISTS`）—— 存储层不归本批改，
+    且 web 层不许写 SQL（``scripts/check_sql_layering.py``）；②直接删掉留痕 ——
+    会丢"推荐历史"这个产品功能。摘要只覆盖"推荐本身"，**不含**
+    ``history``（每次都长），见 :data:`_REC_PERSIST_STABLE_KEYS`。
+    """
     from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
     from cpt.storage.factor_epoch_store import current_epoch  # noqa: PLC0415
     from cpt.storage.recommendation_store import (  # noqa: PLC0415
@@ -268,6 +417,9 @@ def _persist_recommendation(code: str, rec: dict[str, Any], level: str) -> None:
         ensure_table,
     )
 
+    if not _should_persist_recommendation(code, level, rec):
+        _LOG.debug("推荐留痕内容未变，跳过 code=%s level=%s", code, level)
+        return
     rec = {**rec, "code": code, "level": level}
     client = None
     try:
@@ -326,19 +478,22 @@ def _signal_history(code: str) -> dict[str, Any]:
         try:
             events = load_signal_events(conn, days=90, code=code)
         except SignalEventError as exc:
+            # R59（审计 M4）：对外只回**稳定代号**，异常原文只进服务端日志。
+            _LOG.warning("signal_history unreadable: %s", exc)
             return {
                 "available": False,
                 "reason": "signal_history_unavailable",
-                "detail": str(exc),
+                "detail": "signal_event_store_unavailable",
                 "count": 0,
                 "items": [],
             }
         return build_history(events, epoch_ms=epoch_ms)
     except Exception as exc:  # noqa: BLE001 — 历史是锦上添花，不能带崩推荐
+        _LOG.warning("signal_history failed: %s: %s", type(exc).__name__, exc)
         return {
             "available": False,
             "reason": "signal_history_error",
-            "detail": f"{type(exc).__name__}: {exc}",
+            "detail": "internal_error",
             "count": 0,
             "items": [],
         }
@@ -362,21 +517,29 @@ def submit_llm_summarize(code: str, rec: dict[str, Any]) -> dict[str, Any]:
     from cpt.application.llm_cases import summarize_recommendation  # noqa: PLC0415
     from cpt.storage.llm_call_store import LLMCallError  # noqa: PLC0415
 
+    # ``R59（审计 M3/H1）``：先在 ``try`` 之外校验并归一化代码 ——
+    # 修前这里**完全不校验**，`?code=ZZZZZZ` 会带着垃圾代码真的去调一次付费 LLM；
+    # 非法代码抛 InvalidCodeError，由路由回 400 ``invalid_code``。
+    # 同时把服务端构造的 ``subject_id`` 传给审计（与 explain 同款命名空间隔离，
+    # 请求体无从指定：这个函数的 ``rec`` 里没有、也不采信任何 subject 字段）。
+    normalized = _normalize(code)
+
     # ⚠️ 构造在 try **里面**（同 ``submit_llm_explain``）：无 DB 配置时构造函数
     # 就抛，放在外面会绕过这里承诺的「LLM 不可用 → available=False」。
     client = None
     try:
         client = AShareLocalClient()
-        names = _names([code])
+        names = _names([normalized])
         return summarize_recommendation(
             client._get_conn(),
-            code=code,
-            name=names.get(code, ""),
+            code=normalized,
+            name=names.get(normalized, ""),
             action_label=str(rec.get("action_label") or ""),
             headline=str(rec.get("headline") or ""),
             reason=str(rec.get("reason") or ""),
             price=rec.get("raw_close") if rec.get("raw_close") is not None else rec.get("price"),
             disclaimer=str(rec.get("disclaimer") or ""),
+            subject_id=f"{_LLM_SUBJECT_SUMMARIZE_PREFIX}{normalized}",
         )
     except LLMCallError as exc:
         # ``finish_call`` 现在与 ``enqueue_call`` 同口径：写失败**抛**
@@ -432,7 +595,7 @@ def _names(codes: list[str]) -> dict[str, Any]:
         return {}
 
 
-def _manual_entries() -> tuple[list[Any], str | None]:
+def _manual_entries(*, user: str = "") -> tuple[list[Any], str | None]:
     """A 股手输（自选）条目 + 读失败原因。
 
     读不到**不让整个池子挂**：热门池和策略仍然可用，前端只需少一组。这与
@@ -440,11 +603,15 @@ def _manual_entries() -> tuple[list[Any], str | None]:
 
     注意与 ``_entries_payload``（自选路由本身）**刻意不同**：那条路由读失败就该报错，
     因为用户点的是"看我的自选"，静默返回空列表会让他以为自选被清空了。
+
+    ``R59（审计 M4）``：``detail`` 只回异常**类名**，不回原文 —— ``WatchlistError``
+    的原文里带着自选文件的绝对路径（``_read`` 的报错模板），而这里是会回给
+    HTTP 客户端的降级字段。原文在 :func:`pool_payload` 里已进 ``_LOG``。
     """
     try:
-        return [e for e in _store().list() if e.market == _MARKET], None
+        return [e for e in _store(user=user).list() if e.market == _MARKET], None
     except Exception as exc:  # noqa: BLE001
-        return [], f"{type(exc).__name__}: {exc}"
+        return [], f"store_unavailable:{type(exc).__name__}"
 
 
 def _merge_sources(
@@ -518,6 +685,7 @@ def pool_payload(
     *,
     hot_limit: int | None = DEFAULT_HOT_TOP,
     strategy_limit: int | None = DEFAULT_STRATEGY_TOP,
+    user: str = "",
 ) -> dict[str, Any]:
     """A 股下拉的候选池 = **热门池 Top5 ∪ 手输（自选）∪ 策略综合 Top5**。
 
@@ -528,8 +696,14 @@ def pool_payload(
     ``watchlist_error`` 分别记录）：A 股入口是主视图，任何一个上游抖动都不该让它整体
     不可用。前端只在对应字段非空时提示。
 
-    自选读的是 ``_store()``（服务端 JSON，见 ``DEFAULT_WATCHLIST_PATH``）——
+    自选读的是 ``_store(user=user)``（服务端 JSON，见 :func:`watchlist_path_for`）——
     **不是** localStorage。手输的代码必须跨登录保留，这是本次改动的起因。
+
+    ``R59（审计 M4）``：四个 ``*_error`` 字段**只回稳定代码**（``*_store_unavailable``
+    / ``db_unavailable``），不再回 ``f"{type(exc).__name__}: {exc}"`` —— 异常原文里
+    带着 DB DSN、主机名、表名甚至 SQL（psycopg 的 ``OperationalError`` 就有），
+    而这是**回给浏览器**的载荷。原文照旧进服务端日志（``_LOG.warning``），
+    归因信息一条不少，只是不再外泄。前端只判断"字段是否非空"。
     """
     from cpt.adapters.a_share_local import AShareLocalClient, AShareLocalError  # noqa: PLC0415
     from cpt.adapters.a_share_pool import fetch_hot_pool  # noqa: PLC0415
@@ -552,12 +726,14 @@ def pool_payload(
             picks = fetch_strategy_top(conn, limit=strategy_limit)
         except Exception as exc:  # noqa: BLE001 — 策略表读不到也要能出池子
             picks = []
-            strategy_error = f"{type(exc).__name__}: {exc}"
+            strategy_error = "strategy_store_unavailable"
+            _LOG.warning("策略池读取失败（已降级）: %s", exc)
     except AShareLocalError as exc:  # noqa: BLE001 — 缺 psycopg/DB 不可达时降级
-        db_error = f"{type(exc).__name__}: {exc}"
+        db_error = "db_unavailable"
         entries = []
         picks = []
         strategy_error = None
+        _LOG.warning("A 股本地库不可达（已降级出池）: %s", exc)
     finally:
         if client is not None:
             client.close()
@@ -567,9 +743,11 @@ def pool_payload(
         factor_error: str | None = None
     except Exception as exc:  # noqa: BLE001 — 因子表读不到也要能出池子
         factors = set()
-        factor_error = f"{type(exc).__name__}: {exc}"
+        factor_error = "factor_store_unavailable"
+        _LOG.warning("因子表读取失败（drawable 一律按 False 出池）: %s", exc)
 
-    manual, watchlist_error = _manual_entries()
+    manual, watchlist_error = _manual_entries(user=user)
+
     merged = _merge_sources(entries, picks, manual)
 
     names = _names([item["code"] for item in merged])
@@ -640,8 +818,8 @@ def recent_closes(code: str) -> tuple[float, float] | None:
     return (float(ordered[-2].close), float(ordered[-1].close))
 
 
-def _entries_payload() -> dict[str, Any]:
-    entries = _store().list()
+def _entries_payload(*, user: str = "") -> dict[str, Any]:
+    entries = _store(user=user).list()
     names = _names([entry.code for entry in entries])
     return {
         "schema_version": "a_share_watchlist.v1",
@@ -659,26 +837,30 @@ def _entries_payload() -> dict[str, Any]:
     }
 
 
-def watchlist_payload() -> dict[str, Any]:
-    """自选列表（只返回 A 股，crypto 自选不混进来）。"""
-    payload = _entries_payload()
+def watchlist_payload(*, user: str = "") -> dict[str, Any]:
+    """自选列表（只返回 A 股，crypto 自选不混进来）。
+
+    ``R59（审计 L5）``：``user`` 由服务端从 ``X-CPT-User`` 提取后传入，
+    不同用户各读各的文件（见 :func:`watchlist_path_for`），不再全局共用一份。
+    """
+    payload = _entries_payload(user=user)
     payload["items"] = [item for item in payload["items"] if item["market"] == _MARKET]
     payload["count"] = len(payload["items"])
     return payload
 
 
-def watchlist_add(code: str) -> dict[str, Any]:
-    """加入自选（幂等）。"""
+def watchlist_add(code: str, *, user: str = "") -> dict[str, Any]:
+    """加入自选（幂等）。``R59（审计 L5）``：写进 ``user`` 自己的文件。"""
     normalized = _normalize(code)
-    _store().add(normalized, _MARKET)
-    return watchlist_payload()
+    _store(user=user).add(normalized, _MARKET)
+    return watchlist_payload(user=user)
 
 
-def watchlist_remove(code: str) -> dict[str, Any]:
-    """移出自选；返回移除后的列表 + 是否真的移除了。"""
+def watchlist_remove(code: str, *, user: str = "") -> dict[str, Any]:
+    """移出自选；返回移除后的列表 + 是否真的移除了。``R59（审计 L5）``。"""
     normalized = _normalize(code)
-    removed = _store().remove(normalized, _MARKET)
-    payload = watchlist_payload()
+    removed = _store(user=user).remove(normalized, _MARKET)
+    payload = watchlist_payload(user=user)
     payload["removed"] = removed
     return payload
 
@@ -689,6 +871,20 @@ def submit_llm_explain(code: str, structure: dict[str, Any]) -> dict[str, Any]:
     R25。LLM 是旁路增强：未启用 / 缺 key / 表不存在都只是 ``available=False``，
     **不抛异常** —— 主看板照常出图。UI 拿 ``call_id`` 去轮询
     ``/api/dashboard/llm/calls?call_id=...``。
+
+    ``R59（审计 H1）``：``subject_id`` **由服务端按路由语义构造**，不再采信请求体里的
+    ``structure["id"]``。修前是 ``subject_id=str(structure.get("id", ""))`` —— 请求体可控，
+    而 ``recent_calls`` 是 ``WHERE subject_id = %s`` 精确匹配，于是任何人只要在 body 里写
+    ``{"id": "track:victim:000002"}`` 就能把一条 LLM 记录顶进**受害者**追踪页
+    「讲人话」的读取窗口（:func:`cpt.web.track_api._subject_id` 构造的正是
+    ``track:{user}:{code}``）。命名空间前缀 ``a_share:`` 与 ``track:`` 天然隔离，
+    被拒方案是"过滤 body 里的 ``track:`` 前缀"—— 黑名单永远漏，且 body 的其他形状
+    （``"id": "track: victim"`` 之类）也不该被当作主体来源。
+
+    ``R59（审计 M3）``：``_normalize`` 在 ``try`` **之前** 是**故意**的 ——
+    非法代码必须抛 :class:`InvalidCodeError` 让路由回 400 ``invalid_code``，
+    而不是被下面的宽 ``except`` 吞成 ``available=False``（那会把"你代码写错了"
+    伪装成"LLM 不可用"）。HTTP 层（``cpt.web.app._handle_a_share_write``）已接住它。
     """
     from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
     from cpt.application.llm_cases import explain_structure  # noqa: PLC0415
@@ -707,7 +903,7 @@ def submit_llm_explain(code: str, structure: dict[str, Any]) -> dict[str, Any]:
             name=names.get(normalized, ""),
             market="a_share",
             structure=structure,
-            subject_id=str(structure.get("id", "")),
+            subject_id=f"{_LLM_SUBJECT_EXPLAIN_PREFIX}{normalized}",
         )
     except Exception as exc:  # noqa: BLE001 — 旁路失败不拖垮写接口
         _LOG.warning("提交 LLM 解释失败 %s: %s", normalized, exc)

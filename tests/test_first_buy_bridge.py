@@ -196,6 +196,42 @@ def test_bridge_uses_two_most_recent_centers() -> None:
     assert facts.structure_id == "level5:fx:c"
 
 
+def test_main_path_structure_id_is_code_scoped() -> None:
+    """**主路径**（两个同级中枢）的 structure_id 也必须带 code（审计 S3）。
+
+    上一轮只给「结构不足两个中枢」的 ``:empty`` 兜底分支补了 code，主路径仍是
+    ``level5:bi:8`` 这种**纯位置下标**。``center_ids`` 取 ``zhongshu.bi_ids[0]``，
+    而代表 id 由 ``reference_chanlun.py:213`` 生成 ``bi:{i}`` —— 与股票无关。
+    ``load_previous_signal`` 只按 signal_id 查 ⇒ 线上实测 12 组 signal_id 被两只票
+    共用（``first_buy:5:level5:bi:8`` = 000002 + 600707），A 读到 B 的历史状态，
+    ``record_signal_event`` 的 ``status == prev_status`` 还会把 B 的真实跃迁吞掉。
+    """
+    centers = [_zs(5, 0, 10, "fx:a"), _zs(5, 20, 30, "fx:c")]
+
+    legacy = derive_first_buy_facts(level=5, trend_direction=-1, bis=[], zhongshus=centers)
+    assert legacy is not None
+    # 不带 code = 旧格式：不静默改已有历史行的主键（向后兼容）。
+    assert legacy.structure_id == "level5:fx:c"
+    assert f"first_buy:5:{legacy.structure_id}" == "first_buy:5:level5:fx:c"
+
+    a = derive_first_buy_facts(
+        level=5, trend_direction=-1, bis=[], zhongshus=centers, code="000002"
+    )
+    b = derive_first_buy_facts(
+        level=5, trend_direction=-1, bis=[], zhongshus=centers, code="600707"
+    )
+    assert a is not None and b is not None
+    assert a.structure_id == "level5:fx:c:000002"
+    assert b.structure_id == "level5:fx:c:600707"
+    assert f"first_buy:5:{a.structure_id}" != f"first_buy:5:{b.structure_id}"
+
+    sell = derive_first_sell_facts(
+        level=5, trend_direction=1, bis=[], zhongshus=centers, code="300750"
+    )
+    assert sell is not None
+    assert sell.structure_id == "level5:fx:c:300750"
+
+
 def test_bridge_marks_not_checked_when_power_metrics_missing() -> None:
     """力度度量未填充时是 ``not_checked``，**不是** ``not_detected``。
 

@@ -246,7 +246,17 @@ class EastmoneyActionClient:
             )
         rows = data or []
         out: list[CorporateAction] = []
+        bad_rows = 0
         for row in rows:
+            # R59（审计 L8）：``data`` 只保证是 **list**，不保证元素是 dict。
+            # 旧代码直接 ``row.get(...)``，一条字符串/数字就把整只票的分红查询
+            # 抛成 ``AttributeError``（非领域异常，上层 ``except
+            # EastmoneyActionError`` 接不住，等于整份公司行动全丢）。逐元素校验：
+            # 坏行**跳过并计数**，收尾统一 warning 留痕 —— 与顶层 result/data 的
+            # 「结构性损坏一律 fatal」不同，单行破损不应否定整份响应。
+            if not isinstance(row, dict):
+                bad_rows += 1
+                continue
             ex = _parse_date(row.get("EX_DIVIDEND_DATE"))
             if ex is None:
                 continue  # 没有除权日 = 还没到实施，定位不到台阶
@@ -286,6 +296,13 @@ class EastmoneyActionClient:
                     source="eastmoney",
                     status=str(row.get("ASSIGN_PROGRESS") or ""),
                 )
+            )
+        if bad_rows:
+            _LOG.warning(
+                "%s 东财分红接口 data 中 %d 行不是 JSON 对象，已跳过（其余 %d 行正常解析）",
+                em_code,
+                bad_rows,
+                len(rows) - bad_rows,
             )
         return filter_implemented(out)
 

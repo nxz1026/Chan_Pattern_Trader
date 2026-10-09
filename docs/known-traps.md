@@ -56,6 +56,21 @@ grep -c "^SKIPPED" /dev/null   # 直接看 skip 原因：
 > import** —— 这同时是 CI 那盏红灯（`test_canvas_d_trust_boundary.py` 因 CI 未装
 > pandas 而 `ModuleNotFoundError`）的根因，一并根除。
 
+### 运行时锁文件：**故意不锁**，但 extras 必须有主版本上界（R59，审计 L16）
+
+本仓只有**开发/CI** 锁文件 `requirements-dev.txt`（由 `requirements-dev.in` 经
+pip-compile 生成）。运行时依赖（extras）**故意不提交锁文件**：生产是
+`pip install -e ".[db,crypto,chan]"` 按 `pyproject.toml` 现场解析安装，`chan` 用
+`czsc==1.0.1` 精确锁定，`db`/`crypto` 各有独立的降级路径（缺包时对应能力标
+`unavailable`，不拖垮实时看板），给 extras 再维护一份跨 Python 版本的锁文件
+收益低于维护成本 —— 这是取舍，不是遗漏。
+
+但「不锁」不等于「开区间」：`ccxt` 原先只有 `>=4.0`、`psycopg` 只有 `>=3.1`，
+部署时会把任意未来**主版本**直接装进生产。R59 已补主版本上界
+（`ccxt>=4.0,<5`、`psycopg[binary]>=3.1,<4`）；跨主版本升级需人工改这里再上。
+
+**判定**：`grep -n 'ccxt\|psycopg' pyproject.toml` 应看到带 `<` 的上界。
+
 ---
 
 ## 3. `asel.daily_bar_raw.source` 的两个值是**真·多源**，不要去"统一"
@@ -666,7 +681,7 @@ grep -rnE "(index|idx|col|pos|offset|ix)\w* *= *[a-z_]+\([^)]*\) +or " cpt/
 |---|---|---|
 | `reference_backend:386-390` | `int(f.get("x", 0) or 0)` | 两边都是 0，收敛成默认值本就正确 |
 | `a_share_factor:552` | `getattr(act,"share_ratio",0.0) or 0.0` | 同上（None → 0.0 是有意的） |
-| `app.py:912` | `find_run(run_id) or _index_row_from_body(...)` | `find_run` 返回 **dict 或 None**；非空 dict 恒为真，None 才回落 ⇒ 正确 |
+| `app.py:1168` | `find_run(run_id) or _index_row_from_body(...)` | `find_run` 返回 **dict 或 None**；非空 dict 恒为真，None 才回落 ⇒ 正确 |
 
 ⇒ **判据不是「用了 `or`」，而是「左边函数的返回值合法地包含 0 / "" / []」**。
 这条 grep 只能**筛出候选**，逐个看清左边是什么才算结论。

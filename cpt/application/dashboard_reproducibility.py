@@ -5,7 +5,19 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Final
+
+from cpt.domain.config import SCHEMA_VERSION
+
+#: 快照 ``reproducibility.rules_version`` 的唯一口径来源。
+#:
+#: R59（审计 M26）：原值硬编码 ``"rules.v0"``，而领域配置
+#: ``cpt.domain.config.SCHEMA_VERSION`` 早在 R38 就升到 ``"v1"`` —— 于是快照
+#: 对外宣称的口径号比实际规则老了一代。``cpt/domain/config.py`` 明写
+#: v0/v1 结构不可比（``from_dict`` 会拒绝不匹配的 ``config_version``），
+#: 所以这不是「标签写错」，是**拿旧口径号描述新规则**。
+#: 从 SCHEMA_VERSION 派生而不是再写一遍字面量：下次升 v2 时不会漏改这里。
+RULES_VERSION: Final[str] = f"rules.{SCHEMA_VERSION}"
 
 
 def config_hash(config: object) -> str:
@@ -53,7 +65,7 @@ def reproducibility_metadata(
     snapshot: dict[str, Any],
     *,
     config: object | None = None,
-    rules_version: str = "rules.v0",
+    rules_version: str = RULES_VERSION,
     engine_version: str = "cpt.v0",
 ) -> dict[str, Any]:
     """Build a stable, JSON-compatible reproducibility panel.

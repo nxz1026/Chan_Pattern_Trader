@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -671,10 +672,15 @@ def test_app_persist_run_commits(monkeypatch: pytest.MonkeyPatch) -> None:
     assert conn.rows["run-1"]["snapshot"] == {"v": 1}
 
 
-def test_app_persist_run_swallows_db_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_app_persist_run_swallows_db_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     """**最关键的一条**：DB 挂了绝不能让用户的 HTTP 响应 500。
 
     记账是旁路，失败的真实后果只是「这次运行重启后查不到」——日志里留痕即可。
+
+    R59（审计 L13）：原来只有一句「不抛即通过」，函数体被删空也一样绿。现在把
+    docstring 里那句「日志里留痕即可」变成**断言**：必须看到那条 warning。
     """
     from cpt.web import app
 
@@ -684,7 +690,10 @@ def test_app_persist_run_swallows_db_failure(monkeypatch: pytest.MonkeyPatch) ->
         yield  # pragma: no cover
 
     monkeypatch.setattr(app, "_run_store_conn", lambda conn=None: _down())
-    app._persist_run(_row(), {"v": 1})  # 不抛即通过
+    with caplog.at_level(logging.WARNING, logger="cpt.web.handler"):
+        app._persist_run(_row(), {"v": 1})
+
+    assert "运行持久化双写失败" in caplog.text
 
 
 @contextmanager

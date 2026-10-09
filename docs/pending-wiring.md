@@ -160,7 +160,7 @@ R22 的 9 个接线点（路由与调用方均已 grep 复核）：
 
 > **R20 处置：新增 `cpt/application/first_buy_bridge.py`（翻译层），接进 A 股主看板。**
 > - 桥输出 `FirstBuyFacts`（三事实 + `center_ids` + `structure_id` + `divergence_status`），
->   再由 `a_share_snapshot.py:456 _derive_first_buy_signal` 调 `assess_first_buy` 出
+>   再由 `a_share_snapshot.py:470 _derive_first_buy_signal` 调 `assess_first_buy` 出
 >   `Signal`，经 `build_dashboard_snapshot_v2(..., signal=signal)` 落到
 >   `v2["signal"]`。接线点干净：v2 早有该形参，只是没人传。
 > - **保守口径四条**（全选「宁可判否」一侧）：①取本级别**最后两个**中枢，不是任意两个；
@@ -304,7 +304,7 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:98` 的
 |---:|---|---|
 | 94 | `market_24h` | `{"available": False, "reason": "upstream_aggregate_unavailable"}` |
 | 98 | `parity` | `{"available": False, "reason": "oracle_reference_unavailable"}` |
-| ~~62~~→`99` | `runs` | v2 体内的 `[]` **仍在**，但活路径不经它：`cpt/web/app.py:253 _with_run_index()` 在**HTTP 响应层**注入真值（R20），`:1054`/`:1114` 调用 |
+| ~~62~~→`99` | `runs` | v2 体内的 `[]` **仍在**，但活路径不经它：`cpt/web/app.py:413 _with_run_index()` 在**HTTP 响应层**注入真值（R20），`:1054`/`:1114` 调用 |
 | 101 | `multi_level` | `{"available": False, "reason": "multi_level_unavailable"}` |
 | 109 | `config_compare` | `{"available": False, "reason": "config_compare_unavailable"}` |
 
@@ -325,7 +325,7 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:98` 的
 
 | 函数 | 产品位置 | 处境 | R22 处置 |
 |---|---|---|---|
-| `dashboard_reproducibility.py::snapshot_diff` | roadmap R5 | **已接线（R22）** | 调用方 `dashboard_compare.py` 已接进 C3 `/compare`（`cpt/web/app.py:862`）；序列型值由 `cpt/web/app.py:287 _summarize_diff_value` 递归降级，避免原始 candles 灌进响应 |
+| `dashboard_reproducibility.py::snapshot_diff` | roadmap R5 | **已接线（R22）** | 调用方 `dashboard_compare.py` 已接进 C3 `/compare`（`cpt/web/app.py:862`）；序列型值由 `cpt/web/app.py:447 _summarize_diff_value` 递归降级，避免原始 candles 灌进响应 |
 | `adapters/a_share_local.py::_to_wind_code` | 台账决策 C1 | **已接线（R22）** | 调用方 `scripts/factor_backfill.py:199`（`def fetch_wind_factor_rows`）→ 循环体 `:594` 的 `_wind_fallback`，由 `--wind-fallback`（`:506`，**默认关闭**）开启；同时把非法输入从静默兜底改成抛 `ValueError` |
 | `adapters/wind_source.py::fetch_adjust_factors` | 台账决策 C1 | **已接线（R22）** | 同上调用链 `scripts/factor_backfill.py:210`（引用）与 `:221`（`fetch_adjust_factors` 调用）；取数失败只转文案、绝不向上抛 |
 

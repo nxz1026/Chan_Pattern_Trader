@@ -64,6 +64,7 @@ from typing import Any, Final
 
 from cpt.adapters._dbconfig import connection_kwargs as _shared_connection_kwargs
 from cpt.domain.a_share_rules import AShareDailyTag
+from cpt.domain.market_time import market_today
 from cpt.domain.models import CanonicalBar
 from cpt.domain.types import BarLike
 
@@ -229,10 +230,12 @@ def check_t_plus_one_calendar(client: Any) -> dict[str, Any]:
 
     :returns: 字典 ``{"available": bool, "reason": str, "today": str | None,
                         "next_trade_date": str | None}``。
-    """
-    import datetime as _dt
 
-    today = _dt.date.today().isoformat()
+    R59（审计 L11）：``today`` 取**市场时区**（``Asia/Shanghai``）日期，不用宿主
+    本地日期 —— 生产机是 ``Etc/UTC``，``date.today()`` 在北京时间 08:00 前会比
+    交易日历早一天，fail-closed 误判「今日不能买」。
+    """
+    today = market_today().isoformat()
     conn: Any = None
     try:
         conn = client._get_conn()
@@ -481,14 +484,15 @@ class AShareNoFactorError(AShareLocalError):
 
 
 class ASharePlaceholderRowsError(AShareLocalError):
-    """有行情行，但**每一行都是占位行**（OHL 全 0、无成交）—— 画不出任何序列。
+    """有行情行，但**每一行都是废行**（OHL 全 0、无成交，或 OHLC 为 NULL）—— 画不出任何序列。
 
     单独成类的原因：它与 :class:`AShareNoDataError`、:class:`AShareNoFactorError`
     是三种不同的上游故障，排查方向完全不同 ——
     「没数据」查采集是否在跑，「缺因子」查因子表覆盖，
-    而「全是占位行」说明采集**跑了但写出了废行**（实测 2026-09-28~09-30
+    而「全是废行」说明采集**跑了但写出了废行**（实测 2026-09-28~09-30
     上游一次性写出 35 行 O/H/L=0、vol=0、amt=0，其中 18 行连 close 也是 0，
-    涉及 18 只票）。合并成同一类会把排查指到错误的方向。
+    涉及 18 只票；R59 又见 OHLC 为 NULL 的同型脏行）。
+    合并成同一类会把排查指到错误的方向。
     """
 
 
@@ -498,7 +502,10 @@ class AShareFetchResult:
 
     bars: tuple[CanonicalBar, ...]
     skipped_no_factor: tuple[str, ...]  # ISO 日期元组
-    # R52 新增：被丢弃的**占位行**日期（原始 O/H/L 全 0，无论 close 是否为 0）。
+    # R52 新增，R59（审计 M8）扩到 NULL：被丢弃的**废行**日期。
+    # 两种形态：原始 O/H/L 全 0 的占位行（无论 close 是否为 0），
+    # 以及 O/H/L/close 任为 NULL 的脏行 —— 后者构造不出 K 线，旧代码会在
+    # ``float(None)`` 上抛 TypeError 让整只票全废（见 fetch_validated_klines）。
     # 与 skipped_no_factor 分开记，因为两者对上游的指控完全不同：
     # 前者是「因子表没覆盖这只票」，后者是「采集写出了废行」。默认值 `()`
     # 是为了不破坏测试里那些只给两个字段的 duck-type 假结果对象。
@@ -661,11 +668,25 @@ class AShareLocalClient:
         bars: list[CanonicalBar] = []
         skipped: list[str] = []
         placeholders: list[str] = []
+        null_ohlc: list[str] = []
         for row in rows:
             d, op, hi, lo, cl, vol, amt = row
             factor = factors.get(d)
             if factor is None:
                 skipped.append(d.isoformat())
+                continue
+            # R59（审计 M8）：NULL 必须先于任何 ``float()`` 拦下。
+            # ``public.daily_bar`` 的 OHLC 是可空列，上游实测会写 NULL
+            # （R52 逮到的是同一类废行的「全 0」形态）。旧代码只对 vol/amt 做了
+            # ``is not None`` 兜底，O/H/L/close 任遇 NULL 就在 ``float(None)`` 上抛
+            # ``TypeError`` —— 那既不是本模块的领域异常（上层 ``except`` 接不住），
+            # 又会让**整只票**的 K 线全拿不到，连「跳过这一天」都做不到。
+            # 降级纪律与占位行完全一致：丢这一行、保留其余、记进
+            # ``skipped_placeholder`` 并在日志里留痕；一行都不剩时仍走
+            # ``ASharePlaceholderRowsError``。
+            if op is None or hi is None or lo is None or cl is None:
+                null_ohlc.append(d.isoformat())
+                placeholders.append(d.isoformat())
                 continue
             # R52：**占位行**守卫。上游会在某些交易日写出 O/H/L 全 0、
             # vol=amt=0 的行（实测 2026-09-28~09-30 一次批量 35 行 / 18 只票）。
@@ -706,14 +727,33 @@ class AShareLocalClient:
                 )
             )
 
+        if null_ohlc:
+            # 可观测痕迹：NULL 脏行不像「全 0 占位行」那样有上游规律可循，
+            # 只记进结果元组的话运维看不到，所以在日志里也留一行。
+            _LOG.warning(
+                "%s %s~%s：跳过 %d 行 OHLC 含 NULL 的脏行（样例 %s）",
+                bare_code,
+                start_date,
+                end_date,
+                len(null_ohlc),
+                ", ".join(null_ohlc[:3]),
+            )
+
         if not bars:
             # 三种「一条都画不出来」的原因，指控对象各不相同，必须分开报，
             # 否则排查会被指到错误的方向（见三个错误类的 docstring）。
             if placeholders and len(placeholders) == len(rows) - len(skipped):
-                # 有因子、也查到了行情行，但**每一行都是占位行**。
+                # 有因子、也查到了行情行，但**每一行都是废行**（全 0 占位 / OHLC 为 NULL）。
+                if null_ohlc:
+                    detail = (
+                        f"{len(placeholders)} 行全是废行（其中 {len(null_ohlc)} 行 OHLC 含 NULL、"
+                        f"{len(placeholders) - len(null_ohlc)} 行 O/H/L 全 0）"
+                    )
+                else:
+                    detail = f"{len(placeholders)} 行全是占位行（O/H/L 全 0、无成交）"
                 raise ASharePlaceholderRowsError(
                     f"{bare_code} {start_date}~{end_date} 区间内 "
-                    f"{len(placeholders)} 行全是占位行（O/H/L 全 0、无成交）—— "
+                    f"{detail} —— "
                     f"上游采集写出了废行，不是「无行情」也不是「缺因子」。"
                     f"样例日期：{', '.join(placeholders[:3])}"
                 )

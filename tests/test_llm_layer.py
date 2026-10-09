@@ -518,3 +518,115 @@ def test_real_http_401_is_not_retried() -> None:
     assert statuses.count(STATUS_ERROR) == 1, f"401 应一次就结束，实际 {statuses}"
     assert STATUS_RATE_LIMITED not in statuses, "401 不该被当成限流"
     assert "HTTP 401" in seen[-1][1], seen[-1]
+
+
+# --------------------------------------------------------------------------- #
+# 5. 截断/空回答**不是**答案（R59 审计 M10）
+# --------------------------------------------------------------------------- #
+#
+# 病灶：``_extract_text`` 只看 ``choices[0].message.content`` 在不在，
+# **从不看 ``finish_reason``**。于是被 ``max_tokens`` 截断的半句话照常返回
+# ``LLMResult``，落库时是 ``STATUS_OK`` —— 看板上一条读不通的"结论"和真结论
+# 长得一模一样。同一段里 ``int(raw.get(...))`` 还会把 provider 回的 ``"N/A"``
+# 变成 ``ValueError``，打穿「``complete()`` 只抛 ``LLMError``」的契约。
+
+
+class _TruncatedHandler(http.server.BaseHTTPRequestHandler):
+    """真 HTTP 200 + ``finish_reason=length`` + ``usage`` 里塞 ``"N/A"``。"""
+
+    def do_POST(self) -> None:  # noqa: N802
+        self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        body = json.dumps(
+            {
+                "choices": [
+                    {"message": {"content": "这是一句被截断的"}, "finish_reason": "length"}
+                ],
+                "usage": {"prompt_tokens": "N/A", "completion_tokens": 3},
+                "model": "stub-model",
+            }
+        ).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, fmt: str, *args: Any) -> None:
+        return
+
+
+def test_truncated_answer_never_becomes_an_ok_result() -> None:
+    """端到端：截断的回答必须炸成 LLMError，且队列记 ``error`` 而不是 ``ok``。"""
+    srv = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _TruncatedHandler)
+    threading.Thread(target=srv.serve_forever, daemon=True).start()
+    client = OpenAICompatibleClient(
+        base_url=f"http://127.0.0.1:{srv.server_address[1]}/v1/chat/completions",
+        model="stub-model",
+        api_key="k",
+        timeout=5.0,
+    )
+    try:
+        with pytest.raises(LLMError, match="finish_reason=length"):
+            client.complete(_request())
+
+        seen: list[tuple[str, str]] = []
+        queue = LLMQueue(
+            client,
+            _config(max_attempts=2, backoff_base=0.05, backoff_max=0.2),
+            on_status=lambda cid, st, detail, res: seen.append((st, detail)),
+        )
+        try:
+            queue.submit(Job(request=_request(), call_id="c1"))
+            assert queue.drain(timeout=20.0)
+        finally:
+            queue.stop()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+
+    statuses = [s for s, _ in seen]
+    assert statuses, "队列什么都没记"
+    assert STATUS_OK not in statuses, f"截断的回答被当成成功了：{seen}"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"choices": [{"message": {"content": "  你好  "}, "finish_reason": "stop"}]},
+        # 老网关不给 finish_reason：不能凭缺失就判失败（会误伤整条产线）
+        {"choices": [{"message": {"content": "你好"}}]},
+    ],
+)
+def test_complete_answer_still_passes(payload: dict[str, Any]) -> None:
+    assert (
+        OpenAICompatibleClient._extract_text(payload)  # noqa: SLF001
+        == "你好"
+    )
+
+
+@pytest.mark.parametrize("reason", ["length", "content_filter", "tool_calls", "unknown_future"])
+def test_non_stop_finish_reason_is_an_error(reason: str) -> None:
+    """任何非 ``stop`` 的 `finish_reason` 都不算「正常结束的回答」。"""
+    with pytest.raises(LLMError, match="finish_reason="):
+        OpenAICompatibleClient._extract_text(  # noqa: SLF001
+            {"choices": [{"message": {"content": "半句话"}, "finish_reason": reason}]}
+        )
+
+
+@pytest.mark.parametrize("content", ["", "   \n\t "])
+def test_blank_content_is_an_error(content: str) -> None:
+    """空回答按错误落库 —— 否则看板上一条空白"结论"与真失败不可区分。"""
+    with pytest.raises(LLMError, match="为空"):
+        OpenAICompatibleClient._extract_text(  # noqa: SLF001
+            {"choices": [{"message": {"content": content}, "finish_reason": "stop"}]}
+        )
+
+
+def test_unparseable_usage_does_not_escape_as_value_error() -> None:
+    """``"N/A"`` 这类 usage 必须降级成 0，而不是以 ``ValueError`` 逃出本模块。"""
+    usage = OpenAICompatibleClient._extract_usage(  # noqa: SLF001
+        {"usage": {"prompt_tokens": "N/A", "completion_tokens": None}}
+    )
+    assert usage.prompt_tokens == 0
+    assert usage.completion_tokens == 0
+    assert OpenAICompatibleClient._extract_usage({}).prompt_tokens == 0  # noqa: SLF001

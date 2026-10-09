@@ -25,6 +25,7 @@
 
 from __future__ import annotations
 
+import logging
 import sys
 from pathlib import Path
 
@@ -111,6 +112,169 @@ def test_clip_keeps_full_trace() -> None:
 
 
 def test_notify_problem_never_raises(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``notify_problem`` 是最外层的便捷入口，**更不能抛**。"""
+    """``notify_problem`` 是最外层的便捷入口，**更不能抛**。
+
+    R59（审计 L13）：原来这里只写了「调用它」这个动作 —— 把函数体删空照样绿。
+    现在断言**可观测结果**：没配 webhook 时明确回 ``False``（不是 ``None``、
+    不是抛异常），配好且确认送达时明确回 ``True``。
+    """
     monkeypatch.delenv(feishu.ENV_WEBHOOK, raising=False)
-    feishu.notify_problem("巡检", ["2 降级"])
+    assert feishu.notify_problem("巡检", ["2 降级"]) is False
+
+    delivered = feishu.notify_problem(
+        "巡检", ["2 降级"], webhook=_WEBHOOK, opener=_opener(200, '{"code": 0}')
+    )
+    assert delivered is True
+
+
+# --------------------------------------------------------------------------- #
+# R59（审计 H8 / M9）：**HTTP 200 不等于送达** + token 不许进日志
+# --------------------------------------------------------------------------- #
+#
+# 审计发现：原实现只判 HTTP status，而注释自己就写着「飞书失败时也返回 200 +
+# errcode」。于是 webhook 失效、限流（9499）、关键词不匹配（19024）这些**真实
+# 失败**全被记成「已送达」，告警静默丢失 —— 而告警通道静默丢失等于没有告警。
+#
+# 同时 ``ValueError: unknown url type: '<完整 URL>'`` 会把 hook token 原文打进
+# journal（token 就是群里的写权限），所以落日志前必须抹掉。
+
+_WEBHOOK = "https://open.feishu.cn/open-apis/bot/v2/hook/SECRET-TOKEN-abc123"
+
+
+class _BodyResp:
+    """带 body 的假响应 —— 飞书的判定信息全在 body 里。"""
+
+    def __init__(self, status: int, body: str) -> None:
+        self.status = status
+        self._body = body.encode("utf-8")
+
+    def __enter__(self) -> _BodyResp:
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def read(self) -> bytes:
+        return self._body
+
+
+def _opener(status: int, body: str):  # noqa: ANN202 — 测试局部替身
+    def _send(req: object, timeout: float) -> tuple[int, str]:
+        return status, body
+
+    return _send
+
+
+def test_http_200_with_error_code_is_not_delivered(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⚠️ 核心（H8）：200 + ``code!=0`` **必须**判未送达。"""
+    monkeypatch.setenv(feishu.ENV_WEBHOOK, _WEBHOOK)
+    rejected = _opener(200, '{"code": 9499, "msg": "Bad Request"}')
+    with caplog.at_level(logging.INFO):
+        sent = feishu.notify("标题", ["一行"], opener=rejected)
+
+    assert sent is False
+    assert "已送达" not in caplog.text, caplog.text
+    assert "未送达" in caplog.text and "9499" in caplog.text
+    assert "Bad Request" in caplog.text  # 飞书的原话要留着，否则排查无处下手
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"errcode": 19024, "msg": "Key Words Not Found"}',
+        '{"StatusCode": 1, "StatusMessage": "auth failed"}',
+        '{"code": "9499"}',  # 字符串数字也算，别被类型差异放过
+    ],
+)
+def test_other_result_fields_are_also_checked(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture, body: str
+) -> None:
+    """不同网关/版本的字段名不同（``code``/``errcode``/``StatusCode``），都要看。"""
+    monkeypatch.setenv(feishu.ENV_WEBHOOK, _WEBHOOK)
+    with caplog.at_level(logging.INFO):
+        assert feishu.notify("标题", opener=_opener(200, body)) is False
+    assert "已送达" not in caplog.text
+
+
+def test_http_200_with_code_zero_is_delivered(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """``code=0`` 才是真的送达 —— 修完必须还能认出成功，否则就是反向误报。"""
+    monkeypatch.setenv(feishu.ENV_WEBHOOK, _WEBHOOK)
+    with caplog.at_level(logging.INFO):
+        assert feishu.notify("标题", opener=_opener(200, '{"code": 0, "msg": "success"}')) is True
+    assert "已送达" in caplog.text
+
+
+def test_non_json_body_is_treated_as_failure(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """200 + 非 JSON body（反代返回 HTML 错误页）按**未送达**处理：宁可误报也别漏报。"""
+    monkeypatch.setenv(feishu.ENV_WEBHOOK, _WEBHOOK)
+    with caplog.at_level(logging.INFO):
+        assert feishu.notify("标题", opener=_opener(200, "<html>502 Bad Gateway</html>")) is False
+    assert "不是 JSON" in caplog.text
+
+
+def test_empty_body_keeps_old_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
+    """空 body = 无从判断，保持旧口径（否则所有老替身/裸 200 都会翻红）。"""
+    monkeypatch.setenv(feishu.ENV_WEBHOOK, _WEBHOOK)
+    assert feishu.notify("标题", opener=_opener(200, "")) is True
+
+
+def test_legacy_int_opener_still_works(monkeypatch: pytest.MonkeyPatch) -> None:
+    """老替身只回状态码 —— 兼容，但要显式记下"此时校验不到 body 语义"。"""
+
+    def _legacy(req: object, timeout: float) -> int:
+        return 200
+
+    monkeypatch.setenv(feishu.ENV_WEBHOOK, _WEBHOOK)
+    assert feishu.notify("标题", opener=_legacy) is True
+
+
+def test_default_opener_actually_reads_the_body(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⚠️ H8 的病灶在**默认** opener：替身回 tuple 不算数，必须验真身也读 body。"""
+    seen: dict[str, object] = {}
+
+    def _fake_urlopen(req: object, timeout: float = 0.0) -> _BodyResp:
+        seen["url"] = getattr(req, "full_url", None)
+        return _BodyResp(200, '{"code": 19024, "msg": "Key Words Not Found"}')
+
+    monkeypatch.setenv(feishu.ENV_WEBHOOK, _WEBHOOK)
+    monkeypatch.setattr(feishu.urllib.request, "urlopen", _fake_urlopen)
+
+    assert feishu.notify("标题") is False  # 默认 opener 也必须认出 errcode
+    assert seen["url"] == _WEBHOOK
+
+
+def test_hook_token_never_reaches_the_log(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """⚠️ M9：异常原文里的完整 webhook（含 token）必须被抹掉。"""
+    monkeypatch.setenv(feishu.ENV_WEBHOOK, _WEBHOOK)
+
+    def _boom(req: object, timeout: float) -> tuple[int, str]:
+        raise ValueError(f"unknown url type: '{_WEBHOOK}'")
+
+    with caplog.at_level(logging.WARNING):
+        assert feishu.notify("标题", opener=_boom) is False
+
+    assert "SECRET-TOKEN-abc123" not in caplog.text, caplog.text
+    assert "unknown url type" in caplog.text  # 原因还要留着
+    assert "<webhook>" in caplog.text
+
+
+def test_redact_also_scrubs_a_different_hook_url() -> None:
+    """异常里带的 URL 未必等于本次配置的那个（比如重定向/拼接）⇒ 按形状抹。"""
+    out = feishu._redact("failed: https://other.example/bot/v2/hook/OTHER-TOKEN?x=1")
+    assert "OTHER-TOKEN" not in out
+    assert "/hook/<redacted>" in out
+
+
+def test_body_error_reports_unparseable_code() -> None:
+    """``code`` 是怪值时按失败处理并说明，而不是静默放过。"""
+    assert feishu._body_error('{"code": null}') is not None
+    assert feishu._body_error('{"code": 0}') is None
+    assert feishu._body_error("[]") is not None

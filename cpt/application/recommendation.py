@@ -116,9 +116,13 @@ def build_recommendation(snapshot: dict[str, Any]) -> dict[str, Any]:
     divergence = str(signal.get("divergence_status") or "").strip()
 
     if status not in _STATUS_RANK:
-        return _degraded(f"未知的信号状态 {status!r}")
+        # R59（审计 M23）：**必须带 quality** —— 不传时 ``_degraded`` 会退回
+        # ``_data_quality({})``，把「状态字段不认识」谎报成「0 根 / 数据不足」，
+        # 与本模块 :192 的纪律「「不知道」和「没有」必须能分开」直接矛盾。
+        # 数据质量在 :103 已经算过，没有任何理由丢掉。
+        return _degraded(f"未知的信号状态 {status!r}", quality=quality)
     if sig_type not in _TYPE_TO_ACTION:
-        return _degraded(f"未知的信号类型 {sig_type!r}")
+        return _degraded(f"未知的信号类型 {sig_type!r}", quality=quality)
 
     # 失效的信号**不是**「反向信号」—— 它意味着「之前那个判断已经不成立」，
     # 所以动作退回观望，而不是取反。取反会把「失效的一买」说成「卖出」。

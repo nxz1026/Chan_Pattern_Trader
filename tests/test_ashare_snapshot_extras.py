@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 from typing import Any
 from unittest.mock import MagicMock, patch
 
@@ -107,6 +108,52 @@ def test_close_countdown_db_failure() -> None:
     cc = snapshot["close_countdown"]
     assert cc["available"] is False
     assert cc["reason"] == "countdown_check_failed"
+
+
+def test_close_countdown_uses_market_timezone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R59（审计 H10）：锚点走北京时区，不是宿主本地时间。
+
+    取北京时间 00:30（= UTC 前一天 16:30）这个**日期跨天窗口**：宿主若是
+    ``Etc/UTC``（生产机就是），旧实现会拿 UTC 的 2026-10-07 去查日历、并把
+    15:00 当 UTC 15:00，倒计时直接跳成 14.5 小时。
+    """
+    from cpt.adapters import a_share_local
+    from cpt.domain import market_time
+
+    moment = dt.datetime(2026, 10, 8, 0, 30, tzinfo=market_time.MARKET_TZ)
+    monkeypatch.setattr(market_time, "market_now", lambda: moment)
+
+    seen: dict[str, Any] = {}
+
+    def _fake_is_trade_day(conn: Any, day: str) -> bool:
+        seen["day"] = day
+        return True
+
+    monkeypatch.setattr(a_share_local, "is_trade_day", _fake_is_trade_day)
+
+    snapshot: dict[str, Any] = {"market": {}}
+    _attach_close_countdown(snapshot, _FakeClient(_conn_mock([(True,)])))
+
+    cc = snapshot["close_countdown"]
+    assert seen["day"] == "2026-10-08"  # 北京日期，不是 UTC 的 10-07
+    assert cc["available"] is True
+    assert cc["close_time"] == "15:00:00"
+    assert cc["seconds_to_close"] == 14 * 3600 + 30 * 60  # 00:30 → 15:00
+    assert cc["is_open"] is True
+
+
+def test_close_countdown_after_market_close(monkeypatch: pytest.MonkeyPatch) -> None:
+    """北京 16:00 → 倒计时归零且 ``is_open`` 为假（旧实现会报还有 8 小时）。"""
+    from cpt.domain import market_time
+
+    moment = dt.datetime(2026, 10, 8, 16, 0, tzinfo=market_time.MARKET_TZ)
+    monkeypatch.setattr(market_time, "market_now", lambda: moment)
+
+    snapshot: dict[str, Any] = {"market": {}}
+    _attach_close_countdown(snapshot, _FakeClient(_conn_mock([(True,)])))
+    cc = snapshot["close_countdown"]
+    assert cc["seconds_to_close"] == 0
+    assert cc["is_open"] is False
 
 
 # ---------------------------------------------------------------------------

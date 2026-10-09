@@ -120,3 +120,33 @@ new_down_jumps  # scripts/factor_report —— CodeReport 字段，:122 显式�
 #: 本模块的 AST，看不见外部类型有哪些属性 —— 于是任何 `obj.foo = x`
 #: 都会被报成「unused attribute」。
 autocommit  # scripts/verify_public_contracts —— psycopg 连接属性赋值，不是本地变量
+
+# --------------------------------------------------------------------------- #
+# 8. R59（2026-10-09 上线前审计修复）：HTTP 层三个「调用方在框架里 / 在 tests / 在门禁里」
+# --------------------------------------------------------------------------- #
+# 下面三条都是 vulture 的**扫描盲区**，不是死代码。逐条写明谁在用：
+#
+# ① `log_request`（web/app.py）覆写的是 stdlib `BaseHTTPRequestHandler` 的钩子，
+#    由 `send_response()` 内部回调 —— 调用点不在本仓 AST 里。它就是 R59 H4 的
+#    access log 落点（`_redact_path_for_log` 会先把 query 里的 token/api_key 抹成
+#    `***`）。删掉它不会「清死代码」，只会让全站失去 access log。
+log_request  # web/app.py —— 覆写 BaseHTTPRequestHandler 钩子（框架回调）
+
+# ② `rejected_connections`（web/app.py）是并发上限的拒绝计数：`process_request`
+#    抢不到信号量时 +1。读取方在测试里（`tests/test_web_audit_r59_hardening.py`
+#    断言打满 32 个 worker 后该计数 == 1），而 vulture 只扫 `cpt/` 与 `scripts/`。
+rejected_connections  # web/app.py —— 并发拒绝计数，由测试断言
+
+# ③ `MAINTENANCE_PATH`（web/track_api.py）是**机器可读的路由声明**：
+#    `route_for` 按 `p.split("/")` 段解析，代码里不需要再比对一遍字符串，
+#    但 `scripts/check_doc_drift.py` 正是靠「带引号的字面量」判定
+#    「文档写了、代码里没有」—— 没有这个常量，07:30 的 track 维护作业就会
+#    被误判成幽灵接口（R59 实况）。它的引用点在 docstring 的 :data: 里。
+MAINTENANCE_PATH  # web/track_api.py —— 路由字面量声明，供 check_doc_drift 识别
+
+# ④ `daemon_threads` / `block_on_close`（web/app.py）同理：它们不是本地变量，
+#    而是 `socketserver.ThreadingMixIn` / `BaseServer` 读的**类属性**。设成
+#    True/False 的目的是「主线程退出时别等 worker、别阻塞在 close 上」，
+#    调用方在 stdlib 内部（`process_request_thread` / `server_close`）。
+daemon_threads  # web/app.py —— ThreadingMixIn 类属性（标准库读取）
+block_on_close  # web/app.py —— BaseServer 类属性（标准库读取）

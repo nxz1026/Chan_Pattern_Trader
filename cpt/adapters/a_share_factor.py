@@ -310,6 +310,9 @@ def fetch_factor_rows(
 
     Raises:
         FactorUnavailableError: 腾讯无该标的后复权、网络失败、或两个序列无重叠日。
+            R59（审计 L7）：bfq/hfq **两条**取数都在 ``try`` 内，网络失败一律
+            折成 ``category="network"`` 的 :class:`CategorizedFactorUnavailableError`，
+            不再以 ``ASharePublicError`` 逃逸（消费方据此区分可重试的网络故障）。
     """
     if not 1 <= days <= MAX_DAILY_BARS:
         raise ValueError(f"days 必须在 1..{MAX_DAILY_BARS}，实际 {days}")
@@ -318,8 +321,15 @@ def fetch_factor_rows(
     if timeout is not None:
         kwargs["timeout"] = timeout
 
-    raw_bars = TencentKlineClient(adjust="bfq", **kwargs).fetch_daily_bars(bare, limit=days)
     try:
+        # R59（审计 L7）：bfq 取数原先在 ``try`` **之外** —— 网络失败会以
+        # ``ASharePublicError`` 原样逃逸，违反本函数 docstring 声明的
+        # ``Raises FactorUnavailableError``；消费方 ``OnDemandFactorFetcher``
+        # 只能落到 ``except Exception``，把可重试的网络问题漂成 ``reason="error"``
+        # （前端显示成未知错误）。两条腿放进同一个 try，网络一律归 "network"。
+        # bfq 理论上不会触发 ``AShareAdjustUnsupportedError``（不复权不需要复权
+        # 数据），若真触发，归到 "unsupported" 也比漂成 "error" 更准确。
+        raw_bars = TencentKlineClient(adjust="bfq", **kwargs).fetch_daily_bars(bare, limit=days)
         hfq_bars = TencentKlineClient(adjust="hfq", **kwargs).fetch_daily_bars(bare, limit=days)
     except AShareAdjustUnsupportedError as exc:
         # 逐标的属性，不是板块属性 —— 原样带上腾讯实际返回的键名，便于事后核对。

@@ -11,8 +11,8 @@
 | `CPT_LLM_BASE_URL` | 完整端点（OpenAI 兼容的 `/v1/chat/completions`） |
 | `CPT_LLM_MODEL` | 实测 `agnes-3.0-flash` |
 | `CPT_LLM_API_KEY` | **密钥**。不入库、不入日志 |
-| `CPT_LLM_TIMEOUT` | 单次 HTTP 超时秒数 |
-| `CPT_LLM_MAX_ATTEMPTS` | 429 退避重入的最大次数，超过即 `status='error'` |
+| `CPT_LLM_TIMEOUT` | **总时长**上限秒数（覆盖连接 + 读体，不只是单次 socket 操作；审计 M6） |
+| `CPT_LLM_MAX_ATTEMPTS` | 429/5xx/连接错的退避重入上限；**超时不重试**（at-most-once，审计 L6） |
 | `CPT_LLM_BACKOFF_BASE` | 退避基数秒，实际等待 = `base × 2^attempt` + jitter |
 | `CPT_LLM_BACKOFF_MAX` | 退避上限秒 |
 """

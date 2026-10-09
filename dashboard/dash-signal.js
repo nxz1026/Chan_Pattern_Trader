@@ -369,8 +369,12 @@
     if (!Object.keys(statusCounts).length && !Object.keys(divergenceCounts).length) {
       row("分项", "无跃迁事件");
     }
-    const rate = num(stats.alert_to_confirmed_rate);
-    row("预警→确认率", rate === null ? "—" : `${(rate * 100).toFixed(1)}%`);
+    // R59（审计 M27）：后端 key 从 alert_to_confirmed_rate 改名为 confirmed_rate
+    // （口径 = confirmed 事件 / 全部事件，见 cpt/application/dashboard_stats.py）。
+    // 标签同步改成「确认占比」—— 原来的「预警→确认率」把占比讲成了转化率，
+    // 而事件流里根本没有「从 alert 出发」的配对。
+    const rate = num(stats.confirmed_rate);
+    row("确认占比", rate === null ? "—" : `${(rate * 100).toFixed(1)}%`);
     row("失效数", stats.invalidated_count == null ? "—" : String(stats.invalidated_count));
     wrap.appendChild(list);
     return wrap;

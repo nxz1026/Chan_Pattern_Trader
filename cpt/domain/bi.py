@@ -74,7 +74,18 @@ def _resolve_level(start: Fractal, end: Fractal, level: int | None) -> int:
 
 
 def _make_bi(start: Fractal, end: Fractal, level: int | None) -> Bi:
-    """用两个异类端点构造一笔（不做跨度/根数门槛，由调用方保证交替）。"""
+    """用两个**异类**端点构造一笔（不做跨度/根数门槛，但强制端点异类）。
+
+    2026-10-08 审计 H9：原来只在 docstring 里「由调用方保证交替」，于是
+    ``_build_bis_gated`` 按 +1 步进时静默产出了「底→底」的伪笔 —— 中枢漏检、
+    背驰分母错位，而图形上看起来完全正常。现在把这条不变量变成异常。
+    """
+    if start.kind == end.kind:
+        raise ValueError(
+            f"一笔的两端必须异类（底→顶 / 顶→底），实测 {start.kind}→{end.kind}"
+            f"（start_time={start.start_time}, end_time={end.end_time}）—— "
+            f"两端同类是「伪笔」，会让中枢漏检、背驰分母错位。"
+        )
     return Bi(
         level=_resolve_level(start, end, level),
         direction=_direction(start),
@@ -103,8 +114,12 @@ def build_bis(
 
         跨度不足时**合并端点**而不是丢弃该笔：丢掉会让笔序列出空洞，后续中枢
         与背驰的分母就错了。合并的含义是「当前笔的终点顺延到下一个够远的
-        端点」，中间那个端点被吸收掉。
+        **异类**端点」，中间那个端点被吸收掉。顺延只落在异类分型上，所以笔的两端
+        永远一底一顶（审计 H9：旧实现按 +1 步进会落到同类分型，产出两端同类的伪笔）。
+        若顺延后没有更多异类端点可用，该笔不成立 —— 此时笔数会少于不设门槛时，
+        这正是门槛的语义，不是丢数据。
     :raises ValueError: 存在 ``kind`` 不是 ``"top"`` / ``"bottom"`` 的分型；
+        构造出的笔两端同类（伪笔，见 :func:`_make_bi`）；
         ``level < 0``；``level=None`` 时某笔两端分型 ``level`` 不同；
         ``min_bi_len < 1``；**要求门槛但某个分型的 ``merged_index`` 是
         ``None``**（量纲不可知时宁可报错，也不拿 ``bar_index`` 静默量错单位）。
@@ -159,14 +174,24 @@ def _build_bis_gated(
             )
 
     out: list[Bi] = []
-    start = anchors[0]
-    for end in anchors[1:]:
+    start_idx = 0
+    end_idx = 1
+    while end_idx < len(anchors):
+        start = anchors[start_idx]
+        end = anchors[end_idx]
         # 跨度 = end 所在 bar 到 start 所在 bar 的**闭区间**长度
         span = int(end.merged_index) - int(start.merged_index) + 1  # type: ignore[arg-type]
         if span < min_bi_len:
-            # 不足：吞掉这个端点，start 不动，拿下一个端点再试 —— 这就是「合并」。
+            # 不足：吞掉这个端点，拿下一个**异类**端点再试 —— 这就是「合并」。
             # 直接丢弃本笔会让笔序列在时间轴上出空洞。
+            #
+            # 步进必须是 2：``anchors`` 严格交替（底/顶/底/…），+1 会落到与
+            # ``start`` **同类**的分型上，于是 ``_make_bi`` 拿到「底→底」造出伪笔
+            # （2026-10-08 审计 H9：min_bi_len=6 时实测产出 ``+1 0→9``、``+1 8→15``
+            # 这种两端同类的笔）。顺延到下一个异类端点才是 docstring 说的语义。
+            end_idx += 2
             continue
         out.append(_make_bi(start, end, level))
-        start = end
+        start_idx = end_idx
+        end_idx += 1
     return tuple(out)

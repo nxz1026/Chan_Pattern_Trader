@@ -59,8 +59,22 @@ STATUS_RATE_LIMITED = "rate_limited"
 #: 进程重启时在途任务的终态。也不是 error。
 STATUS_INTERRUPTED = "interrupted"
 
-#: 这些状态说明「这个任务不会再变了」，进程重启时可以把在途的标成 interrupted
-TERMINAL_STATUSES = frozenset({STATUS_OK, STATUS_ERROR, STATUS_INTERRUPTED})
+#: 这些状态说明「这个任务不会再变了」—— 终态。
+#: ``rate_limited`` **刻意不在其中**：它是非终态退避等待（见下方
+#: :data:`_RECOVERABLE_STATUSES`），本身仍会被后续 ``running``/``ok`` 覆盖。
+#: 顺序固定，供 :data:`_TERMINAL_SQL` 拼 SQL 字面量，避免 frozenset 迭代序抖动。
+_TERMINAL_ORDER: tuple[str, ...] = (STATUS_OK, STATUS_ERROR, STATUS_INTERRUPTED)
+TERMINAL_STATUSES = frozenset(_TERMINAL_ORDER)
+
+#: 终态的 SQL ``IN`` 字面量，由 :data:`_TERMINAL_ORDER` 拼出（顺序确定）。
+_TERMINAL_SQL = "(" + ", ".join(f"'{status}'" for status in _TERMINAL_ORDER) + ")"
+
+#: 重启时需要清扫的**在途**状态（审计 M15）：除 queued / running 外**必须含
+#: ``rate_limited``。原因：429 退避重试只在**内存队列**里，进程在退避窗口被杀
+#: 时那一行会永远停在 ``rate_limited``、``finished_at`` 恒 NULL，看板永远显示
+#: 「排队中（限流）」。加入后 ``mark_interrupted`` 会把它如实收成 ``interrupted``。
+_RECOVERABLE_ORDER: tuple[str, ...] = (STATUS_QUEUED, STATUS_RUNNING, STATUS_RATE_LIMITED)
+_RECOVERABLE_SQL = "(" + ", ".join(f"'{status}'" for status in _RECOVERABLE_ORDER) + ")"
 
 _COLUMNS = (
     "call_id",
@@ -82,7 +96,7 @@ INSERT INTO public.cpt_llm_call ({", ".join(_COLUMNS)})
 VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
 """
 
-_FINISH_SQL = """
+_FINISH_SQL = f"""
 UPDATE public.cpt_llm_call
    SET status = %s,
        result_text = %s,
@@ -92,6 +106,7 @@ UPDATE public.cpt_llm_call
        completion_tokens = %s,
        finished_at = %s
  WHERE call_id = %s
+   AND status NOT IN {_TERMINAL_SQL}
 """
 
 
@@ -210,12 +225,18 @@ def finish_call(
 ) -> None:
     """更新终态。``finished_at`` 只在终态写。
 
+    审计 M16：``_FINISH_SQL`` 带 ``AND status NOT IN (终态)`` 守卫。多实例 /
+    滚动重启时，B 进程已把某行标成 ``interrupted``，A 进程一个**晚到的回调**
+    会再走一次 ``finish_call(status='ok')`` 把它拉回 ``ok`` —— 破坏「终态不再变」
+    的语义，看板会把一次没跑完的调用显示成成功。守卫让晚到写变成 0 行更新；
+    这里记一条 INFO（不是 warning：这是被明确设计掉的竞态，不是故障）。
+
     :raises LLMCallError: 写失败。**与 :func:`enqueue_call` 同口径**：本模块的
         契约是「写失败一律抛」（见 :class:`LLMCallError`），``finish_call`` 原来
         只记 warning 就返回 —— 于是「模型已经调过、token 已经花掉」这件事在库里
         消失了，调用方还当成功。审计记录写不进去却假装成功，比没有审计更糟。
 
-        调用方义务（三处都在 ``cpt/application/llm_cases.py`` / ``cpt/web``）：
+        调用方义务（三处都在 ``cpt/application/llm_cases.py` / ``cpt/web``）：
         ① 自己决定是吞是抛；② 吞的话必须 ``rollback``（事务里一条语句失败后，
         同一连接后续语句全部报 ``current transaction is aborted``）。
     """
@@ -235,6 +256,8 @@ def finish_call(
                     call_id,
                 ),
             )
+            if not cur.rowcount:
+                _LOG.info("忽略晚到的 LLM 终态写 %s（行已是终态，审计 M16）", call_id)
     except Exception as exc:
         _LOG.warning("更新 LLM 调用状态失败 %s: %s", call_id, exc)
         raise LLMCallError(f"更新 LLM 调用状态失败 {call_id}: {exc}") from exc
@@ -272,10 +295,15 @@ def recent_calls(
 
 
 def mark_interrupted(conn: Any, before: datetime | None = None) -> int:
-    """把 ``queued`` / ``running`` 且**早于 ``before``** 的行标成 ``interrupted``。
+    """把 ``queued`` / ``running`` / ``rate_limited`` 且**早于 ``before``** 的行标成中断。
 
     **进程重启时调用** —— 在途任务随进程一起没了，不标的话调用方会永远等一个
     不会来的结果。
+
+    审计 M15：清扫集合原来只有 ``queued`` / ``running``，漏了 ``rate_limited``。
+    该状态会**真实落库**（队列撞 429 后 emit），但退避等待只存在于**内存队列**；
+    进程在退避窗口被杀 ⇒ 那一行永停 ``rate_limited``、``finished_at`` 恒 NULL。
+    它不是终态（不是 ok/error/interrupted），所以必须被这里一起收掉。
 
     # gate: allow-silent: 启动期 best-effort —— 失败不该挡住进程起来。
     # 调用方 ``llm_cases._bootstrap`` 整段包在 try/except 里、且用**独立连接**，
@@ -290,7 +318,7 @@ def mark_interrupted(conn: Any, before: datetime | None = None) -> int:
     :returns: 被标记的行数。
     """
     params: list[Any] = []
-    where = "status IN ('queued', 'running')"
+    where = f"status IN {_RECOVERABLE_SQL}"
     if before is not None:
         where += " AND created_at < %s"
         params.append(before)

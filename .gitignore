@@ -73,6 +73,13 @@ graphflow-out/
 
 # Local secrets and runtime data.
 .env
+# R58（审计 L15）：只挡精确名 `.env` 挡不住变体/私钥——一次 `git add -A`
+# 就可能把私钥或 DSN 带进仓。补齐常见变体（当前仓内无此类文件，纯防御）。
+.env.*
+!.env.example
+*.pem
+*.key
+*.dbconfig
 *.sqlite3
 *.pyc
 

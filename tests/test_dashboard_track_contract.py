@@ -9,7 +9,9 @@
 2. 成功终态是 ``ok``（``cpt/storage/llm_call_store.py`` 的 ``STATUS_OK``），
    不是 ``succeeded``。写错就永远判失败。
 3. 先查再睡：``duplicate``（同时间窗已生成）的 ``call_id`` 已经是终态，
-   第一次查询就该命中，不该白等一个轮询周期。
+   第一次查询就该命中，不该白等一个轮询周期。轮询本身走全站唯一实现
+   ``window.CPTJob.poll``（门禁⑦），所以 ``track.html`` 里 ``cpt_job.js``
+   必须排在 ``dash-track.js`` **之前**。
 """
 
 from __future__ import annotations
@@ -67,10 +69,42 @@ def test_success_status_is_ok(track_js: str) -> None:
     assert '=== "succeeded"' not in _code_only(track_js)
 
 
-def test_poll_checks_before_sleeping(track_js: str) -> None:
-    """duplicate 路径要靠「先查」才能在第一个周期拿到终态。"""
+def test_poll_delegates_to_the_single_site_wide_implementation(track_js: str) -> None:
+    """门禁⑦：轮询必须交给 ``CPTJob.poll``，不许再自己写定时器。
+
+    「先查再睡」这个性质没丢：``CPTJob.poll`` 的 ``tick()`` 是**立即执行**的，
+    所以 duplicate（同窗口已生成）仍然第一次就能拿到终态。
+    """
     body = _fn_body(track_js, "pollSpeak")
-    assert body.index("apiLlmStatus") < body.index("setTimeout")
+    assert "CPTJob.poll" in body
+    assert "apiLlmStatus" in body
+    # 自己写定时器会让 scripts/check_job_poll_unique.py 报红
+    assert "setTimeout" not in body
+    assert "setInterval" not in body
+
+
+def test_poll_gives_up_after_max_tries(track_js: str) -> None:
+    """用尽次数必须 resolve(false)。
+
+    ``CPTJob.poll`` 次数用尽时**不会**回调 ``onFail``（它只是不再排下一次 tick），
+    少了这条 promise 会永远 pending，按钮卡在「等待中」，连
+    「等待超时（60s），可重试」都等不到（R59 合并轮询时在 node 里实测踩到）。
+    """
+    body = _fn_body(track_js, "pollSpeak")
+    assert "handle.tries >= maxTries" in body
+    assert "resolve(false)" in body
+
+
+def test_cpt_job_loads_before_dash_track(track_html: str) -> None:
+    """CPTJob 是同步脚本：顺序写反 pollSpeak 会 reject，功能整体失效。"""
+    scripts = [
+        line
+        for line in track_html.splitlines()
+        if "<script" in line and ("cpt_job.js" in line or "dash-track.js" in line)
+    ]
+    assert len(scripts) == 2, scripts
+    assert "cpt_job.js" in scripts[0]
+    assert "dash-track.js" in scripts[1]
 
 
 def test_poll_timeout_is_60s(track_js: str) -> None:
@@ -87,7 +121,9 @@ def test_speak_again_polls_duplicate_instead_of_blind_refresh(track_js: str) -> 
 
 def test_track_html_cache_busts_the_script(track_html: str) -> None:
     """静态根是**独立部署副本**，改了 js 不同步版本号浏览器会一直吃旧缓存。"""
-    tags = [line for line in track_html.splitlines() if "dash-track.js" in line]
+    tags = [
+        line for line in track_html.splitlines() if "<script" in line and "dash-track.js" in line
+    ]
     assert len(tags) == 1
     assert "?v=" in tags[0]
     assert "llm-ok-fix" not in tags[0]

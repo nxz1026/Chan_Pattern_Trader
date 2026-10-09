@@ -303,7 +303,11 @@ def test_pool_survives_factor_table_failure(monkeypatch: pytest.MonkeyPatch) -> 
     payload = a_share_routes.pool_payload()
     assert payload["count"] == 1
     assert payload["drawable_count"] == 0
-    assert "factor table locked" in payload["factor_error"]
+    # R59（审计 M4）：对外只给**稳定错误码**。修前这里回的是异常原文
+    # （``"factor table locked"``），既是内部实现细节、又和真实错误无从区分。
+    # 现在断言契约（码 + 异常类名）而不是措辞。
+    assert payload["factor_error"] == "factor_store_unavailable"
+    assert "factor table locked" not in json.dumps(payload, ensure_ascii=False, default=str)
 
 
 # --------------------------------------------------------------- 三源合并（v2）
@@ -421,7 +425,9 @@ def test_pool_survives_strategy_table_failure(
     monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", lambda *a, **k: fake)
     payload = a_share_routes.pool_payload()
     assert payload["count"] == 1
-    assert "strategy_signal missing" in payload["strategy_error"]
+    # R59（审计 M4）：同上，异常原文不再回客户端（只进服务端日志）。
+    assert payload["strategy_error"] == "strategy_store_unavailable"
+    assert "strategy_signal missing" not in json.dumps(payload, ensure_ascii=False, default=str)
     assert payload["groups"]["strategy"] == 0
 
 
@@ -438,8 +444,13 @@ def test_pool_survives_corrupt_watchlist(monkeypatch: pytest.MonkeyPatch, tmp_pa
     monkeypatch.setattr("cpt.adapters.a_share_local.AShareLocalClient", lambda *a, **k: fake)
     payload = a_share_routes.pool_payload()
     assert payload["count"] == 1
-    # R45：文案细分成「自选文件已损坏…未做任何修改」，这里断言**契约**而非措辞
-    assert "未做任何修改" in payload["watchlist_error"]
+    # R59（审计 M4）：修前这里回的是 ``WatchlistError`` 的原文 —— 里面**带着自选
+    # 文件的绝对路径**，等于把一个无鉴权端点变成主机路径探测器。现在只回稳定码
+    # （``store_unavailable:<异常类名>``），所以除了断言码，还要断言路径确实没泄出去。
+    assert payload["watchlist_error"].startswith("store_unavailable")
+    dumped = json.dumps(payload, ensure_ascii=False, default=str)
+    assert str(bad) not in dumped
+    assert "未做任何修改" not in dumped
 
 
 # --------------------------------------------------------------------- 自选

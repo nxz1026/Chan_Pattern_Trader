@@ -751,3 +751,48 @@ def test_rejection_logs_the_offending_date(caplog: pytest.LogCaptureFixture) -> 
     with caplog.at_level(logging.WARNING, logger="cpt.adapters.a_share_factor"):
         build_factor_rows("000002", raw, hfq)
     assert any("因子判脏" in r.message and "2024-01-03" in r.message for r in caplog.records)
+
+
+# ------------------------------------------------------------------ L7：bfq 取数
+
+
+def _patch_bfq_network_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    """把腾讯日线**第一条（bfq）**取数打成网络失败。"""
+    from cpt.adapters.a_share_public import ASharePublicError, TencentKlineClient
+
+    def _bfq_net_fail(self: TencentKlineClient, code: str, *, limit: int = 180) -> Any:
+        raise ASharePublicError("腾讯日线不可达")
+
+    monkeypatch.setattr(TencentKlineClient, "fetch_daily_bars", _bfq_net_fail)
+
+
+def test_bfq_network_failure_is_categorized_as_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """R59（审计 L7）：bfq 取数失败也必须折成 ``network`` 分类。
+
+    改前 bfq 取数在 ``try`` **之外** ⇒ ``ASharePublicError`` 逃逸出
+    ``fetch_factor_rows``（违反它自己的 docstring），消费方落到
+    ``except Exception`` 把原因漂成 ``"error"``，重试语义随之改变。
+    """
+    from cpt.adapters import a_share_factor as mod
+
+    _patch_bfq_network_failure(monkeypatch)
+    with pytest.raises(FactorUnavailableError) as excinfo:
+        fetch_factor_rows("600519")
+    reason, detail = mod.factor_unavailable_category(excinfo.value)
+    assert reason == "network"
+    assert detail == "腾讯日线不可达"
+    assert str(excinfo.value).startswith("network:")
+
+
+def test_bfq_network_failure_reaches_consumer_as_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    """消费方看到的是 ``network``（可重试），不是 ``error``（未知异常）。"""
+    from cpt.adapters import a_share_factor as mod
+
+    _patch_bfq_network_failure(monkeypatch)
+    fetcher = OnDemandFactorFetcher(
+        cooldown_seconds=0.0, fetch=lambda code, days: mod.fetch_factor_rows(code, days=days)
+    )
+    outcome = fetcher.ensure("600519")
+    assert outcome.fetched is False
+    assert outcome.reason == "network"
+    assert outcome.detail == "腾讯日线不可达"

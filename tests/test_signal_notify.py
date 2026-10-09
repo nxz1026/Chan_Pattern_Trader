@@ -10,12 +10,15 @@
 6. ``signal.status == "confirmed"`` 时告警消息字段正确填充。
 7. pusher 抛异常 —— 吞掉，``maybe_notify`` 仍返回 ``False``；下一次再试。
 8. 24h 窗口外可以重推 —— clock 注入可验证。
+9. 过期条目在写入时被清理、表大小有硬上限（R59 审计 L18：常驻进程内存有界）。
 
 不调真实 webhook（``cpt.adapters.feishu.notify`` 走 urllib，会真去 POST）。
 测试通过 ``_set_pusher_for_test`` 注入 mock；每个测试用 ``reset_for_test`` 清场。
 """
 
 from __future__ import annotations
+
+from collections.abc import Iterator
 
 import pytest
 from cpt.application import signal_notify
@@ -56,7 +59,7 @@ class _Recorder:
 
 
 @pytest.fixture(autouse=True)
-def _isolate() -> None:
+def _isolate() -> Iterator[None]:
     """每个用例前清节流缓存 + 还原时间源与推送函数（兜底）。"""
     signal_notify.reset_for_test()
     signal_notify._set_clock_for_test(lambda: 1_700_000_000_000)
@@ -70,9 +73,7 @@ def _isolate() -> None:
 def test_first_event_pushes_and_records_throttle() -> None:
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
-    pushed = signal_notify.maybe_notify(
-        _mk_signal(), prev_status=None, code="600519", event_time=1
-    )
+    pushed = signal_notify.maybe_notify(_mk_signal(), prev_status=None, code="600519", event_time=1)
     assert pushed is True
     assert len(rec.calls) == 1
     title, lines = rec.calls[0]
@@ -85,13 +86,12 @@ def test_same_signal_same_status_within_24h_skipped() -> None:
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
     sig = _mk_signal()
-    assert signal_notify.maybe_notify(
-        sig, prev_status=None, code="600519", event_time=1
-    ) is True
+    assert signal_notify.maybe_notify(sig, prev_status=None, code="600519", event_time=1) is True
     # 推第二次同 (signal_id, status)
-    assert signal_notify.maybe_notify(
-        sig, prev_status="structure_ready", code="600519", event_time=2
-    ) is False
+    assert (
+        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=2)
+        is False
+    )
     assert len(rec.calls) == 1
 
 
@@ -99,14 +99,18 @@ def test_same_signal_different_status_pushes_again() -> None:
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
     # 第一次：structure_ready
-    assert signal_notify.maybe_notify(
-        _mk_signal(), prev_status=None, code="600519", event_time=1
-    ) is True
+    assert (
+        signal_notify.maybe_notify(_mk_signal(), prev_status=None, code="600519", event_time=1)
+        is True
+    )
     # 第二次：跳到 confirmed（key 不同）
     sig_confirmed = _mk_signal(status="confirmed")
-    assert signal_notify.maybe_notify(
-        sig_confirmed, prev_status="structure_ready", code="600519", event_time=2
-    ) is True
+    assert (
+        signal_notify.maybe_notify(
+            sig_confirmed, prev_status="structure_ready", code="600519", event_time=2
+        )
+        is True
+    )
     assert len(rec.calls) == 2
     assert rec.calls[1][0].endswith("· confirmed")
 
@@ -115,12 +119,18 @@ def test_different_signal_same_status_pushes_again() -> None:
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
     # 同一 status、不同 signal_id —— key 不同，第二次也推
-    assert signal_notify.maybe_notify(
-        _mk_signal(signal_id="sig-A"), prev_status=None, code="600519", event_time=1
-    ) is True
-    assert signal_notify.maybe_notify(
-        _mk_signal(signal_id="sig-B"), prev_status=None, code="600519", event_time=2
-    ) is True
+    assert (
+        signal_notify.maybe_notify(
+            _mk_signal(signal_id="sig-A"), prev_status=None, code="600519", event_time=1
+        )
+        is True
+    )
+    assert (
+        signal_notify.maybe_notify(
+            _mk_signal(signal_id="sig-B"), prev_status=None, code="600519", event_time=2
+        )
+        is True
+    )
     assert len(rec.calls) == 2
 
 
@@ -129,9 +139,10 @@ def test_status_unchanged_short_circuits_without_recording() -> None:
     signal_notify._set_pusher_for_test(rec)
     sig = _mk_signal()
     # prev_status 与 signal.status 相同（兜底，正常不会到这里）
-    assert signal_notify.maybe_notify(
-        sig, prev_status="structure_ready", code="600519", event_time=1
-    ) is False
+    assert (
+        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=1)
+        is False
+    )
     assert rec.calls == []
 
 
@@ -139,9 +150,10 @@ def test_confirmed_message_carries_signal_id_and_prev() -> None:
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
     sig = _mk_signal(signal_id="sig-X", status="confirmed")
-    assert signal_notify.maybe_notify(
-        sig, prev_status="structure_ready", code="600519", event_time=42
-    ) is True
+    assert (
+        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=42)
+        is True
+    )
     _, lines = rec.calls[0]
     assert any("signal_id: sig-X" in ln for ln in lines)
     assert any("prev_status: structure_ready" in ln for ln in lines)
@@ -153,13 +165,15 @@ def test_pusher_returning_false_does_not_consume_throttle() -> None:
     rec = _Recorder(ok=False)
     signal_notify._set_pusher_for_test(rec)
     sig = _mk_signal(status="confirmed")
-    assert signal_notify.maybe_notify(
-        sig, prev_status="structure_ready", code="600519", event_time=1
-    ) is False
+    assert (
+        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=1)
+        is False
+    )
     # 同 (sig, status) —— 节流未消耗，再次调
-    assert signal_notify.maybe_notify(
-        sig, prev_status="structure_ready", code="600519", event_time=2
-    ) is False
+    assert (
+        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=2)
+        is False
+    )
     assert len(rec.calls) == 2
 
 
@@ -170,9 +184,7 @@ def test_pusher_raising_is_swallowed() -> None:
         raise RuntimeError("feishu broken")
 
     signal_notify._set_pusher_for_test(boom)
-    pushed = signal_notify.maybe_notify(
-        _mk_signal(), prev_status=None, code="600519", event_time=1
-    )
+    pushed = signal_notify.maybe_notify(_mk_signal(), prev_status=None, code="600519", event_time=1)
     assert pushed is False
 
 
@@ -182,17 +194,63 @@ def test_throttle_window_can_be_advanced_by_clock() -> None:
     signal_notify._set_pusher_for_test(rec)
     sig = _mk_signal(status="confirmed")
     # t = 0
-    assert signal_notify.maybe_notify(
-        sig, prev_status="structure_ready", code="600519", event_time=0
-    ) is True
+    assert (
+        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=0)
+        is True
+    )
     # t = 23h —— 仍在窗口内
     signal_notify._set_clock_for_test(lambda: 1_700_000_000_000 + 23 * 3600 * 1000)
-    assert signal_notify.maybe_notify(
-        sig, prev_status="structure_ready", code="600519", event_time=1
-    ) is False
+    assert (
+        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=1)
+        is False
+    )
     # t = 25h —— 窗口外
     signal_notify._set_clock_for_test(lambda: 1_700_000_000_000 + 25 * 3600 * 1000)
-    assert signal_notify.maybe_notify(
-        sig, prev_status="structure_ready", code="600519", event_time=2
-    ) is True
+    assert (
+        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=2)
+        is True
+    )
     assert len(rec.calls) == 2
+
+
+# ── R59（审计 L18）：节流表必须有界 ────────────────────────────────────
+
+
+def test_expired_throttle_entries_are_pruned_on_write() -> None:
+    """改前：过期条目永远留在 ``_LAST_PUSH_MS`` 里 —— 常驻进程内存泄漏。"""
+    now = 1_700_000_000_000
+    stale_key = ("stale-signal", "structure_ready")
+    fresh_key = ("fresh-signal", "structure_ready")
+    signal_notify._LAST_PUSH_MS[stale_key] = now - signal_notify.THROTTLE_WINDOW_MS - 1
+    signal_notify._LAST_PUSH_MS[fresh_key] = now
+
+    rec = _Recorder()
+    signal_notify._set_pusher_for_test(rec)
+    pushed = signal_notify.maybe_notify(
+        _mk_signal(signal_id="new-signal"), prev_status=None, code="600519", event_time=1
+    )
+
+    assert pushed is True
+    assert stale_key not in signal_notify._LAST_PUSH_MS
+    assert fresh_key in signal_notify._LAST_PUSH_MS
+
+
+def test_throttle_table_is_bounded_by_max_entries() -> None:
+    """异常峰值（一轮数千个不同 signal_id）也不会让表无界增长。"""
+    now = 1_700_000_000_000
+    # 全部落在窗口内（否则先被过期分支清掉，测不到上限分支）。
+    for i in range(signal_notify.MAX_THROTTLE_ENTRIES):
+        signal_notify._LAST_PUSH_MS[(f"sig-{i}", "structure_ready")] = now - i
+
+    rec = _Recorder()
+    signal_notify._set_pusher_for_test(rec)
+    pushed = signal_notify.maybe_notify(
+        _mk_signal(signal_id="new-signal"), prev_status=None, code="600519", event_time=1
+    )
+
+    assert pushed is True
+    assert len(signal_notify._LAST_PUSH_MS) <= signal_notify.MAX_THROTTLE_ENTRIES
+    # 最旧的一条（时间最小）被淘汰，刚写入的这条保留。
+    oldest = (f"sig-{signal_notify.MAX_THROTTLE_ENTRIES - 1}", "structure_ready")
+    assert oldest not in signal_notify._LAST_PUSH_MS
+    assert ("new-signal", "structure_ready") in signal_notify._LAST_PUSH_MS

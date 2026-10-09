@@ -14,13 +14,17 @@
 
   // ── DOM 工具 ────────────────────────────────────────────────
 
+  // R59（审计 L2）：本函数**故意不提供 `html`/innerHTML 入口**。
+  // 它曾是全仓唯一的 innerHTML 逃生口（零调用方），留着就是一条
+  // 「某天有人图方便把服务端/LLM 文本塞进来」的潜在 XSS 通道；
+  // 所有文本一律走 `text:` → textContent（无解析、无执行）。
+  // 需要富文本时请显式构造 DOM 节点，而不是在这里加回 innerHTML。
   function el(tag, attrs, children) {
     const node = document.createElement(tag);
     if (attrs) {
       for (const [k, v] of Object.entries(attrs)) {
         if (k === "class") node.className = v;
         else if (k === "text") node.textContent = v;
-        else if (k === "html") node.innerHTML = v;
         else if (k.startsWith("data-")) node.setAttribute(k, String(v));
         else if (k === "style" && typeof v === "object") Object.assign(node.style, v);
         else node.setAttribute(k, String(v));
@@ -210,18 +214,42 @@
   const POLL_INTERVAL_MS = 2000;
   const POLL_TIMEOUT_MS = 60000;
 
-  async function pollSpeak(callId, code) {
-    const deadline = Date.now() + POLL_TIMEOUT_MS;
-    for (;;) {
-      // 先查再睡：duplicate（同窗口已生成过）时第一次就能拿到终态，
-      // 不必白等一个 2s 周期。
-      const row = await apiLlmStatus(callId, code);
-      if (row && TERMINAL.has(row.status)) {
-        return OK_STATUSES.has(row.status);
+  // R59（门禁⑦ job_poll_unique）：**不再自己写定时器**，轮询交给全站唯一实现
+  // `window.CPTJob.poll`（加载顺序见 track.html：cpt_job.js 必须排在 dash-track.js
+  // 之前）。`CPTJob.poll` 的 `tick()` 是**立即执行**的，所以 duplicate（同窗口
+  // 已生成过）仍然第一次就能拿到终态，不必白等一个 2s 周期。
+  function pollSpeak(callId, code) {
+    return new Promise((resolve, reject) => {
+      if (!(window.CPTJob && typeof window.CPTJob.poll === "function")) {
+        reject(new Error("CPTJob 未加载：track.html 需先引入 /cpt/cpt_job.js"));
+        return;
       }
-      if (Date.now() >= deadline) return false;
-      await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
-    }
+      // maxTries × interval 覆盖到 POLL_TIMEOUT_MS（含 t=0 那次），与旧实现
+      // 「t=0,2,…,60 各查一次」等价。
+      const maxTries = Math.ceil(POLL_TIMEOUT_MS / POLL_INTERVAL_MS) + 1;
+      window.CPTJob.poll(
+        () => apiLlmStatus(callId, code),
+        (row, handle) => {
+          if (row && TERMINAL.has(row.status)) {
+            resolve(OK_STATUSES.has(row.status));
+            return false;
+          }
+          // 用尽次数还没终态 ⇒ 与旧实现的 deadline 分支等价：返回 false，
+          // 调用方照旧提示「等待超时（60s），可重试」。
+          // 少了这一步，promise 会永远 pending，按钮就卡在「等待中」。
+          if (handle && handle.tries >= maxTries) {
+            resolve(false);
+            return false;
+          }
+          return undefined;
+        },
+        {
+          intervalMs: POLL_INTERVAL_MS,
+          maxTries: maxTries,
+          onFail: (err) => reject(err),
+        }
+      );
+    });
   }
 
   async function refreshOne(code) {

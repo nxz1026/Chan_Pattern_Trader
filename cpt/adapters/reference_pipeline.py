@@ -24,7 +24,7 @@
 from __future__ import annotations
 
 import logging
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import asdict
 from typing import Any, Final
 
@@ -62,13 +62,43 @@ _COMPARE_FIELDS: Final[dict[str, tuple[str, ...]]] = {
 }
 
 
+class StructureFieldMissingError(RuntimeError):
+    """白名单字段在源对象里不存在（R59 审计 M19）。
+
+    为什么单独成类、而不是照旧 ``raw.get(f)`` 静默给 ``None``：这份白名单是
+    「参考实现 vs 本仓实现」交叉验证的比较键，与
+    :mod:`cpt.application.parity_reference` 里那份**重复但必须一致**。
+    领域对象一旦改名/删字段，两侧会**同时**取到 ``None`` ⇒ 比较恒相等 ⇒
+    交叉验证门禁永真且零报错（审计原文：「字段改名后两侧同时变 None」）。
+    显式失败后，改动会立刻在 ``parity_reference`` 的 ``except Exception``
+    里落成 ``reason="reference_error"``，而不是悄悄放行。
+    """
+
+
+def _project_fields(raw: Mapping[str, Any], fields: tuple[str, ...], kind: str) -> dict[str, Any]:
+    """按白名单投影，**缺键即抛**（R59 审计 M19；见 :class:`StructureFieldMissingError`）。"""
+    missing = [f for f in fields if f not in raw]
+    if missing:
+        raise StructureFieldMissingError(
+            f"{kind} 归一化缺少白名单字段 {missing}（源对象键：{sorted(raw)}）—— "
+            f"字段改名时必须在这里显式失败，否则两侧同时变 None、交叉验证门禁恒真"
+        )
+    return {f: raw[f] for f in fields}
+
+
 def normalize_structures(items: Sequence[Any], kind: str) -> list[dict[str, Any]]:
-    """领域对象 → 只含语义字段的 dict（两侧共用同一份白名单与键序）。"""
+    """领域对象 → 只含语义字段的 dict（两侧共用同一份白名单与键序）。
+
+    R59（审计 M19）：原先 ``{f: raw.get(f) for f in fields}`` 对缺键静默返回
+    ``None``，且 ``_COMPARE_FIELDS``/本函数此前零测试引用 —— 缺键改为抛
+    :class:`StructureFieldMissingError`；白名单与领域字段的一致性由
+    ``tests/test_reference_pipeline.py`` 钉住（含与本模块重复的那份白名单对照）。
+    """
     fields = _COMPARE_FIELDS[kind]
     out: list[dict[str, Any]] = []
     for item in items:
         raw = asdict(item) if hasattr(item, "__dataclass_fields__") else dict(item)
-        out.append({f: raw.get(f) for f in fields})
+        out.append(_project_fields(raw, fields, kind))
     return out
 
 

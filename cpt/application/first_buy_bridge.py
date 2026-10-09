@@ -70,12 +70,28 @@ def _center_id(zhongshu: ZhongShu) -> str:
     return zhongshu.bi_ids[0] if zhongshu.bi_ids else f"zs@{zhongshu.start_time}"
 
 
+def _scoped_structure_id(level: int, center_id: str, code: str) -> str:
+    """结构 id：**必须带 code**，否则各票共用同一个 ``signal_id``。
+
+    ``signal_id`` 是 ``f"{signal_type}:{level}:{structure_id}"``，而
+    :func:`~cpt.storage.signal_event_store.load_previous_signal` **只按
+    signal_id 查** —— 不带 code 时 ``level5:bi:8`` 同时属于 000002 与 600707
+    （2026-10-08 线上实测 12 组 signal_id 跨股票共用），A 股读到的 ``previous``
+    可能是 B 股那一行，状态机因此串味。
+
+    ``code`` 为空（旧调用方 / 只测结构推导的单测）时保持旧格式，不静默改
+    已有历史行的主键。
+    """
+    return f"level{level}:{center_id}:{code}" if code else f"level{level}:{center_id}"
+
+
 def derive_first_buy_facts(
     *,
     level: int,
     trend_direction: int,
     bis: Sequence[Bi],
     zhongshus: Sequence[ZhongShu],
+    code: str = "",
 ) -> FirstBuyFacts | None:
     """由结构对象推导一买三事实。
 
@@ -83,6 +99,8 @@ def derive_first_buy_facts(
     :param trend_direction: 走势方向，必须 ``1`` 或 ``-1``。
     :param bis: 全部笔（按时间升序），本函数自行按 ``level`` 与时间筛选。
     :param zhongshus: 全部中枢，本函数自行按 ``level`` 与时间筛选。
+    :param code: A 股 6 位代码；非空时写进 ``structure_id``（⇒ 写进 ``signal_id``），
+        否则不同股票的同级别同位置结构会共用一行信号历史。默认空串 = 旧行为。
     :returns: ``None`` 表示**不适用**（``trend_direction != -1``，一买无意义）；
         否则返回结构事实。注意 ``has_*`` 全为 ``False`` 仍会返回对象——那是
         「评估了、结构不满足」，与 ``None`` 的「不评估」语义不同。
@@ -110,7 +128,7 @@ def derive_first_buy_facts(
     if has_two_centers:
         second = centers[-1]
         center_ids = (_center_id(centers[-2]), _center_id(second))
-        structure_id = f"level{level}:{center_ids[1]}"
+        structure_id = _scoped_structure_id(level, center_ids[1], code)
         # 背驰段：中枢二结束之后、仍沿原方向运行的**第一笔**（保守口径第 2 条）。
         leg_index = next(
             (
@@ -153,9 +171,12 @@ def derive_first_sell_facts(
     trend_direction: int,
     bis: Sequence[Bi],
     zhongshus: Sequence[ZhongShu],
+    code: str = "",
 ) -> FirstBuyFacts | None:
     """由结构对象推导一卖三事实（``derive_first_buy_facts`` 的镜像）。
 
+    :param code: 同 :func:`derive_first_buy_facts`：非空时写进 ``structure_id``，
+        否则不同股票共用同一 ``signal_id``。默认空串 = 旧行为。
     :param trend_direction: 走势方向，必须 ``1`` 或 ``-1``。
     :returns: ``None`` 表示**不适用**（``trend_direction != 1``，一卖无意义）。
     """
@@ -181,7 +202,7 @@ def derive_first_sell_facts(
     if has_two_centers:
         second = centers[-1]
         center_ids = (_center_id(centers[-2]), _center_id(second))
-        structure_id = f"level{level}:{center_ids[1]}"
+        structure_id = _scoped_structure_id(level, center_ids[1], code)
         # 背驰段：中枢二结束之后、仍沿原方向（向上）运行的**第一笔**。
         leg_index = next(
             (

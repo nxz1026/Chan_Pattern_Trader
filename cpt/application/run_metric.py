@@ -176,6 +176,19 @@ def metric_from_snapshot(
     else:
         health = HEALTH_OK
 
+    # R59（审计 M24）：``factor_coverage`` 目前**全仓没有生产者** —— 快照里从来
+    # 不带这个键。原来的 ``_float(...) or 1.0`` 把「缺失」写成 1.0，等于给巡检
+    # 面板报「覆盖率 100%」；这比不报更坏，因为它把「没实现」伪装成「最好」。
+    #
+    # 为什么「未实现」不能靠 NULL 区分：列是
+    # ``factor_coverage numeric NOT NULL DEFAULT 0``（``run_metric_store._DDL``
+    # 与迁移 ``2026-10-06_r56_cpt_run_metric.sql``），且 ``append_metrics`` 对
+    # ``None`` 会**整列省略**让 DEFAULT 生效 —— 两种写法落库都是 0。所以标记
+    # 只能放进 ``detail`` jsonb：数值列如实记 0.0（不再抬成 1.0），来源由
+    # ``factor_coverage_source`` 区分。等哪天接了真实生产者，改的就是这里。
+    raw_coverage = quality.get("factor_coverage")
+    factor_coverage = _float(raw_coverage)
+
     return RunMetric(
         kind=KIND_RUN,
         market=market,
@@ -193,7 +206,7 @@ def metric_from_snapshot(
         last_bar_time=last_bar_time,
         gap_count=gap_count,
         stale=stale,
-        factor_coverage=_float(quality.get("factor_coverage")) or 1.0,
+        factor_coverage=factor_coverage,
         snapshot_age_ms=_num(runtime.get("snapshot_age_ms")),
         health=health,
         detail=json.dumps(
@@ -202,6 +215,11 @@ def metric_from_snapshot(
                 "data_source": runtime.get("data_source"),
                 "interval": runtime.get("interval"),
                 "schema_version": snapshot.get("schema_version"),
+                # R59（审计 M24）：把「未实现」与「真实 0%」分开的**唯一**位置。
+                "factor_coverage": raw_coverage,
+                "factor_coverage_source": (
+                    "snapshot" if raw_coverage is not None else "unimplemented"
+                ),
             },
             ensure_ascii=False,
         ),

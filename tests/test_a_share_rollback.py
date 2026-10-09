@@ -150,7 +150,22 @@ def test_rollback_quietly_swallows_its_own_failure() -> None:
 
 
 def test_rollback_quietly_tolerates_client_without_conn() -> None:
-    mod._rollback_quietly(object(), "unit")  # 不抛即通过
+    """取不到连接时必须静默返回 —— 降级路径绝不许抛。
+
+    R59（审计 L13）：原来只有一句「不抛即通过」，函数体被删空也一样绿。
+    改成**可观测**：替身的 ``_get_conn`` 记一笔再抛 ``AttributeError``，
+    断言它真的被问过（证明函数确实跑了这条路径），且异常被吞掉。
+    """
+    asked: list[str] = []
+
+    class _NoConn:
+        def _get_conn(self) -> Any:
+            asked.append("asked")
+            raise AttributeError("client has no connection")
+
+    mod._rollback_quietly(_NoConn(), "unit")
+
+    assert asked == ["asked"]
 
 
 # --------------------------------------------------------------------------- #
@@ -268,6 +283,34 @@ def test_fetch_validated_klines_rollback_failure_does_not_mask_the_error() -> No
 # --------------------------------------------------------------------------- #
 
 
+def _fake_signal(*, status: str = "structure_ready") -> Any:
+    """完整的 ``Signal`` 替身（**不是** ``SimpleNamespace``）。
+
+    审计 §5 定性：``test_load_previous_signal_failure_does_not_propagate`` 原先
+    用 ``types.SimpleNamespace(status="structure_ready")`` 桩掉 ``assess_first_buy``，
+    于是走到 ``signal_notify.maybe_notify`` 时读 ``signal.signal_id`` 直接
+    ``AttributeError`` —— 那是**测试替身缺字段**（替身没跟上真实契约），
+    不是生产缺陷。换成真 dataclass，`maybe_notify` 校正的一整条路径也就顺便被覆盖。
+    """
+    from cpt.domain.models import Signal
+
+    return Signal(
+        signal_id="first_buy:5:level5:bi:1:000011",
+        level=5,
+        signal_type="first_buy",
+        status=status,  # type: ignore[arg-type]
+        structure_id="level5:bi:1:000011",
+        center_ids=("bi:1",),
+        divergence_status="not_checked",
+        alert_time=None,
+        candidate_time=None,
+        confirmed_time=None,
+        invalidated_time=None,
+        price=10.5,
+        source_revision=0,
+    )
+
+
 def _patch_first_buy_scaffolding(monkeypatch: pytest.MonkeyPatch) -> None:
     """把纯计算部分桩掉，只留「加载历史」这一段真实逻辑。"""
     facts = types.SimpleNamespace(
@@ -279,12 +322,12 @@ def _patch_first_buy_scaffolding(monkeypatch: pytest.MonkeyPatch) -> None:
         divergence_status="none",
     )
     monkeypatch.setattr(mod, "derive_first_buy_facts", lambda **kw: facts)
-    monkeypatch.setattr(
-        mod,
-        "assess_first_buy",
-        lambda **kw: types.SimpleNamespace(status="structure_ready"),
-    )
+    monkeypatch.setattr(mod, "assess_first_buy", lambda **kw: _fake_signal())
     monkeypatch.setattr(mod, "record_signal_event", lambda *a, **kw: None)
+    # 本文件只考事务边界：把推送通道钉成「不送达」，避免任何测试环境变量
+    # （例如别人导出过 CPT_FEISHU_WEBHOOK）让单测真的出网。通道本身由
+    # tests/test_signal_notify.py 专测。
+    monkeypatch.setattr(mod.signal_notify, "_pusher", lambda title, lines: False)
 
 
 def test_load_previous_signal_failure_does_not_propagate(

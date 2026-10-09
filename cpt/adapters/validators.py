@@ -62,6 +62,16 @@ DEFAULT_INTERVAL_MS: Final[int] = 300_000
 #: ``open_time+300000-1`` 的契约报错（R17 实测踩到），属于纯粹的坑。
 A_SHARE_DAILY_INTERVAL_MS: Final[int] = 86_400_000
 
+#: 价格字段（R59 审计 L10）：必须非负。
+_PRICE_FIELDS: Final[tuple[str, ...]] = ("open", "high", "low", "close")
+#: 量/额字段（R59 审计 L10）：可以为 0（停牌、无成交），但不能为负。
+_VOLUME_FIELDS: Final[tuple[str, ...]] = (
+    "volume",
+    "quote_volume",
+    "taker_buy_base_volume",
+    "taker_buy_quote_volume",
+)
+
 
 class DataValidationError(ValueError):
     """输入 K 线序列**自身不合法**。
@@ -71,6 +81,7 @@ class DataValidationError(ValueError):
     * 同一个 ``open_time`` 出现**内容不一致**的重复 K 线（数据冲突）；
     * ``open_time`` 未严格递增（重复或乱序），即需要调用方排序的数据；
     * OHLC 非法：``open`` / ``close`` 落在 ``[low, high]`` 之外；
+    * 价格或量/额为负（``close=-1``、``volume=-500`` 这类语义上不可能的值，R59 审计 L10）；
     * ``close_time`` 不满足契约边界 ``open_time + interval_ms - 1``；
     * 相邻间隔小于契约周期（疑似混入更细周期数据）；
     * ``interval_ms`` 参数本身非正。
@@ -215,11 +226,36 @@ def _require_positive_interval(interval_ms: int) -> None:
 
 
 def _validate_bar_contract(bar: CanonicalBar, index: int, interval_ms: int) -> None:
-    """单根 K 线的契约校验：OHLC 合法 + ``close_time`` 边界。
+    """单根 K 线的契约校验：非负 + OHLC 合法 + ``close_time`` 边界。
 
     ``CanonicalBar`` 自身已保证 ``high >= low`` 与数值有限，这里补的是构造期
-    无法覆盖的两条 Binance 契约（``docs/rules.md`` §8.5）。
+    无法覆盖的 Binance 契约（``docs/rules.md`` §8.5）。
+
+    R59（审计 L10）：原先只查 ``math.isfinite`` 与 OHLC 顺序，**负值是畅通的** ——
+    ``close=-1``、``volume=-500`` 能一路进分型/笔/中枢，造出「数学合法、语义荒谬」
+    的结构且零报错。这里补一条**非负**校验（价格与量/额都不可能是负数）。
+
+    为什么是「非负」而不是「严格为正」：0 价在 A 股是上游占位行的历史形态，
+    其取舍已由 :func:`cpt.adapters.a_share_local.fetch_validated_klines` 按 R52
+    在**逐行**层面处理（全 0 占位行丢弃、单侧 0 的行刻意保留，误丢会静默造出
+    序列缺口）。校验层若再拒 0，一根脏行就会把整只票降级成
+    ``DataValidationError`` —— 那是比「保留 0」更糟的回归。负值则不同：
+    数据源在语义上不可能给出负价/负量，出现即是损坏，必须拒绝。
     """
+    for name in _PRICE_FIELDS:
+        value = getattr(bar, name)
+        if value < 0:
+            raise DataValidationError(
+                f"bars[{index}] open_time={bar.open_time} {name} 为负数: {value}"
+                " —— 价格为负在语义上不可能（R59 审计 L10）"
+            )
+    for name in _VOLUME_FIELDS:
+        value = getattr(bar, name)
+        if value < 0:
+            raise DataValidationError(
+                f"bars[{index}] open_time={bar.open_time} {name} 为负数: {value}"
+                " —— 成交量/成交额不可能为负（R59 审计 L10）"
+            )
     if not (bar.low <= bar.open <= bar.high and bar.low <= bar.close <= bar.high):
         raise DataValidationError(
             f"bars[{index}] open_time={bar.open_time} OHLC 非法: "

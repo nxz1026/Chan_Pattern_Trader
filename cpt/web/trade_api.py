@@ -28,11 +28,13 @@ import json
 import logging
 import os
 import uuid
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
 from typing import Any
 from urllib.parse import parse_qs
+
+from cpt.domain.market_time import market_today
 
 _LOG = logging.getLogger(__name__)
 
@@ -73,6 +75,23 @@ DEFAULT_TRADE_DIR = "/home/ubuntu/trade_cpt"
 #: 得新增盘中反向 K 线的实时能力，不是补线。详见 ``docs/pending-wiring.md``。
 DEFAULT_TRADE_STATUSES: tuple[str, ...] = ("confirmed", "structure_ready")
 
+#: 回执文件 / ``processed`` 列表的保留上限（``R59（审计 M2）``）。
+#:
+#: 修前两个都**只涨不消**：``results_*.json`` 每个 batch 一个文件（交易机
+#: 一天可能回传多次），``state["processed"]`` 每条回执追加一个 batch_id ——
+#: 跑一年就是几万个文件 + 几万条 list，而 ``state.json`` 是每次决策都要整体读写的。
+#:
+#: - ``_RESULTS_RETENTION_DAYS``：只保留最近 N 天的回执**文件**。回执是审计留痕，
+#:   ``GET /api/trade/results?date=`` 只查某一天，且**生产查询的都是今天**；
+#:   90 天足够覆盖"翻上季度账"的需求，再老的就该进归档而不是留在热目录。
+#: - ``_MAX_PROCESSED_BATCHES``：``processed`` 只保留最近 N 个 batch_id（FIFO）。
+#:   ⚠️ 幂等性代价必须说清：超过上限的老 batch 若**再次**回传，会被当成新批次
+#:   重写一个结果文件。上限取 5000（远超任何真实回放窗口：交易机重试发生在
+#:   分钟级），**不破坏实际幂等**；同时``_prune_processed`` 只裁最老的，
+#:   最近的一定在。
+_RESULTS_RETENTION_DAYS = 90
+_MAX_PROCESSED_BATCHES = 5000
+
 #: 建议股数。⚠️ LKL-Trade 目前**只支持市价单**（``OrderType_Market, price=0``），
 #: 所以这里的 ``price`` 只能进 ``reason`` 供审计，**不会**成为委托价。
 DEFAULT_VOLUME = 100
@@ -88,6 +107,17 @@ _state_lock = Lock()
 
 class TradeStateError(RuntimeError):
     """决策状态目录损坏或不可读——必须让调用方看见，不静默降级成「无信号」。"""
+
+
+def _today() -> date:
+    """市场时区（北京）下的今天（``R59（审计 L11 同类残留）``）。
+
+    修前这里是 ``date.today()`` —— **宿主本地时区**。生产机是 ``Etc/UTC``，
+    于是北京时间 00:00-08:00 之间接口默认查的是**前一天**的决策/回执：
+    交易机在北京凌晨拉一次，拿到的是昨天那一批，且看不出任何异常。
+    统一走 :func:`cpt.domain.market_time.market_today`（域层唯一口径）。
+    """
+    return market_today()
 
 
 def trade_dir() -> Path:
@@ -134,6 +164,50 @@ def _save_state(state: dict[str, Any]) -> None:
     tmp = d / "state.json.tmp"
     tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
     os.replace(tmp, _state_file())
+
+
+def _prune_results_files(*, today: date | None = None) -> int:
+    """删掉过期回执文件，返回删除数（``R59（审计 M2）``）。
+
+    只碰**文件名严格匹配** ``results_YYYY-MM-DD_*.json`` 且日期早于
+    ``today - _RESULTS_RETENTION_DAYS`` 的文件 —— 目录里别的东西（包括
+    ``state.json`` 与交易机自己的文件）一律不动。这是删除操作，
+    所以宁可少删（多占几 KB）也不能删错：
+    「文件名不像回执」就跳过，绝不按大小/时间乱扫。
+
+    为什么不只靠 ``processed`` 上限：那是**幂等键**的裁剪，与磁盘占用是两件事；
+    两者都做，且各自的保留期独立可解释。
+    """
+    cutoff = (today or _today()) - timedelta(days=_RESULTS_RETENTION_DAYS)
+    removed = 0
+    for path in trade_dir().glob("results_*.json"):
+        stamp = path.name[len("results_") :].split("_", 1)[0]
+        try:
+            when = date.fromisoformat(stamp)
+        except ValueError:
+            continue
+        if when >= cutoff:
+            continue
+        try:
+            path.unlink()
+            removed += 1
+        except OSError as exc:
+            _LOG.warning("过期回执删除失败 %s: %s", path.name, exc)
+    if removed:
+        _LOG.info("清理过期回执 %d 个（保留 %d 天）", removed, _RESULTS_RETENTION_DAYS)
+    return removed
+
+
+def _prune_processed(state: dict[str, Any]) -> None:
+    """把 ``processed`` 裁到最近 :data:`_MAX_PROCESSED_BATCHES` 条（``R59（审计 M2）``）。
+
+    裁剪**必须在锁内、且与 ``_save_state`` 同一次写**完成，否则并发回执会用
+    陈旧副本把别的 batch 盖回去（幂等键丢失 → 重复执行）。
+    """
+    processed = state.get("processed")
+    if not isinstance(processed, list) or len(processed) <= _MAX_PROCESSED_BATCHES:
+        return
+    state["processed"] = processed[-_MAX_PROCESSED_BATCHES:]
 
 
 def _fetch_signals(for_date: str) -> tuple[dict[str, Any], ...]:
@@ -189,11 +263,15 @@ def _build_actions(rows: tuple[dict[str, Any], ...]) -> list[dict[str, Any]]:
 def handle_trade_decisions(query_str: str) -> tuple[dict[str, Any], int]:
     """``GET /api/trade/decisions?date=YYYY-MM-DD``"""
     q = parse_qs(query_str)
-    for_date_str = q.get("date", [date.today().isoformat()])[0]
+    for_date_str = q.get("date", [_today().isoformat()])[0]
     try:
         for_date = date.fromisoformat(for_date_str)
     except ValueError:
-        return {"error": f"invalid date: {for_date_str}"}, 400
+        # R59（审计 M4）：不再把请求串原样回显（``f"invalid date: {for_date_str}"``）。
+        # 这不是路径穿越（已核算不可利用），但**回显输入**没有任何诊断价值，
+        # 而错误体是唯一回给交易机/浏览器的字段；原文进日志。
+        _LOG.warning("决策查询的 date 非法（已忽略）: %r", for_date_str[:64])
+        return {"error": "invalid date"}, 400
 
     key = for_date.isoformat()
     with _state_lock:
@@ -211,7 +289,8 @@ def handle_trade_decisions(query_str: str) -> tuple[dict[str, Any], int]:
             rows = _fetch_signals(key)
         except Exception as exc:  # noqa: BLE001 — 读不到 ≠ 没信号，必须分开说
             _LOG.error("取交易决策失败 %s: %s", key, exc)
-            return {"error": f"decision source unavailable: {type(exc).__name__}"}, 503
+            # R59（审计 M4）：只回稳定文案，异常类名/原文只进服务端日志。
+            return {"error": "decision source unavailable"}, 503
 
         payload: dict[str, Any] = {"batch_id": "", "for_date": key, "actions": []}
         actions = _build_actions(rows)
@@ -249,6 +328,24 @@ def handle_trade_results_post(data: dict[str, Any] | None) -> tuple[dict[str, An
     if not batch_id or not for_date:
         return {"error": "missing batch_id or for_date"}, 400
 
+    # R59（审计 M2）：``for_date`` 以前**完全不校验**，直接进文件名
+    # （``results_{for_date}_{ts}.json``）与 ``state["decisions"]`` 的键。
+    # 路径穿越已核算不可利用（``Path`` 不接受含分隔符的写文件名），但非法形状会被
+    # 原样写进目录/日志，且让「按日期查回执」永远查不到 —— 现在与 decisions 同口径
+    # 用 ``date.fromisoformat`` 归一化，并限制在"回执是近期审计留痕"的合理范围内。
+    try:
+        for_date_day = date.fromisoformat(for_date)
+    except ValueError:
+        _LOG.warning("回执 for_date 非法 batch=%s for_date=%r", batch_id, for_date[:64])
+        return {"error": "invalid for_date"}, 400
+    today = _today()
+    if not (today - timedelta(days=_RESULTS_RETENTION_DAYS)) <= for_date_day <= today:
+        # 允许 90 天窗口（=保留期）：再早的回执文件已被清理，收下只会立刻成为孤儿；
+        # 未来的日期则一定是交易机时钟或字段拼错。
+        _LOG.warning("回执 for_date 超出保留窗口 batch=%s for_date=%s", batch_id, for_date)
+        return {"error": "for_date out of retention window"}, 400
+    for_date = for_date_day.isoformat()
+
     with _state_lock:
         try:
             state = _load_state()
@@ -270,10 +367,18 @@ def handle_trade_results_post(data: dict[str, Any] | None) -> tuple[dict[str, An
             return {"error": "results not persisted"}, 503
 
         state["processed"].append(batch_id)
+        # R59（审计 M2）：两个"只涨不消"的地方都在这里收口 —— ``processed`` 裁上限、
+        # 过期回执文件删除。都放在**已经持有 _state_lock 且紧随成功写入之后**，
+        # 失败只记日志：清理是维护动作，不该让已落盘的回执变成 500。
+        _prune_processed(state)
         try:
             _save_state(state)
         except OSError as exc:
             _LOG.error("processed 落盘失败（结果已存，幂等会失效）: %s", exc)
+        try:
+            _prune_results_files(today=today)
+        except OSError as exc:
+            _LOG.warning("过期回执清理失败: %s", exc)
 
     _LOG.info("收到回执 batch=%s 共 %d 笔", batch_id, len(trades))
     return {"status": "ok", "batch_id": batch_id}, 200
@@ -282,21 +387,46 @@ def handle_trade_results_post(data: dict[str, Any] | None) -> tuple[dict[str, An
 def handle_trade_results_get(query_str: str) -> tuple[dict[str, Any], int]:
     """``GET /api/trade/results?date=YYYY-MM-DD``"""
     q = parse_qs(query_str)
-    for_date = q.get("date", [date.today().isoformat()])[0]
+    for_date_str = q.get("date", [_today().isoformat()])[0]
+    # R59（审计 M2）：``for_date`` 以前直接拼进 glob 模式
+    # （``results_{for_date}_*.json``）—— 与 decisions 同口径先归一化，
+    # 非法回 400 而不是 glob 出一个空列表冒充"今天没有回执"。
+    try:
+        for_date = date.fromisoformat(for_date_str).isoformat()
+    except ValueError:
+        _LOG.warning("回执查询的 date 非法（已忽略）: %r", for_date_str[:64])
+        return {"error": "invalid date"}, 400
     files = sorted(trade_dir().glob(f"results_{for_date}_*.json"), reverse=True)
     if not files:
         return {"for_date": for_date, "trades": []}, 200
-    return json.loads(files[0].read_text(encoding="utf-8")), 200
+    try:
+        return json.loads(files[0].read_text(encoding="utf-8")), 200
+    except (ValueError, OSError) as exc:
+        # 回执文件半截/被手工改坏：回 503 说清楚"存储有问题"，
+        # 而不是抛出去让 handler 变成 500（也没有原文回显，M4）。
+        _LOG.error("回执文件不可读 %s: %s", files[0].name, exc)
+        return {"error": "results unreadable"}, 503
 
 
 def handle_trade_health() -> tuple[dict[str, Any], int]:
-    """``GET /api/trade/health``"""
+    """``GET /api/trade/health``
+
+    R59（审计 L5）：``state_dir`` 以前回**绝对路径**（``/home/ubuntu/trade_cpt``）——
+    这个端点无鉴权、经 nginx 对外，等于把主机布局与运行账户名直接告诉扫描者。
+    这里只回目录**名**（``trade_cpt``），保留"能看出指向哪个目录"的排障价值，
+    又不再是可被拿去拼路径的绝对位置；``state_present`` 仍是布尔，判断"接线了吗"
+    不依赖这个字段。
+
+    被拒方案：①删掉整个键 —— 有的探针只拿它做展示/比对，删了会变成 ``missing``
+    噪音，而审计只要求"不回绝对路径"，相对名已满足；②回 ``os.path.relpath`` ——
+    它相对的是**进程 CWD**（server 由 systemd 起，CWD 不稳定），反而不可解释。
+    """
     d = trade_dir()
     return {
         "ok": True,
         "service": "cpt_trade_api",
         "source": "cpt",
-        "state_dir": str(d),
+        "state_dir": d.name or str(d),
         "state_present": (d / "state.json").exists(),
         "statuses": list(_statuses()),
         "volume": _volume(),

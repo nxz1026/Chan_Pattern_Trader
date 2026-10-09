@@ -58,6 +58,7 @@ def _patch_snapshot_rec(
         def fake_snapshot(code: str) -> Any:
             raise snapshot_exc
     else:
+
         def fake_snapshot(code: str) -> dict[str, Any]:
             return snapshot or {
                 "name": "贵州茅台",
@@ -70,6 +71,7 @@ def _patch_snapshot_rec(
         def fake_rec(code: str) -> Any:
             raise rec_exc
     else:
+
         def fake_rec(code: str) -> dict[str, Any]:
             return rec or {
                 "price": 1500.0,
@@ -132,6 +134,7 @@ def test_speak_passes_note_into_disclaimer(
     assert payload["call_id"] == "call-1"
     # 关键断言：note 进 disclaimer
     import cpt.application.llm_cases as cases
+
     last = cases.summarize_recommendation.last_kwargs  # type: ignore[attr-defined]
     assert "长期持有" in last["disclaimer"]
     assert last["subject_id"] == "track:u:600519"
@@ -154,6 +157,7 @@ def test_speak_without_note_omits_preference_segment(
     payload, status = track_api.handle_track_speak("u", "600519")
     assert status == 200
     import cpt.application.llm_cases as cases
+
     last = cases.summarize_recommendation.last_kwargs  # type: ignore[attr-defined]
     assert "用户偏好" not in last["disclaimer"]
     assert "结构状态翻译" in last["disclaimer"]

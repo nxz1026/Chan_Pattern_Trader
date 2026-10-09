@@ -1,5 +1,7 @@
 [Unit]
-Description=CPT read-only Dashboard API
+# R58（审计 L1）：原文写 “read-only”，但服务运行期会写库与本地状态文件，
+# Description 与行为不符 ⇒ 改成如实描述（前端“结构只读”不代表 API 只读）。
+Description=CPT Dashboard API（结构分析视图；写 cpt_dashboard_run 与自选/决策状态）
 After=network-online.target postgresql.service
 Wants=network-online.target
 
@@ -12,6 +14,31 @@ EnvironmentFile=/home/ubuntu/DSH/Chan_Pattern_Trader/deploy/env/cpt-dashboard.en
 ExecStart=/home/ubuntu/DSH/Chan_Pattern_Trader/.venv/bin/python -m cpt.web --host ${CPT_HOST} --port ${CPT_PORT} --mode ${CPT_MODE} --poll-seconds ${CPT_POLL_SECONDS} --symbol ${CPT_SYMBOL} --interval ${CPT_INTERVAL}
 Restart=on-failure
 RestartSec=10s
+
+# ── 沙箱加固（R58，审计 L1）────────────────────────────────────────────────
+# 本服务需要且仅需要：
+#   读：~/.dbconfig（600，DB 连接）、仓库与 .venv（WorkingDirectory 下）、
+#       EnvironmentFile（由 systemd 读，不经服务进程）、~/.wind-aifinmarket*
+#   写：PostgreSQL（经 TCP 127.0.0.1，不走文件系统），以及下面 ReadWritePaths 两项
+# 因此：ProtectSystem=strict 把 /usr /etc /var 等整棵树设为只读；
+#       ProtectHome=read-only 让 /home 只读（挡住 ~/.dbconfig 之外的秘密被写），
+#       再用 ReadWritePaths= 精确放开 CPT 真正会写的两个目录，避免加固误伤：
+#         · /home/ubuntu/trade_cpt              决策状态 state.json
+#           （cpt/web/trade_api.py:51 DEFAULT_TRADE_DIR）
+#         · /home/ubuntu/.cache/cpt              自选 watchlist.json 等
+#           （cpt/web/a_share_routes.py:70、cpt/adapters/wind_source.py:86）
+# 刻意不开的两项与理由：
+#   · ProtectHome=false —— 会让整个 home 对服务可写，~/.dbconfig 等秘密失去保护；
+#     本服务只需读它，read-only 已足够。
+#   · 多写 ReadWritePaths=/home/ubuntu —— 仓库pyc/任意路径都可写，等于没收敛；
+#     本服务运行期不需要写仓库（未编译模块的 .pyc 写失败会被 Python 静默忽略）。
+# ReadWritePaths 前缀 “-” = 目录不存在时忽略，避免换机/全新部署时启动失败。
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=-/home/ubuntu/trade_cpt -/home/ubuntu/.cache/cpt
+# 服务以非 root 运行、只监听 8010（>1024），不需要任何 capability。
+CapabilityBoundingSet=
+AmbientCapabilities=
 NoNewPrivileges=true
 PrivateTmp=true
 

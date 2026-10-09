@@ -14,6 +14,11 @@
 不同写多行**（状态机评估的循环里反复命中同一终态）。24h 节流挡掉这部分噪音，
 同时把"重启后历史信号再推一次"作为可接受代价（不是常态路径）。
 
+⚠️ R59（审计 L18）：这个 dict 的 key 含 ``structure_id``（经 ``signal_id``），
+结构会不断新增 ⇒ 不做清理就是常驻进程的内存泄漏。写入前一律走
+:func:`_prune_throttle`（按窗口过期 + ``MAX_THROTTLE_ENTRIES`` 硬上限），
+保证它**有界**。
+
 ## 边界（刻意为之）
 
 - **best-effort**：调用方拿到 ``False`` 而不是异常；观测通道不该有能力让业务路径崩。
@@ -55,6 +60,36 @@ _TITLE_PREFIX: str = "[CPT 追踪]"
 #: 节流缓存：``(signal_id, status) -> 上次推送时间（Unix 毫秒）``。
 #: 进程重启清空 —— 设计上接受"重启后历史信号再推一次"作为可接受代价。
 _LAST_PUSH_MS: dict[tuple[str, str], int] = {}
+
+#: 节流表硬上限（R59 审计 L18）。
+#: key 含 ``structure_id``（经 ``signal_id``），而结构会随时间不断新增 ⇒ 若只增
+#: 不减，常驻进程的内存会随每个新结构单调涨。上限针对的是**异常峰值**
+#: （一轮里几千个不同 signal_id 同时跃迁），正常路径靠下面按窗口过期淘汰兜住。
+MAX_THROTTLE_ENTRIES: int = 4096
+
+
+def _prune_throttle(now_ms: int) -> None:
+    """写入后清理节流表，保证它**有界**（R59 审计 L18）。
+
+    两步：
+
+    1. **按窗口过期**：``now_ms - last >= THROTTLE_WINDOW_MS`` 的条目再也不可能
+       挡住任何推送（命中条件是 ``< THROTTLE_WINDOW_MS``），留着纯属内存 —— 这
+       就是常驻进程泄漏的来源。
+    2. **按上限淘汰**：过期清完仍超过 ``MAX_THROTTLE_ENTRIES`` 时，丢掉最旧的
+       若干条（按上次推送时间）。代价是「被淘汰的 key 可能提前允许重推一次」，
+       但那只在 24h 内出现数千个不同信号时才会发生，远优于无界增长。
+    """
+    if not _LAST_PUSH_MS:
+        return
+    expired = [key for key, last in _LAST_PUSH_MS.items() if now_ms - last >= THROTTLE_WINDOW_MS]
+    for key in expired:
+        del _LAST_PUSH_MS[key]
+    overflow = len(_LAST_PUSH_MS) - MAX_THROTTLE_ENTRIES
+    if overflow > 0:
+        oldest = sorted(_LAST_PUSH_MS.items(), key=lambda item: item[1])[:overflow]
+        for key, _ in oldest:
+            del _LAST_PUSH_MS[key]
 
 
 def _default_clock() -> int:
@@ -143,7 +178,12 @@ def maybe_notify(
         _LOG.info("飞书推送未送达 signal=%s status=%s", signal.signal_id, signal.status)
         return False
 
+    # 先写入再清理：``MAX_THROTTLE_ENTRIES`` 是**写入之后**的不变量。若先清理
+    # 再插入，表恰好在上限时插入会让它变成 ``MAX + 1``（清理看不到那条还没写
+    # 进去的记录），上限就成了摆设。新条目的时间是 ``now_ms``（最新），
+    # 淘汰按时间升序，永远不会误删刚记下的这条。
     _LAST_PUSH_MS[key] = now_ms
+    _prune_throttle(now_ms)
     return True
 
 

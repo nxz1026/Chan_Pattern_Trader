@@ -78,7 +78,6 @@ def build_parity_snapshot_for(
         ReferenceChanlunBackend,
         ReferenceUnavailableError,
     )
-    from cpt.adapters.reference_chanlun import ReferenceChanlunConfig  # noqa: PLC0415
 
     # ⚠️ R45 修：**min_bi_len 不属于 ReferenceChanlunConfig**。
     # 原写法 `ReferenceChanlunConfig(min_bi_len=cfg.min_bi_len)` 直接
@@ -100,7 +99,17 @@ def build_parity_snapshot_for(
         # 后者返回 ``ChanlunResult``（存 **bar 索引**），而本层要的是带
         # ``start_time``/``end_time`` 的领域对象 —— 两者量纲不同，
         # 硬转会把时间锚点全丢（``start_bar=0``），面板「点选高亮」就废了。
-        ref = backend.compute_domain_structures(list(bars), ReferenceChanlunConfig())
+        # R59（审计 M25）：参照侧必须用**同一份** ``RulesConfig`` →
+        # ``ReferenceChanlunConfig`` 映射。原写法直接 ``ReferenceChanlunConfig()``
+        # 只用了 dataclass 默认值，``cfg`` 里除走 resolve_backend 的 ``min_bi_len``
+        # 外全部被静默丢弃（fx_qy_middle / fx_qj_ck / bi_type_new / zs_wzgx /
+        # macd_*）。后果不是「少几个开关」：两侧口径不同时，笔/中枢数量差异会被
+        # 当成**算法差异**上报，parity 这个交叉验证块就变成了假阳性来源。
+        # 复用 ``multi_level._ref_config``（同包内已有的正确映射）而不是再抄一份 ——
+        # 抄一份就是下一次漂移的种子。
+        from cpt.application.multi_level import _ref_config  # noqa: PLC0415
+
+        ref = backend.compute_domain_structures(list(bars), _ref_config(cfg))
     except ReferenceUnavailableError as exc:
         return build_parity_snapshot(
             available=False,

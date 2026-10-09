@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
+import threading
+import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from http import HTTPStatus
@@ -20,8 +23,62 @@ from cpt.application.dashboard_multi_run import align_runs
 from cpt.application.dashboard_runs import find_run, recent_runs, record_run, run_body
 from cpt.application.dashboard_stats import signal_statistics
 from cpt.application.dashboard_watchlist import watchlist_rows
+from cpt.web.rate_limit import SlidingWindowLimiter, client_ip
 
 _LOG = logging.getLogger("cpt.web.handler")
+
+#: R59（审计 H1）：LLM 端点的默认配额 —— 同一「来源 + 端点」60s 内最多 10 次。
+#:
+#: 为什么是 10：正常人一次会话点几下「讲人话 / 解释结构」，10 次/分钟远超手速；
+#: 而脚本循环一分钟能烧掉的额度正好被钉死在 10 次。被拒回 429 + ``Retry-After``。
+_DEFAULT_LLM_MAX_EVENTS = 10
+_DEFAULT_LLM_WINDOW_S = 60.0
+
+#: R59（审计 H3）：付费探活（Wind 额度）的默认配额 —— 同一来源 300s 内最多 3 次。
+#:
+#: 为什么不是 10：这里的单位是**钱**（一次探测一次真实额度），而它本来只是排障用的
+#: 一次性检查，3 次/5 分钟足够；比 LLM 更紧，因为失败代价不可逆（额度已花）。
+_DEFAULT_QUOTA_MAX_EVENTS = 3
+_DEFAULT_QUOTA_WINDOW_S = 300.0
+
+#: R59（审计 H2）：加密侧 ``?symbol=`` 的白名单形状（Binance 现货/合约交易对，如 ``BTCUSDT``）。
+#:
+#: 为什么用正则而不是「问 provider 认不认识」：``select_symbol`` 的下游会在 HTTP
+#: 工作线程里**同步重算整条流水线并写库**，非法 symbol 走到那里就已经付出代价了。
+#: 先在入口把形状挡掉，不合法**绝不落到上游**。
+_SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}$")
+
+#: R59（审计 H4）：TCP 并发上限。
+#:
+#: 原实现是裸 ``ThreadingHTTPServer`` —— 来多少连就开多少线程，一个慢下游
+#: （LLM/数据库）就能把线程数顶到几百。超限的连接直接回 503，而不是排队到超时。
+_DEFAULT_MAX_WORKERS = 32
+
+#: R59（审计 M5）：分页/窗口参数的统一上界。
+#:
+#: 原实现只做 ``int()``，``?limit=100000000`` 会让每个 (market, symbol) 都去
+#: 拉一次 ``waterline_trend``（N+1 放大）。与 A 股 ``width_k`` 的 5..2000 同类，
+#: 这里把「一次响应能承载多少条」钉成有界区间。
+_MAX_LIMIT = 500
+_MAX_DAYS = 3650
+
+#: R59（审计 M5）：``/inspection`` 里 distinct ``(market, symbol)`` 的硬上限。
+#:
+#: 每个 key 一次 ``waterline_trend``（N+1），而 key 数随 run 行数无限增长。
+#: 取 20：看板同时盯的标的（加密 1~3 个 + A 股几只）远不到这个量级，
+#: 正常巡检**看不见**这个上限；真撞上说明数据被灌脏了，那时宁可标注截断
+#: （响应的 ``limits.trend_keys_truncated``）也不要把 DB 打满。
+#: 真正的修法是一条批量查询 ``waterline_trends_bulk(conn, keys, limit)``，
+#: 那要改 ``cpt/storage``（不在本批范围，已在回报里列出所需接口）。
+_MAX_TREND_KEYS = 20
+
+#: access log 里**从不落盘**的查询参数（R59／审计 H4）。
+#:
+#: 令牌/回调地址一旦进日志就等于泄露 —— 日志会被打包、会被转发。命中的键只留键名，
+#: 值替换成 ``***``；其余参数照常记录，排障信息不受影响。
+_SENSITIVE_QUERY_KEYS = frozenset(
+    {"token", "access_token", "api_key", "apikey", "key", "secret", "password", "webhook", "hook"}
+)
 
 SnapshotProvider = Callable[[], dict[str, Any]]
 
@@ -65,6 +122,109 @@ class SelectableSource(Protocol):
     def select_symbol(self, symbol: str, interval: str) -> None: ...
 
     def force_refresh(self) -> None: ...
+
+
+def _redact_path_for_log(path_with_query: str) -> str:
+    """把请求行里的查询串脱敏后返回（R59／审计 H4）。
+
+    只动**键名命中** :data:`_SENSITIVE_QUERY_KEYS` 的值：键名保留（排障时知道
+    「带了 token」），值一律换 ``***``。其余参数原样——access log 的价值就在于
+    能看出请求了什么。
+
+    被拒方案：整条 query 一律不记。那样的 access log 无法定位「谁在刷
+    ``?include_quota=1``」，而这正是 H1/H3 要观测的行为；只遮敏感键更实用。
+    """
+    split = urlsplit(path_with_query)
+    if not split.query:
+        return split.path
+    try:
+        pairs = parse_qs(split.query, keep_blank_values=True)
+    except ValueError:  # pragma: no cover - parse_qs 对 str 不抛，防御性
+        return split.path
+    redacted: dict[str, list[str]] = {
+        key: ["***"] * len(values) if key.lower() in _SENSITIVE_QUERY_KEYS else values
+        for key, values in pairs.items()
+    }
+    return f"{split.path}?{urlencode(redacted, doseq=True)}"
+
+
+class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
+    """``ThreadingHTTPServer`` + **有界线程**（R59／审计 H4）。
+
+    原实现来一个连接开一条线程：慢下游（LLM / DB）叠加并发请求就能把线程数顶到
+    几百，进程内存与下游连接池一起被打爆。这里用一个信号量把**同时在跑的请求**
+    限制在 ``max_workers``；拿不到名额的连接当场回 503 + ``Retry-After``，
+    **不排队**（排队只会把超时推给客户端，还占着 socket）。
+
+    Attributes:
+        max_workers: 并发处理上限（``<= 0`` 表示不设限，供测试/兼容旧行为）。
+        rejected_connections: 被 503 拒掉的累计连接数（运维可观测，不落盘）。
+
+    关闭语义（审计点名的坑）：``daemon_threads=True`` 让工作线程不阻塞进程退出；
+    ``block_on_close=False`` 让 ``server_close()`` **不 join** 工作线程 ——
+    否则一条卡在 LLM 上的请求会让关停一直挂到超时。
+    """
+
+    daemon_threads = True
+    block_on_close = False
+
+    def __init__(
+        self,
+        server_address: tuple[str, int],
+        handler_cls: type[BaseHTTPRequestHandler],
+        *,
+        max_workers: int = _DEFAULT_MAX_WORKERS,
+    ) -> None:
+        super().__init__(server_address, handler_cls)
+        self.max_workers = max_workers
+        self.rejected_connections = 0
+        self._slots = threading.BoundedSemaphore(max_workers) if max_workers > 0 else None
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        slots = self._slots
+        if slots is None:
+            super().process_request(request, client_address)
+            return
+        if not slots.acquire(blocking=False):
+            self.rejected_connections += 1
+            self._reject_overloaded(request, client_address)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            # 起线程失败必须把名额还回去，否则每失败一次就永久少一个名额。
+            slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            slots = self._slots
+            if slots is not None:
+                slots.release()
+
+    def _reject_overloaded(self, request: Any, client_address: Any) -> None:
+        """在 accept 线程里直接回 503（不经 handler，故手写状态行）。"""
+        body = json.dumps(
+            {"error": {"code": "server_busy", "message": "并发请求过多，请稍后重试"}},
+            ensure_ascii=False,
+        ).encode("utf-8")
+        head = (
+            "HTTP/1.1 503 Service Unavailable\r\n"
+            "Content-Type: application/json; charset=utf-8\r\n"
+            f"Content-Length: {len(body)}\r\n"
+            "Retry-After: 1\r\n"
+            "Connection: close\r\n\r\n"
+        ).encode()
+        peer = client_address[0] if client_address else "-"
+        _LOG.warning("并发上限 %d 已满，拒绝连接 %s", self.max_workers, peer)
+        try:
+            request.sendall(head + body)
+        except OSError:
+            pass
+        finally:
+            self.shutdown_request(request)
 
 
 #: ``/api/dashboard/runs`` 面板一次拉多少行。ring 是 50，表侧同量级。
@@ -503,6 +663,9 @@ def _watchlist_payload() -> dict[str, Any]:
 
 def make_handler(
     provider: SnapshotProvider | SnapshotSource,
+    *,
+    llm_limiter: SlidingWindowLimiter | None = None,
+    quota_limiter: SlidingWindowLimiter | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Create a read-only handler bound to a thread-safe snapshot provider.
 
@@ -511,9 +674,29 @@ def make_handler(
 
     If ``provider`` additionally exposes ``inspect(bar_index)``, the
     ``/api/dashboard/inspect`` route is enabled for B3 per-bar inspection.
+
+    R59（审计 H1/H3）：``llm_limiter`` / ``quota_limiter`` 是**可注入**的限流器
+    （默认各自新建一个，见 :data:`_DEFAULT_LLM_MAX_EVENTS` /
+    :data:`_DEFAULT_QUOTA_MAX_EVENTS`）。测试注入假时钟的实例即可验证
+    「超限回 429 + Retry-After」而**不必 sleep**；生产调用方（``cpt/web/a_share.py``、
+    ``cpt/web/__main__.py``）不传，用默认值。
     """
 
+    # 在类定义**之前**绑定成局部变量：handler 方法引用它们是闭包变量（不是全局），
+    # 这样每个 server 实例都持有自己的限流器，测试之间不会互相污染。
+    _llm_limiter = llm_limiter or SlidingWindowLimiter(
+        max_events=_DEFAULT_LLM_MAX_EVENTS, window_seconds=_DEFAULT_LLM_WINDOW_S
+    )
+    _quota_limiter = quota_limiter or SlidingWindowLimiter(
+        max_events=_DEFAULT_QUOTA_MAX_EVENTS, window_seconds=_DEFAULT_QUOTA_WINDOW_S
+    )
+
     class DashboardHandler(BaseHTTPRequestHandler):
+        #: R59（审计 H4）：access log 用的请求开始时刻（``handle_one_request`` 写入）。
+        _request_started: float | None = None
+        #: R59（审计 M3）：是否已经发出过响应头（兜底 except 不能写第二个响应）。
+        _response_started: bool = False
+
         def do_GET(self) -> None:  # noqa: N802
             path = urlsplit(self.path)
             query = parse_qs(path.query)
@@ -572,27 +755,75 @@ def make_handler(
                 # demo / fixture 模式 provider 没有 select_symbol，按下面 fallback 走。
                 provider_switched = False
                 provider_error: str | None = None
-                if query.get("symbol") and isinstance(provider, SelectableSource):
-                    requested_symbol = query["symbol"][0]
+                # R59（审计 H2）：``?symbol=`` / ``?interval_ms=`` 先在入口校验**形状**，
+                # 非法立即 400，绝不落到上游。理由：走到 ``select_symbol`` 就已经在
+                # HTTP 工作线程里同步跑整条流水线（拉数 + 全量重算 + 写结构事件），
+                # 一个畸形查询串就能触发一次完整重算并 commit。
+                requested_symbol = ""
+                if query.get("symbol"):
+                    requested_symbol = query["symbol"][0].strip()
+                    if not _SYMBOL_RE.match(requested_symbol):
+                        self._write_json_error(
+                            HTTPStatus.BAD_REQUEST,
+                            "invalid_symbol",
+                            "symbol 形状非法（形如 BTCUSDT：2..20 位大写字母/数字）",
+                        )
+                        return
+                requested_interval_ms: int | None = None
+                if query.get("interval_ms"):
+                    try:
+                        requested_interval_ms = int(query["interval_ms"][0])
+                    except ValueError:
+                        self._write_json_error(
+                            HTTPStatus.BAD_REQUEST,
+                            "interval_ms_not_int",
+                            "interval_ms must be int",
+                        )
+                        return
+                    if requested_interval_ms <= 0:
+                        self._write_json_error(
+                            HTTPStatus.BAD_REQUEST,
+                            "invalid_interval_ms",
+                            "interval_ms 必须为正数",
+                        )
+                        return
+                if requested_symbol and isinstance(provider, SelectableSource):
                     requested_interval = runtime.get("interval") or "1h"
-                    if query.get("interval_ms"):
+                    if requested_interval_ms is not None:
                         try:
-                            interval_ms = int(query["interval_ms"][0])
+                            requested_interval = resolve_interval_label(requested_interval_ms)
                         except ValueError:
+                            # 原来这里会 ValueError 冒到 except Exception，被折成
+                            # provider_warnings 里的 "symbol_switch_failed:..." ——
+                            # 参数错却回 200 + 警告，调用方无从判断请求到底生效没有。
                             self._write_json_error(
                                 HTTPStatus.BAD_REQUEST,
-                                "interval_ms_not_int",
-                                "interval_ms must be int",
+                                "invalid_interval_ms",
+                                "interval_ms 不是已知周期标签",
                             )
                             return
-                        requested_interval = resolve_interval_label(interval_ms)
                     try:
                         provider.select_symbol(requested_symbol, requested_interval)
                         provider.force_refresh()
                         provider_switched = True
+                    except ValueError:
+                        # 形状合法但上游不认识（例如该交易对不存在）→ 这是调用错误，回 400。
+                        _LOG.warning(
+                            "provider.select_symbol 拒绝 symbol=%s interval=%s",
+                            requested_symbol,
+                            requested_interval,
+                        )
+                        self._write_json_error(
+                            HTTPStatus.BAD_REQUEST,
+                            "unknown_symbol",
+                            "上游不认识该 symbol/interval",
+                        )
+                        return
                     except Exception as exc:  # noqa: BLE001
-                        provider_error = f"symbol_switch_failed:{exc}"
-                        _LOG.warning("provider.select_symbol failed: %s", exc)
+                        # R59（审计 M4）：只回稳定的代号，异常原文进服务端日志（原来把
+                        # 原文塞进 provider_warnings 回给客户端，会带出内部路径/SQL）。
+                        provider_error = "symbol_switch_failed"
+                        _LOG.warning("provider.select_symbol failed: %s", exc, exc_info=True)
                     else:
                         # 强制刷新后重读 snapshot（已经是新交易对）
                         snapshot = provider.snapshot_payload()
@@ -600,19 +831,11 @@ def make_handler(
                         market = dict(payload.get("market", {}))
                         runtime = dict(payload.get("runtime", {}))
                 if not provider_switched:
-                    if query.get("symbol"):
-                        market["symbol"] = query["symbol"][0]
-                        runtime["symbol"] = query["symbol"][0]
-                    if query.get("interval_ms"):
-                        try:
-                            market["interval_ms"] = int(query["interval_ms"][0])
-                        except ValueError:
-                            self._write_json_error(
-                                HTTPStatus.BAD_REQUEST,
-                                "interval_ms_not_int",
-                                "interval_ms must be int",
-                            )
-                            return
+                    if requested_symbol:
+                        market["symbol"] = requested_symbol
+                        runtime["symbol"] = requested_symbol
+                    if requested_interval_ms is not None:
+                        market["interval_ms"] = requested_interval_ms
                 payload["market"] = market
                 payload["runtime"] = runtime
                 if provider_error:
@@ -712,8 +935,13 @@ def make_handler(
                     return self._write_json(payload)
                 try:
                     payload = provider.inspect(bar_index)
-                except IndexError as exc:
-                    self._write_json_error(HTTPStatus.BAD_REQUEST, "inspect_failed", str(exc))
+                except IndexError:
+                    # R59（审计 M4）：原来把 IndexError 的原文回给客户端（含内部索引
+                    # 语义），改成稳定文案；细节只进服务端日志。
+                    _LOG.warning("inspect 越界 bar_index=%s", bar_index)
+                    self._write_json_error(
+                        HTTPStatus.BAD_REQUEST, "inspect_failed", "bar_index 超出当前快照范围"
+                    )
                     return
                 except Exception:  # noqa: BLE001
                     self._write_json_error(
@@ -725,15 +953,43 @@ def make_handler(
                 # 一次探测就是一次真实额度，必须显式 ?include_quota=1 才允许。
                 # 探活结果有 60s 进程内缓存，?refresh=1 强制重探。
                 from cpt.adapters.source_registry import (  # noqa: PLC0415
+                    SOURCES,
                     capabilities_payload,
                     clear_cache,
                 )
 
                 include_quota = (query.get("include_quota") or ["0"])[0] not in {"0", "false", ""}
+                # R59（审计 H3）：付费探测要**过闸**。默认路径（不带 include_quota）
+                # 一行都不多花，这条既有纪律保持不变；显式要探活时按「来源 + 端点」
+                # 限流（默认 3 次 / 5 分钟），超限 429 —— 一次探测就是一次真实 Wind
+                # 额度，脚本刷一次就是真金白银。
+                if include_quota and self._rate_limit_or_reject(_quota_limiter, "sources_quota"):
+                    return
                 if (query.get("refresh") or ["0"])[0] not in {"0", "false", ""}:
                     clear_cache()
                 markets_raw = (query.get("markets") or [""])[0]
                 markets = tuple(part for part in markets_raw.split(",") if part) or None
+                # R59（审计 H2）：markets 原来是「原样透传」，未知标识会被静默忽略
+                # （``probe_all`` 里 intersect 为空 ⇒ 一个源都不探）——看起来像
+                # 「探过了、都没问题」。这里显式拒绝。
+                if markets is not None:
+                    known = {market for source in SOURCES for market in source.markets}
+                    unknown = sorted({market for market in markets if market not in known})
+                    if unknown:
+                        self._write_json_error(
+                            HTTPStatus.BAD_REQUEST,
+                            "unknown_market",
+                            "markets 含未知市场标识：" + ",".join(unknown),
+                        )
+                        return
+                if include_quota:
+                    # 审计留痕：付费探测必须能从日志里追溯（谁/什么时候/探了哪几个市场）。
+                    _LOG.info(
+                        "付费探活 include_quota=1 client=%s markets=%s refresh=%s",
+                        client_ip(self),
+                        ",".join(markets) if markets else "*",
+                        (query.get("refresh") or ["0"])[0],
+                    )
                 payload = capabilities_payload(include_quota=include_quota, markets=markets)
             elif path.path == "/api/dashboard/signal-radar":
                 # Phase N1：信号雷达 —— 只读聚合当前 snapshot 的信号数据。
@@ -996,6 +1252,10 @@ def make_handler(
                             HTTPStatus.BAD_REQUEST, "limit_not_int", "limit 必须是整数"
                         )
                         return
+                    # R59（审计 M5）：上限夹到 1..500。原来只有 ``int()``，
+                    # ``?limit=100000000`` 会直接把「最近 N 条」变成全表扫描 +
+                    # 每个 (market, symbol) 一次 waterline_trend（N+1 放大到天文数字）。
+                    limit = max(1, min(limit, _MAX_LIMIT))
                     _client = AShareLocalClient()
                     try:
                         _conn = _client._get_conn()  # noqa: SLF001
@@ -1003,9 +1263,19 @@ def make_handler(
                         runs = _rms.recent_metrics(_conn, kind=_rms.KIND_RUN, limit=limit)
                         trends: dict[str, Any] = {}
                         seen: set[tuple[str, str]] = set()
+                        # R59（审计 M5）：N+1 的规模由 distinct (market,symbol) 决定，
+                        # 而它随 run 行数增长。真正的修法是一条批量查询
+                        # （``waterline_trends_bulk(conn, keys, limit)``）—— 那要改
+                        # ``cpt/storage``（不在本批改动范围，已在回报里列出所需接口）。
+                        # 退而求其次：给 distinct key 数一个硬上限，并在响应里**标注截断**，
+                        # 绝不静默少给数据。
+                        truncated_keys = 0
                         for _row in runs:
                             _key = (_row["market"], _row["symbol"])
                             if _key in seen:
+                                continue
+                            if len(seen) >= _MAX_TREND_KEYS:
+                                truncated_keys += 1
                                 continue
                             seen.add(_key)
                             trends[f"{_key[0]}/{_key[1]}"] = _rms.waterline_trend(
@@ -1018,16 +1288,27 @@ def make_handler(
                             "waterlines": list(runs),
                             "trends": trends,
                             "health_values": list(_rms.HEALTH_VALUES),
+                            # 审计 M5：让调用方看得出「参数被夹过 / 结果被截断」，
+                            # 而不是以为这就是全部。
+                            "limits": {
+                                "limit": limit,
+                                "max_limit": _MAX_LIMIT,
+                                "max_trend_keys": _MAX_TREND_KEYS,
+                                "trend_keys_truncated": truncated_keys,
+                            },
                         }
                     finally:
                         _client.close()
                 except Exception as exc:  # noqa: BLE001
-                    _LOG.warning("inspection unavailable: %s", exc)
+                    _LOG.warning("inspection unavailable: %s", exc, exc_info=True)
                     payload = {
                         "schema_version": "dashboard_inspection.v1",
                         "available": False,
                         "reason": "inspection_unavailable",
-                        "detail": f"{type(exc).__name__}: {exc}"[:200],
+                        # R59（审计 M4）：``detail`` 原来回 ``type(exc).__name__: exc``，
+                        # psycopg 的原文里带主机/库名/角色 —— 对外只留稳定代号，
+                        # 原文进上面那条 warning 日志（排查信息不丢）。
+                        "detail": "internal_error",
                     }
             elif path.path == "/api/dashboard/structure-events":
                 # R27：结构事件流列表页（「最近发生了什么」）。与
@@ -1036,6 +1317,8 @@ def make_handler(
                     limit = int((query.get("limit") or ["50"])[0])
                 except ValueError:
                     limit = 50
+                # R59（审计 M5）：非法值保持「回落默认」的既有契约，越界则夹紧。
+                limit = max(1, min(limit, _MAX_LIMIT))
                 event_type = (query.get("event_type") or [""])[0].strip() or None
                 kind = (query.get("kind") or [""])[0].strip() or None
                 payload = _structure_events_payload(limit=limit, event_type=event_type, kind=kind)
@@ -1054,6 +1337,7 @@ def make_handler(
                     limit = int((query.get("limit") or ["100"])[0])
                 except ValueError:
                     limit = 100
+                limit = max(1, min(limit, _MAX_LIMIT))
                 payload = _structure_timeline_payload(structure_id, limit=limit)
             elif path.path == "/api/dashboard/signal-stats":
                 days_raw = (query.get("days") or ["30"])[0]
@@ -1064,6 +1348,8 @@ def make_handler(
                         HTTPStatus.BAD_REQUEST, "invalid_days", "days 必须是整数"
                     )
                     return
+                # R59（审计 M5）：``days`` 原来无上界（``?days=99999999`` 会扫全表）。
+                days = max(1, min(days, _MAX_DAYS))
                 code_filter = (query.get("code") or [""])[0].strip() or None
                 payload = _signal_stats_payload(days, code_filter)
             elif path.path == "/api/dashboard/watchlist":
@@ -1093,7 +1379,15 @@ def make_handler(
 
         def _handle_a_share_get(self, path: str, query: dict[str, list[str]]) -> None:
             """A 股只读路由：snapshot / pool / watchlist / recommendation。"""
-            from cpt.web import a_share_routes  # noqa: PLC0415 — 避免顶层拖入 psycopg
+            from cpt.web import (
+                a_share_routes,  # noqa: PLC0415 — 避免顶层拖入 psycopg
+                track_api,  # noqa: PLC0415 — 复用同一个用户标识解析
+            )
+
+            # R59（审计 L5）：自选按用户分文件。这里只做「按传入 user 分文件」，
+            # **不引入新鉴权**（S2：X-CPT-User 自报零校验，不在本批范围）；
+            # 缺头时 track_api 给 DEFAULT_USER_ID，路径仍是老的单文件，行为零变化。
+            user_id = track_api.extract_user_id(self.headers)
 
             if path == "/api/dashboard/a-share/recommendation":
                 # R45：结构判断摘要（买卖 + 参考价）。**纯确定性** ——
@@ -1140,8 +1434,20 @@ def make_handler(
                             f"width_k 超出范围 5..2000：{width_k}",
                         )
                         return
+                # R59（审计 M1）：GET 默认**只读**（不联网补因子、不写库）。
+                # ``?ensure_factors=1`` 才允许这条请求触发"拉因子 + 落库"——
+                # 把写副作用从"默认发生"改成"必须显式要求"。
+                ensure_raw = ((query.get("ensure_factors") or [""])[0] or "").strip().lower()
+                if ensure_raw in {"1", "true", "yes", "on"}:
+                    ensure_factors: bool | None = True
+                elif ensure_raw:
+                    ensure_factors = False
+                else:
+                    ensure_factors = None
                 try:
-                    payload = a_share_routes.snapshot_payload(code, width_k=width_k)
+                    payload = a_share_routes.snapshot_payload(
+                        code, width_k=width_k, ensure_factors=ensure_factors
+                    )
                 except a_share_routes.InvalidCodeError as exc:
                     # 代码格式非法回 400（JSON 体，见 _write_json_error 的注释：
                     # 中文消息不能走 send_error）。
@@ -1150,10 +1456,10 @@ def make_handler(
                 self._write_json(_with_run_index(payload))
                 return
             if path == "/api/dashboard/a-share/pool":
-                self._write_json(a_share_routes.pool_payload())
+                self._write_json(a_share_routes.pool_payload(user=user_id))
                 return
             if path == "/api/dashboard/a-share/watchlist":
-                self._write_json(a_share_routes.watchlist_payload())
+                self._write_json(a_share_routes.watchlist_payload(user=user_id))
                 return
             self._write_json_error(HTTPStatus.NOT_FOUND, "not_found", "")
 
@@ -1192,6 +1498,25 @@ def make_handler(
                 return False
             from cpt.web import trade_api  # noqa: PLC0415
 
+            # R59（审计 M2）：回执 POST 原来**完全不看 Content-Type**，任何跨站表单
+            # （``enctype=text/plain``）都能打进来。这里按同模块 A 股写路由的做法加门禁，
+            # 但**放行「没有 Content-Type」的请求**：
+            #
+            #   浏览器发起的表单/fetch **必然带** Content-Type（form-urlencoded /
+            #   text/plain / multipart），所以门禁照样挡住跨站提交；而交易机
+            #   （LKL-Trade，仓外程序）若用 ``data=json.dumps(...)`` 就可能一个头都不带 ——
+            #   硬拒会直接把真金白银的决策回执打回去，代价远大于收益。
+            #   缺头时留一条 warning，等确认上游一定会带头再收紧。
+            content_type = self.headers.get("Content-Type") or ""
+            if content_type and "application/json" not in content_type.lower():
+                self._write_json_error(
+                    HTTPStatus.UNSUPPORTED_MEDIA_TYPE,
+                    "content_type_required",
+                    "Content-Type 必须是 application/json",
+                )
+                return True
+            if not content_type:
+                _LOG.warning("trade results POST 未带 Content-Type（已放行，交易机兼容）")
             try:
                 payload, status = trade_api.handle_trade_results_post(self._read_json_body())
             except Exception:  # noqa: BLE001
@@ -1231,6 +1556,16 @@ def make_handler(
                     except ValueError:
                         days = track_api.track_store.SNAPSHOT_RETENTION_DAYS
                     payload, status = track_api.handle_track_history(user_id, code, days=days)
+                elif handler_name == "maintenance":
+                    # R59（审计 M18）：``deploy/cron/track-maintenance-daily.sh`` 每天
+                    # 07:30 UTC 真调 ``?apply=1``；接线前它每天 404。契约键名不能改。
+                    # 只有 ``1``/``true``（大小写无关）才是真删，**其余取值一律 dry-run**：
+                    # 清理是破坏性动作，宁可少删一次（第二天再来），
+                    # 也不能因为参数写法不认识就把用户的回收站行删了。
+                    apply_raw = ((query.get("apply") or [""])[0] or "").strip().lower()
+                    payload, status = track_api.handle_track_maintenance(
+                        apply=apply_raw in {"1", "true"}
+                    )
                 else:
                     self._write_json_error(HTTPStatus.NOT_FOUND, "not_found", "")
                     return
@@ -1269,7 +1604,8 @@ def make_handler(
                 return True
             if status >= 400:
                 self._write_json_error(
-                    HTTPStatus(status), payload.get("error", "speak_failed"),
+                    HTTPStatus(status),
+                    payload.get("error", "speak_failed"),
                     payload.get("detail") or payload.get("code", ""),
                 )
             else:
@@ -1340,7 +1676,10 @@ def make_handler(
                 )
                 return True
             from cpt.web import a_share_routes  # noqa: PLC0415
+            from cpt.web import track_api as _track_api  # noqa: PLC0415
 
+            # R59（审计 L5）：自选写操作同样按用户分文件（理由见 _handle_a_share_get）。
+            user_id = _track_api.extract_user_id(self.headers)
             query = parse_qs(path.query)
             code = (query.get("code") or [""])[0].strip()
             if not code:
@@ -1348,6 +1687,10 @@ def make_handler(
                 return True
 
             if path.path == "/api/dashboard/a-share/llm/summarize":
+                # R59（审计 H1）：LLM 端点先过限流。key 是「来源 IP + 端点」，
+                # 超限直接 429 + Retry-After，**绝不**让请求走到付费调用上。
+                if self._rate_limit_or_reject(_llm_limiter, "llm_summarize"):
+                    return True
                 # R45：给结构判断配人话。**入队即返回**，不等模型。
                 # 与 explain 不同的是它**只吃推荐那几行**，不含结构明细 ——
                 # 模型因此没有机会产出与确定性结果**矛盾**的判断
@@ -1365,10 +1708,21 @@ def make_handler(
                         "recommendation 不能为空",
                     )
                     return True
-                self._write_json(a_share_routes.submit_llm_summarize(code, rec))
+                try:
+                    payload = a_share_routes.submit_llm_summarize(code, rec)
+                except a_share_routes.InvalidCodeError as exc:
+                    # R59（审计 M3）：修前这条分支**完全不校验 code**，`?code=ZZZZZZ`
+                    # 会真的去调一次付费 LLM。校验失败回 400 invalid_code，
+                    # 而不是让异常直穿到 do_POST（那会变成连接重置）。
+                    self._write_json_error(HTTPStatus.BAD_REQUEST, "invalid_code", str(exc))
+                    return True
+                self._write_json(payload)
                 return True
 
             if path.path == "/api/dashboard/a-share/llm/explain":
+                # R59（审计 H1）：同 summarize，LLM 端点先过限流。
+                if self._rate_limit_or_reject(_llm_limiter, "llm_explain"):
+                    return True
                 # LLM 解释：入队即返回，不等模型（实测 provider 延迟 0.3–7.4s）。
                 if method != "POST":
                     self._write_json_error(
@@ -1381,16 +1735,22 @@ def make_handler(
                         HTTPStatus.BAD_REQUEST, "structure_required", "structure 不能为空"
                     )
                     return True
-                self._write_json(
-                    a_share_routes.submit_llm_explain(code, structure)  # noqa: SLF001
-                )
+                try:
+                    payload = a_share_routes.submit_llm_explain(code, structure)
+                except a_share_routes.InvalidCodeError as exc:
+                    # R59（审计 M3）：``submit_llm_explain`` 里的 ``_normalize`` 在
+                    # ``try`` 之外**故意**抛，这里必须接住 —— 修前它直穿 do_POST，
+                    # 客户端看到的是连接被重置而不是 400。
+                    self._write_json_error(HTTPStatus.BAD_REQUEST, "invalid_code", str(exc))
+                    return True
+                self._write_json(payload)
                 return True
 
             try:
                 if method == "POST":
-                    payload = a_share_routes.watchlist_add(code)
+                    payload = a_share_routes.watchlist_add(code, user=user_id)
                 else:
-                    payload = a_share_routes.watchlist_remove(code)
+                    payload = a_share_routes.watchlist_remove(code, user=user_id)
             except a_share_routes.InvalidCodeError as exc:
                 self._write_json_error(HTTPStatus.BAD_REQUEST, "invalid_code", str(exc))
                 return True
@@ -1421,20 +1781,83 @@ def make_handler(
                 _LOG.warning("读取 JSON body 失败: %s", exc)
                 return None
 
+        def _rate_limit_or_reject(self, limiter: SlidingWindowLimiter, label: str) -> bool:
+            """超限时写 429 并返回 ``True``（调用方 ``return``）；放行返回 ``False``。
+
+            R59（审计 H1/H3）：bucket key 是「端点标签 + 对端 IP」，**不含**
+            ``X-CPT-User``（S2 身份自报、零校验，拿它当键等于送一个绕过开关，
+            见 :mod:`cpt.web.rate_limit` 的说明）。429 带 ``Retry-After``
+            与 ``X-RateLimit-*``，客户端/脚本能算出该等多久。
+            """
+            source = client_ip(self)
+            decision = limiter.check(f"{label}:{source}")
+            if decision.allowed:
+                return False
+            _LOG.warning(
+                "限流命中 endpoint=%s client=%s 上限=%d/%gs",
+                label,
+                source,
+                limiter.max_events,
+                limiter.window_seconds,
+            )
+            self._write_json_error(
+                HTTPStatus.TOO_MANY_REQUESTS,
+                "rate_limited",
+                f"请求过于频繁（{label} 最多 {limiter.max_events} 次 / "
+                f"{int(limiter.window_seconds)}s），请稍后重试",
+                headers={
+                    "Retry-After": str(decision.retry_after),
+                    "X-RateLimit-Limit": str(limiter.max_events),
+                    "X-RateLimit-Remaining": "0",
+                },
+            )
+            return True
+
         def _write_json(self, payload: dict[str, Any]) -> None:
             self._write_json_status(HTTPStatus.OK, payload)
 
-        def _write_json_error(self, status: HTTPStatus, code: str, message: str) -> None:
+        def _write_json_error(
+            self,
+            status: HTTPStatus,
+            code: str,
+            message: str,
+            *,
+            headers: dict[str, str] | None = None,
+        ) -> None:
             """以 JSON 体返回错误。
 
             **不要用 ``send_error`` 传非 ASCII 文本**：``BaseHTTPRequestHandler``
             把 message 写进 HTTP 状态行，而状态行只能 latin-1 编码 —— 中文消息会
             抛 ``UnicodeEncodeError`` 并**直接断开连接**，浏览器侧只看到网络错误
             （实测踩到：``code=abc`` 的 400 变成了 RemoteDisconnected）。
-            """
-            self._write_json_status(status, {"error": {"code": code, "message": message}})
 
-        def _write_json_status(self, status: HTTPStatus, payload: dict[str, Any]) -> None:
+            :param headers: 额外响应头（R59 新增，429 的 ``Retry-After`` 用）。
+            """
+            self._write_json_status(
+                status, {"error": {"code": code, "message": message}}, headers=headers
+            )
+
+        def _write_json_status(
+            self,
+            status: HTTPStatus,
+            payload: dict[str, Any],
+            *,
+            headers: dict[str, str] | None = None,
+        ) -> None:
+            # R59（审计 L5）：204 / 304 **不得带 body**（RFC 7230 §3.3.2 还禁止带
+            # Content-Length）。原来 DELETE 软删不存在的票时回 204 却照写 JSON 体，
+            # 严格客户端（含 requests 的 keep-alive 复用）会把这段体当成下一个响应
+            # 的开头，连接随之错位。
+            #
+            # 被拒方案：把 track_api 的 204 改成 200。那会破坏「DELETE 幂等用 204
+            # 表达」的既有契约，而且 204 带体这个 bug 在别的路由上也存在，改出口
+            # 一次是修根因。
+            if status in (HTTPStatus.NO_CONTENT, HTTPStatus.NOT_MODIFIED):
+                self.send_response(status)
+                for name, value in (headers or {}).items():
+                    self.send_header(name, value)
+                self.end_headers()
+                return
             try:
                 encoded = json.dumps(
                     payload, ensure_ascii=False, sort_keys=True, allow_nan=False
@@ -1449,31 +1872,89 @@ def make_handler(
             self.send_response(status)
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(encoded)))
+            for name, value in (headers or {}).items():
+                self.send_header(name, value)
             self.end_headers()
             self.wfile.write(encoded)
 
         def do_POST(self) -> None:  # noqa: N802
-            # Trade 回执先于 A 股写路由判定：两者路径前缀不重叠，顺序无关，
-            # 但放在前面是为了让「Trade API 只 POST 一个端点」这件事在代码上一眼可见。
-            if self._handle_trade_post():
-                return
-            # Track 「再讲一次人话」是 POST + 路径里带 code，先于 _handle_track_post
-            # 判定（后者只认 /add /remove /restore 三条字面量）。
-            if self._handle_track_speak():
-                return
-            if self._handle_track_post():
-                return
-            if self._handle_a_share_write("POST"):
-                return
-            self._write_json_error(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed", "")
+            try:
+                # Trade 回执先于 A 股写路由判定：两者路径前缀不重叠，顺序无关，
+                # 但放在前面是为了让「Trade API 只 POST 一个端点」这件事在代码上一眼可见。
+                if self._handle_trade_post():
+                    return
+                # Track 「再讲一次人话」是 POST + 路径里带 code，先于 _handle_track_post
+                # 判定（后者只认 /add /remove /restore 三条字面量）。
+                if self._handle_track_speak():
+                    return
+                if self._handle_track_post():
+                    return
+                if self._handle_a_share_write("POST"):
+                    return
+                self._write_json_error(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed", "")
+            except Exception:
+                self._handle_unexpected("POST")
 
         def do_DELETE(self) -> None:  # noqa: N802
-            if self._handle_a_share_write("DELETE"):
+            try:
+                if self._handle_a_share_write("DELETE"):
+                    return
+                self._write_json_error(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed", "")
+            except Exception:
+                self._handle_unexpected("DELETE")
+
+        def _handle_unexpected(self, method: str) -> None:
+            """写路由的**最后一道**兜底（R59／审计 M3）。
+
+            原来 ``do_POST`` 没有任何 except：路由里漏了一个校验（例如
+            ``a_share_routes.submit_llm_explain`` 在 try 之前调的 ``_normalize``
+            抛 ``InvalidCodeError``）就会一路冒到 socketserver —— 客户端看到的是
+            **连接被重置**，而不是一个能读的 400/500。这里兜住并回结构化 500。
+
+            已经发过响应头就不再写第二遍（半截响应会污染 keep-alive 流）。
+            """
+            _LOG.exception("%s 未捕获异常 path=%s", method, self.path)
+            if self._response_started:
                 return
-            self._write_json_error(HTTPStatus.METHOD_NOT_ALLOWED, "method_not_allowed", "")
+            self._write_json_error(
+                HTTPStatus.INTERNAL_SERVER_ERROR, "internal_error", "服务器内部错误"
+            )
+
+        def handle_one_request(self) -> None:
+            """记录请求开始时刻，供 access log 算耗时（R59／审计 H4）。"""
+            self._request_started = time.monotonic()
+            super().handle_one_request()
+
+        def log_request(self, code: int | str = "-", size: int | str = "-") -> None:
+            """access log（R59／审计 H4）：方法 / 脱敏路径 / 状态 / 耗时 / 来源。
+
+            原来全站**没有任何访问日志** —— ``log_message`` 直接 ``return``，
+            线上排障只能靠猜。这里不覆盖 ``send_response`` 而是覆写官方的
+            ``log_request`` 钩子：它在 ``send_response`` 里被调用，状态码天然准确。
+
+            路径经 :func:`_redact_path_for_log` 脱敏（``?token=`` / ``?webhook=``
+            等的值不会落盘）；耗时用 ``time.monotonic``，不受系统时间调整影响。
+            """
+            self._response_started = True
+            started = self._request_started
+            elapsed_ms = "-" if started is None else f"{(time.monotonic() - started) * 1000:.1f}"
+            _LOG.info(
+                "access %s %s %s status=%s size=%s elapsed_ms=%s",
+                client_ip(self),
+                self.command or "-",
+                _redact_path_for_log(self.path),
+                code,
+                size,
+                elapsed_ms,
+            )
 
         def log_message(self, format: str, *args: object) -> None:
-            return
+            """把 ``BaseHTTPRequestHandler`` 的 stderr 日志改走 ``logging``（R59／审计 H4）。
+
+            只用于 ``log_error`` 路径（404/501 这类由 ``send_error`` 发起的响应），
+            参数里不含查询串；正常请求的访问日志在 :meth:`log_request`。
+            """
+            _LOG.info("http %s - %s", client_ip(self), format % args)
 
     return DashboardHandler
 
@@ -1482,6 +1963,29 @@ def serve_snapshot(
     provider: SnapshotProvider | SnapshotSource,
     host: str = "127.0.0.1",
     port: int = 0,
+    *,
+    max_workers: int = _DEFAULT_MAX_WORKERS,
+    llm_limiter: SlidingWindowLimiter | None = None,
+    quota_limiter: SlidingWindowLimiter | None = None,
 ) -> ThreadingHTTPServer:
-    """Build a server; caller owns lifecycle and must call ``server_close``."""
-    return ThreadingHTTPServer((host, port), make_handler(provider))
+    """Build a server; caller owns lifecycle and must call ``server_close``.
+
+    R59（审计 H4）：返回的 server 是 :class:`_BoundedThreadingHTTPServer`
+    （并发上限 ``max_workers``，默认 :data:`_DEFAULT_MAX_WORKERS`=32，
+    超限的连接当场 503 + ``Retry-After``）。返回标注仍是
+    :class:`ThreadingHTTPServer` —— 子类满足该类型，调用方（
+    ``cpt/web/__main__.py`` 与 ``cpt/web/a_share.py``）无需改。
+    修前这里直接实例化 ``ThreadingHTTPServer``：并发上限在线上**完全没生效**
+    （一个慢 LLM 请求叠几十个并发就能把线程开爆）。
+
+    ``max_workers <= 0`` 表示不设限（测试用；生产默认必须有界）。
+
+    R59（审计 H1/H3）：``llm_limiter`` / ``quota_limiter`` 透传给
+    :func:`make_handler`，让测试可以注入**假时钟**的限流器验证 429 路径
+    （不必 sleep，也不再需要为了拿到限流器去直接实例化私有 server 类）。
+    """
+    return _BoundedThreadingHTTPServer(
+        (host, port),
+        make_handler(provider, llm_limiter=llm_limiter, quota_limiter=quota_limiter),
+        max_workers=max_workers,
+    )

@@ -93,6 +93,10 @@ def _speak_bucket(now: datetime | None = None) -> str:
 #: R52 修：前端曾只传前缀 ``track:{user}:``，于是永远查出 ``count=0``。
 _SPEAK_SUBJECT_PREFIX: Final[str] = "track"
 
+#: 维护端点完整路径。写成字面量是有意的：``scripts/check_doc_drift.py`` 的接口漂移
+#: 门禁只认 ``cpt/web/*.py`` 里带引号的路由字面量，靠段解析拼出来的路径它看不见。
+MAINTENANCE_PATH: Final[str] = "/api/dashboard/track/maintenance"
+
 
 # ── 用户识别 ──────────────────────────────────────────────────────────
 
@@ -480,10 +484,7 @@ def handle_track_speak(user_id: str, code: str) -> tuple[dict[str, Any], int]:
     from cpt.application import llm_cases  # noqa: PLC0415
 
     note_segment = f"用户偏好：{user_note}。" if user_note else ""
-    disclaimer = (
-        f"{note_segment}结构状态翻译与参考位，不构成投资建议。"
-        "T+1 持仓层由交易机负责。"
-    )
+    disclaimer = f"{note_segment}结构状态翻译与参考位，不构成投资建议。T+1 持仓层由交易机负责。"
     subject_id = _subject_id(user_id, bare)
     bucket = _speak_bucket()
 
@@ -550,25 +551,63 @@ def handle_track_history(
 
 def handle_track_maintenance(
     *,
+    apply: bool = False,
     snapshot_retention_days: int = track_store.SNAPSHOT_RETENTION_DAYS,
     recycle_retention_days: int = track_store.RECYCLE_RETENTION_DAYS,
 ) -> tuple[dict[str, Any], int]:
     """日常维护：删过期快照 + 删过期回收站。**给 cron / 手动调**，不在用户路径上。
 
-    返回每步的删除行数。
+    R59（审计 M18）：``prune_snapshots`` / ``prune_removed`` 原先**零调用方**
+    （``route_for`` 认 ``/maintenance``，但 ``app.py`` 的分发没接），两张表只涨不消。
+    这里补齐「dry-run / 真删」两态，契约由 ``deploy/cron/track-maintenance-daily.sh``
+    逐键复核，**不要改键名或形状**（端点路径见 :data:`MAINTENANCE_PATH`）：
+
+    - 不带 ``apply``（或 ``apply`` 不是 ``1``/``true``）：**dry-run**，
+      ``{"ok": true, "dry_run": true, "applied": false, "retention": {...},
+      "pruned_snapshots": N, "pruned_removed": M}``，**一行都不删**；
+    - ``apply=True``：``{"ok": true, "dry_run": false, "applied": true, ...}``，
+      N/M 是**实际删除行数**；
+    - 失败：``{"ok": false, "error": <稳定代号>}, 503``。
+
+    ⚠️ ``pruned_snapshots`` / ``pruned_removed`` 在 **dry-run 模式下是「预计」行数**
+    （只 ``count(*)``，不删），真删模式下才是实际行数。cron 脚本靠 ``dry_run`` /
+    ``applied`` 区分，**不能**只看 ``pruned_*`` 的数值。
+
+    R59（审计 M1）：写库副作用必须**显式**——默认 dry-run 只读；只有调用方明确
+    ``apply=True``（HTTP 侧 ``?apply=1``）才删。这样「一条查询串就删数据」不成立。
+
+    :param apply: ``False``（默认）只报计数，``True`` 执行删除。
     """
+    # 保留期一起回给调用方：cron 日志里能直接看出「当时按什么口径清的」。
+    retention = {
+        "snapshot_days": snapshot_retention_days,
+        "recycle_days": recycle_retention_days,
+    }
     try:
         conn = _conn()
         try:
             track_store.ensure_table(conn)
-            snap_n = track_store.prune_snapshots(conn, snapshot_retention_days)
-            rec_n = track_store.prune_removed(conn, recycle_retention_days)
+            if apply:
+                snap_n = track_store.prune_snapshots(conn, snapshot_retention_days)
+                rec_n = track_store.prune_removed(conn, recycle_retention_days)
+            else:
+                # 只读计数走 storage 的 `count_prunable_*`（web 层禁止出现 SQL，
+                # scripts/check_sql_layering.py 会拦）。同一 `_snapshot_scope`
+                # 保证 dry-run 的数字与随后真删一致。
+                snap_n = track_store.count_prunable_snapshots(conn, snapshot_retention_days)
+                rec_n = track_store.count_prunable_removed(conn, recycle_retention_days)
         finally:
             conn.close()
     except track_store.TrackStoreError as exc:
-        return {"ok": False, "error": str(exc)[:160]}, 503
+        # R59（审计 M4）：TrackStoreError 的原文带 SQL/库对象，不进响应体；
+        # 归因信息留在日志里。
+        _LOG.error("track maintenance failed: %s", exc)
+        return {"ok": False, "error": "track_store_unavailable"}, 503
     return {
         "ok": True,
+        "dry_run": not apply,
+        "applied": apply,
+        "retention": retention,
         "pruned_snapshots": snap_n,
         "pruned_removed": rec_n,
     }, 200
@@ -628,7 +667,7 @@ def route_for(path: str) -> tuple[str, str] | None:
     - ``/api/dashboard/track``                    → ``("list", "")``
     - ``/api/dashboard/track/600519/advice``      → ``("advice", "600519")``
     - ``/api/dashboard/track/600519/history``     → ``("history", "600519")``
-    - ``/api/dashboard/track/maintenance``       → ``("maintenance", "")``
+    - :data:`MAINTENANCE_PATH`                    → ``("maintenance", "")``
     """
     p = urlsplit(path).path
     parts = [seg for seg in p.split("/") if seg]

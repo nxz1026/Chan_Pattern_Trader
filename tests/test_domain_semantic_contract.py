@@ -152,6 +152,10 @@ def test_domain_still_has_no_third_party_imports() -> None:
         "datetime",
         "types",
         "contextlib",
+        # R59：``cpt/domain/market_time.py`` 用 ``ZoneInfo("Asia/Shanghai")`` 钉住
+        # A 股时区（审计 H10/L11）。``zoneinfo`` 自 3.9 起就是标准库，
+        # 原先这份"手抄白名单"只是没收进来。
+        "zoneinfo",
     }
     bad: list[str] = []
     for path in sorted(DOMAIN.glob("*.py")):

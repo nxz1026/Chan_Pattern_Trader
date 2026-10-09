@@ -46,8 +46,14 @@ curl http://127.0.0.1:8010/api/dashboard/snapshot
 
 - **不要** `cp deploy/nginx/cpt-dashboard.conf /etc/nginx/sites-enabled/` ——
   会与 dsh-web 的 `listen 80` 冲突；
-- 正确做法是把文件里的 `location = /cpt`、`location /cpt/api/`、`location = /cpt/`、
-  `location /cpt/` 四块摘进 dsh-web，再 `nginx -t && systemctl reload nginx`。
+- 正确做法是把文件里的 `location = /cpt`、`location = /cpt/`、`location = /cpt/track/`、
+  `location /cpt/`、`location /cpt/api/`、`location /api/` 六块摘进 dsh-web，
+  再 `nginx -t && systemctl reload nginx`。
+
+⚠️ **每一块都要带 `auth_basic`（R59/审计 M11）**：模板此前一个认证都没有，而线上
+R30 早已给 `/cpt/` 系列挂上 `auth_basic "Restricted"` + `/etc/nginx/.htpasswd`。
+只加静态块、漏掉 `/cpt/api/`（或裸 `/api/`）的话，看板 401 而**写库 API 仍然匿名可达**
+—— 那种「看起来加了认证」比没加更危险。做法见下面「/cpt/ 的 Basic Auth」一节。
 
 只有在独立主机或独立 vhost 上才整块使用本文件。模板里的
 `proxy_read_timeout`/301 跳转已与线上实测对齐。Nginx 仅提供静态 Dashboard 和
@@ -87,16 +93,20 @@ grep -c '<新字段名>' /var/www/cpt-dashboard/market_a_share.js   # 0 = 前端
 <summary>手工等价做法（脚本不可用时）</summary>
 
 ```bash
-# R51 更正：R45 拆分后线上加载的是 dash-*.js + dashboard.bundle.js，
-# 下面这份列表已随之更新（canvas_*.js 只剩 B/C，dashboard.js 已随画布 D 下线删除）
-sudo cp dashboard/{index.html,dashboard.css,url_safety.js,cpt_job.js,\
+# R59（审计 M14）更正：R45 拆分后 **index.html 只加载 dashboard.bundle.js**；
+# dash-track.js 由独立页 track.html 单独加载。下面列表里的 dash-core/chrome/
+# structure/signal/chart/alert/ops 是 bundle 的**源**，线上不单独加载，
+# 同步它们只是为了对照/调试（canvas_*.js 只剩 B/C，dashboard.js 已随画布 D 删除）。
+sudo cp dashboard/{index.html,track.html,dashboard.css,url_safety.js,cpt_job.js,\
 canvas_registry.js,canvas_b.js,canvas_c.js,market_a_share.js,inspection_panel.js,\
 dash-*.js,dashboard.bundle.js} \
         /var/www/cpt-dashboard/
 # 首次或依赖有变时还要拷 vendor/
 sudo cp -r dashboard/vendor /var/www/cpt-dashboard/
-# 改过 dash-*.js 后必须重建 bundle，否则线上拿的是旧产物
+# 改过 dash-*.js 后必须重建 bundle，否则线上拿的是旧产物；
+# 重建后用 --check 自验源与 bundle 一致（脚本侧的自动检查同上，见 --verify）
 .venv/bin/python scripts/build_dashboard_bundle.py
+.venv/bin/python scripts/build_dashboard_bundle.py --check
 ```
 
 </details>
@@ -137,10 +147,52 @@ sudo chmod -R u=rwX,go=rX /var/www/cpt-dashboard   # X = 只给目录加执行�
 改完**必须**按文件名逐个 `diff -q` 确认与仓库一致（`vendor/` 也要比对）再刷新页面
 ——走脚本的话这个校验已经自动做了。
 
+### web 根允许的文件（白名单，R59/审计 M13）
+
+`/var/www/cpt-dashboard/` 是一个**公开 web 根**，任何文件都能被直接下载。允许出现的
+**顶层**条目只有三类：
+
+| 允许的条目 | 来源 |
+|---|---|
+| `dashboard-sync.sh` 的 `FILES` 列表（`index.html`、`track.html`、`dashboard.css`、各 `*.js`、`dashboard.bundle.js`） | 本仓 `dashboard/`，脚本同步 |
+| `vendor/` 目录 | 本仓 `dashboard/vendor/`，脚本同步 |
+| `_pkg/` 目录 | **外部项目**（league/collector-cn）的发布通道，不归本仓管，见下节 |
+
+其它一切顶层条目都是**残留**，需要清理 —— 实测曾出现
+`market_a_share.js.bak-*`、根目录的 `run*.sh`、`collector-cn-*.tgz`，其中 `.tgz` 是
+采集机**整包**（含内部拓扑），放在公开 web 根等于可被遍历下载。
+
+`dashboard-sync.sh` 每次运行都会打印**残留清单**（不在白名单里的顶层条目，
+**只报不删**，见脚本里的「残留检查」段）：
+
+```bash
+deploy/dashboard-sync.sh --verify     # 输出「残留检查」段，列出预期外条目
+```
+
+⚠️ **脚本故意不自动删除**（`rm -rf`/`rsync --delete` 会连带删掉 `_pkg/`，而
+`_pkg/` 不归本仓管；handoff §7 记过 `git clean -x` 删掉唯一一份 webhook 的坑）。
+删除前先备份到 `/tmp`，再人工确认 —— 清理动作由人拍板。
+
 ## systemd
 
 `deploy/systemd/cpt-dashboard.service` 是 hardened 模板（`NoNewPrivileges=true`
-`PrivateTmp=true` `EnvironmentFile=` + `Restart=on-failure`）。安装前**先创建环境文件**，
+`PrivateTmp=true` `ProtectSystem=strict` `ProtectHome=read-only`
+`CapabilityBoundingSet=`(空) `EnvironmentFile=` + `Restart=on-failure`；
+R59/审计 L1 把原来的两项加固补成了整套）。
+
+⚠️ **服务不是只读的**（旧 `Description` 曾自称 read-only，与行为不符）：
+它会写 `cpt_dashboard_run`，以及自选列表 / 决策状态两个 JSON 文件。所以
+`ReadWritePaths=` 显式放开了两个运行期目录：
+
+- `/home/ubuntu/trade_cpt/`（`CPT_TRADE_DIR` 的默认值，`state.json`）
+- `/home/ubuntu/.cache/cpt/`（自选 `watchlist.json` 等）
+
+`ProtectHome=read-only` 则保证 `~/.dbconfig`（数据库凭据）**只读**可用 ——
+刻意不开 `ProtectHome=false`，否则等于把整个 `~/.dbconfig` 暴露成可写。
+改 `ReadWritePaths=` 前先 grep `cpt/` 里的写路径（`mkdir`/`write_text`/`os.replace`），
+**漏一个就是运行时 EROFS**。
+
+安装前**先创建环境文件**，
 否则服务会拒绝启动（模板里的 `EnvironmentFile=` 故意不带 `-` 前缀，文件缺失时直接报
 `Failed to load environment files`，而不是静默把参数展开成空串）：
 
@@ -159,6 +211,13 @@ sudo cp deploy/systemd/cpt-dashboard.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now cpt-dashboard
 sudo systemctl status cpt-dashboard
+```
+
+加固改动部署前先离线自验（不需要真起服务）：
+
+```bash
+systemd-analyze verify deploy/systemd/cpt-dashboard.service          # 语法/单元引用
+systemd-analyze security --offline=yes deploy/systemd/cpt-dashboard.service  # 逐项暴露面
 ```
 
 `--mode realtime` **已可用**（真实 engine snapshot provider 已接线）：线上服务就是
@@ -300,16 +359,25 @@ ssh oracle 'sudo -n systemctl restart cpt-dashboard && sleep 3 && \
 
 2026-10-02 补：`/cpt/` 此前是同一个 nginx 站点上**唯一没有 `auth_basic` 的项目**
 （`/emotion/` `/dashboard/` `/resume` 三个都有），静态看板与 `/cpt/api/` 全部匿名
-可读可写地挂在公网上。现在三处都挂了 `auth_basic "Restricted"` + `/etc/nginx/.htpasswd`。
+可读可写地挂在公网上。现在五处都挂了 `auth_basic "Restricted"` + `/etc/nginx/.htpasswd`。
 
-### 坑一：三个 location 都要加，漏一个等于没做
+### 坑一：每个承载数据的 location 都要加，漏一个等于没做
 
-    location /cpt/api/     ← 独立块，且比 /cpt/ 更具体，nginx 按最长前缀匹配
-    location = /cpt/       ← 静态首页
-    location /cpt/         ← 静态资源
+    location /cpt/api/       ← 独立块，且比 /cpt/ 更具体，nginx 按最长前缀匹配
+    location /api/           ← 裸反代，同样能写库
+    location = /cpt/         ← 静态首页
+    location = /cpt/track/   ← 「我的追踪」独立页
+    location /cpt/           ← 静态资源
 
-只给静态两块加认证时，实测是 `/cpt/` → 401 而 `/cpt/api/...` → **200 无凭据可读
+只给静态那几块加认证时，实测是 `/cpt/` → 401 而 `/cpt/api/...` → **200 无凭据可读
 可写**。看起来做了、其实没做 —— 比完全没做更危险。
+
+⚠️ R59（审计 M11）：`deploy/nginx/cpt-dashboard.conf` 这个**参考模板**此前
+**一块 auth_basic 都没有**（线上 R30 的改动只落在 `/etc/nginx/sites-enabled/dsh-web`，
+没回流到模板）。照模板整块部署就会得到一个未认证的看板 + 未认证写库 API。
+现已按上面的写法给模板的五块都补上 `auth_basic` + `/etc/nginx/.htpasswd`。
+⚠️ 口令文件路径写死在配置里没问题，**但不要把账号口令写进配置**：
+线上口令等于仓库默认值的问题见审计 S1，另行处置。
 
 ### 坑二：不能用 URL 内嵌凭据驱动这个页面
 
@@ -366,22 +434,24 @@ REPO=/home/ubuntu/DSH/Chan_Pattern_Trader
 # ⚠️ 这个清单**必须与 deploy/cron/crontab 的作业一一对应**（R57 新增第 4 条时
 # 这里漏过一次：循环里少了 dashboard-run-prune-daily ⇒ 照本段部署，
 # 保留期作业**根本不会进 crontab**，而看板对外毫无任何异常 —— 静默到下个月
-# 才可能被发现；R57 补第 5 条日报时同样要在这里加一行）。
+# 才可能被发现；R57 补第 5 条日报、R59 补第 6 条 track-maintenance 时
+# 同样要在这里加一行）。
 # 改 crontab 里的作业时，**同一个 commit 里改这里**。
 # 另有测试兜底：tests/test_cron_daily_report.py 会按日志名双向比对
 # crontab 与日报的 JOBS（「加了 cron 忘了登记日报」会被逮到）。
 for job in factor-recompute-daily run-inspection-daily \
-           run-metric-prune-daily dashboard-run-prune-daily cron-daily-report; do
+           run-metric-prune-daily dashboard-run-prune-daily \
+           track-maintenance-daily cron-daily-report; do
   crontab -l | grep -v "$job.sh" > /tmp/cron.new
   grep -E "^\S+ \S+ \* \* \* .*$job\.sh" "$REPO/deploy/cron/crontab" >> /tmp/cron.new
   crontab /tmp/cron.new
 done
-# 复核：五条 CPT 作业都在，且其它作业还在
-crontab -l | grep -cE '(factor-recompute|run-inspection|run-metric-prune|dashboard-run-prune|cron-daily-report)-daily'
+# 复核：六条 CPT 作业都在，且其它作业还在
+crontab -l | grep -cE '(factor-recompute|run-inspection|run-metric-prune|dashboard-run-prune|track-maintenance|cron-daily-report)-daily'
 crontab -l   # 逐条看，别只看数量
 ```
 
-> 仓内 `deploy/cron/crontab` 只含 CPT 这**五条**作业，**不含**机器上其它项目
+> 仓内 `deploy/cron/crontab` 只含 CPT 这**六条**作业，**不含**机器上其它项目
 > （采集、看门狗等）的作业 —— 那些属于别的项目，不该进本仓的真相源。
 > 所以「仓内文件 = 线上完整 crontab」这个假设**不成立**，装之前必须先 `crontab -l`。
 
@@ -404,9 +474,11 @@ crontab -l   # 逐条看，别只看数量
 | 03:40 | `run-inspection-daily.sh` | 巡检水位+数据源 → 飞书告警 | 只写巡检结论行 |
 | 04:10 | `run-metric-prune-daily.sh` | 清 `cpt_run_metric` 过期行 | run 90 天 / inspection 30 天 |
 | 04:30 | `dashboard-run-prune-daily.sh` | 清 `cpt_dashboard_run` 过期行 | 默认 7 天（R57 新增） |
-| 07:00 | `cron-daily-report.sh` | 扫上面 4 条的日志，发现失败发飞书 | R57 新增 |
+| 07:30 | `track-maintenance-daily.sh` | 清追踪过期快照/回收站（loopback 调 `GET /api/dashboard/track/maintenance?apply=1`） | 快照 30 天 / 回收站 90 天（R59 审计 M18 新增） |
+| 11:00 | `cron-daily-report.sh` | 扫上面 5 条的日志，发现失败发飞书 | R57 新增 |
 
-刻意错开：两条清理依次排在巡检之后；**日报排在全部作业跑完之后**，这样它报出来的
+刻意错开：两条清理依次排在巡检之后；`track-maintenance` 放在北京 15:30（A 股收盘后
+半小时，避开盘中写入）；**日报排在全部作业跑完之后**，这样它报出来的
 每一条都已经过了完整的重试窗口仍不成立 —— 那才是真需要人看的东西。
 A 股快照 timer 在 08:00 UTC。
 
@@ -424,7 +496,7 @@ R57 上线前审计发现：作业失败时的行为是「非零退出 + 写一�
 以及「上一轮还在跑，跳过」（它 `exit 0`，扫不到失败标记，但「今天没执行」
 和「跑了成功」必须能区分）。
 
-⚠️ **加 cron 作业时必须同步两处**，否则新作业的失败永远不出现���日报里，
+⚠️ **加 cron 作业时必须同步两处**，否则新作业的失败永远不会出现在日报里，
 而日报看起来一切正常：
 1. `scripts/cron_daily_report.py` 的 `JOBS`（扫哪些日志）
 2. `deploy/cron/crontab`（什么时候扫）
@@ -432,7 +504,7 @@ R57 上线前审计发现：作业失败时的行为是「非零退出 + 写一�
 有测试兜底：`tests/test_cron_daily_report.py::test_every_cron_script_is_scanned_by_the_daily_report`
 按日志名双向比对 crontab 与 `JOBS`。
 
-### ⚠️ cron 必须自己 source env 文件 —— 现在**五个脚本都会 source**（R57 起）
+### ⚠️ cron 必须自己 source env 文件 —— 现在**六个脚本都会 source**（R57 起）
 
 `CPT_FEISHU_WEBHOOK` 只存在于 `deploy/env/cpt-dashboard.env`（被 gitignore）。
 systemd 那边靠 `EnvironmentFile=`，**cron 没有等价物** —— 忘了 source 的话，
@@ -443,7 +515,7 @@ systemd 那边靠 `EnvironmentFile=`，**cron 没有等价物** —— 忘了 so
 > 那些 `${VAR:-默认}` 赋值在脚本读 env 之前就定死了。
 > 这比「只影响日志的配置变量」更隐蔽：它连日志都不影响，是**无声**地不生效。
 
-R57 起五个脚本统一：
+R57 起各脚本（现在是六个）统一：
 
 - **env 文件存在** → `set -a; . $ENV_FILE; set +a`，env 里的值生效；
 - **env 文件不存在** → 用脚本内默认值，**继续跑**（清理/重算不该因为

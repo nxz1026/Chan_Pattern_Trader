@@ -25,6 +25,7 @@ R44 修的 bug 只有一个，但它杀的是**一整轮 3036 只**的任务：
 from __future__ import annotations
 
 import json
+import logging
 from typing import Any
 
 import pytest
@@ -285,3 +286,28 @@ def test_normalize_code(raw: str, want: str) -> None:
 )
 def test_is_no_data_matrix(payload: dict[str, Any], want: bool) -> None:
     assert _is_no_data(payload, str(payload.get("message") or "")) is want
+
+
+# ---------------------------------------------------------------------------
+# data 里的非对象行（R59 审计 L8）
+#
+# 改前 ``row.get(...)`` 直接抛 ``AttributeError`` —— 不是 ``EastmoneyActionError``，
+# 上层按领域异常接不住，一条字符串就把整只票（乃至整轮任务）的公司行动全部丢掉。
+# ---------------------------------------------------------------------------
+
+
+def test_non_object_rows_are_skipped_with_a_warning(caplog: pytest.LogCaptureFixture) -> None:
+    good = dict(PAYLOAD_WITH_DIVIDEND["result"]["data"][0])
+    payload: dict[str, Any] = {
+        "version": PAYLOAD_WITH_DIVIDEND["version"],
+        "result": {"pages": 1, "data": ["oops", 42, good]},
+        "success": True,
+        "code": 0,
+    }
+    with caplog.at_level(logging.WARNING, logger="cpt.adapters.eastmoney_actions"):
+        actions = _client(payload).fetch_actions("001238")
+    assert len(actions) == 1, "坏行跳过，好行照常解析"
+    assert actions[0].source == "eastmoney"
+    assert any("不是 JSON 对象" in record.getMessage() for record in caplog.records), (
+        "跳过坏行必须留可观测痕迹"
+    )
