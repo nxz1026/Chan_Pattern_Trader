@@ -220,10 +220,34 @@ def metric_from_snapshot(
                 "factor_coverage_source": (
                     "snapshot" if raw_coverage is not None else "unimplemented"
                 ),
+                # R62：A 股「K 线为什么没跟上」的诊断跟着水位行一起落库 ——
+                # 告警通道（``scripts/run_inspection.py``）读的是**水位表**，
+                # 不是快照；不把它带下来，告警只能说「stale=True」，说不了
+                # 「缺复权因子、滞后 5 个交易日」，而后者才是能直接去修的那句话。
+                "ashare_staleness": _ashare_staleness(quality),
             },
             ensure_ascii=False,
         ),
     )
+
+
+def _ashare_staleness(quality: Any) -> dict[str, Any] | None:
+    """从 ``data_quality`` 里摘出 A 股陈旧诊断；不陈旧（或没有）返回 ``None``。
+
+    ``None`` 而不是空 dict：``detail`` 是 jsonb，空对象会在巡检面板上渲染成一个
+    无意义的 ``{}``；缺键则什么都不显示。
+    """
+    if not isinstance(quality, dict) or not quality.get("stale"):
+        return None
+    keys = (
+        "stale_reason",
+        "stale_reason_day",
+        "stale_last_bar_date",
+        "stale_cutoff_date",
+        "stale_lag_days",
+    )
+    out = {key: quality[key] for key in keys if quality.get(key) is not None}
+    return out or None
 
 
 def _len_of(value: Any) -> int:

@@ -56,7 +56,12 @@ from cpt.storage import run_metric_store as rms  # noqa: E402
 
 _LOG = logging.getLogger("run_inspection")
 
-__all__ = ["STALE_METRIC_MS", "build_report", "main"]
+__all__ = [
+    "ASHARE_STALE_LAG_ALERT_DAYS",
+    "STALE_METRIC_MS",
+    "build_report",
+    "main",
+]
 
 #: 水位行多久算"流本身断了"。轮询是 30s 一轮，10 分钟足够宽松。
 STALE_METRIC_MS: Final[int] = 10 * 60 * 1000
@@ -64,18 +69,107 @@ STALE_METRIC_MS: Final[int] = 10 * 60 * 1000
 #: 结构计数相对上一行的变化幅度，超过它就当"突变"
 COUNT_JUMP_RATIO: Final[float] = 0.15
 
+#: A 股「K 线没跟上」告警的**最小滞后交易日数**。
+#:
+#: 为什么不按 ``stale=True`` 直接报警：``stale`` 只回答「末根 bar 不是最近的
+#: 交易日」，而 A 股的 ``asel.ref_adjust_factor`` 是**按需**补的（``FactorEnsurer``），
+#: 当日因子常常要等到收盘后才齐。2026-10-14 实测跟踪清单（热池 50 ∪ 自选 1）
+#: 51 只：lag=0 的 9 只、lag=1 的 20 只（当日因子未发布，**常态**）、lag≥2 的
+#: 22 只（其中 20 只卡在 09-30）。把 lag=1 也报警 = 每天 20+ 条噪音，真断的
+#: 那 20 只反而被淹掉 —— 正是 ``STALE_METRIC_MS`` 注释里 R38 那条教训。
+#: 只对「缺了 2 个以上交易日」报警：那已经不是发布时差，是链路断了。
+ASHARE_STALE_LAG_ALERT_DAYS: Final[int] = 2
+
+#: 告警正文里最多贴几条**问题项**。
+#:
+#: A 股一批就是 50+ 只（``scripts/snapshot_a_share_batch.py --limit 50``），
+#: 全贴会顶到 ``cpt/adapters/feishu.py`` 的 ``_MAX_CHARS = 3500`` 上限而被截断 ——
+#: 而截断砍掉的正好是最后那几条（最可能是这轮**新变坏**的）。状态指纹
+#: ``_state_key(report)`` 仍用**全量**问题列表：省的是版面，不是信息。
+ALERT_PROBLEM_LINES: Final[int] = 15
+
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
 
 
+def _recent_rows(conn: Any) -> list[Any]:
+    """最近的 run 水位行，**时间正序**返回：主流 200 条 + A 股单开一窗。
+
+    ## 为什么 A 股要单开一窗（R62 实测）
+
+    水位流是**加密轮询**在喂：30s 一轮、每次一行，``limit=200`` 只覆盖最近
+    ~100 分钟；而 A 股一天只在 16:00（北京）写一轮（``cpt-dashboard-ashare.timer``）。
+    于是 2026-10-14 实测 ``run_inspection.py --print`` 报 ``symbols: 1,
+    problems: 0`` —— 154 只 A 股里 51 行 ``health=failing`` **全在窗口外**，
+    A 股在巡检里等于不存在。单开一窗后 A 股 100% 可见；两窗各自成序列，
+    加密侧的突变检测不受影响。
+    """
+    rows = list(rms.recent_metrics(conn, kind=rms.KIND_RUN, limit=200))
+    try:
+        # A 股一天一轮、每轮 50 只（``snapshot_a_share_batch.py --limit 50``），
+        # 所以窗口要**宽**：取满 store 的上限（1000），把历次批次的每一只都纳进来。
+        # 实测 2026-10-14：cn 行总共才 647 行、154 只；limit=200 时只能看见 48 只。
+        cn = rms.recent_metrics(conn, kind=rms.KIND_RUN, market="cn", limit=1000)
+    except TypeError:  # 假实现/旧签名：不因为多要一窗就整个巡检崩掉
+        _LOG.warning("recent_metrics 不支持 market= 过滤，A 股可能不在窗口里", exc_info=True)
+        cn = ()
+    seen = {(r["market"], r["symbol"], r["observed_at"]) for r in rows}
+    for row in cn:
+        key = (row["market"], row["symbol"], row["observed_at"])
+        if key not in seen:
+            rows.append(row)
+            seen.add(key)
+    rows.sort(key=lambda r: r["observed_at"] or 0)
+    return rows
+
+
+def _ashare_staleness(row: Any) -> dict[str, Any]:
+    """水位行 ``detail`` 里的 A 股陈旧诊断（由 ``run_metric`` 写入，见 R62）。"""
+    detail = row.get("detail") if hasattr(row, "get") else None
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail)
+        except (TypeError, ValueError):
+            return {}
+    if not isinstance(detail, dict):
+        return {}
+    block = detail.get("ashare_staleness")
+    return block if isinstance(block, dict) else {}
+
+
+def _ashare_stale_lag(row: Any) -> int | None:
+    """滞后几个交易日；诊断里没有就 ``None``（判不了 ⇒ 不参与分级）。"""
+    lag = _ashare_staleness(row).get("stale_lag_days")
+    return int(lag) if isinstance(lag, (int, float)) and not isinstance(lag, bool) else None
+
+
+def _ashare_stale_suffix(row: Any) -> str:
+    """把 A 股陈旧诊断拼成**一句能照着去修**的话（没有诊断就空串）。"""
+    block = _ashare_staleness(row)
+    if not block:
+        return ""
+    parts: list[str] = []
+    lag = block.get("stale_lag_days")
+    if isinstance(lag, (int, float)) and not isinstance(lag, bool):
+        parts.append(f"滞后 {int(lag)} 个交易日")
+    reason = block.get("stale_reason")
+    if reason:
+        day = block.get("stale_reason_day")
+        parts.append(f"原因 {reason}{f'@{day}' if day else ''}")
+    last_bar = block.get("stale_last_bar_date")
+    if last_bar:
+        parts.append(f"末根 K 线 {last_bar}")
+    return ("、" + "、".join(parts)) if parts else ""
+
+
 def build_report(conn: Any) -> dict[str, Any]:
     """只读：把水位流 + 数据源状态汇成一份结论。"""
-    rows = rms.recent_metrics(conn, kind=rms.KIND_RUN, limit=200)
+    rows = _recent_rows(conn)  # 时间正序（含 A 股单开的那一窗，见 _recent_rows）
     problems: list[str] = []
     degraded: list[str] = []
     per_symbol: dict[tuple[str, str], dict[str, Any]] = {}
-    for row in reversed(rows):  # 时间正序，后写覆盖先写 = 取最新
+    for row in rows:  # 时间正序，后写覆盖先写 = 取最新
         per_symbol[(row["market"], row["symbol"])] = row
 
     if not rows:
@@ -91,11 +185,21 @@ def build_report(conn: Any) -> dict[str, Any]:
 
     for (market, symbol), row in per_symbol.items():
         tag = f"{market}/{symbol}"
+        lag = _ashare_stale_lag(row) if market == "cn" else None
+        shallow = lag is not None and lag < ASHARE_STALE_LAG_ALERT_DAYS
         if row["health"] == "failing":
-            problems.append(
-                f"{tag} health=failing（缺口 {row['gap_count']}、stale={row['stale']}、"
-                f"bars={row['bar_count']}）"
-            )
+            if shallow:
+                # A 股当日因子未发布是**常态**（阈值理由见常量注释）：只记降级，
+                # 不进告警正文，免得每天 20+ 条噪音把真断的那批淹掉。
+                degraded.append(
+                    f"{tag} K 线滞后（{_ashare_stale_suffix(row).lstrip('、') or '无诊断'}）"
+                    f" —— 未达告警线 {ASHARE_STALE_LAG_ALERT_DAYS} 个交易日，仅记录"
+                )
+            else:
+                problems.append(
+                    f"{tag} health=failing（缺口 {row['gap_count']}、stale={row['stale']}、"
+                    f"bars={row['bar_count']}{_ashare_stale_suffix(row)}）"
+                )
         elif row["health"] == "degraded":
             degraded.append(f"{tag} degraded")
         if not row["bar_count"]:
@@ -105,7 +209,7 @@ def build_report(conn: Any) -> dict[str, Any]:
     jumps: list[str] = []
     fingerprint_changes: list[str] = []
     by_symbol: dict[tuple[str, str], list[dict[str, Any]]] = {}
-    for row in reversed(rows):
+    for row in rows:
         by_symbol.setdefault((row["market"], row["symbol"]), []).append(row)
     for (market, symbol), seq in by_symbol.items():
         tag = f"{market}/{symbol}"
@@ -219,7 +323,12 @@ def main(argv: list[str] | None = None) -> int:
 
         # 决定要不要发
         lines: list[str] = []
-        lines += [f"🔴 {p}" for p in report["problems"]]
+        lines += [f"🔴 {p}" for p in report["problems"][:ALERT_PROBLEM_LINES]]
+        if report["problems"][ALERT_PROBLEM_LINES:]:
+            lines.append(
+                f"🔴 …… 另有 {len(report['problems']) - ALERT_PROBLEM_LINES} 条问题项"
+                "（完整列表见巡检日志）"
+            )
         lines += [f"🟡 {d}" for d in report["degraded"][:5]]
         if report["degraded"][5:]:
             lines.append(f"🟡 …… 另有 {len(report['degraded']) - 5} 条降级项")

@@ -1320,6 +1320,11 @@ def _attach_staleness(snapshot: dict[str, Any], client: Any) -> None:
     quality["missing_trade_days"] = [d.isoformat() for d in missing]
     quality["stale_last_bar_date"] = last_bar_day.isoformat()
     quality["stale_cutoff_date"] = cutoff.isoformat()
+    # 滞后**深度**（缺几个交易日）：告警通道要拿它做分级 —— 见
+    # ``scripts/run_inspection.py`` 的 ``ASHARE_STALE_LAG_ALERT_DAYS``。
+    # 2026-10-14 实测：跟踪清单 51 只里 lag=0 的 9 只、lag=1 的 20 只（因子当日
+    # 未发布，**常态**）、lag≥2 的 22 只（其中 20 只卡在 09-30）。
+    quality["stale_lag_days"] = len(missing)
     # 「K 线没跟上」不等于「上游没入库」：2026-10-14 实拉 600519，
     # ``public.daily_bar`` 有当天行（全市场 5224 只），但 ``asel.ref_adjust_factor``
     # 当天只有 16 个 code、600519 不在其中 —— K 线只认带因子的 bar，于是末根
