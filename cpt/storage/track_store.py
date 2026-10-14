@@ -34,6 +34,7 @@ __all__ = [
     "count_prunable_removed",
     "count_prunable_snapshots",
     "ensure_table",
+    "is_tracked",
     "list_active",
     "list_removed",
     "list_snapshots",
@@ -180,6 +181,34 @@ def restore(conn: Any, user_id: str, code: str) -> bool:
         conn.rollback()
         raise TrackStoreError(f"restore(user_id={user_id!r}, code={code!r}) failed: {exc}") from exc
     return bool(affected > 0)
+
+
+def is_tracked(conn: Any, code: str) -> bool:
+    """该 ``code`` 是否被**任一**用户的活跃追踪行包含（推送范围判据）。
+
+    不带 ``user_id`` 过滤：飞书 webhook 是全局一条，没有「谁的关注列表」这一维度，
+    所以判据取「有人关注即可」。软删（``removed_at`` 非空）不算。
+
+    :raises TrackStoreError: 读失败 —— 与 ``list_active`` 同一纪律，
+        **绝不用 False 冒充「没人追踪」**（那会让推送范围静默失效；
+        R59 的取舍是 fail-closed：读不到就不推）。
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM public.cpt_track
+                    WHERE code = %s AND removed_at IS NULL
+                )
+                """,
+                (code,),
+            )
+            row = cur.fetchone()
+    except Exception as exc:
+        raise TrackStoreError(f"is_tracked(code={code!r}) failed: {exc}") from exc
+    return bool(row[0]) if row is not None else False
 
 
 def list_active(conn: Any, user_id: str) -> list[dict[str, Any]]:

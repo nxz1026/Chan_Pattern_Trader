@@ -23,6 +23,22 @@ from collections.abc import Iterator
 import pytest
 from cpt.application import signal_notify
 from cpt.domain.models import Signal
+from cpt.storage.track_store import TrackStoreError
+
+#: 哑连接：`is_tracked` 在下面被 monkeypatch 掉，只要一个非 None 的占位。
+_CONN = object()
+
+
+def _notify(signal, *, prev_status, code="600519", event_time, conn=_CONN):
+    """`maybe_notify` 的测试包装。
+
+    本文件所有用例都打 600519（`is_tracked` 又被上面的 autouse fixture 顶掉），
+    把这两个恒定参数收进默认值：一是少噪音，二是 `signal_notify.maybe_notify`
+    全名太长，直接写会把行宽顶到 100 以上（ruff E501）。
+    """
+    return signal_notify.maybe_notify(
+        signal, prev_status=prev_status, code=code, event_time=event_time, conn=conn
+    )
 
 # ── 工具 ──────────────────────────────────────────────────────────
 
@@ -59,6 +75,16 @@ class _Recorder:
 
 
 @pytest.fixture(autouse=True)
+def _tracked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """默认「该 code 在关注列表里」。
+
+    本文件测的是节流与消息形状，不是范围收敛（那组用例自己在用例内改这个
+    假实现），所以默认放行 —— 否则每个用例都得造一条真库记录。
+    """
+    monkeypatch.setattr(signal_notify, "is_tracked", lambda conn, code: True)
+
+
+@pytest.fixture(autouse=True)
 def _isolate() -> Iterator[None]:
     """每个用例前清节流缓存 + 还原时间源与推送函数（兜底）。"""
     signal_notify.reset_for_test()
@@ -73,7 +99,7 @@ def _isolate() -> Iterator[None]:
 def test_first_event_pushes_and_records_throttle() -> None:
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
-    pushed = signal_notify.maybe_notify(_mk_signal(), prev_status=None, code="600519", event_time=1)
+    pushed = _notify(_mk_signal(), prev_status=None, event_time=1, conn=_CONN)
     assert pushed is True
     assert len(rec.calls) == 1
     title, lines = rec.calls[0]
@@ -86,10 +112,10 @@ def test_same_signal_same_status_within_24h_skipped() -> None:
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
     sig = _mk_signal()
-    assert signal_notify.maybe_notify(sig, prev_status=None, code="600519", event_time=1) is True
+    assert _notify(sig, prev_status=None, event_time=1, conn=_CONN) is True
     # 推第二次同 (signal_id, status)
     assert (
-        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=2)
+        _notify(sig, prev_status="structure_ready", event_time=2, conn=_CONN)
         is False
     )
     assert len(rec.calls) == 1
@@ -100,14 +126,14 @@ def test_same_signal_different_status_pushes_again() -> None:
     signal_notify._set_pusher_for_test(rec)
     # 第一次：structure_ready
     assert (
-        signal_notify.maybe_notify(_mk_signal(), prev_status=None, code="600519", event_time=1)
+        _notify(_mk_signal(), prev_status=None, event_time=1, conn=_CONN)
         is True
     )
     # 第二次：跳到 confirmed（key 不同）
     sig_confirmed = _mk_signal(status="confirmed")
     assert (
-        signal_notify.maybe_notify(
-            sig_confirmed, prev_status="structure_ready", code="600519", event_time=2
+        _notify(
+            sig_confirmed, prev_status="structure_ready", event_time=2, conn=_CONN
         )
         is True
     )
@@ -120,14 +146,14 @@ def test_different_signal_same_status_pushes_again() -> None:
     signal_notify._set_pusher_for_test(rec)
     # 同一 status、不同 signal_id —— key 不同，第二次也推
     assert (
-        signal_notify.maybe_notify(
-            _mk_signal(signal_id="sig-A"), prev_status=None, code="600519", event_time=1
+        _notify(
+            _mk_signal(signal_id="sig-A"), prev_status=None, event_time=1, conn=_CONN
         )
         is True
     )
     assert (
-        signal_notify.maybe_notify(
-            _mk_signal(signal_id="sig-B"), prev_status=None, code="600519", event_time=2
+        _notify(
+            _mk_signal(signal_id="sig-B"), prev_status=None, event_time=2, conn=_CONN
         )
         is True
     )
@@ -140,7 +166,7 @@ def test_status_unchanged_short_circuits_without_recording() -> None:
     sig = _mk_signal()
     # prev_status 与 signal.status 相同（兜底，正常不会到这里）
     assert (
-        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=1)
+        _notify(sig, prev_status="structure_ready", event_time=1, conn=_CONN)
         is False
     )
     assert rec.calls == []
@@ -151,7 +177,7 @@ def test_confirmed_message_carries_signal_id_and_prev() -> None:
     signal_notify._set_pusher_for_test(rec)
     sig = _mk_signal(signal_id="sig-X", status="confirmed")
     assert (
-        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=42)
+        _notify(sig, prev_status="structure_ready", event_time=42, conn=_CONN)
         is True
     )
     _, lines = rec.calls[0]
@@ -166,12 +192,12 @@ def test_pusher_returning_false_does_not_consume_throttle() -> None:
     signal_notify._set_pusher_for_test(rec)
     sig = _mk_signal(status="confirmed")
     assert (
-        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=1)
+        _notify(sig, prev_status="structure_ready", event_time=1, conn=_CONN)
         is False
     )
     # 同 (sig, status) —— 节流未消耗，再次调
     assert (
-        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=2)
+        _notify(sig, prev_status="structure_ready", event_time=2, conn=_CONN)
         is False
     )
     assert len(rec.calls) == 2
@@ -184,7 +210,7 @@ def test_pusher_raising_is_swallowed() -> None:
         raise RuntimeError("feishu broken")
 
     signal_notify._set_pusher_for_test(boom)
-    pushed = signal_notify.maybe_notify(_mk_signal(), prev_status=None, code="600519", event_time=1)
+    pushed = _notify(_mk_signal(), prev_status=None, event_time=1, conn=_CONN)
     assert pushed is False
 
 
@@ -195,19 +221,19 @@ def test_throttle_window_can_be_advanced_by_clock() -> None:
     sig = _mk_signal(status="confirmed")
     # t = 0
     assert (
-        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=0)
+        _notify(sig, prev_status="structure_ready", event_time=0, conn=_CONN)
         is True
     )
     # t = 23h —— 仍在窗口内
     signal_notify._set_clock_for_test(lambda: 1_700_000_000_000 + 23 * 3600 * 1000)
     assert (
-        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=1)
+        _notify(sig, prev_status="structure_ready", event_time=1, conn=_CONN)
         is False
     )
     # t = 25h —— 窗口外
     signal_notify._set_clock_for_test(lambda: 1_700_000_000_000 + 25 * 3600 * 1000)
     assert (
-        signal_notify.maybe_notify(sig, prev_status="structure_ready", code="600519", event_time=2)
+        _notify(sig, prev_status="structure_ready", event_time=2, conn=_CONN)
         is True
     )
     assert len(rec.calls) == 2
@@ -226,8 +252,8 @@ def test_expired_throttle_entries_are_pruned_on_write() -> None:
 
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
-    pushed = signal_notify.maybe_notify(
-        _mk_signal(signal_id="new-signal"), prev_status=None, code="600519", event_time=1
+    pushed = _notify(
+        _mk_signal(signal_id="new-signal"), prev_status=None, event_time=1, conn=_CONN
     )
 
     assert pushed is True
@@ -244,8 +270,8 @@ def test_throttle_table_is_bounded_by_max_entries() -> None:
 
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
-    pushed = signal_notify.maybe_notify(
-        _mk_signal(signal_id="new-signal"), prev_status=None, code="600519", event_time=1
+    pushed = _notify(
+        _mk_signal(signal_id="new-signal"), prev_status=None, event_time=1, conn=_CONN
     )
 
     assert pushed is True
@@ -254,3 +280,78 @@ def test_throttle_table_is_bounded_by_max_entries() -> None:
     oldest = (f"sig-{signal_notify.MAX_THROTTLE_ENTRIES - 1}", "structure_ready")
     assert oldest not in signal_notify._LAST_PUSH_MS
     assert ("new-signal", "structure_ready") in signal_notify._LAST_PUSH_MS
+
+
+# ── 推送范围（R4/C2） ───────────────────────────────────────────────
+
+
+def test_not_tracked_is_skipped_without_writing_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """不在关注列表 → 不推，且**不写**节流表。
+
+    "没人关注"与"被节流"是两回事：写进 ``_LAST_PUSH_MS`` 会让该信号即使后来被
+    加入关注，24h 内也推不出来。
+    """
+    monkeypatch.setattr(signal_notify, "is_tracked", lambda conn, code: False)
+    rec = _Recorder()
+    signal_notify._set_pusher_for_test(rec)
+
+    pushed = _notify(
+        _mk_signal(), prev_status=None, event_time=1, conn=_CONN
+    )
+    assert pushed is False
+    assert rec.calls == []
+    assert signal_notify._LAST_PUSH_MS == {}
+
+
+def test_missing_conn_fails_closed(caplog: pytest.LogCaptureFixture) -> None:
+    """``conn=None`` → 不推 + warning（调用点漏传时绝不误推）。"""
+    rec = _Recorder()
+    signal_notify._set_pusher_for_test(rec)
+    with caplog.at_level("WARNING"):
+        pushed = _notify(
+            _mk_signal(), prev_status=None, event_time=1, conn=None
+        )
+    assert pushed is False
+    assert rec.calls == []
+    assert "未提供连接" in caplog.text
+
+
+def test_track_store_failure_fails_closed(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """关注范围读失败（``TrackStoreError``）→ 不推 + warning。
+
+    fail-closed：读不到就当作"没资格推"，绝不把读失败当成"不需要推"静默放行。
+    """
+
+    def _boom(conn: object, code: str) -> bool:
+        raise TrackStoreError("库挂了")
+
+    monkeypatch.setattr(signal_notify, "is_tracked", _boom)
+    rec = _Recorder()
+    signal_notify._set_pusher_for_test(rec)
+    with caplog.at_level("WARNING"):
+        pushed = _notify(
+            _mk_signal(), prev_status=None, event_time=1, conn=_CONN
+        )
+    assert pushed is False
+    assert rec.calls == []
+    assert "关注范围读取失败" in caplog.text
+
+
+def test_scope_check_runs_before_throttle(monkeypatch: pytest.MonkeyPatch) -> None:
+    """范围判定在节流**之前**：不在列表的信号不占用节流名额。"""
+    seen: list[str] = []
+
+    def _tracked(conn: object, code: str) -> bool:
+        seen.append(code)
+        return False
+
+    monkeypatch.setattr(signal_notify, "is_tracked", _tracked)
+    signal_notify._set_pusher_for_test(_Recorder())
+
+    assert _notify(
+        _mk_signal(), prev_status=None, event_time=1, conn=_CONN
+    ) is False
+    assert seen == ["600519"]
+    assert not signal_notify._LAST_PUSH_MS

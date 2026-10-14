@@ -26,6 +26,22 @@
   ``deploy/env/cpt-dashboard.env.example`` 的占位符。
 - **不重试**：告警本身失败再重试只会放大故障；交给下一次评估轮询。
 
+## 推送范围（R4/C2）
+
+只推**关注列表里**的股票：推送前查 ``public.cpt_track`` 是否有该 code 的活跃行
+（:func:`cpt.storage.track_store.is_tracked`，**不带 user** —— 飞书 webhook 是全局
+一条，没有"谁的关注列表"这一维度）。不在关注列表 → ``return False``，且**不写**
+节流表（"没人关注"与"被节流"是两回事）。
+
+⚠️ fail-closed：``conn`` 为 ``None`` 或查询抛 ``TrackStoreError`` 时**不推**并记
+warning —— 与 ``record_signal_event`` 调用点上游的 R59 取舍一致（读不到就不推），
+绝不把"读失败"当成"不需要推"。
+
+这条也顺带堵住旧行为：此前范围是**全局**的（任何会被评估到的票），而评估既跑在
+每根 K 线的循环里、也跑在 on-demand 快照上 —— 开一次页面、探一次活、跑一次测试，
+只要撞上状态跃迁就会往群里推（2026-10-13 那条 ``000016 · invalidated`` 就是这么
+来的）。
+
 ## 推送标题
 
 ``[CPT 追踪] <signal_type> · <code> · <status>`` —— 前缀
@@ -38,9 +54,11 @@ from __future__ import annotations
 import logging
 import time
 from collections.abc import Callable
+from typing import Any
 
 from cpt.adapters.feishu import notify
 from cpt.domain.models import Signal
+from cpt.storage.track_store import TrackStoreError, is_tracked
 
 _LOG = logging.getLogger(__name__)
 
@@ -125,6 +143,8 @@ def maybe_notify(
     prev_status: str | None,
     code: str,
     event_time: int,
+    *,
+    conn: Any | None = None,
 ) -> bool:
     """信号跃迁后调一次。返回是否真的推过一次。
 
@@ -132,11 +152,30 @@ def maybe_notify(
     :param prev_status: 上一状态；``None`` = 首次评估。
     :param code: A 股 6 位代码。
     :param event_time: 本次评估的事件时间（Unix 毫秒）—— 仅用于消息展示。
-    :returns: ``True`` 表示本轮真的发出去了；``False`` 表示节流跳过 / 推送失败 / 无状态变化。
+    :param conn: 调用方的连接，**只用于读关注列表**。为 ``None`` 时 fail-closed
+        不推 —— 调用点必须把自己的 ``conn`` 传进来，本模块不自建连接
+        （理由见模块 docstring 的「推送范围」）。
+    :returns: ``True`` 表示本轮真的发出去了；``False`` 表示不在关注列表 /
+        关注范围读失败 / 节流跳过 / 推送失败 / 无状态变化。
     """
     # record_signal_event 已保证「status 变化才进」，所以「无变化」这一档
     # 在本调用点不会触发；但留一道兜底，避免把"无变化"也记进节流 dict。
     if signal.status == prev_status:
+        return False
+
+    # 推送范围（R4/C2）：只推关注列表里的票。放在节流**之前** ——
+    # 不在列表就不算「本可以推但被节流」，不写 _LAST_PUSH_MS。
+    if conn is None:
+        _LOG.warning("跳过飞书推送（未提供连接，无法判定关注范围）code=%s", code)
+        return False
+    try:
+        tracked = is_tracked(conn, code)
+    except TrackStoreError as exc:
+        # fail-closed：读不到关注范围就不推，绝不把「读失败」当成「不需要推」
+        _LOG.warning("跳过飞书推送（关注范围读取失败）code=%s: %s", code, exc)
+        return False
+    if not tracked:
+        _LOG.info("跳过飞书推送（不在关注列表）code=%s status=%s", code, signal.status)
         return False
 
     key = (signal.signal_id, signal.status)
