@@ -17,8 +17,8 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
-
 from scripts import build_dashboard_bundle as bdb
+
 from tests.conftest import DASHBOARD_JS_ORDER
 
 ROOT = Path(__file__).parents[1]

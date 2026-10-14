@@ -1368,3 +1368,72 @@ A，代码做的是 B，而**没有任何门禁会红**。
 4. **改代码行为时，同一个 commit 里搜一遍提到该行为的文档**。
 5. 写「甲不做 Y」时，同步检查「乙到底做不做 Y」的文档 —— 今天那四处里有三处
    是「甲文档说做了/没做，乙文档说相反」。
+## 44. 产物只拼「首模块的头」⇒ 别的模块头里的声明被静默丢弃（R62 汇总 R61 实测）
+
+- 现场：`dashboard/dash-chrome.js` 的 `// <<<HEAD` 段里加了
+  `const SOURCE_LABELS = {...}`，同一文件的 `renderChrome()` 用到它。
+- `scripts/build_dashboard_bundle.py` 的 `build()` **只取 `ORDER[0]`
+  （`dash-core.js`）的 HEAD 段**，其它模块的头整段丢弃 —— 原实现是 `pass`，
+  一声不响。
+- 后果：bundle 里没有该声明 ⇒ `ReferenceError` 在 `renderChrome` 中途抛出
+  ⇒ 被调用方的 `try/catch` 吞掉 ⇒ **页面正常、console 零报错、
+  `window.onerror` 空**，只是其后所有 DOM 写入（当日高/低、成交量、
+  实时价标签）全都不执行。
+- 定位手法（值得复用）：往 bundle 里插 `window.__M.push("pre-dual")` 这类
+  路标 + `window.__RC_CALLS++`，看到「只跑了 1 次、过 `pre-dual` 就没了」
+  才敢断定异常被吞 —— 光看 `ERRS=[]` 会得出「没问题」的反向结论。
+- 防：共享声明一律加在 `dash-core.js` 的头；`check_head_declarations()` 在
+  构建期 `SystemExit` 硬失败；`tests/test_build_dashboard_bundle.py` 钉住
+  该不变量；`tests/test_dashboard_ashare_r61_render.py` 用**真 DOM** 断言
+  最终文本。
+- ⚠️ 关键教训：单测读的是**源文件拼接**（`tests/conftest.py` 的
+  `dashboard_js()`），它看得见那个声明 ⇒ **只跑它永远发现不了这一类**。
+  丢失发生在构建，只有产物（或真浏览器）才看得见。
+
+## 45. 只守分母、不守分子：盘前 `last=0.0` ⇒ 涨跌幅 −100%（R61 实测）
+
+- 2026-10-14 09:23（北京，开盘前）新浪返回 `last=0.0`（哨兵值），
+  `prev_close=1274.89`。
+- `_pct_from` 原判据只有 `if prev <= 0`：分母守住了，分子是 0 照样算出
+  `(0-1274.89)/1274.89*100 = -100.0%` ⇒ 面板显示一个「跌停」。
+- 防：`_is_tradable_price(v) -> float(v) > 0` 同时守分子，命中则
+  `reason="realtime_no_trade"` 走降级，**不给一个看起来像真的错数**。
+- 推广：凡行情/计数参与运算，**每个输入**都要有域校验。除零才会炸，
+  而 0 不会炸 —— 它只是安静地给出一个错答案，这正是它比崩溃更危险的地方。
+
+## 46. `formatNumber` 内部是 `Math.abs` ⇒ 负号必须调用方自己拼
+
+- `dashboard/dash-core.js` 的 `formatNumber(value, digits)` 实现是
+  `Math.abs(value).toFixed(digits)`（外加千分位）。
+- 于是 `formatPrice(-3.12) === "3.12"`：跌 3.12 元显示成涨 3.12 元。
+  返回值**看起来完全正常**，页面无报错，测试也不会红。
+- 当时全站只有 `dual-divergence` 一处自己拼了符号
+  （`div >= 0 ? "+" : ""`），其它调用点都没有 ⇒ 每新加一个「带方向」的量
+  就必然踩一次。
+- 防：`scripts/check_value_plumbing.py` 的 R3 判据 —— 「带方向词
+  （change/pct/divergence/delta…）的 `format*` 调用 + 同行没有符号拼装」
+  一律 error。
+
+## 47. 判 `=== null` 不等于判类型：键**缺失**是 `undefined`（R61 复查发现，note 级）
+
+- 典型写法：`const div = dc.divergence_pct;` 之后
+  `div === null ? "—" : div.toFixed(2)`。上游一旦**漏写该键**，走的是
+  `undefined.toFixed()` ⇒ TypeError ⇒ 又回到 #44 的「被 catch 吞掉」
+  模式（那一行永远显示旧值，且没有任何报错）。
+- 现状不可达：唯一生产者（`cpt/application/a_share_snapshot.py` 的
+  `_attach_dual_compare`）在同一 `available: True` 分支内必写该键。
+  但它与 #44/#45 同族 —— **降级路径只在一种缺失形态下成立**。
+- 防：判型（`Number.isFinite`）而不是判 null。R4 判据只把这类记成 note
+  （不阻断 CI），且只认**直接从对象属性读出来的局部变量**：函数形参的契约
+  由调用方给，`num(x.y)` / 三元赋值的结果只可能是 null 或数字
+  （三者都不该报）—— 不收窄到这一步，这条规则就是满屏噪声。
+
+### 本轮的对策（R62）
+
+`scripts/check_value_plumbing.py` 把上面四类收成 R1-R4 四条判据，
+发现写进 `docs/audit/probe-findings.log`（故意用 `.log` 不用 `.md`：
+`check_all_claims` / `check_doc_counts` 会 `rglob("*.md")`，生成物里的路径
+与行号会被当文档断言去验）；CI 门禁⑮ 跑它，`selftest_gates.py` 配了
+`check_value_plumbing.py` 与 `check_value_plumbing.py#R4` 两个已知错例夹具，
+`tests/test_check_value_plumbing.py` 管判据边界，`check_test_mutation.py`
+登记了一条「把 R1 的守卫判据改成恒真」的变异。

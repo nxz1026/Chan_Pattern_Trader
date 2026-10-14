@@ -496,8 +496,15 @@
         dualSection.hidden = false;
         setText("[data-testid=dual-cpt-close]", dc.cpt_close ? formatPrice(dc.cpt_close) : "—");
         setText("[data-testid=dual-realtime-price]", dc.realtime_price ? formatPrice(dc.realtime_price) : "—");
+        // R62：这里原本判的是 `div === null`。判 null 不判类型 —— 键**缺失**（undefined）
+        // 会走到 `div.toFixed()` 抛 TypeError，异常被 render() 的上层 catch 吞掉，
+        // 表现为「这一行还是旧的，页面毫无报错」（R61 bug ② 的同款失效模式）。
+        // `Number.isFinite` 一并挡掉 NaN 与非数字（NaN 会渲染成 "NaN%"）。
         const div = dc.divergence_pct;
-        setText("[data-testid=dual-divergence]", div === null ? "—" : `${div >= 0 ? "+" : ""}${div.toFixed(2)}%`);
+        setText(
+          "[data-testid=dual-divergence]",
+          Number.isFinite(div) ? `${div >= 0 ? "+" : ""}${div.toFixed(2)}%` : "—",
+        );
         // R35 换源后上游是**新浪**（东财在生产的日本机器上实测 502）。标签必须跟着
         // 改：把源名写死会让人去一个根本不存在的源上排查问题。
         const rtInfo = isObject(dc.realtime) ? dc.realtime : null;

@@ -117,6 +117,24 @@ jobs:
       # 挡在前面、从未暴露。R51 删掉画布 D 让 pytest 转绿，它才浮出来。
       - name: Dashboard bundle in sync
         run: python scripts/build_dashboard_bundle.py --check
+      # 门禁⑮（R62 新增）：**值从数据源到屏幕**这条链上的静默失效。
+      # R61 一轮里连着踩了三个，症状全都一样：页面正常、console 零报错、
+      # 单测全绿，只是**某个数不更新**或**符号是反的**。
+      #   ① 除法的分子没人守（盘前上游给 last=0.0 ⇒ 涨跌幅算出 −100%）；
+      #   ② 产物与源不同步（bundle 只拼 ORDER[0] 的头，别的模块头里的声明被
+      #      静默丢弃 ⇒ ReferenceError 被上层 catch 吞掉）；
+      #   ③ `formatNumber` 内部是 `Math.abs` ⇒ 跌 3.12 显示成涨 3.12。
+      # 三条的共同点：**形状都对**，所以查形状的门禁与断言全部放行。
+      # ⇒ R1 扫除法分母的守卫、R2 比「源 → build() → 部署目录」三层字节、
+      #    R3 扫带符号量是否自己拼符号（error）；R4 只把「判 null 不判类型」
+      #    记成 note（唯一生产者必给该键的那些当场就够用，不阻断 CI）。
+      # 发现写进 docs/audit/probe-findings.log —— 故意用 `.log` 不用 `.md`：
+      # check_all_claims / check_doc_counts 会 rglob("*.md") 并把生成物里的
+      # 路径与行号当成文档断言去验，改一行 dashboard 就让它假阳性。
+      # 它只读不写源码，但会写那份日志 ⇒ 必须排在 check_test_mutation 之前
+      # （那道门禁要求工作区干净）。
+      - name: Value plumbing (source → build → deploy → screen)
+        run: python scripts/check_value_plumbing.py
       # 门禁④：全量文档断言。check_doc_drift 管「有/没有」，
       # 这个管「**是不是还对得上**」—— 路径、符号、接口、表名、配置键、行号。
       # 第五轮全量扫描实测它一次抓到 1 处真漂移（architecture 说 72 个测试

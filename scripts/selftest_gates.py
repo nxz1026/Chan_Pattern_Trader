@@ -376,6 +376,38 @@ def fx_test_mutation(root: Path) -> tuple[str, str]:
     return "check_test_mutation.py", "自检失败"
 
 
+def fx_value_plumbing(root: Path) -> tuple[str, str]:
+    """⑮ 值管道：一个没守卫的除法 + 一个丢符号的格式化。
+
+    ⚠️ 两类错必须**同时**注入，而期望串断言的是按判据计数那行
+    （``R1 × 1 · R3 × 1``），不是「合计 N 个 error」：后者在 R2 因部署目录
+    或临时仓库差异多报几条时**照样匹配**，于是 R1/R3 各自到底活没活
+    从未被证明 —— 那就是「桩测桩」的变体。
+    """
+    # 分母是裸的行情名（`base` 命中 _MARKETISH），函数体里没有任何守卫词。
+    _pkg(
+        root, "application/probe.py", "def ratio(last_price, base):\n    return last_price / base\n"
+    )
+    # 带方向词（change）的格式化，同行没有自己拼符号。
+    _write(root / "dashboard/probe.js", "const txt = formatPrice(changeAmount);\n")
+    return "check_value_plumbing.py", "R1 × 1 · R3 × 1"
+
+
+def fx_value_plumbing_null_guard(root: Path) -> tuple[str, str]:
+    """⑯ 值管道 R4：``const div = dc.divergence_pct;`` 之后判 null 不判型。
+
+    R4 是 **note** 级、不返回 1，退出码在这里没有判别力 ⇒ 这个夹具靠
+    ``--cat R4``（run_one 从键名的 ``#R4`` 后缀传进去）只跑这一条判据，
+    再在输出里找 ``[note] R4``。若哪天 R4 被删或被收窄到漏报，期望串就没了。
+    """
+    _write(
+        root / "dashboard/probe.js",
+        # 直接属性读法（不是函数形参、不是 num(...) 包装）才该被认出来。
+        'const div = dc.divergence_pct;\nconst txt = div === null ? "—" : div.toFixed(2);\n',
+    )
+    return "check_value_plumbing.py", "[note] R4"
+
+
 FIXTURES = {
     "check_doc_drift.py": fx_doc_drift,
     "check_all_claims.py": fx_all_claims,
@@ -391,6 +423,8 @@ FIXTURES = {
     "check_gate_coverage.py": fx_gate_coverage,
     "check_cold_environment.py": fx_cold_environment,
     "check_test_mutation.py": fx_test_mutation,
+    "check_value_plumbing.py": fx_value_plumbing,
+    "check_value_plumbing.py#R4": fx_value_plumbing_null_guard,
 }
 
 #: 这些门禁的夹具必须在**真实仓库**里跑，而不是临时目录。

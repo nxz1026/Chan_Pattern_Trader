@@ -199,6 +199,16 @@ MUTATIONS: tuple[Mutation, ...] = (
         why="2026-10-06 的根因：startPolling 只挂在无缓存分支，稳态轮询全部"
         "命中缓存提前 return，stale 定时器永不重布，15 秒后必然误报「数据陈旧」",
     ),
+    Mutation(
+        name="值管道探针真的会报无守卫除法",
+        rel="scripts/check_value_plumbing.py",
+        old="if any(g.format(d=den) in body for g in _GUARDS):",
+        new="if True:",
+        tests=("tests/test_check_value_plumbing.py::test_r1_reports_unguarded_division",),
+        why="R61 bug ① 就是「只守分母、不守分子」算出的 −100%：这条判据若退化成"
+        "恒不报，全仓再出现同类除法没人拦，而门禁**依然全绿**（它只是什么都没查）。"
+        "变异前这条测试必须在，否则本门禁自己也在恒真",
+    ),
 )
 
 

@@ -120,14 +120,18 @@ def test_price_basis_no_date_still_gives_ratio() -> None:
 def test_price_basis_non_positive_close_skips_raw_price() -> None:
     """close = 0 是"没数据"，别算出一个 0.0 的不复权价。"""
     snapshot: dict = {"market": {}}
-    _attach_price_basis(snapshot, _PriceBasis(last_close=0.0, last_date=dt.date(2026, 10, 13), factor=2.0))
+    _attach_price_basis(
+        snapshot, _PriceBasis(last_close=0.0, last_date=dt.date(2026, 10, 13), factor=2.0)
+    )
     market = snapshot["market"]
     assert market["price_ratio"] == 2.0
     assert "last_price_raw" not in market
 
 
 def test_price_basis_ignores_missing_market() -> None:
-    _attach_price_basis({}, _PriceBasis(last_close=1.0, last_date=dt.date(2026, 10, 13), factor=2.0))
+    _attach_price_basis(
+        {}, _PriceBasis(last_close=1.0, last_date=dt.date(2026, 10, 13), factor=2.0)
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -172,7 +176,9 @@ def _bar() -> dict:
 
 def test_last_bar_stats_with_factor_gives_two_price_bases() -> None:
     snapshot: dict = {"candles": [_bar()], "market": {}}
-    _attach_last_bar_stats(snapshot, _PriceBasis(last_close=8151.84, last_date=dt.date(2026, 10, 13), factor=6.394))
+    _attach_last_bar_stats(
+        snapshot, _PriceBasis(last_close=8151.84, last_date=dt.date(2026, 10, 13), factor=6.394)
+    )
     market = snapshot["market"]
     assert market["last_high"] == 8151.84
     assert market["last_high_raw"] == pytest.approx(1274.92, abs=1e-2)
@@ -355,12 +361,15 @@ def test_staleness_uses_beijing_time_not_host_time(monkeypatch: pytest.MonkeyPat
 
     calls: list[tuple[dt.date, dt.date]] = []
     monkeypatch.setattr(
-        local, "open_days_between",
+        local,
+        "open_days_between",
         lambda _c, s, e: (calls.append((s, e)), [])[1],
     )
     monkeypatch.setattr(mod, "_active_client_conn", lambda _c: object())
     # 关键：market_now() 给的是**北京时区**的 00:30
-    monkeypatch.setattr(mt, "market_now", lambda: dt.datetime(2026, 10, 14, 0, 30, tzinfo=mt.MARKET_TZ))
+    monkeypatch.setattr(
+        mt, "market_now", lambda: dt.datetime(2026, 10, 14, 0, 30, tzinfo=mt.MARKET_TZ)
+    )
     snapshot = _quality([{"open_time": _bar_ms(dt.date(2026, 10, 13))}])
     _attach_staleness(snapshot, object())
     assert snapshot["data_quality"]["stale"] is False

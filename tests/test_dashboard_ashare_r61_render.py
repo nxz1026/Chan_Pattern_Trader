@@ -57,10 +57,30 @@ _SNAPSHOT: dict = {
         "interval_ms": 86400000,
     },
     "candles": [
-        {"open_time": 1776384000000, "close": 8000.0, "open": 7900.0, "high": 8100.0, "low": 7800.0, "volume": 100.0},
-        {"open_time": 1791820800000, "close": 8151.84, "open": 8100.0, "high": 8238.7365, "low": 8108.4876, "volume": 26573.0},
+        {
+            "open_time": 1776384000000,
+            "close": 8000.0,
+            "open": 7900.0,
+            "high": 8100.0,
+            "low": 7800.0,
+            "volume": 100.0,
+        },
+        {
+            "open_time": 1791820800000,
+            "close": 8151.84,
+            "open": 8100.0,
+            "high": 8238.7365,
+            "low": 8108.4876,
+            "volume": 26573.0,
+        },
     ],
-    "data_quality": {"stale": False, "gap": False, "closed_bar_count": 2, "unclosed_bar_count": 0, "reason": None},
+    "data_quality": {
+        "stale": False,
+        "gap": False,
+        "closed_bar_count": 2,
+        "unclosed_bar_count": 0,
+        "reason": None,
+    },
     "dual_compare": {
         "available": True,
         "cpt_close": 8151.84,
@@ -86,11 +106,16 @@ def _harness(tmp_path: Path) -> Path:
             continue
         (tmp_path / entry.name).symlink_to(entry)
     html = (DASH / "index.html").read_text(encoding="utf-8")
-    html = html.replace('data-snapshot-url="/cpt/api/dashboard/snapshot"', 'data-snapshot-url="/api/dashboard/a-share"')
+    html = html.replace(
+        'data-snapshot-url="/cpt/api/dashboard/snapshot"',
+        'data-snapshot-url="/api/dashboard/a-share"',
+    )
     stub = (
         "<script>\n(function () {\n"
         "  window.__ERRS = [];\n"
-        '  window.addEventListener("error", function (e) { window.__ERRS.push(String(e.message)); });\n'
+        '  window.addEventListener("error", function (e) {\n'
+        "    window.__ERRS.push(String(e.message));\n"
+        "  });\n"
         "  var SNAP = " + json.dumps(_SNAPSHOT) + ";\n"
         "  window.fetch = function (input) {\n"
         '    var url = typeof input === "string" ? input : (input && input.url) || "";\n'
@@ -114,7 +139,8 @@ def _harness(tmp_path: Path) -> Path:
 
 
 def _text(dom: str, testid: str) -> str:
-    m = re.search(r'<[^>]*data-testid="%s"[^>]*>(.*?)</' % re.escape(testid), dom, re.S)
+    pattern = rf'<[^>]*data-testid="{re.escape(testid)}"[^>]*>(.*?)</'
+    m = re.search(pattern, dom, re.S)
     assert m, f"DOM 里没有 {testid}"
     return re.sub(r"<[^>]+>", "", m.group(1)).strip()
 
@@ -145,7 +171,9 @@ def test_ashare_overview_renders_both_price_bases(tmp_path: Path) -> None:
 
     # 页面里不该有任何未捕获异常（静默丢声明就是这个测试要抓的东西）
     errs = re.search(r"<pre id=\"__errs_out\">(.*?)</pre>", dom, re.S)
-    assert errs and errs.group(1).strip() == "ERRS=[]", f"渲染期有 JS 错误: {errs and errs.group(1)}"
+    assert errs and errs.group(1).strip() == "ERRS=[]", (
+        f"渲染期有 JS 错误: {errs and errs.group(1)}"
+    )
 
     # 后复权价旁边必须有不复权价（用户提的原始诉求）
     assert _text(dom, "market-last-price") == "8,151.84"
