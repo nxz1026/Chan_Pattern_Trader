@@ -1295,6 +1295,8 @@ def _attach_staleness(snapshot: dict[str, Any], client: Any) -> None:
     if not isinstance(raw_open, (int, float)):
         return
     last_bar_day = datetime.fromtimestamp(raw_open / 1000, tz=UTC).date()
+    market = snapshot.get("market")
+    code = str(market.get("symbol") or "") if isinstance(market, dict) else ""
 
     from cpt.adapters.a_share_local import open_days_between  # noqa: PLC0415
     from cpt.domain.market_time import MARKET_CLOSE, market_now  # noqa: PLC0415
@@ -1318,6 +1320,39 @@ def _attach_staleness(snapshot: dict[str, Any], client: Any) -> None:
     quality["missing_trade_days"] = [d.isoformat() for d in missing]
     quality["stale_last_bar_date"] = last_bar_day.isoformat()
     quality["stale_cutoff_date"] = cutoff.isoformat()
+    # 「K 线没跟上」不等于「上游没入库」：2026-10-14 实拉 600519，
+    # ``public.daily_bar`` 有当天行（全市场 5224 只），但 ``asel.ref_adjust_factor``
+    # 当天只有 16 个 code、600519 不在其中 —— K 线只认带因子的 bar，于是末根
+    # 停在 10-13。只看 ``stale=True`` 会让人去查 emotion-core 的入库，
+    # 而真正该查的是因子链路。所以补一个**原因**字段（不改 stale 本身的含义）。
+    reason = _stale_reason(conn, code, missing)
+    if reason is not None:
+        quality["stale_reason"], quality["stale_reason_day"] = reason
+
+
+def _stale_reason(conn: Any, code: str, missing: set[date]) -> tuple[str, str] | None:
+    """K 线窗口为什么没跟上：探**最早**的缺口交易日，三态之一。
+
+    * ``upstream_lag`` —— ``public.daily_bar`` 里没有这天的行（真·上游滞后）；
+    * ``factor_missing`` —— 有行、没有当天复权因子（K 线只认带因子的 bar）；
+    * ``unusable`` —— 行和因子都在、K 线仍然跳过了它（别在面板上编原因，去查日志）。
+
+    拿不到 ``code``、探不出结果（DB 不可达等）→ ``None``，面板不显示这一行。
+    """
+    if not code:
+        return None
+    from cpt.adapters.a_share_local import fetch_raw_bar_on, hfq_factor_on  # noqa: PLC0415
+
+    day = min(missing)
+    try:
+        if fetch_raw_bar_on(code, day) is None:
+            return ("upstream_lag", day.isoformat())
+        if hfq_factor_on(conn, code, day) is None:
+            return ("factor_missing", day.isoformat())
+        return ("unusable", day.isoformat())
+    except Exception as exc:  # noqa: BLE001 — 判不出就不写原因，绝不编一个
+        _LOG.debug("滞后原因判定失败 %s %s: %s: %s", code, day, type(exc).__name__, exc)
+        return None
 
 
 def _attach_dual_compare(

@@ -198,7 +198,33 @@
     if (unclosedLabel) unclosedLabel.textContent = isAShare ? "期望交易日" : "未收盘";
     const staleNode = q("[data-testid=data-quality-stale]");
     if (staleNode && isAShare) {
-      staleNode.setAttribute("title", "A 股日线快照批每次重写整段窗口，不存在「陈旧未刷新」态");
+      staleNode.setAttribute(
+        "title",
+        "末根 K 线早于最近交易日即报 true（K 线只认带复权因子的 bar）；为什么没跟上见下一行",
+      );
+    }
+    // stale 只说「K 线没跟上」，不说**为什么** —— 上游没入库 / 入库了但缺复权因子
+    // 是两条完全不同的排查路径（2026-10-14 实拉：daily_bar 全市场有当天行，
+    // 而 ref_adjust_factor 当天只有 16 个 code）。原因单独一行。
+    const staleReasonLabel = q("[data-testid=data-quality-stale-reason-label]");
+    const staleReasonNode = q("[data-testid=data-quality-stale-reason]");
+    const staleReason = typeof quality.stale_reason === "string" ? quality.stale_reason : "";
+    // 认不出的原因不显示：宁可少一行，也不把英文裸键摆给用户。
+    const staleReasonText = {
+      upstream_lag: "上游当日 bar 未入库",
+      factor_missing: "当日 bar 已入库，缺复权因子",
+      unusable: "bar 与因子都在，K 线仍跳过",
+    }[staleReason];
+    const staleReasonDay = typeof quality.stale_reason_day === "string" ? quality.stale_reason_day : "";
+    if (staleReasonLabel) staleReasonLabel.textContent = "K 线滞后原因";
+    if (staleReasonNode) {
+      const showReason = isAShare && !!staleReasonText;
+      staleReasonNode.textContent = showReason
+        ? staleReasonDay
+          ? `${staleReasonText}（${staleReasonDay}）`
+          : staleReasonText
+        : "—";
+      staleReasonNode.hidden = !showReason;
     }
 
     const reason = quality.reason;

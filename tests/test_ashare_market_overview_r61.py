@@ -375,3 +375,117 @@ def test_staleness_uses_beijing_time_not_host_time(monkeypatch: pytest.MonkeyPat
     assert snapshot["data_quality"]["stale"] is False
     # 截止日 == 末根 bar 日 → 早退，一次库都不该查（查了说明 cutoff 被算成 10-14）
     assert calls == []
+
+
+# --- K 线滞后原因（R62）----------------------------------------------------------
+#
+# stale 只说「K 线没跟上最近交易日」，不说为什么。2026-10-14 线上实拉 600519：
+# daily_bar 有当天行（全市场 5224 只），而 ref_adjust_factor 当天只有 16 个 code、
+# 600519 不在其中 → K 线（只认带因子的 bar）停在 10-13。这两种情形的排查路径
+# 完全不同，所以补一个原因字段。
+
+
+def _quality_with_symbol(candles: list[dict], code: str = "600519") -> dict:
+    snapshot = _quality(candles)
+    snapshot["market"] = {"symbol": code}
+    return snapshot
+
+
+def _reason_env(
+    stale_env, monkeypatch: pytest.MonkeyPatch, **probe: object
+) -> list[tuple[str, object]]:
+    """收盘后（北京 16:00）+ 末根 10-13 → 缺口 [10-14]，并把两个探针换成假实现。"""
+    import cpt.adapters.a_share_local as local
+
+    stale_env(
+        dt.datetime(2026, 10, 14, 16, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+        missing=[dt.date(2026, 10, 14)],
+    )
+    seen: list[tuple[str, object]] = []
+
+    def fake_bar(code: str, day: dt.date):
+        seen.append(("bar", day))
+        value = probe.get("bar")
+        return _raise(value) if isinstance(value, Exception) else value
+
+    def fake_factor(_conn: object, code: str, day: dt.date):
+        seen.append(("factor", day))
+        value = probe.get("factor")
+        return _raise(value) if isinstance(value, Exception) else value
+
+    monkeypatch.setattr(local, "fetch_raw_bar_on", fake_bar)
+    monkeypatch.setattr(local, "hfq_factor_on", fake_factor)
+    return seen
+
+
+def _raise(exc: object) -> object:
+    raise exc  # type: ignore[misc]
+
+
+def test_stale_reason_upstream_lag_when_daily_bar_absent(stale_env, monkeypatch) -> None:
+    """库里根本没有这天 → 真·上游滞后，且**不该**再问因子（省一次查询）。"""
+    seen = _reason_env(stale_env, monkeypatch, bar=None, factor=6.39)
+    snapshot = _quality_with_symbol([{"open_time": _bar_ms(dt.date(2026, 10, 13))}])
+    _attach_staleness(snapshot, object())
+    quality = snapshot["data_quality"]
+    assert quality["stale"] is True
+    assert quality["stale_reason"] == "upstream_lag"
+    assert quality["stale_reason_day"] == "2026-10-14"
+    assert seen == [("bar", dt.date(2026, 10, 14))]
+
+
+def test_stale_reason_factor_missing_when_bar_in_db_without_factor(stale_env, monkeypatch) -> None:
+    """2026-10-14 的真实情形：bar 已在库、当天复权因子没有。"""
+    seen = _reason_env(stale_env, monkeypatch, bar=(dt.date(2026, 10, 14), 1286.0), factor=None)
+    snapshot = _quality_with_symbol([{"open_time": _bar_ms(dt.date(2026, 10, 13))}])
+    _attach_staleness(snapshot, object())
+    quality = snapshot["data_quality"]
+    assert quality["stale"] is True  # stale 的含义没变：K 线确实没跟上
+    assert quality["stale_reason"] == "factor_missing"
+    assert quality["stale_reason_day"] == "2026-10-14"
+    assert seen == [("bar", dt.date(2026, 10, 14)), ("factor", dt.date(2026, 10, 14))]
+
+
+def test_stale_reason_unusable_when_bar_and_factor_both_present(stale_env, monkeypatch) -> None:
+    """行和因子都在、K 线仍跳过了它 → 不编原因，交给日志。"""
+    _reason_env(stale_env, monkeypatch, bar=(dt.date(2026, 10, 14), 1286.0), factor=6.39415165)
+    snapshot = _quality_with_symbol([{"open_time": _bar_ms(dt.date(2026, 10, 13))}])
+    _attach_staleness(snapshot, object())
+    assert snapshot["data_quality"]["stale_reason"] == "unusable"
+
+
+def test_stale_reason_probes_earliest_missing_day(stale_env, monkeypatch) -> None:
+    """缺口有两天时探**最早**那天（链路的断点在那里）。"""
+    import cpt.adapters.a_share_local as local
+
+    stale_env(
+        dt.datetime(2026, 10, 16, 16, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+        missing=[dt.date(2026, 10, 14), dt.date(2026, 10, 15)],
+    )
+    seen: list[dt.date] = []
+    monkeypatch.setattr(local, "fetch_raw_bar_on", lambda code, day: seen.append(day))
+    monkeypatch.setattr(local, "hfq_factor_on", lambda _c, code, day: 6.39)
+    snapshot = _quality_with_symbol([{"open_time": _bar_ms(dt.date(2026, 10, 13))}])
+    _attach_staleness(snapshot, object())
+    assert seen == [dt.date(2026, 10, 14)]
+    assert snapshot["data_quality"]["stale_reason_day"] == "2026-10-14"
+
+
+def test_stale_reason_omitted_without_symbol(stale_env, monkeypatch) -> None:
+    """快照里没有 ``market.symbol`` → 不写原因（宁可少一行，不写错一行）。"""
+    _reason_env(stale_env, monkeypatch, bar=None, factor=None)
+    snapshot = _quality([{"open_time": _bar_ms(dt.date(2026, 10, 13))}])
+    _attach_staleness(snapshot, object())
+    quality = snapshot["data_quality"]
+    assert quality["stale"] is True
+    assert "stale_reason" not in quality
+
+
+def test_stale_reason_omitted_when_probe_raises(stale_env, monkeypatch) -> None:
+    """探针抛异常 → fail-open：不写原因，但 stale 本身照报（已确认有交易日缺口）。"""
+    _reason_env(stale_env, monkeypatch, bar=RuntimeError("daily_bar 不可达"), factor=None)
+    snapshot = _quality_with_symbol([{"open_time": _bar_ms(dt.date(2026, 10, 13))}])
+    _attach_staleness(snapshot, object())
+    quality = snapshot["data_quality"]
+    assert quality["stale"] is True
+    assert "stale_reason" not in quality

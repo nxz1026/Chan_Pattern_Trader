@@ -36,6 +36,8 @@ def test_market_overview_elements_exist_for_every_field_the_js_writes() -> None:
         "market-board",
         "data-quality-closed-label",
         "data-quality-unclosed-label",
+        "data-quality-stale-reason-label",
+        "data-quality-stale-reason",
         "dual-realtime-label",
     ):
         assert f'data-testid="{testid}"' in html, f"index.html 缺少 {testid}"

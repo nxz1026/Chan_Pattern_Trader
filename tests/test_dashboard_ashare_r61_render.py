@@ -75,7 +75,9 @@ _SNAPSHOT: dict = {
         },
     ],
     "data_quality": {
-        "stale": False,
+        "stale": True,
+        "stale_reason": "factor_missing",
+        "stale_reason_day": "2026-10-14",
         "gap": False,
         "closed_bar_count": 2,
         "unclosed_bar_count": 0,
@@ -198,3 +200,8 @@ def test_ashare_overview_renders_both_price_bases(tmp_path: Path) -> None:
 
     # 实时价标签跟上游走（R35 之后是新浪），不是写死的东财
     assert _text(dom, "dual-realtime-label") == "实时价（新浪）"
+
+    # stale 只说「K 线没跟上」，原因单独一行（上游没入库 vs 缺复权因子，排查路径不同）
+    assert _text(dom, "data-quality-stale") == "true"
+    assert _text(dom, "data-quality-stale-reason-label") == "K 线滞后原因"
+    assert _text(dom, "data-quality-stale-reason") == "当日 bar 已入库，缺复权因子（2026-10-14）"
