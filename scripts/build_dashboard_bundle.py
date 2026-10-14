@@ -42,7 +42,9 @@ ROOT = Path(__file__).resolve().parents[1]
 DASH = ROOT / "dashboard"
 BUNDLE = DASH / "dashboard.bundle.js"
 
-#: 与 index.html / tests.conftest.DASHBOARD_JS_ORDER **必须一致**
+#: 进 bundle 的模块，顺序 = index.html 的脚本顺序 = tests.conftest.DASHBOARD_JS_ORDER
+#: 里这 7 个 dash-* 的**相对顺序**（``tests/test_build_dashboard_bundle.py`` 钉住）。
+#: ``ORDER[0]`` 的 ``<<<HEAD`` 是 bundle 唯一的权威头。
 ORDER = (
     "dash-core.js",
     "dash-chrome.js",
@@ -73,6 +75,17 @@ BANNER = """// dashboard.bundle.js — **自动生成，请勿手改**
 """
 
 
+_DECL = re.compile(r"^\s*(?:const|let|var|function)\s+([A-Za-z_$][\w$]*)", re.M)
+
+
+def _declared_names(head: str) -> set[str]:
+    """头段里声明的顶层名字（const/let/var/function）。
+
+    只用于比对"这个声明有没有进 bundle"，不做作用域分析。
+    """
+    return set(_DECL.findall(head))
+
+
 def _parts(name: str) -> tuple[str, str, str]:
     text = (DASH / name).read_text(encoding="utf-8")
     mh, mf = _HEAD.search(text), _FUNCS.search(text)
@@ -82,15 +95,37 @@ def _parts(name: str) -> tuple[str, str, str]:
     return mh.group(1), mf.group(1), (mt.group(1) if mt else "")
 
 
+def check_head_declarations(name: str, head: str, authoritative_head: str) -> None:
+    """非权威模块的 ``<<<HEAD`` 不许声明权威头里没有的名字。
+
+    允许其它模块的共享头与权威头有差异（拆分器复制的副本可能暂时落后），
+    但**不允许它声明权威头里没有的名字**：bundle 只拼 ORDER[0] 的
+    ``<<<HEAD``，其余模块头里的声明会被**静默丢弃**。
+
+    R61 实测的后果：把 SOURCE_LABELS 只加进 dash-chrome.js 的头 →
+    bundle 里没有这个声明 → renderChrome 跑到用它的那一行抛
+    ReferenceError → 被上层 ``catch`` 吞掉 → 其后所有 DOM
+    写入都不执行。页面**没有任何报错**，只是那几行永远停在初始值。
+    静默不一致是这类 bug 的唯一入口，所以这里直接失败。
+    """
+    dropped = _declared_names(head) - _declared_names(authoritative_head)
+    if dropped:
+        raise SystemExit(
+            f"{name} 的 <<<HEAD 声明了 {ORDER[0]} 权威头里没有的名字："
+            f"{sorted(dropped)} —— 这些声明会被**静默丢弃**（bundle 只拼 "
+            f"{ORDER[0]} 的头）。共享变量请加在 {ORDER[0]}，"
+            "并把各模块的头同步成一致。"
+        )
+
+
 def build() -> str:
     head = funcs = tail = ""
     for i, name in enumerate(ORDER):
         h, f, t = _parts(name)
         if i == 0:
             head = h
-        elif h.strip() and h.strip() != head.strip():
-            # 允许：只有 core 持有权威头；其余文件的头应当一致（拆分器复制的）。
-            pass
+        elif h.strip() != head.strip():
+            check_head_declarations(name, h, head)
         funcs += ("\n\n" if funcs else "") + f
         if t:
             tail = t

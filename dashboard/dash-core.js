@@ -87,6 +87,9 @@
   };
   // source.role 中文映射
   const SOURCE_ROLE_LABELS = { primary: "主通道", fallback: "兜底", local: "本地库" };
+  // 实时报价源中文名（``dual_compare.realtime.source``）。R35 换源后上游是新浪，
+  // 面板上写死指向东财的那个标签已经指错地方。
+  const SOURCE_LABELS = { sina: "新浪", eastmoney: "东财", tencent: "腾讯" };
 // >>>HEAD
 // <<<FUNCS
   function statusLabel(status) {

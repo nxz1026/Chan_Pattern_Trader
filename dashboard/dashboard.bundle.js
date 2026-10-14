@@ -97,6 +97,9 @@
   };
   // source.role 中文映射
   const SOURCE_ROLE_LABELS = { primary: "主通道", fallback: "兜底", local: "本地库" };
+  // 实时报价源中文名（``dual_compare.realtime.source``）。R35 换源后上游是新浪，
+  // 面板上写死指向东财的那个标签已经指错地方。
+  const SOURCE_LABELS = { sina: "新浪", eastmoney: "东财", tencent: "腾讯" };
 
   function statusLabel(status) {
     return STATUS_LABELS[status] || STATUS_LABELS.none;
@@ -1221,10 +1224,31 @@
     const quality = isObject(snapshot) && isObject(snapshot.data_quality) ? snapshot.data_quality : {};
     const runtime = isObject(snapshot) && isObject(snapshot.runtime) ? snapshot.runtime : {};
     const candles = normalizeCandles(snapshot && snapshot.candles);
+    // A 股模式标记：这块面板里「24h / USDT / 东财」都是加密侧遗产，A 股要换口径。
+    const isAShare = market.kind === "a_share";
+    const lastBarDate = typeof market.last_bar_date === "string" ? market.last_bar_date : "";
+    // 上游 24h 聚合（A 股恒为 available=false）。原来在涨跌幅与量额两处各声明一次，
+    // 涨跌幅现在要参与回落链，提到函数顶部统一声明。
+    const market24h = isObject(snapshot) && isObject(snapshot.market_24h) ? snapshot.market_24h : null;
+    const market24hAvailable = market24h && market24h.available === true;
 
     root.querySelectorAll("[data-field]").forEach((node) => {
       node.textContent = formatFieldValue(node.dataset.field, resolvePath(snapshot, node.dataset.field));
     });
+
+    // 板块：``market.board`` 是 ``security_master.board`` 的裸值（SH / SZ /
+    // SZ_CHINEXT），而 SH 把主板与科创板混在一起（688981 中芯国际也是 SH）——
+    // 光一个 "SH" 分不出科创板。后端补了带中文名的 ``market.board_label``，
+    // 有就用它，原始板号放 title 里方便对库。
+    const boardNode = q("[data-testid=market-board]");
+    if (boardNode) {
+      const boardCode = typeof market.board === "string" ? market.board.trim() : "";
+      const boardLabel = typeof market.board_label === "string" ? market.board_label.trim() : "";
+      if (boardLabel && boardLabel !== boardCode) {
+        boardNode.textContent = boardLabel;
+      }
+      if (boardCode) boardNode.setAttribute("title", `security_master.board = ${boardCode}`);
+    }
 
     // 证券名称（A 股有，加密没有）。**不放进 data-field 绑定**：那套把 undefined
     // 格式化成 "—"，加密模式下会在顶栏留一个孤零零的破折号。这里空则直接隐藏。
@@ -1263,9 +1287,21 @@
           : "上游未注入 generated_at 时间戳",
       );
     }
+    // 面板标题：A 股这块讲的是**单只股票**，「市场概览 / 24h」是加密侧的措辞。
+    const marketTitleNode = q("#market-overview-title");
+    if (marketTitleNode) marketTitleNode.textContent = isAShare ? "个股概览" : "市场概览";
+    // 时间范围：日线及以上级别不再输出 ``:00:00``。``formatAxisTime`` 早就按这个
+    // 口径渲染坐标轴，只有这里还在用 ``formatDateTime`` ——
+    // ``2026-04-17 00:00:00 → 2026-10-13 00:00:00`` 里的时间部分全是噪音，
+    // 而且全站 UTC 展示会让「00:00:00」被读成"当天零点"。
+    const rangeIntervalMs = num(market.interval_ms) || 0;
+    const rangeFormatter =
+      rangeIntervalMs >= 86400000
+        ? (ms) => formatAxisTime(ms, { showDate: true, showTime: false, showYear: true })
+        : formatDateTime;
     setText("[data-testid=market-time-range]", firstOpen === null || lastOpen === null
       ? "—"
-      : `${formatDateTime(firstOpen)} → ${formatDateTime(lastOpen)}`);
+      : `${rangeFormatter(firstOpen)} → ${rangeFormatter(lastOpen)}`);
     setText("[data-testid=market-bar-count]", candles.length);
     setText("[data-testid=replay-schema-version]", (isObject(snapshot) && snapshot.schema_version) || SCHEMA_VERSION);
 
@@ -1274,6 +1310,19 @@
     const gap = quality.gap === true;
     setState(setText("[data-testid=data-quality-stale]", stale ? "true" : "false"), stale ? "true" : "false");
     setState(setText("[data-testid=data-quality-gap]", gap ? "true" : "false"), gap ? "true" : "false");
+    // A 股数据质量口径：``closed_bar_count``/``unclosed_bar_count`` 在 A 股恒为
+    // 119/0（日线批 16:00 跑完，库里不可能有未收盘 bar），顶着「已收盘/未收盘」
+    // 两行是纯噪音，还让人以为盘中也是这套计数。改成窗口交易日/期望交易日，
+    // 并把 stale 为什么恒 false 写进 title —— 否则「数据陈旧」永远显示 false，
+    // 看着像这个指标坏了。
+    const closedLabel = q("[data-testid=data-quality-closed-label]");
+    const unclosedLabel = q("[data-testid=data-quality-unclosed-label]");
+    if (closedLabel) closedLabel.textContent = isAShare ? "窗口交易日" : "已收盘";
+    if (unclosedLabel) unclosedLabel.textContent = isAShare ? "期望交易日" : "未收盘";
+    const staleNode = q("[data-testid=data-quality-stale]");
+    if (staleNode && isAShare) {
+      staleNode.setAttribute("title", "A 股日线快照批每次重写整段窗口，不存在「陈旧未刷新」态");
+    }
 
     const reason = quality.reason;
     setText("[data-testid=data-quality-reason]", typeof reason === "string" && reason ? reason : "—");
@@ -1419,19 +1468,123 @@
     setText("[data-testid=market-last-price]", lastPrice === null ? "—" : formatPrice(lastPrice));
     const last = candles.length ? candles[candles.length - 1] : null;
     const first = candles.length ? candles[0] : null;
+    // R61：后复权价旁边**同屏**给出不复权价。面板上的 600519 是 8151.84，而不复权
+    // 收盘 1274.89 —— 用户拿前者去行情软件里找不到、也挂不了单，第一反应是
+    // 「数据错了」。两套尺子都得摆出来，口径说明放下面「价格口径」那一行。
+    // 后端取不到当日因子时**不给**这两个字段（不伪造 ×1.0），此处整行隐藏。
+    const priceRatio = num(market.price_ratio);
+    const lastPriceRaw = num(market.last_price_raw);
+    const rawPriceNode = setText(
+      "[data-testid=market-last-price-raw]",
+      lastPriceRaw === null ? "" : `（${formatPrice(lastPriceRaw)}）`,
+    );
+    if (rawPriceNode) {
+      rawPriceNode.hidden = lastPriceRaw === null;
+      rawPriceNode.setAttribute(
+        "title",
+        lastPriceRaw === null
+          ? "缺当日复权因子，无法给出不复权价（不显示假倍率）"
+          : `不复权价（后复权 ÷ 同一根 K 线的因子 ×${priceRatio}）`,
+      );
+    }
+    const basisNode = setText(
+      "[data-testid=market-price-basis]",
+      isAShare && priceRatio !== null
+        ? `后复权 ×${priceRatio}（括号内为不复权）`
+        : isAShare
+          ? "后复权（因子未知）"
+          : "—",
+    );
+    const basisLabel = q("[data-testid=market-price-basis-label]");
+    const basisRowShown = isAShare;
+    if (basisNode) basisNode.hidden = !basisRowShown;
+    if (basisLabel) basisLabel.hidden = !basisRowShown;
+    // 数据截止日：A 股快照批 16:00（北京）跑，盘中运行时库里**没有今天**的 bar，
+    // 而顶栏「更新时间」读的是 snapshot 生成时刻、一直滚动 —— 看着像实时数据。
+    // 把数据本身的日期写出来，是这里唯一能防"看岔一天"的东西。
+    const asofNode = setText("[data-testid=market-data-asof]", lastBarDate || "—");
+    const asofLabel = q("[data-testid=market-data-asof-label]");
+    if (asofNode) asofNode.hidden = !isAShare;
+    if (asofLabel) asofLabel.hidden = !isAShare;
+    if (asofNode && isAShare) {
+      asofNode.setAttribute("title", "末根 K 线所属交易日（数据本身截止到这天，不是快照生成时刻）");
+    }
+    const dualCompare = isObject(snapshot) && isObject(snapshot.dual_compare) ? snapshot.dual_compare : null;
+    const realtime = dualCompare && dualCompare.available === true && isObject(dualCompare.realtime)
+      ? dualCompare.realtime
+      : null;
+    // 实时报价只有**比末根 bar 更新**（quote_date 更晚）时才算"今日涨跌"：
+    // 盘中快照的末根 bar 还是昨天，此时上游现价才是今天的口径；反过来若上游
+    // 给的还是昨天那根，用它就与 K 线重复且口径不一。
+    const realtimeDate = realtime && typeof realtime.quote_date === "string" ? realtime.quote_date : "";
+    const realtimeIsNewer = !!realtime && realtimeDate !== "" && (lastBarDate === "" || realtimeDate > lastBarDate);
+    let changePct = market24hAvailable ? num(market24h.price_change_pct) : null;
+    let changeSource = changePct === null ? null : "24h";
+    let changeAmount = null;
+    if (changePct === null && realtimeIsNewer) {
+      const realtimePct = num(realtime.change_pct);
+      if (realtimePct !== null) {
+        changePct = realtimePct;
+        changeSource = "realtime";
+      }
+    }
+    const prevBar = candles.length > 1 ? candles[candles.length - 2] : null;
+    if (changePct === null && last && prevBar) {
+      const prevClose = num(prevBar.close);
+      if (prevClose !== null && prevClose > 0) {
+        changePct = ((last.close - prevClose) / prevClose) * 100;
+        changeSource = "bars";
+      }
+    }
+    // 涨跌额：一律按**不复权元**给（行情软件里就是这个数，挂单也用得上）。
+    //
+    // ⚠️ 上游 ``dual_compare.realtime`` 里 **``prev_close`` 是后复权域的**
+    // （实测 600519/2026-10-14：``prev_close=8151.84`` = 后复权收盘），只有
+    // ``raw_price`` 是不复权的。直接 ``raw_price - prev_close`` 会得到
+    // ``1271.77 - 8151.84 = −6880.07`` —— 一个"跌了 6880 元"的茅台。
+    // 昨收必须**先除回因子**：用上游随报价一起给的 ``hfq_factor``（它与
+    // ``price``/``raw_price`` 同源，除权日也不会跟 K 线那根错位），
+    // 次选 K 线口径的 ``price_ratio``。
+    const realtimeRawPrice = realtime ? num(realtime.raw_price) : null;
+    const realtimeRawPrev = realtime ? num(realtime.prev_close) : null;
+    if (changeSource === "realtime" && realtimeRawPrice !== null && realtimeRawPrev !== null) {
+      const quoteFactor = num(realtime.hfq_factor);
+      const divisor =
+        quoteFactor !== null && quoteFactor > 0 ? quoteFactor : priceRatio !== null && priceRatio > 0 ? priceRatio : null;
+      if (divisor !== null) changeAmount = realtimeRawPrice - realtimeRawPrev / divisor;
+    } else if (changeSource === "bars" && lastPriceRaw !== null && changePct !== null && changePct > -100) {
+      // K 线分支只有后复权序列，用 raw 现价反推 raw 昨收（同一根 bar 的因子约掉）。
+      changeAmount = lastPriceRaw - lastPriceRaw / (1 + changePct / 100);
+    }
     const changeNode = q("[data-testid=market-change]");
     if (changeNode) {
-      const market24h = isObject(snapshot) && isObject(snapshot.market_24h) ? snapshot.market_24h : null;
-      const has24h = market24h && market24h.available === true;
-      const upstreamPct = has24h ? Number(market24h.price_change_pct) : NaN;
-      const changePct = Number.isFinite(upstreamPct) ? upstreamPct : null;
-      changeNode.textContent = changePct === null ? "—" : `${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
+      changeNode.textContent =
+        changePct === null ? "—" : `${changePct >= 0 ? "+" : ""}${changePct.toFixed(2)}%`;
       changeNode.dataset.state = changePct === null ? "flat" : changePct >= 0 ? "up" : "down";
-      changeNode.dataset.source = has24h && Number.isFinite(upstreamPct) ? "24h" : "unavailable";
-      changeNode.setAttribute(
-        "title",
-        has24h && Number.isFinite(upstreamPct) ? "上游 24h 涨跌幅" : "上游 24h 涨跌幅不可用（A 股暂无数据源）",
-      );
+      changeNode.dataset.source = changeSource || "unavailable";
+      const changeTitle =
+        changeSource === "24h"
+          ? "上游 24h 涨跌幅"
+          : changeSource === "realtime"
+            ? `实时涨跌幅（含当日盘中，来源 ${realtime.source || "upstream"} ${realtimeDate}）`
+            : changeSource === "bars"
+              ? `末两根 K 线涨跌幅（数据截止 ${lastBarDate || "—"}）`
+              : "涨跌幅不可用";
+      changeNode.setAttribute("title", changeTitle);
+    }
+    const changeAmountNode = setText(
+      "[data-testid=market-change-amount]",
+      // ⚠️ 符号必须自己拼：``formatNumber`` 内部是 ``Math.abs(value)``（千分位格式化
+      // 用），``formatPrice(-3.12)`` 返回 ``"3.12"`` —— 跌了 3 块会显示成涨了 3 块。
+      changeAmount === null
+        ? ""
+        : `${changeAmount >= 0 ? "+" : "-"}${formatPrice(Math.abs(changeAmount))}`,
+    );
+    if (changeAmountNode) {
+      changeAmountNode.hidden = changeAmount === null;
+      changeAmountNode.dataset.state =
+        changeAmount === null ? "flat" : changeAmount >= 0 ? "up" : "down";
+      changeAmountNode.setAttribute("title", "涨跌额（不复权，元）");
     }
     const countdownNode = q("[data-testid=close-countdown]");
     if (countdownNode) {
@@ -1461,13 +1614,28 @@
       // R34：同上，服务发的是 `dual_compare`。写错的后果是
       // `dc.available` 恒为 undefined → 走 else → `dualSection.hidden = true`，
       // **整个双数据集对比面板永久隐藏**，而且没有任何报错。
-      const dc = snapshot.dual_compare;
+      const dc = dualCompare;
       if (dc && dc.available) {
         dualSection.hidden = false;
         setText("[data-testid=dual-cpt-close]", dc.cpt_close ? formatPrice(dc.cpt_close) : "—");
         setText("[data-testid=dual-realtime-price]", dc.realtime_price ? formatPrice(dc.realtime_price) : "—");
         const div = dc.divergence_pct;
         setText("[data-testid=dual-divergence]", div === null ? "—" : `${div >= 0 ? "+" : ""}${div.toFixed(2)}%`);
+        // R35 换源后上游是**新浪**（东财在生产的日本机器上实测 502）。标签必须跟着
+        // 改：把源名写死会让人去一个根本不存在的源上排查问题。
+        const rtInfo = isObject(dc.realtime) ? dc.realtime : null;
+        const rtLabel = q("[data-testid=dual-realtime-label]");
+        if (rtLabel) {
+          const source = rtInfo && typeof rtInfo.source === "string" ? rtInfo.source : "";
+          rtLabel.textContent = source ? `实时价（${SOURCE_LABELS[source] || source}）` : "实时价";
+        }
+        const rtPriceNode = q("[data-testid=dual-realtime-price]");
+        if (rtPriceNode && rtInfo) {
+          const stamp = [rtInfo.quote_date, rtInfo.quote_time]
+            .filter((value) => typeof value === "string" && value)
+            .join(" ");
+          rtPriceNode.setAttribute("title", stamp ? `上游实时快照 ${stamp}` : "上游实时快照");
+        }
       } else {
         dualSection.hidden = true;
       }
@@ -1482,16 +1650,70 @@
       last && previous ? directionState(trendDirection) : "flat",
     );
 
-    const market24h = isObject(snapshot) && isObject(snapshot.market_24h) ? snapshot.market_24h : null;
-    const market24hAvailable = market24h && market24h.available === true;
-    const high24 = setText("[data-testid=market-high-24h]", market24hAvailable ? formatPrice(market24h.high) : "不可用");
-    if (high24) high24.setAttribute("title", market24hAvailable ? "上游 24h 聚合" : "上游未提供真实 24h 聚合");
-    const low24 = setText("[data-testid=market-low-24h]", market24hAvailable ? formatPrice(market24h.low) : "不可用");
-    if (low24) low24.setAttribute("title", market24hAvailable ? "上游 24h 聚合" : "上游未提供真实 24h 聚合");
+    // 最高/最低：A 股改用**末根 K 线的当日高低**。``market_24h`` 在 A 股恒为
+    // available=false，于是一整年都显示"不可用"——而当天的高低从来没缺过，
+    // 就在快照的末根 bar 里。价格按「后复权（不复权）」两个口径一起给。
+    const highLabel = q("[data-testid=market-high-label]");
+    const lowLabel = q("[data-testid=market-low-label]");
+    if (highLabel) highLabel.textContent = isAShare ? "当日最高" : "24h 最高";
+    if (lowLabel) lowLabel.textContent = isAShare ? "当日最低" : "24h 最低";
+    const formatBasisPrice = (hfq, raw) =>
+      raw === null ? formatPrice(hfq) : `${formatPrice(hfq)}（${formatPrice(raw)}）`;
+    const lastHigh = num(market.last_high);
+    const lastHighRaw = num(market.last_high_raw);
+    const lastLow = num(market.last_low);
+    const lastLowRaw = num(market.last_low_raw);
+    const high24 = setText(
+      "[data-testid=market-high-24h]",
+      isAShare
+        ? lastHigh === null ? "—" : formatBasisPrice(lastHigh, lastHighRaw)
+        : market24hAvailable ? formatPrice(market24h.high) : "不可用",
+    );
+    if (high24) {
+      high24.setAttribute(
+        "title",
+        isAShare
+          ? `末根 K 线（${lastBarDate || "—"}）当日最高；括号内为不复权`
+          : market24hAvailable ? "上游 24h 聚合" : "上游未提供真实 24h 聚合",
+      );
+    }
+    const low24 = setText(
+      "[data-testid=market-low-24h]",
+      isAShare
+        ? lastLow === null ? "—" : formatBasisPrice(lastLow, lastLowRaw)
+        : market24hAvailable ? formatPrice(market24h.low) : "不可用",
+    );
+    if (low24) {
+      low24.setAttribute(
+        "title",
+        isAShare
+          ? `末根 K 线（${lastBarDate || "—"}）当日最低；括号内为不复权`
+          : market24hAvailable ? "上游 24h 聚合" : "上游未提供真实 24h 聚合",
+      );
+    }
+    // 成交量：A 股原来把 118 根 bar 相加显示成 ``4.85M`` —— 既不是当日量、又不带
+    // 单位（``daily_bar.volume`` 的单位是**手**），还和旁边的「K 线根数」打架。
+    // 改成末根 bar 的当日量（手/万手）+ 当日成交额（亿元），两者都有现成字段。
     const quoteVolume = market24hAvailable ? Number(market24h.quote_volume) : NaN;
+    const volumeLabel = q("[data-testid=market-volume-label]");
+    if (volumeLabel) volumeLabel.textContent = isAShare ? "当日成交" : "成交量";
     const volumeNode = q("[data-testid=market-volume]");
     if (volumeNode) {
-      if (Number.isFinite(quoteVolume)) {
+      const lots = num(market.last_volume_lots);
+      const amount = num(market.last_amount);
+      if (isAShare && (lots !== null || amount !== null)) {
+        const parts = [];
+        if (lots !== null) {
+          parts.push(lots >= 1e4 ? `${(lots / 1e4).toFixed(2)} 万手` : `${formatNumber(lots, 0)} 手`);
+        }
+        if (amount !== null) parts.push(`${(amount / 1e8).toFixed(2)} 亿元`);
+        volumeNode.textContent = parts.join(" / ");
+        volumeNode.setAttribute(
+          "title",
+          `末根 K 线（${lastBarDate || "—"}）当日成交量 / 成交额；1 手 = 100 股`,
+        );
+        volumeNode.dataset.source = "last_bar";
+      } else if (Number.isFinite(quoteVolume)) {
         volumeNode.textContent = `${formatVolume(quoteVolume)} USDT`;
         volumeNode.setAttribute("title", "上游 24h USDT 成交额");
         volumeNode.dataset.source = "24h";

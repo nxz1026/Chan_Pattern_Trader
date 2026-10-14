@@ -22,8 +22,8 @@ import logging
 import os
 from collections.abc import Callable, Sequence
 from dataclasses import asdict
-from datetime import UTC, date, datetime
-from typing import Any
+from datetime import UTC, date, datetime, timedelta
+from typing import Any, NamedTuple
 
 from cpt.adapters.a_share_factor import (
     DEFAULT_FACTOR_DAYS,
@@ -64,6 +64,7 @@ __all__ = [
     "ENV_ONDEMAND_FACTOR",
     "FactorEnsurer",
     "build_ashare_snapshot",
+    "board_label",
     "factor_ensurer_from_env",
     "empty_ashare_snapshot",
     "reset_factor_fetcher",
@@ -415,6 +416,9 @@ def build_ashare_snapshot(
     snapshot["market"]["interval"] = "1d"
     snapshot["market"]["name"] = security_name
     snapshot["market"]["board"] = security_board
+    # 裸码 ``SH`` 分不出主板/科创板（实测 ``board='SH'`` 里混着 617 只 688/689），
+    # 前端直接显示 ``SH`` 等于没显示。原值 ``board`` 保留不动，另给一个可读标签。
+    snapshot["market"]["board_label"] = board_label(code, security_board)
     snapshot["summary"]["structural_alert"] = structural_alert
     _attach_factor_fetch(snapshot, outcome)
     _attach_ashare_tags(snapshot, tags_audit)
@@ -422,7 +426,14 @@ def build_ashare_snapshot(
     _attach_close_countdown(snapshot, active_client)
     _attach_signal_change(snapshot, active_client, prev_status=signal_prev_status)
     _attach_factor_epoch(snapshot, active_client)  # R45：口径纪元随快照下发
-    _attach_dual_compare(snapshot, code, active_client)
+    # R61：价格口径基准（末根 bar 收盘 + **当日后复权因子**）只解析一次 ——
+    # 双数据集对比与「复权价 vs 不复权价」必须用同一个因子，各查各的迟早不一致。
+    basis = _resolve_price_basis(snapshot, code, active_client)
+    _attach_dual_compare(snapshot, code, active_client, basis=basis)
+    _attach_price_basis(snapshot, basis)
+    _attach_last_bar_stats(snapshot, basis)
+    # 顺序有依赖：``stale`` 必须先落，``_attach_calendar_gaps`` 读它决定 severity。
+    _attach_staleness(snapshot, active_client)
     _attach_calendar_gaps(snapshot, active_client)
     # R38：A 股侧也落「运行水位 + 算法指纹」。加密侧那行在"只有走到这里才算成功
     # 发布的快照"之后；这里同理 —— 上面几条 except 分支返回的是**降级/空**快照
@@ -1013,7 +1024,230 @@ def _attach_factor_epoch(snapshot: dict[str, Any], client: Any) -> None:
     snapshot["summary"]["factor_epoch"] = payload
 
 
-def _attach_dual_compare(snapshot: dict[str, Any], code: str, client: Any) -> None:
+def board_label(code: str, board: str | None) -> str | None:
+    """把裸板块码翻成可读板块（``SH`` → ``沪市主板`` / ``科创板``）。
+
+    ## 为什么不能直接用 ``board``
+
+    实测 ``asel.security_master`` 只有三个值：``SH`` 2319 / ``SZ`` 1494 /
+    ``SZ_CHINEXT`` 1408 —— 而 ``SH`` 里**混着 617 只科创板**（688/689）与
+    1702 只主板（600/601/603/605）。显示 ``SH`` 的用户看到 688981（中芯国际）
+    只会以为面板把板块认错了。
+
+    所以按 **code 前缀**判板块，``board`` 只做兜底：这个库里 ``SZ_CHINEXT``
+    恰好等于创业板，但那是数据源命名，不是语义 —— 前缀才是交易所本身的规则。
+
+    ``board`` 为空（老调用方 / 不带 board 的测试）时只走前缀判定；前缀也认不出
+    就返回 ``None``（**不编**一个"其它"），前端对 ``None`` 隐藏该行。
+    """
+    normalized = board.strip() if isinstance(board, str) else ""
+    prefix = code.strip()[:3] if isinstance(code, str) else ""
+    if prefix in {"688", "689"}:
+        return "科创板"
+    if prefix in {"300", "301", "302"}:
+        return "创业板"
+    if prefix in {"430", "830", "831", "832", "833", "834", "835", "836", "837", "838", "839"} or (
+        prefix.startswith("87") or prefix.startswith("92")
+    ):
+        return "北交所"
+    if prefix.startswith("900"):
+        return "沪市B股"
+    if prefix.startswith("200"):
+        return "深市B股"
+    if normalized == "SH":
+        return "沪市主板"
+    if normalized == "SZ":
+        return "深市主板"
+    if normalized == "SZ_CHINEXT":
+        return "创业板"
+    return None
+
+
+class _PriceBasis(NamedTuple):
+    """末根 bar 的价格口径基准（一次解析，多处共用）。"""
+
+    last_close: float
+    last_date: date | None
+    factor: float | None
+
+
+def _resolve_price_basis(snapshot: dict[str, Any], code: str, client: Any) -> _PriceBasis:
+    """解析末根 bar 的收盘价 / 日期 / **当日后复权因子**。
+
+    R61：``_attach_dual_compare`` 原来自己查一次因子。新增的「最新价旁边挂不复权
+    价」需要**同一个**因子 —— 跨日相除会把区间内的除权变化算进倍率（除权日
+    600519 的因子从 7.06 掉到 6.39，差 10%），而
+    :func:`cpt.adapters.a_share_local.fetch_latest_raw_bar` 的 docstring 早就
+    记着这个坑。把查询提出来共享，比让两个面板各自算更省事也更不容易错。
+
+    查不到因子返回 ``factor=None``（**不填 1.0**）：调用方据此选择"不显示"，
+    而不是显示一个假的「没除过权」。
+    """
+    from cpt.adapters.a_share_local import hfq_factor_on  # noqa: PLC0415
+
+    candles = snapshot.get("candles") or []
+    last_close = 0.0
+    last_date: date | None = None
+    if candles:
+        try:
+            last_close = float(candles[-1].get("close") or 0.0)
+        except (TypeError, ValueError):
+            last_close = 0.0
+        raw_open = candles[-1].get("open_time")
+        if isinstance(raw_open, (int, float)):
+            last_date = datetime.fromtimestamp(raw_open / 1000, tz=UTC).date()
+    factor: float | None = None
+    if last_date is not None and client is not None:
+        try:
+            factor = hfq_factor_on(_active_client_conn(client), code, last_date)
+        except Exception as exc:  # noqa: BLE001 — 查不到因子不该让整个面板消失
+            _LOG.debug("取后复权因子失败 %s %s: %s", code, last_date, exc)
+    return _PriceBasis(last_close=last_close, last_date=last_date, factor=factor)
+
+
+def _attach_price_basis(snapshot: dict[str, Any], basis: _PriceBasis) -> None:
+    """把「价格口径」挂到 ``market``：后复权价旁边给出不复权价与倍率。
+
+    ## 为什么要并排显示（R61）
+
+    快照的 ``market.last_price`` 是**后复权**价：600519 / 2026-10-13 是
+    ``8151.84``，而不复权收盘 ``1274.89``。两者都是对的 —— 缠论必须用后复权
+    序列（否则除权当天凭空一根大阴线，笔和中枢全废），但**面板上没有一个字
+    说明这件事**：用户拿 ``8151.84`` 去行情软件里找不到、也挂不了单，第一反应
+    是「数据错了」。
+
+    不复权价 = ``last_close / 同一根 bar 的因子``。因子取不到时**只给
+    ``last_bar_date``，不给 ``price_ratio``/``last_price_raw``**：显示 ``×1.0``
+    等于把"不知道"说成"没除权"，比不显示更坏。前端对缺失字段隐藏该行。
+    """
+    market = snapshot.get("market")
+    if not isinstance(market, dict):
+        return
+    if basis.last_date is not None:
+        market["last_bar_date"] = basis.last_date.isoformat()
+    factor = basis.factor
+    if not factor or factor <= 0:
+        return
+    market["price_ratio"] = round(float(factor), 6)
+    if basis.last_close > 0:
+        market["last_price_raw"] = round(basis.last_close / float(factor), 4)
+
+
+def _attach_last_bar_stats(snapshot: dict[str, Any], basis: _PriceBasis) -> None:
+    """末根 bar 的当日高/低/量/额（A 股日线 → 当日口径）。
+
+    三件事一起修，都是同一个根因：**面板拿加密侧字段硬套 A 股**。
+
+    * ``market_24h`` 在 A 股永远 ``available=False``，于是「24h 最高/最低」长期
+      显示「不可用」——而当天的高低就在末根 bar 里；
+    * 成交量原实现把 118 根 bar 相加显示成 ``4.85M``，既不是当日量、又不带单位
+      （``daily_bar.volume`` 的单位是**手**，实测 600519/2026-10-13：
+      26573 手 × 100 × 1274.89 = 33.88 亿 ≈ ``amount`` 33.93 亿），
+      还和旁边的「K 线根数」互相打架；
+    * 成交额（``quote_volume`` = ``daily_bar.amount``，单位**元**）后端一直在发，
+      前端从来没读过。
+
+    高/低给**两个口径**（后复权 + 不复权），与 ``last_price`` 的处理一致；
+    量/额本身无所谓复权，直接给原始值。
+    """
+    candles = snapshot.get("candles") or []
+    market = snapshot.get("market")
+    if not isinstance(market, dict) or not candles:
+        return
+    bar = candles[-1]
+    if not isinstance(bar, dict):
+        return
+
+    factor = basis.factor if basis.factor and basis.factor > 0 else None
+
+    def _price(value: Any) -> float | None:
+        try:
+            return None if value is None else float(value)
+        except (TypeError, ValueError):
+            return None
+
+    high = _price(bar.get("high"))
+    low = _price(bar.get("low"))
+    if high is not None:
+        market["last_high"] = high
+        if factor:
+            market["last_high_raw"] = round(high / factor, 4)
+    if low is not None:
+        market["last_low"] = low
+        if factor:
+            market["last_low_raw"] = round(low / factor, 4)
+    volume = _price(bar.get("volume"))
+    if volume is not None:
+        market["last_volume_lots"] = volume
+    amount = _price(bar.get("quote_volume"))
+    if amount is not None:
+        market["last_amount"] = amount
+
+
+def _attach_staleness(snapshot: dict[str, Any], client: Any) -> None:
+    """按交易日历判定 ``data_quality.stale``（"最后一根 bar 是不是最近的交易日"）。
+
+    ## 原实现为什么从来不会亮
+
+    ``quality["stale"]`` **只有人读、没有人写**：``build_dashboard_snapshot`` 的
+    默认值是 ``False``，:func:`_attach_calendar_gaps` 读它去决定 ``severity``，
+    而 A 股路径没有任何一处把它置 ``True``。于是「数据陈旧」这个态在 A 股侧是
+    死代码 —— 采集断了一周，面板照旧显示绿色。
+
+    ## 判据与两个边界
+
+    用 ``open_days_between`` 查「末根 bar 之后**到截止日为止**还有没有交易日」，
+    有则是陈旧。两个边界都必须处理，否则会误报：
+
+    * **今天**：A 股快照批 16:00（北京）跑，盘中运行时库里本来就没有今天的 bar。
+      所以收盘（15:00）前把截止日取到**昨天**，15:00 之后才把今天算进去。
+    * **日历查不到**：保持不动（fail-open 到不误报），绝不能因为查库失败就报陈旧。
+
+    时区一律走 :mod:`cpt.domain.market_time`（生产机是 UTC，用宿主 ``now()``
+    会在北京 00:00–08:00 之间算错一天 —— R59 已为此踩过一次）。
+    """
+    quality = snapshot.get("data_quality")
+    if not isinstance(quality, dict):
+        return
+    candles = snapshot.get("candles") or []
+    if not candles:
+        return
+    raw_open = candles[-1].get("open_time")
+    if not isinstance(raw_open, (int, float)):
+        return
+    last_bar_day = datetime.fromtimestamp(raw_open / 1000, tz=UTC).date()
+
+    from cpt.adapters.a_share_local import open_days_between  # noqa: PLC0415
+    from cpt.domain.market_time import MARKET_CLOSE, market_now  # noqa: PLC0415
+
+    now = market_now()
+    cutoff = now.date() if now.time() >= MARKET_CLOSE else now.date() - timedelta(days=1)
+    if cutoff <= last_bar_day:
+        return
+    try:
+        conn = _active_client_conn(client)
+        if conn is None:
+            return
+        missing = open_days_between(conn, last_bar_day + timedelta(days=1), cutoff)
+    except Exception as exc:  # noqa: BLE001 — 判不了就不判，不误报陈旧
+        _LOG.debug("陈旧判定失败 %s: %s: %s", last_bar_day, type(exc).__name__, exc)
+        return
+    if not missing:
+        return
+    quality["stale"] = True
+    quality["stale_basis"] = "trade_calendar"
+    quality["missing_trade_days"] = [d.isoformat() for d in missing]
+    quality["stale_last_bar_date"] = last_bar_day.isoformat()
+    quality["stale_cutoff_date"] = cutoff.isoformat()
+
+
+def _attach_dual_compare(
+    snapshot: dict[str, Any],
+    code: str,
+    client: Any,
+    *,
+    basis: _PriceBasis | None = None,
+) -> None:
     """双数据集同步对比：CPT 本地（**后复权**）vs 上游实时行情。
 
     ## R35：换源 + 修口径（两件事，都因为一个实测结论）
@@ -1035,17 +1269,15 @@ def _attach_dual_compare(snapshot: dict[str, Any], code: str, client: Any) -> No
 
     取的是**最后一根 bar 当日**的因子：盘中因子不变，跨日才会变，而面板比的就是
     「今日 vs 上一根收盘」。
+
+    R61：因子改由调用方经 ``basis`` 传入（:func:`_resolve_price_basis` 只查一次，
+    与 :func:`_attach_price_basis` 共用）。省略 ``basis`` 时本函数自己解析，
+    保持单测里 ``_attach_dual_compare(snapshot, code, client)`` 的调用方式可用。
     """
-    from cpt.adapters.a_share_local import hfq_factor_on
     from cpt.adapters.a_share_public import ASharePublicError, SinaQuoteClient
 
-    candles = snapshot.get("candles", [])
-    last_close = float(candles[-1].get("close") or 0.0) if candles else 0.0
-    last_date = None
-    if candles:
-        raw_open = candles[-1].get("open_time")
-        if isinstance(raw_open, (int, float)):
-            last_date = datetime.fromtimestamp(raw_open / 1000, tz=UTC).date()
+    basis = basis or _resolve_price_basis(snapshot, code, client)
+    last_close = basis.last_close
 
     try:
         quote = SinaQuoteClient().fetch_quote(code)
@@ -1059,14 +1291,23 @@ def _attach_dual_compare(snapshot: dict[str, Any], code: str, client: Any) -> No
         return
 
     raw_price = quote.get("last")
-    factor: float | None = None
-    if last_date is not None and client is not None:
-        try:
-            factor = hfq_factor_on(_active_client_conn(client), code, last_date)
-        except Exception as exc:  # noqa: BLE001 — 查不到因子不该让整个面板消失
-            _LOG.debug("取后复权因子失败 %s %s: %s", code, last_date, exc)
+    factor = basis.factor
     if raw_price is None:
+        # 上游连字段都没给（与下面的 ``0.0`` 是两件事，别合并）。
         snapshot["dual_compare"] = {"available": False, "reason": "realtime_empty"}
+        return
+    if not _is_tradable_price(raw_price):
+        # R61 实测：2026-10-14 09:23（北京时间，开盘前）新浪返回 ``last=0.0``，
+        # 而 ``prev_close`` 已经是昨收 1274.89 —— 按 0 比就是 **−100%**。
+        # 这个数会同时进「双数据集对比」和「涨跌幅」，即每个交易日早盘都会
+        # 亮一次"市场跌没了"，09:30 一到又自己变回来。宁可不显示。
+        snapshot["dual_compare"] = {
+            "available": False,
+            "reason": "realtime_no_trade",
+            "realtime_prev_close": quote.get("prev_close"),
+            "realtime_quote_date": quote.get("date"),
+            "realtime_quote_time": quote.get("time"),
+        }
         return
     if not factor:
         # 没有因子就没法同口径比。**宁可说不知道**，也不给一个 −85% 的假数字。
@@ -1108,12 +1349,25 @@ def _hfq(value: Any, factor: float) -> float | None:
     return None if value is None else float(value) * factor
 
 
+def _is_tradable_price(value: Any) -> bool:
+    """上游现价是否是**可成交**的价（``0``/负数/非数都不算）。
+
+    开盘前与停牌时新浪把 ``last`` 给成 ``0.0``。``0`` 不是一个"低价格"，
+    它是一个"今天还没有成交价"的哨兵值 —— 拿它参与任何比值都会产生
+    ``−100%`` 这种看着像灾难的数。所以单独判，别混进 ``None`` 分支。
+    """
+    try:
+        return value is not None and float(value) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _pct_from(last: Any, prev_close: Any) -> float | None:
     """涨跌幅（%）：由现价与昨收算，而不是依赖上游给的那一个字段。"""
     if last is None or prev_close is None:
         return None
     prev = float(prev_close)
-    if prev <= 0:
+    if prev <= 0 or not _is_tradable_price(last):
         return None
     return round((float(last) - prev) / prev * 100, 4)
 

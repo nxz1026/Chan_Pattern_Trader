@@ -185,21 +185,23 @@
 
         <div data-testid="market-price" class="market-price">
           <span data-testid="market-last-price" data-field="market.last_price">—</span>
+          <span data-testid="market-last-price-raw" hidden>—</span>
           <span data-testid="market-change" data-state="flat">—</span>
+          <span data-testid="market-change-amount" hidden>—</span>
           <span data-testid="market-price-direction" data-state="flat">持平</span>
         </div>
 
         <dl class="market-stats">
           <div class="stat">
-            <dt>24h 最高</dt>
+            <dt data-testid="market-high-label">24h 最高</dt>
             <dd data-testid="market-high-24h">—</dd>
           </div>
           <div class="stat">
-            <dt>24h 最低</dt>
+            <dt data-testid="market-low-label">24h 最低</dt>
             <dd data-testid="market-low-24h">—</dd>
           </div>
           <div class="stat">
-            <dt>成交量</dt>
+            <dt data-testid="market-volume-label">成交量</dt>
             <dd data-testid="market-volume">—</dd>
           </div>
           <div class="stat">
@@ -209,6 +211,14 @@
           <div class="stat">
             <dt>时间范围</dt>
             <dd data-testid="market-time-range">—</dd>
+          </div>
+          <div class="stat">
+            <dt data-testid="market-data-asof-label" hidden>数据截止</dt>
+            <dd data-testid="market-data-asof" hidden>—</dd>
+          </div>
+          <div class="stat">
+            <dt data-testid="market-price-basis-label" hidden>价格口径</dt>
+            <dd data-testid="market-price-basis" hidden>—</dd>
           </div>
           <div class="stat">
             <dt>板块</dt>
@@ -224,7 +234,7 @@
               <dd data-testid="dual-cpt-close">—</dd>
             </div>
             <div class="stat">
-              <dt>东财实时价</dt>
+              <dt data-testid="dual-realtime-label">实时价</dt>
               <dd data-testid="dual-realtime-price">—</dd>
             </div>
             <div class="stat">
@@ -238,19 +248,19 @@
           <h3 id="data-quality-title">数据质量</h3>
           <ul class="quality-list">
             <li>
-              <span>stale</span>
+              <span>数据陈旧</span>
               <span data-testid="data-quality-stale" data-field="data_quality.stale">false</span>
             </li>
             <li>
-              <span>gap</span>
+              <span>K 线缺口</span>
               <span data-testid="data-quality-gap" data-field="data_quality.gap">false</span>
             </li>
             <li>
-              <span>已收盘</span>
+              <span data-testid="data-quality-closed-label">已收盘</span>
               <span data-testid="data-quality-closed" data-field="data_quality.closed_bar_count">0</span>
             </li>
             <li>
-              <span>未收盘</span>
+              <span data-testid="data-quality-unclosed-label">未收盘</span>
               <span data-testid="data-quality-unclosed" data-field="data_quality.unclosed_bar_count">0</span>
             </li>
             <li class="quality-wide">
