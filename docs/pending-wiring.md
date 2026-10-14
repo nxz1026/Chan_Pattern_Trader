@@ -304,7 +304,7 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:98` 的
 |---:|---|---|
 | 94 | `market_24h` | `{"available": False, "reason": "upstream_aggregate_unavailable"}` |
 | 98 | `parity` | `{"available": False, "reason": "oracle_reference_unavailable"}` |
-| ~~62~~→`99` | `runs` | v2 体内的 `[]` **仍在**，但活路径不经它：`cpt/web/app.py:413 _with_run_index()` 在**HTTP 响应层**注入真值（R20），`:1054`/`:1114` 调用 |
+| ~~62~~→`99` | `runs` | v2 体内的 `[]` **仍在**，但活路径不经它：`cpt/web/app.py:428 _with_run_index()` 在**HTTP 响应层**注入真值（R20），`:1054`/`:1114` 调用 |
 | 101 | `multi_level` | `{"available": False, "reason": "multi_level_unavailable"}` |
 | 109 | `config_compare` | `{"available": False, "reason": "config_compare_unavailable"}` |
 
@@ -325,7 +325,7 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:98` 的
 
 | 函数 | 产品位置 | 处境 | R22 处置 |
 |---|---|---|---|
-| `dashboard_reproducibility.py::snapshot_diff` | roadmap R5 | **已接线（R22）** | 调用方 `dashboard_compare.py` 已接进 C3 `/compare`（`cpt/web/app.py:862`）；序列型值由 `cpt/web/app.py:447 _summarize_diff_value` 递归降级，避免原始 candles 灌进响应 |
+| `dashboard_reproducibility.py::snapshot_diff` | roadmap R5 | **已接线（R22）** | 调用方 `dashboard_compare.py` 已接进 C3 `/compare`（`cpt/web/app.py:862`）；序列型值由 `cpt/web/app.py:462 _summarize_diff_value` 递归降级，避免原始 candles 灌进响应 |
 | `adapters/a_share_local.py::_to_wind_code` | 台账决策 C1 | **已接线（R22）** | 调用方 `scripts/factor_backfill.py:199`（`def fetch_wind_factor_rows`）→ 循环体 `:594` 的 `_wind_fallback`，由 `--wind-fallback`（`:506`，**默认关闭**）开启；同时把非法输入从静默兜底改成抛 `ValueError` |
 | `adapters/wind_source.py::fetch_adjust_factors` | 台账决策 C1 | **已接线（R22）** | 同上调用链 `scripts/factor_backfill.py:210`（引用）与 `:221`（`fetch_adjust_factors` 调用）；取数失败只转文案、绝不向上抛 |
 
