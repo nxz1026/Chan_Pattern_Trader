@@ -28,6 +28,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import UTC, datetime
 from typing import Any, Final
 
 _LOG = logging.getLogger(__name__)
@@ -93,6 +94,42 @@ def _to_raw(adjusted_price: float, price_ratio: float | None) -> float | None:
     return adjusted_price / price_ratio
 
 
+def _last_bar_day(snapshot: dict[str, Any]) -> str | None:
+    """快照末根 K 线的日期（ISO 字符串）；取不到 → ``None``。
+
+    只用于撰写给人看的 ``reason`` 文案，异常一律吞掉（同 ``_to_raw`` 的「宁缺勿错」）。
+    """
+    candles = snapshot.get("candles")
+    if not isinstance(candles, list) or not candles:
+        return None
+    last = candles[-1]
+    if not isinstance(last, dict):
+        return None
+    open_time = last.get("open_time")
+    if not isinstance(open_time, (int, float)) or isinstance(open_time, bool):
+        return None
+    try:
+        return datetime.fromtimestamp(open_time / 1000, tz=UTC).date().isoformat()
+    except (OSError, OverflowError, ValueError):
+        return None
+
+
+def _ratio_reason(snapshot: dict[str, Any]) -> str:
+    """``price_ratio`` 不可用时给前端的一句解释（R4/S0 · C4）。
+
+    加这个键之前，面板只能显示一排「—」，用户分不清「没有结构数据」与
+    「有结构但换算不出 raw」。``dashboard/dash-track.js`` 的 points 折叠
+    已有「有 ``reason`` 才渲染 hint」的分支，键一出现即生效。
+    """
+    day = _last_bar_day(snapshot)
+    if day is None:
+        return "price_ratio 不可用（快照缺少末根 K 线日期）→ 结构位无法换算为 raw"
+    return (
+        f"price_ratio 不可用（快照末根 {day} 与 daily_bar 无同日配对）"
+        "→ 结构位无法换算为 raw"
+    )
+
+
 # ── 主入口 ────────────────────────────────────────────────────────────
 
 
@@ -110,6 +147,8 @@ def compute_points(
         ``action`` / ``raw_close`` / ``price_ratio``）。
     :param note: 该追踪行的备注（"长期持有"会让 ``stop_loss_reference`` 出现）。
     :returns: ``suggested_points`` dict（见 schema 文档）；任一关键量缺则该字段为 ``None``。
+        另含可选 ``reason``（R4/S0·C4）：五槽为空或止损被 note 门槛挡掉时，
+        给一句可直接展示给用户的中文解释；五槽齐全且止损正常时**不带**该键。
     """
     overlays = snapshot.get("overlays") or {}
     bis = list(overlays.get("bis") or [])
@@ -119,10 +158,13 @@ def compute_points(
     price_ratio = rec.get("price_ratio")
     if not isinstance(price_ratio, (int, float)) or price_ratio <= 0:
         # 没 ratio 就不能把结构位转 raw；直接给 None，不假装有数。
+        # R4/S0·C4：连原因一起给 —— 否则前端只有一排「—」，
+        # 用户分不清「本来就没有结构」与「有结构但换算不出来」。
         return {
             "buy": _empty_sides(),
             "sell": _empty_sides(),
             "stop_loss_reference": None,
+            "reason": _ratio_reason(snapshot),
         }
 
     buy_ref = _buy_reference(bis, zhongshus, price_ratio)
@@ -157,7 +199,7 @@ def compute_points(
         else None
     )
 
-    return {
+    out: dict[str, Any] = {
         "buy": {
             "reference": buy_ref,
             "confirmed": buy_confirmed,
@@ -170,6 +212,14 @@ def compute_points(
         "raw_close": raw_close,
         "as_of_basis": "后复权→raw 转换价 = adjusted ÷ price_ratio",
     }
+    if stop is None and buy_ref and buy_ref.get("price_level"):
+        # 有买点却给不出止损 ⇒ 唯一原因是该追踪行没标注长期持有（门槛②，docs/18 §4.3）。
+        # 说出来，用户才知道止损为什么空、以及怎么让它出现。
+        out["reason"] = (
+            "止损未给出：该追踪行未标注「长期持有」"
+            "（note 含「长期」/long/hold 才输出 stop_loss_reference）"
+        )
+    return out
 
 
 # ── 内部 ──────────────────────────────────────────────────────────────

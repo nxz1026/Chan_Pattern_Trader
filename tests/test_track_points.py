@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 
 from cpt.application import track_points
@@ -63,6 +64,57 @@ def test_reference_is_none_with_no_overlays() -> None:
         _snap([_bi(-1, 100, 80)], []), _rec(status="structure_ready", price_ratio=1.0)
     )
     assert out2["buy"]["reference"]["price_level"] is not None
+
+
+# ── reason：空 points 要能自我解释（R4/S0·C4） ─────────────────────
+
+
+def _snap_with_last_bar(day_iso: str) -> dict[str, Any]:
+    """带一根 K 线的快照（``open_time`` 为 ms）：验证 reason 文案里的日期。"""
+    dt = datetime.fromisoformat(day_iso).replace(tzinfo=UTC)
+    snap = _snap([_bi(-1, 100, 80)], [])
+    snap["candles"] = [{"open_time": int(dt.timestamp() * 1000), "close": 100.0}]
+    return snap
+
+
+def test_reason_says_snapshot_has_no_bar_day() -> None:
+    """快照没有 candles ⇒ 说不出是哪一天，但要说清是「缺末根 K 线日期」。"""
+    out = track_points.compute_points(
+        _snap([_bi(-1, 100, 80)], []), _rec(status="structure_ready", price_ratio=None)
+    )
+    assert out["buy"]["reference"] is None
+    assert "缺少末根 K 线日期" in out["reason"]
+
+
+def test_reason_names_the_snapshot_last_bar_day() -> None:
+    """快照末根是 2026-10-12 ⇒ reason 必须点名这一天（用户才能去查因子表）。"""
+    out = track_points.compute_points(
+        _snap_with_last_bar("2026-10-12"), _rec(status="structure_ready", price_ratio=None)
+    )
+    assert "2026-10-12" in out["reason"]
+    assert "同日配对" in out["reason"]
+
+
+def test_no_reason_when_points_are_complete() -> None:
+    """五槽齐全 + 标注长期持有 ⇒ 不出现 reason 键（面板不显示多余提示）。"""
+    out = track_points.compute_points(
+        _snap([_bi(-1, 100, 80)], []),
+        _rec(status="confirmed", action="buy", price_ratio=1.0),
+        note="长期持有",
+    )
+    assert out["stop_loss_reference"] is not None
+    assert "reason" not in out
+
+
+def test_reason_explains_missing_stop_loss() -> None:
+    """有买点却不给止损 ⇒ 唯一原因是 note 没标注长期持有，必须说出来。"""
+    out = track_points.compute_points(
+        _snap([_bi(-1, 100, 80)], []),
+        _rec(status="structure_ready", price_ratio=1.0),
+    )
+    assert out["buy"]["reference"]["price_level"] is not None
+    assert out["stop_loss_reference"] is None
+    assert "长期持有" in out["reason"]
 
 
 # ── reference 计算（核心） ───────────────────────────────────────────
