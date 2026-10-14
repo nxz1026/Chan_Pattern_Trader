@@ -65,6 +65,7 @@ _LOG = logging.getLogger(__name__)
 __all__ = [
     "_set_clock_for_test",
     "_set_pusher_for_test",
+    "build_watchlist_summary",
     "maybe_notify",
     "reset_for_test",
 ]
@@ -169,6 +170,62 @@ def _points_lines(points: dict[str, Any]) -> list[str]:
     if reason:
         out.append(f"说明: {reason}")
     return out
+
+
+def _level(points: dict[str, Any], side: str) -> float | None:
+    """取 ``buy``/``sell`` 的参考价；字段缺了或不是数就返回 None。"""
+    ref = (points.get(side) or {}).get("reference") or {}
+    value = ref.get("price_level")
+    return float(value) if isinstance(value, (int, float)) else None
+
+
+def build_watchlist_summary(
+    rows: list[dict[str, Any]],
+) -> tuple[str, list[str]] | None:
+    """把「关注列表」每只票的最新建议折成一条收盘汇总（R4/C2 ④）。
+
+    :param rows: ``cpt.storage.track_store.latest_active_snapshots`` 的返回
+        （已按 code 去重、只留最新一条快照）。
+    :returns: ``(title, lines)``；一条都渲染不出来时返回 ``None`` —— 宁可不推，
+        也不发一条空消息出去。
+
+    为什么是**另一条**推送：跃迁推送是「有事就说」，而汇总的价值恰恰在于
+    「没事也让人看一眼」。所以它不走 :func:`maybe_notify` 的 24h 节流，
+    也不看有没有问题 —— 它每天收盘后固定说一次。
+
+    ``current`` 里没有股票名（快照载荷只有代码），所以这里只显示代码。
+    """
+    entries: list[str] = []
+    for row in rows:
+        payload = row.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        current = payload.get("current")
+        if not isinstance(current, dict):
+            continue
+        code = str(row.get("code") or payload.get("code") or "")
+        if not code:
+            continue
+        label = current.get("action_label") or current.get("action") or "—"
+        parts = [f"{code} {label}"]
+        points = payload.get("suggested_points")
+        if isinstance(points, dict):
+            buy = _level(points, "buy")
+            sell = _level(points, "sell")
+            if buy is not None:
+                parts.append(f"买点 {buy:g}")
+            if sell is not None:
+                parts.append(f"卖点 {sell:g}")
+            stop = points.get("stop_loss_reference")
+            if isinstance(stop, (int, float)):
+                parts.append(f"止损 {stop:g}")
+        raw_close = current.get("raw_close")
+        if isinstance(raw_close, (int, float)):
+            parts.append(f"现价 {raw_close:g}")
+        entries.append(" · ".join(parts))
+    if not entries:
+        return None
+    return f"{_TITLE_PREFIX} 关注列表收盘汇总（{len(entries)} 只）", entries
 
 
 def _latest_human_text(conn: Any, code: str) -> str | None:

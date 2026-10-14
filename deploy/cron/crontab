@@ -41,7 +41,8 @@
 # | 04:10 | `run-metric-prune-daily.sh` | 清 `cpt_run_metric` 过期行（run 90 天 / inspection 30 天） |
 # | 04:30 | `dashboard-run-prune-daily.sh` | 清 `cpt_dashboard_run` 过期行（默认 7 天） |
 # | 07:30 | `track-maintenance-daily.sh` | 兜底清理「我的追踪」过期快照 30 天 / 回收站 90 天（调 loopback 维护端点，`?apply=1`） |
-# | 11:00 | `cron-daily-report.sh` | 扫上面 5 条作业日志 + 共享表新鲜度，异常发飞书（R57 第 5 条） |
+# | 10:10 | `watchlist-daily-summary.sh` | 关注列表收盘汇总发飞书（R4/C2 ④；**每个交易日都推**；必须先于 11:00 日报，好让失败当天可见） |
+# | 11:00 | `cron-daily-report.sh` | 扫上面 6 条作业日志 + 共享表新鲜度，异常发飞书（R57 第 5 条） |
 #
 # 六个时间**刻意错开**：巡检 03:40 跑在因子重算 02:20 之后、两条清理 04:10/04:30 之前 ——
 # 这样巡检读到的是「刚重算完」的因子状态，而清理不会与它抢同一批行；
@@ -152,3 +153,19 @@ PATH=/usr/local/bin:/usr/bin:/bin
 #   另一条约束：必须晚于 emotion-core 的 18:05 watchdog，
 #   这样日报看到的是当天两个项目的**完整**结果。
 0 11 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/cron-daily-report.sh >> /home/ubuntu/logs/cron-daily-report.log 2>&1
+
+# ## 七、关注列表收盘汇总（R4/C2 ④）
+#
+# 与上面日报的分工：日报**只在有故障时**推（静默日不发）；这条是产品功能，
+# **每个交易日都推**一条「关注列表收盘汇总（N 只）」，是用户要看的收盘小结。
+# 因此它不走 `signal_notify.maybe_notify` 的 24h 节流 —— 那是「跃迁即推」的通道。
+#
+# ⚠️ 时刻同样是被上游决定的（理由见上面 R57 那一段）：
+#   必须晚于 emotion-core pipeline（北京 17:20）与它的 18:05 watchdog，
+#   否则快照/共享表还不是当天的完整数据；又必须早于 11:00 的日报，
+#   这样本作业失败时，**当天**的日报就能扫到它写的 `!!!!!`。
+#   北京 18:10 = 10:10 UTC。
+#
+# ✅ 已同步 `scripts/cron_daily_report.py` 的 `JOBS`（本行与那条一一对应，
+#    由 `tests/test_cron_daily_report.py` 双向断言守着）。
+10 10 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/watchlist-daily-summary.sh >> /home/ubuntu/logs/watchlist-daily-summary.log 2>&1

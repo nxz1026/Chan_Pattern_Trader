@@ -70,6 +70,7 @@ JOBS: Final[tuple[tuple[str, str], ...]] = (
     ("run-metric-prune", "/home/ubuntu/logs/run-metric-prune.log"),
     ("dashboard-run-prune", "/home/ubuntu/logs/dashboard-run-prune.log"),
     ("track-maintenance", "/home/ubuntu/logs/track-maintenance.log"),
+    ("watchlist-daily-summary", "/home/ubuntu/logs/watchlist-daily-summary.log"),
     ("cron-daily-report", "/home/ubuntu/logs/cron-daily-report.log"),
 )
 

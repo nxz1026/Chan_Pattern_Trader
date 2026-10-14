@@ -416,3 +416,82 @@ def test_human_cache_failure_does_not_block_push(
     _, lines = rec.calls[0]
     assert not [line for line in lines if line.startswith("说人话：")]
     assert "跳过推送的人话段" in caplog.text
+
+
+# ── C2 ④：关注列表收盘汇总 ─────────────────────────────────────────
+
+
+def _summary_row(
+    code: str,
+    *,
+    label: str = "观望",
+    buy: float | None = 3.56,
+    sell: float | None = 3.92,
+    stop: float | None = None,
+    raw_close: float | None = 3.73,
+) -> dict[str, object]:
+    """一行 ``cpt_track_snapshot``（只保留汇总渲染用到的字段）。"""
+    return {
+        "code": code,
+        "note": None,
+        "as_of": "2026-10-14T09:05:58+00:00",
+        "payload": {
+            "current": {"action": "hold", "action_label": label, "raw_close": raw_close},
+            "suggested_points": {
+                "buy": {"reference": {"price_level": buy}},
+                "sell": {"reference": {"price_level": sell}},
+                "stop_loss_reference": stop,
+            },
+        },
+    }
+
+
+def test_watchlist_summary_is_none_when_there_are_no_rows() -> None:
+    """一条都渲染不出来 ⇒ None；宁可不推，也不发一条空消息。"""
+    assert signal_notify.build_watchlist_summary([]) is None
+
+
+def test_watchlist_summary_names_every_tracked_code() -> None:
+    title, lines = signal_notify.build_watchlist_summary(
+        [
+            _summary_row("000002"),
+            _summary_row("600519", label="长期持有", buy=1374.11, sell=1429.25),
+        ]
+    )
+    assert title.startswith("[CPT 追踪] ")
+    assert "2 只" in title
+    assert len(lines) == 2
+    assert lines[0] == "000002 观望 · 买点 3.56 · 卖点 3.92 · 现价 3.73"
+    assert "买点 1374.11" in lines[1]
+
+
+def test_watchlist_summary_skips_rows_without_a_payload() -> None:
+    title, lines = signal_notify.build_watchlist_summary(
+        [{"code": "000002", "payload": "not-a-dict"}, _summary_row("600519")]
+    )
+    assert "1 只" in title
+    assert lines == ["600519 观望 · 买点 3.56 · 卖点 3.92 · 现价 3.73"]
+
+
+def test_watchlist_summary_keeps_a_row_without_points() -> None:
+    """只有 ``current``、没有 ``suggested_points`` ⇒ 仍要出现这一只。"""
+    row = _summary_row("000002")
+    row["payload"] = {"current": {"action": "hold", "action_label": "观望", "raw_close": 3.73}}
+    title, lines = signal_notify.build_watchlist_summary([row])
+    assert "1 只" in title
+    assert lines == ["000002 观望 · 现价 3.73"]
+
+
+def test_watchlist_summary_falls_back_to_action_and_skips_bad_numbers() -> None:
+    """``action_label`` 缺失用 ``action``；``price_level`` 不是数就不写那一段。"""
+    row = _summary_row("000002", buy=None, sell=None, raw_close=None)
+    payload = row["payload"]
+    assert isinstance(payload, dict)
+    payload["current"] = {"action": "watch"}
+    payload["suggested_points"] = {
+        "buy": {"reference": {"price_level": "3.56"}},  # 字符串不是数 ⇒ 不写这一段
+        "stop_loss_reference": 3.30,
+    }
+    title, lines = signal_notify.build_watchlist_summary([row])
+    assert "1 只" in title
+    assert lines == ["000002 watch · 止损 3.3"]

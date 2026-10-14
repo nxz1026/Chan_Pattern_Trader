@@ -30,12 +30,14 @@ __all__ = [
     "SNAPSHOT_RETENTION_DAYS",
     "RECYCLE_RETENTION_DAYS",
     "TrackStoreError",
+    "active_pairs",
     "add",
     "count_prunable_removed",
     "count_prunable_snapshots",
     "ensure_table",
     "is_tracked",
     "track_note",
+    "latest_active_snapshots",
     "list_active",
     "list_removed",
     "list_snapshots",
@@ -241,6 +243,59 @@ def track_note(conn: Any, code: str) -> str | None:
     if not row or row[0] is None:
         return None
     return str(row[0])
+
+
+def active_pairs(conn: Any) -> list[tuple[str, str]]:
+    """全部活跃追踪的 ``(user_id, code)`` 配对。
+
+    R4/C2 ④ 收盘汇总前要「逐对刷新快照」—— 刷新走的是
+    ``/api/dashboard/track/<code>/advice`` + ``X-CPT-User`` 头，缺一不可，
+    所以这里必须返回**配对**，只给 code 是不够的。同一只票被多个用户追踪
+    会返回多行（有意为之：每人各有自己的 ``cpt_track_snapshot`` 行）。
+
+    :raises TrackStoreError: 读失败 —— 与 :func:`list_active` 同一纪律，
+        绝不用空列表冒充「没人追踪」（那会让收盘汇总静默变成空推）。
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT user_id, code FROM public.cpt_track"
+                " WHERE removed_at IS NULL ORDER BY user_id, code"
+            )
+            rows = cur.fetchall()
+    except Exception as exc:
+        raise TrackStoreError(f"active_pairs() failed: {exc}") from exc
+    return [(str(r[0]), str(r[1])) for r in rows]
+
+
+def latest_active_snapshots(conn: Any) -> list[dict[str, Any]]:
+    """全部**有效**追踪行的最新一条快照，**按 code 跨用户去重**。
+
+    R4/C2 ④ 收盘汇总用：飞书是全局一条 webhook，没有「谁的关注列表」这一维度
+    —— 同一只票被多个用户追踪时只报一行（取 ``as_of`` 最近的那条）。
+
+    :returns: ``[{"code", "note", "as_of", "payload"}, ...]``，按 ``code`` 升序。
+    :raises TrackStoreError: 读失败 —— 与 :func:`list_active` 同一纪律，
+        **绝不用空列表冒充「没人追踪」**（那会把「汇总推不出去」伪装成「没内容」）。
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT DISTINCT ON (t.code) t.code, t.note, s.as_of, s.payload
+                FROM public.cpt_track t
+                JOIN public.cpt_track_snapshot s
+                  ON s.user_id = t.user_id AND s.code = t.code
+                WHERE t.removed_at IS NULL
+                ORDER BY t.code, s.as_of DESC
+                """
+            )
+            rows = cur.fetchall()
+    except Exception as exc:
+        raise TrackStoreError(f"latest_active_snapshots() failed: {exc}") from exc
+    return [
+        {"code": r[0], "note": r[1], "as_of": _iso(r[2]), "payload": r[3]} for r in rows
+    ]
 
 
 def list_active(conn: Any, user_id: str) -> list[dict[str, Any]]:
