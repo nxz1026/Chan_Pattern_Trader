@@ -83,6 +83,7 @@ __all__ = [
     "fetch_factor_codes",
     "fetch_latest_raw_bar",
     "fetch_latest_raw_close",
+    "fetch_raw_bar_on",
     "fetch_security_names",
     "hfq_factor_on",
     "is_trade_day",
@@ -445,6 +446,40 @@ def fetch_latest_raw_bar(code: str) -> tuple[date, float] | None:
         elif isinstance(trade_date, str):
             trade_date = date.fromisoformat(trade_date)
         return trade_date, float(row[1])
+    except Exception:  # noqa: BLE001 — 拿不到就不给倍率，不崩
+        return None
+
+
+def fetch_raw_bar_on(code: str, trade_date: date) -> tuple[date, float] | None:
+    """**指定交易日**的不复权收盘价 ``(交易日, 价格)``；拿不到返回 ``None``（**不抛**）。
+
+    与 :func:`fetch_latest_raw_bar` 只差 ``WHERE``：那个取最新一天，这个取给定一天。
+    为什么需要它（R4/C1）：快照会**拒绝缺因子的那一天**，所以 ``candles[-1]`` 常常
+    早于 ``daily_bar`` 的最新一行 —— 而算后复权倍率只需要「分子分母**同一天**」，
+    不需要那天是最新。按 ``candles[-1]`` 的日期回查，凡是当天有行情的股票就都能
+    拿到倍率（2026-10-12 实测 ``daily_bar`` 有 5223/5223 只）。
+
+    交易日不存在 / ``close`` 为 NULL / DB 不可达 → ``None``，**不抛**（理由同
+    :func:`fetch_latest_raw_bar`：消费方把 ``None`` 当正常分支「这天没有倍率」）。
+    """
+    try:
+        import psycopg  # noqa: PLC0415 — 与 fetch_latest_raw_bar 同款「自己建连、用完即弃」
+
+        with psycopg.connect(**connection_kwargs()) as conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT date, close FROM public.daily_bar WHERE code=%s AND date=%s LIMIT 1",
+                (code, trade_date),
+            )
+            row = cur.fetchone()
+        if not row or row[1] is None:
+            return None
+        bar_day = row[0]
+        # 列是 date 但驱动可能回 datetime / str，统统归一成 date。
+        if isinstance(bar_day, datetime):
+            bar_day = bar_day.date()
+        elif isinstance(bar_day, str):
+            bar_day = date.fromisoformat(bar_day)
+        return bar_day, float(row[1])
     except Exception:  # noqa: BLE001 — 拿不到就不给倍率，不崩
         return None
 

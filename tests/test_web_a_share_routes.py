@@ -624,18 +624,39 @@ _OPEN_0930 = int(datetime(2026, 9, 30, 1, 30, tzinfo=UTC).timestamp() * 1000)
 _OPEN_0929 = int(datetime(2026, 9, 29, 1, 30, tzinfo=UTC).timestamp() * 1000)
 
 
-def _ratio_site(monkeypatch, *, open_time, adj_close, raw_day, raw_close):
-    """搭出 ``build_recommendation`` 的最小现场（全程离线，不碰 DB）。"""
+def _ratio_site(
+    monkeypatch,
+    *,
+    open_time,
+    adj_close,
+    raw_day,
+    raw_close,
+    latest_day=None,
+    latest_close=None,
+):
+    """搭出 ``build_recommendation`` 的最小现场（全程离线，不碰 DB）。
+
+    R4/C1 后 ``_raw_bar_for`` 带 ``on`` 关键字：按「**指定那天**有没有行」回答，
+    取不到再由调用方退回最新一天。所以这个假实现要说清两件事：
+    ``raw_day``/``raw_close`` = 快照末根那天的 raw；``latest_day``/``latest_close``
+    = ``daily_bar`` 的最新一天（不传则与 ``raw_day`` 相同，即「快照没落后」）。
+    """
     monkeypatch.setattr(
         a_share_routes,
         "snapshot_payload",
         lambda code: {"candles": [{"close": adj_close, "open_time": open_time}] * 30},
     )
-    monkeypatch.setattr(
-        a_share_routes,
-        "_raw_bar_for",
-        lambda code: None if raw_day is None else (raw_day, raw_close),
-    )
+    if latest_day is None:
+        latest_day, latest_close = raw_day, raw_close
+
+    def _fake_raw_bar_for(code, *, on=None):
+        if on is None:
+            return None if latest_day is None else (latest_day, latest_close)
+        if raw_day is not None and on == raw_day:
+            return (raw_day, raw_close)
+        return None
+
+    monkeypatch.setattr(a_share_routes, "_raw_bar_for", _fake_raw_bar_for)
     monkeypatch.setattr(a_share_routes, "_signal_history", lambda code: {})
     monkeypatch.setattr(a_share_routes, "_persist_recommendation", lambda *a: None)
     return a_share_routes.build_recommendation("600519")
@@ -668,6 +689,29 @@ def test_price_ratio_is_none_when_the_two_days_differ(monkeypatch: pytest.Monkey
     )
     assert rec["raw_close"] == 1258.62
     assert rec["price_ratio"] is None
+
+
+def test_price_ratio_uses_the_snapshot_day_when_it_lags_behind(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R4/C1：快照末根**落后**于 ``daily_bar`` 最新一天时，按末根那天配对。
+
+    这是 C1 修的核心场景 —— 因子表只维护当日候选池（2026-10-13 实测仅 33/5223
+    只），快照会拒绝缺因子的那天、退到更早的一根；而 ``daily_bar`` 每天都有
+    全市场（2026-10-12 = 5223/5223）。旧实现只认「最新一天」，于是 000002 这类
+    股票的建议点整段为 null；按末根那天回查即可恢复。
+    """
+    rec = _ratio_site(
+        monkeypatch,
+        open_time=_OPEN_0929,           # 快照末根 = 09-29（09-30 缺因子被拒而退根）
+        adj_close=8886.54,
+        raw_day=date(2026, 9, 29),      # 09-29 那天的 raw
+        raw_close=1000.0,
+        latest_day=date(2026, 9, 30),   # daily_bar 最新 = 09-30（旧实现只看得到它）
+        latest_close=1258.62,
+    )
+    assert rec["raw_close"] == 1000.0   # 与快照同日，卡片上的价才对得上图
+    assert rec["price_ratio"] == round(8886.54 / 1000.0, 4)
 
 
 def test_price_ratio_is_none_without_open_time(monkeypatch: pytest.MonkeyPatch) -> None:
