@@ -138,6 +138,57 @@ def _set_pusher_for_test(pusher: Callable[[str, list[str]], bool]) -> None:
     _pusher = pusher
 
 
+def _points_lines(points: dict[str, Any]) -> list[str]:
+    """把 ``track_points.compute_points`` 的结果折成几行推送文本（R4/C2 ②）。
+
+    取值一律走 ``.get`` —— 这个 dict 来自另一个模块的纯函数，字段缺了宁可少一
+    行，也不能让整条推送因为 ``KeyError`` 丢掉。
+    """
+    out: list[str] = []
+    action = points.get("action")
+    status = points.get("status")
+    if action:
+        suffix = f"（{status}）" if status else ""
+        out.append(f"动作: {action}{suffix}")
+    buy = (points.get("buy") or {}).get("reference") or {}
+    if buy.get("price_level") is not None:
+        out.append(f"参考买点: {buy['price_level']}")
+    sell = (points.get("sell") or {}).get("reference") or {}
+    if sell.get("price_level") is not None:
+        out.append(f"参考卖点: {sell['price_level']}")
+    stop = points.get("stop_loss_reference")
+    if stop is not None:
+        out.append(f"止损参考: {stop}")
+    raw_close = points.get("raw_close")
+    if raw_close is not None:
+        out.append(f"现价: {raw_close}")
+    ratio = points.get("price_ratio")
+    if ratio is not None:
+        out.append(f"后复权倍率: {ratio}")
+    reason = points.get("reason")
+    if reason:
+        out.append(f"说明: {reason}")
+    return out
+
+
+def _latest_human_text(conn: Any, code: str) -> str | None:
+    """取该 code 最近一次成功的「说人话」（跨用户）。
+
+    推送是全局一条（不知道 ``user_id``），所以按 ``track:%:<code>`` 跨用户取 ——
+    追踪页的键是 ``track:<user>:<code>``（``cpt/web/track_api.py::_subject_id``）。
+
+    **命中才加，不命中绝不现造 LLM** —— 在推送路径上跑一次 LLM 会引入延迟与
+    费用，还可能因为失败反而把整条通知丢了。读失败也只降级成「这次不带人话」。
+    """
+    from cpt.storage.llm_call_store import latest_ok_text  # noqa: PLC0415
+
+    try:
+        return latest_ok_text(conn, subject_like=f"track:%:{code}")
+    except Exception as exc:  # noqa: BLE001 — 旁路：读不到就不带这一段
+        _LOG.info("跳过推送的人话段（缓存读取失败）code=%s: %s", code, exc)
+        return None
+
+
 def maybe_notify(
     signal: Signal,
     prev_status: str | None,
@@ -145,6 +196,7 @@ def maybe_notify(
     event_time: int,
     *,
     conn: Any | None = None,
+    points: dict[str, Any] | None = None,
 ) -> bool:
     """信号跃迁后调一次。返回是否真的推过一次。
 
@@ -155,6 +207,9 @@ def maybe_notify(
     :param conn: 调用方的连接，**只用于读关注列表**。为 ``None`` 时 fail-closed
         不推 —— 调用点必须把自己的 ``conn`` 传进来，本模块不自建连接
         （理由见模块 docstring 的「推送范围」）。
+    :param points: ``track_points.compute_points`` 的结果（R4/C2 ②：参考买卖点、
+        止损、现价、后复权倍率）。为 ``None`` 时只推信号本身 —— 算不出来不拦
+        推送，只是少一段。
     :returns: ``True`` 表示本轮真的发出去了；``False`` 表示不在关注列表 /
         关注范围读失败 / 节流跳过 / 推送失败 / 无状态变化。
     """
@@ -199,6 +254,13 @@ def maybe_notify(
         f"price: {signal.price}",
         f"event_time: {event_time}",
     ]
+    if points:
+        lines.extend(_points_lines(points))
+    if conn is not None:
+        human = _latest_human_text(conn, code)
+        if human:
+            lines.append(f"说人话：{human}")
+
     try:
         pushed = _pusher(title, lines)
     except Exception as exc:

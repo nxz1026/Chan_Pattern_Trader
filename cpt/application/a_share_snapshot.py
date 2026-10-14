@@ -478,6 +478,77 @@ def _empty_structure_id(level: int, code: str) -> str:
     return f"level{level}:empty:{code}" if code else f"level{level}:empty"
 
 
+def _points_for_push(
+    signal: Signal,
+    bis: Sequence[Bi],
+    zhongshus: Sequence[ZhongShu],
+    bars: Sequence[CanonicalBar],
+    conn: Any,
+    code: str,
+) -> dict[str, Any] | None:
+    """给推送算一份参考买卖点（R4/C2 ②）。
+
+    与 web 层 ``handle_track_advice`` 调的是**同一个** ``compute_points``，所以
+    「价位算式只有一份」这条纪律不破。倍率取**当日后复权因子**
+    （``hfq_factor_on``），它与 web 层 ``price_ratio``（末根 close ÷ 同日
+    ``daily_bar`` close）是同一份数据 —— 后复权价 = raw × 因子，方向相反而已。
+
+    任何一步拿不到就返回 ``None``：推送照发，只是少一段（绝不因算点失败丢通知）。
+
+    :param signal: 本次跃迁的信号（提供 ``status`` 与 ``signal_type``）。
+    :param bis: 后复权域笔序列。
+    :param zhongshus: 后复权域中枢序列。
+    :param bars: 后复权域 K 线（只取末根的 ``open_time`` / ``close``）。
+    :param conn: 调用方连接，**只读**（查因子表 + 关注列表备注）。
+    :param code: A 股 6 位代码。
+    """
+    if not bars:
+        return None
+    last = bars[-1]
+    from datetime import UTC, datetime  # noqa: PLC0415 — 只在本分支用到
+
+    from cpt.adapters.a_share_local import hfq_factor_on  # noqa: PLC0415
+    from cpt.application.track_points import compute_points  # noqa: PLC0415
+    from cpt.storage import track_store  # noqa: PLC0415
+
+    try:
+        last_day = datetime.fromtimestamp(last.open_time / 1000, tz=UTC).date()
+        ratio = hfq_factor_on(conn, code, last_day)
+    except Exception as exc:  # noqa: BLE001 — 推送不能因为查因子失败而丢
+        _LOG.warning("推送用倍率查询失败 %s: %s", code, exc)
+        return None
+    if not ratio or ratio <= 0:
+        return None
+    raw_close = round(float(last.close) / float(ratio), 4)
+    # 只有 1 根 K 线：`compute_points` 只读 overlays 与 rec 的两个字段，
+    # 不读 candles —— 这里给末根是为了万一将来它要用。
+    snapshot = {
+        "overlays": {"bis": list(bis), "zhongshus": list(zhongshus)},
+        "candles": [{"open_time": last.open_time, "close": last.close}],
+    }
+    rec = {
+        "status": signal.status,
+        "action": "buy" if signal.signal_type == "first_buy" else "sell",
+        "raw_close": raw_close,
+        "price_ratio": float(ratio),
+    }
+    try:
+        note = track_store.track_note(conn, code)
+    except Exception as exc:  # noqa: BLE001 — 备注读不到就当作没标注
+        _LOG.warning("推送用关注列表备注读取失败 %s: %s", code, exc)
+        note = None
+    try:
+        points = compute_points(snapshot, rec, note=note)
+    except Exception as exc:  # noqa: BLE001 — 同上：算不出来不拦推送
+        _LOG.warning("推送用参考买卖点计算失败 %s: %s", code, exc)
+        return None
+    points["raw_close"] = raw_close
+    points["price_ratio"] = float(ratio)
+    points["status"] = signal.status
+    points["action"] = rec["action"]
+    return points
+
+
 def _derive_first_buy_signal(
     bis: Sequence[Bi],
     zhongshus: Sequence[ZhongShu],
@@ -603,7 +674,11 @@ def _derive_first_buy_signal(
             _rollback_quietly(client, f"first_buy:{code}")
         else:
             # 推送在 commit 之后（先入库后告知）；失败 best-effort，吞掉。
-            signal_notify.maybe_notify(signal, prev_status, code, event_time, conn=conn)
+            # R4/C2 ②：带上参考买卖点。算不出来也照推，只是少一段。
+            points = _points_for_push(signal, bis, zhongshus, bars, conn, code)
+            signal_notify.maybe_notify(
+                signal, prev_status, code, event_time, conn=conn, points=points
+            )
 
     # 回传**写之前**的前值给 _attach_signal_change（2026-10-06）。它若自己再查一次
     # 库，查到的必然是上面刚 commit 的这条 ⇒ signal_changed 恒 False。
@@ -705,7 +780,11 @@ def _derive_first_sell_signal(
             _rollback_quietly(client, f"first_sell:{code}")
         else:
             # 推送在 commit 之后（先入库后告知）；失败 best-effort，吞掉。
-            signal_notify.maybe_notify(signal, prev_status, code, event_time, conn=conn)
+            # R4/C2 ②：带上参考买卖点。算不出来也照推，只是少一段。
+            points = _points_for_push(signal, bis, zhongshus, bars, conn, code)
+            signal_notify.maybe_notify(
+                signal, prev_status, code, event_time, conn=conn, points=points
+            )
 
     return signal, prev_status
 

@@ -355,3 +355,64 @@ def test_scope_check_runs_before_throttle(monkeypatch: pytest.MonkeyPatch) -> No
     ) is False
     assert seen == ["600519"]
     assert not signal_notify._LAST_PUSH_MS
+
+
+# ── C2 ③：说人话段 ───────────────────────────────────────────────────
+
+
+def _patch_human(monkeypatch: pytest.MonkeyPatch, result: object) -> None:
+    """顶掉存储层的 ``latest_ok_text``。
+
+    ``signal_notify._latest_human_text`` 是**局部 import**（避免 application →
+    storage 的模块级耦合），所以必须打在 ``llm_call_store`` 上才生效。
+    ``result`` 传 ``Exception`` 实例即模拟读失败。
+    """
+    from cpt.storage import llm_call_store
+
+    def _fake(conn: object, *, subject_like: str) -> str | None:
+        if isinstance(result, Exception):
+            raise result
+        return None if result is None else str(result)
+
+    monkeypatch.setattr(llm_call_store, "latest_ok_text", _fake)
+
+
+def test_human_line_is_added_when_cache_hits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """命中「说人话」缓存 → 推送多一行 ``说人话：…``。"""
+    _patch_human(monkeypatch, "这票中枢刚走完一笔向下")
+    rec = _Recorder()
+    signal_notify._set_pusher_for_test(rec)
+
+    assert _notify(_mk_signal(), prev_status=None, event_time=1) is True
+    assert len(rec.calls) == 1
+    _, lines = rec.calls[0]
+    assert "说人话：这票中枢刚走完一笔向下" in lines
+
+
+def test_human_line_is_absent_when_cache_misses(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """没有缓存 → 不出现该行，但**照推**（人话段是增量，不是前提）。"""
+    _patch_human(monkeypatch, None)
+    rec = _Recorder()
+    signal_notify._set_pusher_for_test(rec)
+
+    assert _notify(_mk_signal(), prev_status=None, event_time=1) is True
+    _, lines = rec.calls[0]
+    assert not [line for line in lines if line.startswith("说人话：")]
+
+
+def test_human_cache_failure_does_not_block_push(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """缓存读失败（``LLMCallError``）→ 只少一段，**绝不吞掉通知**。"""
+    from cpt.storage.llm_call_store import LLMCallError
+
+    _patch_human(monkeypatch, LLMCallError("库挂了"))
+    rec = _Recorder()
+    signal_notify._set_pusher_for_test(rec)
+    with caplog.at_level("INFO"):
+        assert _notify(_mk_signal(), prev_status=None, event_time=1) is True
+    _, lines = rec.calls[0]
+    assert not [line for line in lines if line.startswith("说人话：")]
+    assert "跳过推送的人话段" in caplog.text

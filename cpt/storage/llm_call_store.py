@@ -26,6 +26,7 @@ __all__ = [
     "call_row",
     "enqueue_call",
     "finish_call",
+    "latest_ok_text",
     "mark_interrupted",
     "request_hash",
     "recent_calls",
@@ -292,6 +293,40 @@ def recent_calls(
         _LOG.warning("读取 LLM 调用列表失败: %s", exc)
         raise LLMCallError(f"读取 LLM 调用列表失败: {exc}") from exc
     return tuple(_row_to_dict(row) for row in rows)
+
+
+def latest_ok_text(conn: Any, *, subject_like: str) -> str | None:
+    """按 ``subject_id`` 模式取最近一条**成功**且非空的 ``result_text``。
+
+    R4/C2 ③：飞书推送要带「说人话」，但推送是**全局**的（一条 webhook、不知道
+    ``user_id``），所以用不了 :func:`recent_calls` 的等值过滤 —— 追踪页的键形如
+    ``track:<user>:<code>``，这里按 ``LIKE`` 跨用户取该 code 最近的一句。
+
+    与 :func:`recent_calls` 同一纪律：读失败**抛** ``LLMCallError``，绝不返回
+    ``None`` 冒充「没生成过」；调用方自己决定要不要降级成「不推人话段」。
+
+    :param subject_like: 形如 ``track:%:600519`` 的 ``LIKE`` 模式。它是**绑定
+        参数**（``%s``）而不是 SQL 片段；但 ``%`` / ``_`` 在 ``LIKE`` 里仍是
+        通配符，调用方需保证 code 已归一（本仓是 6 位数字）。
+    :returns: 命中则返回 ``strip`` 过的文本；没人话时 ``None``。
+    """
+    sql = (
+        "SELECT result_text FROM public.cpt_llm_call"
+        " WHERE subject_id LIKE %s AND status = %s"
+        " AND result_text IS NOT NULL AND result_text <> ''"
+        " ORDER BY created_at DESC LIMIT 1"
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, (subject_like, STATUS_OK))
+            row = cur.fetchone()
+    except Exception as exc:
+        _LOG.warning("读取人话缓存失败 like=%s: %s", subject_like, exc)
+        raise LLMCallError(f"读取人话缓存失败 {subject_like}: {exc}") from exc
+    if not row or row[0] is None:
+        return None
+    text = str(row[0]).strip()
+    return text or None
 
 
 def mark_interrupted(conn: Any, before: datetime | None = None) -> int:

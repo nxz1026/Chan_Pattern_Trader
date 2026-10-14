@@ -35,6 +35,7 @@ __all__ = [
     "count_prunable_snapshots",
     "ensure_table",
     "is_tracked",
+    "track_note",
     "list_active",
     "list_removed",
     "list_snapshots",
@@ -209,6 +210,37 @@ def is_tracked(conn: Any, code: str) -> bool:
     except Exception as exc:
         raise TrackStoreError(f"is_tracked(code={code!r}) failed: {exc}") from exc
     return bool(row[0]) if row is not None else False
+
+
+def track_note(conn: Any, code: str) -> str | None:
+    """关注列表里该 ``code`` 最相关的一条备注（取 ``added_at`` 最新）。
+
+    推送（R4/C2 ②）是**全局一条**，没有「谁的关注列表」这一维度，所以止损的
+    「长期持有」门槛只能按「有人这么标过」来判 —— 这是刻意的近似：宁可多给
+    一个止损位，也不要因为别人没写备注而让所有人都看不到。
+
+    :returns: 备注文本；没有活跃追踪行 / 全是空备注时返回 ``None``。
+    :raises TrackStoreError: 读失败（与 ``list_active`` 同一纪律）。
+    """
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT note
+                FROM public.cpt_track
+                WHERE code = %s AND removed_at IS NULL AND note IS NOT NULL
+                  AND note <> ''
+                ORDER BY added_at DESC
+                LIMIT 1
+                """,
+                (code,),
+            )
+            row = cur.fetchone()
+    except Exception as exc:  # noqa: BLE001 — 统一转 TrackStoreError
+        raise TrackStoreError(f"track_note(code={code!r}) failed: {exc}") from exc
+    if not row or row[0] is None:
+        return None
+    return str(row[0])
 
 
 def list_active(conn: Any, user_id: str) -> list[dict[str, Any]]:
