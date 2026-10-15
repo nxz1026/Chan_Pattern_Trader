@@ -47,9 +47,12 @@ price / snapshot**。切到口径 B 后它们**不会自动复现**（结构判�
 ## 设计取舍
 - **DB 连接是可选项**（``AShareLocalClient(conn=None)``）— 让测试与 replay 可注入
   mock，避免拖入 psycopg 到 cpt 核心依赖。
-- **缺口处理**：因子缺失的日期**拒绝该日**（不静默用 1.0 填，否则产生假跳空）。
+- **缺口处理**：中间某个交易日缺因子时**跳过该日**（不静默用 1.0 填，否则序列
+  内部出现假跳空）；但**最后一根**缺因子时整段退到不复权（R64，见
+  ``AShareFetchResult.price_basis``）—— 因子链路一故障就整只票画不出来，
+  等于「今天多少钱」都看不到，这个代价比换口径大得多。
 - **停牌**：``public.daily_bar`` 不含停牌日（库是交易日表），所以停牌不需要额外
-  处理——只在缺因子时拒绝。
+  处理——只在缺因子时跳过该日。
 """
 
 from __future__ import annotations
@@ -545,6 +548,17 @@ class AShareFetchResult:
     # 前者是「因子表没覆盖这只票」，后者是「采集写出了废行」。默认值 `()`
     # 是为了不破坏测试里那些只给两个字段的 duck-type 假结果对象。
     skipped_placeholder: tuple[str, ...] = ()
+    # R64 新增：这批 K 线是**什么口径**。
+    #
+    # ``"hfq"``（默认）= 后复权（raw × 当日因子）；``"raw"`` = 不复权 ——
+    # 尾部交易日缺因子时**整段**退到原始价（见 fetch_validated_klines），
+    # 上层必须据此改口（价格口径标签、实时价对比、陈旧判定的基准日）。
+    # 默认值让不知情的调用方与假结果对象继续按后复权理解。
+    price_basis: str = "hfq"
+    # 窗口内**最后一个有因子的交易日**（ISO）。只在 ``price_basis="raw"`` 时有意义：
+    # 那时最后一根 K 线是原始的、没有因子，陈旧判定要退到「因子覆盖到哪天」为准，
+    # 否则「不复权兜底」会把因子链路的故障伪装成「K 线没滞后」。
+    factor_last_date: str | None = None
 
 
 class AShareLocalClient:
@@ -650,11 +664,15 @@ class AShareLocalClient:
         code: str,
         start_ms: int,
         end_ms: int,
+        *,
+        raw_fallback: bool = True,
     ) -> AShareFetchResult:
         """拉取区间 [start_ms, end_ms] 的日线，返回后复权 CanonicalBar 序列。
 
         :param code: 6 位裸码（如 ``"600519"``）或带后缀（``"600519.SH"``）。
         :param start_ms / end_ms: Unix 毫秒（与 Binance 协议对齐）。
+        :param raw_fallback: 尾部缺因子时是否**整段**退到不复权（R64，默认 True）。
+            传 ``False`` 恢复旧行为（缺因子即抛 :class:`AShareNoFactorError`）。
         :raises AShareLocalError: 区间内无任何数据，或 DB 异常。
         """
         start_date = datetime.fromtimestamp(start_ms / 1000, tz=UTC).date()
@@ -700,16 +718,55 @@ class AShareLocalClient:
                 f"{bare_code} {start_date}~{end_date} 在 public.daily_bar 无数据"
             )
 
+        # R64：**尾部**缺因子 ⇒ 整段退到不复权，而不是让这只票没有 K 线。
+        #
+        # 背景（2026-10-15 实测）：`asel.ref_adjust_factor` 的每日覆盖从 09-30 的
+        # 5206 只塌到 56 只 / 25 只，而 `public.daily_bar` 依旧是全市场 5225 只。
+        # 旧行为是跳过缺因子的日期，于是最新那根被跳过 ⇒ 快照停在几天前
+        # （600519 停在 10-13），「今天多少钱」都看不到 —— 因子链路的一个故障
+        # 被放大成「看板不显示行情」。
+        #
+        # 为什么必须**整段**换口径（不是只补尾巴）：后复权序列每根都乘当天因子，
+        # 只把尾部若干根换成原始价，接缝处会凭空出现一个「因子倍」的跳空
+        # （600519 是 6.39 倍）—— 正是 R37 整轮修掉的那种假结构。宁可整段换口径
+        # 并在 ``price_basis`` 上标明，也不许序列内部自相矛盾。
+        #
+        # 触发条件只看**最后一根**：K 线滞后是用户看得见的问题。中间某几天缺因子
+        # 照旧跳过（缺一天只是日历缺口，每根 bar 用的仍是它自己的因子，不会跳空）。
+        #
+        # 兜底**不改变**陈旧判定：``factor_last_date`` 会一路传给快照，
+        # 由 ``_attach_staleness`` 用「因子覆盖到哪天」当基准 —— 否则不复权兜底
+        # 会把因子链路故障伪装成「K 线没滞后」，把告警静音掉。
+        tail_missing = factors.get(rows[-1][0]) is None
+        use_raw = raw_fallback and tail_missing
+        factor_last_date = next((d for d, *_ in reversed(rows) if factors.get(d) is not None), None)
+        if use_raw:
+            _LOG.info(
+                "%s %s~%s：尾部 %s 缺复权因子，整段退到不复权（上次有因子 %s）",
+                bare_code,
+                start_date,
+                end_date,
+                rows[-1][0].isoformat(),
+                factor_last_date.isoformat() if factor_last_date else "无",
+            )
+
         bars: list[CanonicalBar] = []
         skipped: list[str] = []
         placeholders: list[str] = []
         null_ohlc: list[str] = []
         for row in rows:
             d, op, hi, lo, cl, vol, amt = row
-            factor = factors.get(d)
-            if factor is None:
+            raw_factor = factors.get(d)
+            if raw_factor is None:
                 skipped.append(d.isoformat())
-                continue
+                if not use_raw:
+                    continue
+                # 兜底口径：缺因子这一根按 1.0 算。
+                factor = 1.0
+            # 兜底时**每一根**都按 1.0 算（不是只把缺因子那几根换成原始价）：
+            # 混着算会在接缝处造出一个「因子倍」的假跳空。
+            else:
+                factor = 1.0 if use_raw else raw_factor
             # R59（审计 M8）：NULL 必须先于任何 ``float()`` 拦下。
             # ``public.daily_bar`` 的 OHLC 是可空列，上游实测会写 NULL
             # （R52 逮到的是同一类废行的「全 0」形态）。旧代码只对 vol/amt 做了
@@ -793,13 +850,16 @@ class AShareLocalClient:
                     f"样例日期：{', '.join(placeholders[:3])}"
                 )
             raise AShareNoFactorError(
-                f"{bare_code} {start_date}~{end_date} 区间内所有日期都缺因子（{len(skipped)} 日）"
+                f"{bare_code} {start_date}~{end_date} 区间内所有日期都缺因子"
+                f"（{len(skipped)} 日）—— raw_fallback=False 时不接受不复权兜底"
             )
 
         return AShareFetchResult(
             bars=tuple(bars),
             skipped_no_factor=tuple(skipped),
             skipped_placeholder=tuple(placeholders),
+            price_basis="raw" if use_raw else "hfq",
+            factor_last_date=factor_last_date.isoformat() if factor_last_date else None,
         )
 
     def fetch_validated_bars(self, code: str, start_ms: int, end_ms: int) -> list[BarLike]:

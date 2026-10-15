@@ -120,6 +120,9 @@ def test_returns_hfq_applied_canonical_bars(full_db):
     assert result.skipped_no_factor == ()
 
     bar = result.bars[0]
+    # R64：全都有因子 ⇒ 口径是后复权（默认值不能被兜底逻辑改掉）
+    assert result.price_basis == "hfq"
+    assert result.factor_last_date == "2026-09-24"
     # 原始 close=3.05 × factor=10.0 = 30.5
     assert isinstance(bar, CanonicalBar)
     assert bar.close == pytest.approx(30.5)
@@ -149,11 +152,87 @@ def test_factor_missing_day_is_skipped_not_failed(full_db):
     assert [b.open_time for b in result.bars] == [ms(date(2026, 9, 22)), ms(date(2026, 9, 24))]
 
 
-def test_all_dates_missing_factor_raises_error(full_db):
+def test_all_dates_missing_factor_raises_when_fallback_disabled(full_db):
+    """`raw_fallback=False` 保留旧行为：整段缺因子就报错，不悄悄换口径。"""
     client, _ = full_db
     client._get_conn().factors.clear()
     with pytest.raises(AShareLocalError, match="所有日期都缺因子"):
-        client.fetch_validated_klines("000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24)))
+        client.fetch_validated_klines(
+            "000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24)), raw_fallback=False
+        )
+
+
+# --------------------------------------------------------------------------- #
+# R64：尾部缺因子 ⇒ 整段不复权兜底
+# --------------------------------------------------------------------------- #
+
+
+def test_tail_missing_factor_falls_back_to_raw_whole_series(full_db):
+    """只缺最后一根的因子 ⇒ **整段**原始价，且标明口径。
+
+    关键断言是「整段」：第一根（本来有因子 10.0）也必须是不复权的 3.05，
+    不能出现「前两根 ×10、最后一根 ×1」的假跳空。
+    """
+    client, _ = full_db
+    client._get_conn().factors[:] = [
+        f for f in client._get_conn().factors if f[0] != date(2026, 9, 24)
+    ]
+
+    result = client.fetch_validated_klines("000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24)))
+
+    assert result.price_basis == "raw"
+    assert result.factor_last_date == "2026-09-23"
+    assert result.skipped_no_factor == ("2026-09-24",)
+    assert len(result.bars) == 3
+    assert [b.close for b in result.bars] == pytest.approx([3.05, 3.15, 3.25])
+    # 不复权时因子必须**完全**不参与：第一根的 close 不能是 30.5
+    assert result.bars[0].close != pytest.approx(30.5)
+
+
+def test_raw_fallback_does_not_hole_out_middle_days(full_db):
+    """不复权口径下缺因子不再是「跳过这一天」的理由（少一个日历缺口）。"""
+    client, _ = full_db
+    client._get_conn().factors.clear()
+
+    result = client.fetch_validated_klines("000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24)))
+
+    assert result.price_basis == "raw"
+    assert result.factor_last_date is None
+    assert len(result.bars) == 3
+    assert result.skipped_no_factor == ("2026-09-22", "2026-09-23", "2026-09-24")
+
+
+def test_raw_fallback_still_drops_placeholder_rows(db_with_placeholders):
+    """兜底不是放过废行的理由：整段不复权也要过占位行守卫。"""
+    conn = db_with_placeholders._get_conn()
+    conn.factors.clear()
+    conn.bars[:] = [
+        ("000002", date(2026, 9, 22), 3.0, 3.1, 2.9, 3.05, 100.0, 200.0),
+        ("000002", date(2026, 9, 23), 0.0, 0.0, 0.0, 3.10, 0.0, 0.0),
+    ]
+
+    result = db_with_placeholders.fetch_validated_klines(
+        "000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 23))
+    )
+
+    assert result.price_basis == "raw"
+    assert result.skipped_placeholder == ("2026-09-23",)
+    assert [b.close for b in result.bars] == pytest.approx([3.05])
+
+
+def test_middle_factor_gap_keeps_hfq_basis(full_db):
+    """只有**中间**缺因子时照旧跳日、照旧后复权 —— 口径不变，没有假跳空。"""
+    client, _ = full_db
+    client._get_conn().factors[:] = [
+        f for f in client._get_conn().factors if f[0] != date(2026, 9, 23)
+    ]
+
+    result = client.fetch_validated_klines("000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24)))
+
+    assert result.price_basis == "hfq"
+    assert result.skipped_no_factor == ("2026-09-23",)
+    assert result.factor_last_date == "2026-09-24"
+    assert result.bars[0].close == pytest.approx(30.5)
 
 
 def test_no_bars_in_range_raises_error(full_db):
@@ -316,7 +395,9 @@ def test_all_rows_missing_factor_still_raises_no_factor_error(full_db):
     client, _ = full_db
     client._get_conn().factors.clear()
     with pytest.raises(AShareNoFactorError):
-        client.fetch_validated_klines("000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24)))
+        client.fetch_validated_klines(
+            "000002", ms(date(2026, 9, 22)), ms(date(2026, 9, 24)), raw_fallback=False
+        )
 
 
 def test_zero_open_alone_is_not_a_placeholder(db_with_placeholders):

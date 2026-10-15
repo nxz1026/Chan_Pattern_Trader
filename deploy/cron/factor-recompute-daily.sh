@@ -1,6 +1,25 @@
 #!/usr/bin/env bash
-# 每日一轮：按公司行动重算后复权因子（**只写暂存表 asel.ref_adjust_factor_v2**，
-# 不碰生产表 asel.ref_adjust_factor —— 切换与否看 scripts/factor_report.py 的报告）。
+# 每日一轮：按公司行动重算后复权因子，重算完**提升到生产表 asel.ref_adjust_factor**
+# （``--promote``，R64）。
+#
+# ## 为什么默认要 promote（R64）
+#
+# 原设计只写暂存表 ``asel.ref_adjust_factor_v2``，「切不切换看 factor_report.py 的
+# 报告」—— 于是**没有任何自动步骤把重算结果送进生产表**：生产表靠 2026-10-04 一次
+# 全市场回填（东财公司行动，5206 只 × 到 09-30）+ 每天按需拉的腾讯比值（25~137 只）
+# 撑着。10-08 起按需那一侧越拉越少，K 线只认带因子的 bar ⇒ 大量票的快照停在
+# 09-30~10-13（600519 停在 10-13）。暂存表里其实**一直有**正确数据（到 10-13），
+# 只是没人搬。这个脚本现在负责搬。
+#
+# 提升是**增量**的：只更新与生产表相差超过 1e-8 的行（实测首轮 93,073 行），
+# 靠 ``ON CONFLICT (code, trade_date)`` 幂等 upsert + 来源标记
+# ``eastmoney:corporate-actions (recompute)`` 与按需的 ``tx:fqkline`` 区分。
+#
+# ## 候选集默认 all（R64）
+#
+# 原默认 ``placeholder`` 只补「从没算过」的票，跟踪池以外的票永远不会被重算到 ——
+# 而 K 线要的是**全市场**每天都有因子。实测一只 ~1.45 秒（东财无额度），
+# 5206 只 ≈ 2.1 小时，在 timeout 10h 之内；MAX_CALLS 默认 6000 刚好覆盖一轮。
 #
 # 安装：直接装仓内那份 crontab（**不要**手工 echo 一行，见 deploy/cron/crontab）：
 #   crontab deploy/cron/crontab
@@ -59,8 +78,17 @@ SOURCE="${CPT_RECOMPUTE_SOURCE:-eastmoney}"
 # 单轮处理上限。⚠️ 东财无额度，这只是「别让一轮跑太久」的时间预算；
 # 用 wind 时它才重新变成真正的硬边界，此时应调小。
 MAX_CALLS="${CPT_RECOMPUTE_MAX_CALLS:-6000}"
-# 候选集：placeholder = 优先补从没算过的（source IS NULL）；all = 所有有 bar 的
-SCOPE="${CPT_RECOMPUTE_SCOPE:-placeholder}"
+# 候选集：all = 所有有 bar 的（R64 起为默认 —— K 线要全市场每天都有因子，
+# placeholder 只补「从没算过」的票，跟踪池以外的票永远轮不到重算）；
+# placeholder = 只补 source IS NULL 的；wired = 只跟踪池（调试用）。
+SCOPE="${CPT_RECOMPUTE_SCOPE:-all}"
+# 提升到生产表：默认开。设 0 可只重算不搬（排查用）。
+PROMOTE="${CPT_RECOMPUTE_PROMOTE:-1}"
+if [ "$PROMOTE" = "1" ]; then
+  PROMOTE_ARGS=(--promote)
+else
+  PROMOTE_ARGS=()
+fi
 
 mkdir -p /home/ubuntu/logs
 exec 9>"$LOCK"
@@ -74,11 +102,12 @@ cd "$REPO" || exit 1
 export CPT_WIND_NODE="${CPT_WIND_NODE:-/home/ubuntu/.local/bin/node}"
 
 {
-  echo "===== $(date -u +%FT%TZ) 开始（源=$SOURCE scope=$SCOPE 上限 $MAX_CALLS env=$_ENV_LOADED）====="
+  echo "===== $(date -u +%FT%TZ) 开始（源=$SOURCE scope=$SCOPE 上限 $MAX_CALLS promote=$PROMOTE env=$_ENV_LOADED）====="
 } >> "$LOG"
 
 timeout 10h .venv/bin/python scripts/factor_recompute.py \
-  --source "$SOURCE" --scope "$SCOPE" --max-calls "$MAX_CALLS" >> "$LOG" 2>&1
+  --source "$SOURCE" --scope "$SCOPE" --max-calls "$MAX_CALLS" \
+  "${PROMOTE_ARGS[@]}" >> "$LOG" 2>&1
 rc=$?
 
 {

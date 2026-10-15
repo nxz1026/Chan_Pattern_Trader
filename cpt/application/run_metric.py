@@ -245,6 +245,9 @@ def _ashare_staleness(quality: Any) -> dict[str, Any] | None:
         "stale_last_bar_date",
         "stale_cutoff_date",
         "stale_lag_days",
+        # R64：不复权兜底时口径也要跟着走 —— 否则告警说「滞后 N 个交易日」
+        # 而面板上明明有今天的价，读告警的人会先怀疑告警坏了。
+        "stale_price_basis",
     )
     out = {key: quality[key] for key in keys if quality.get(key) is not None}
     return out or None

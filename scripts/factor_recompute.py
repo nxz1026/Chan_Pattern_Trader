@@ -38,12 +38,13 @@ R36 实测的后果（全部真机量过）：
 
 ## 安全边界（这个脚本刻意做不到的那几件事）
 
-- **绝不写** ``asel.ref_adjust_factor``（生产表）—— 只写暂存表
-  ``asel.ref_adjust_factor_v2``；
-- **绝不自动切换** —— 切换是人工决定（看报告 → 决定）；
+- **默认绝不写** ``asel.ref_adjust_factor``（生产表）—— 只写暂存表
+  ``asel.ref_adjust_factor_v2``；搬进生产表要显式传 ``--promote``（R64，用户拍板 a）；
+- **切换仍是显式动作** —— 不传 ``--promote`` 时一个字节都不碰生产表；
 - **单轮有处理上限**（``--max-calls``，默认 6000）。⚠️ R42：默认源是东财、
-  **没有额度**，所以它现在只是「别让一轮跑太久」的时间预算（全集 5223 只
-  约 87 分钟），不是「分几天跑完」的机制。用 ``--source wind`` 时它才重新
+  **没有额度**，所以它现在只是「别让一轮跑太久」的时间预算（全集 5225 只
+  约 2.1 小时 —— 2026-10-15 实测 60 只 / 87 秒，单只约 1.45 秒），
+  不是「分几天跑完」的机制。用 ``--source wind`` 时它才重新
   变成真正的硬边界（Wind 的 ``RATE_LIMIT_ERROR``）；
 - **通道不可用会立即停**并落盘进度（东财侧=接口不可达，Wind 侧=额度/通道）；
 - **可断点续跑**（``~/.cache/cpt/factor_recompute_state.json``）；
@@ -65,6 +66,12 @@ R36 实测的后果（全部真机量过）：
 
     # 扩到所有有 bar 的票（3098 -> 5223 只）
     .venv/bin/python scripts/factor_recompute.py --scope all
+
+    # 跑一轮全市场再把暂存表搬进生产表（R64 起 cron 每晚就是这么跑的）
+    .venv/bin/python scripts/factor_recompute.py --scope all --promote
+
+    # 只搬（不取数）；加 --dry-run 只数不写
+    .venv/bin/python scripts/factor_recompute.py --promote-only --dry-run
 
     # 调试单只（不写暂存表）
     .venv/bin/python scripts/factor_recompute.py --only 000001 --dry-run
@@ -91,6 +98,7 @@ from cpt.adapters.a_share_factor import (  # noqa: E402
     factor_from_actions,
     hot_pool_codes,
     load_recent_closes,
+    promote_recompute_factors,
     save_recompute_factors,
 )
 from cpt.adapters.a_share_local import AShareLocalClient  # noqa: E402
@@ -590,6 +598,16 @@ def report(state: dict[str, Any]) -> None:
             print(f"    {code}: {why}")
 
 
+def _log_promote(scanned: int, changed: int, *, dry_run: bool) -> None:
+    """把 promote 的计数打进日志（``scanned/changed`` 两个数都要留痕）。"""
+    _LOG.info(
+        "promote%s：扫描 %d 行，改写 %d 行",
+        "（dry-run，未写生产表）" if dry_run else "",
+        scanned,
+        changed,
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="按公司行动重算后复权因子（只写暂存表）")
     parser.add_argument(
@@ -618,6 +636,17 @@ def main(argv: list[str] | None = None) -> int:
         "wind 保留作交叉校验（实测 24/2197 只就撞「账户积分余额不足」）",
     )
     parser.add_argument("--dry-run", action="store_true", help="照常取数与计算，但不写暂存表")
+    parser.add_argument(
+        "--promote",
+        action="store_true",
+        help="本轮取数结束后，把暂存表的重算因子搬进生产表 asel.ref_adjust_factor"
+        "（R64；不传就一个字节都不碰生产表）",
+    )
+    parser.add_argument(
+        "--promote-only",
+        action="store_true",
+        help="跳过取数，只做 promote（与 --dry-run 合用则只数不写）",
+    )
     parser.add_argument("-v", "--verbose", action="store_true")
     args = parser.parse_args(argv)
 
@@ -655,6 +684,10 @@ def main(argv: list[str] | None = None) -> int:
     conn = client._get_conn()  # noqa: SLF001
     if not args.dry_run:
         ensure_recompute_stage(conn)
+
+    if args.promote_only:
+        _log_promote(*promote_recompute_factors(conn, dry_run=args.dry_run), dry_run=args.dry_run)
+        return 0
 
     if args.only:
         todo = [c.strip() for c in args.only.split(",") if c.strip()]
@@ -709,6 +742,12 @@ def main(argv: list[str] | None = None) -> int:
 
     save_state(state)
     report(state)
+
+    # ⚠️ R64：promote 放在这里（而不是脚本外单跑一步）—— 取数与搬运必须成对，
+    # 否则 cron 里漏了后半步就会「算得再多也不上线」。本轮被通道打断时**照样**
+    # 搬已经算好的那部分（promote 不碰网络），但退出码仍按 3 报「未完成」。
+    if args.promote:
+        _log_promote(*promote_recompute_factors(conn, dry_run=args.dry_run), dry_run=args.dry_run)
 
     # ⚠️ R44：本轮**被打断**必须以非零码退出。
     #

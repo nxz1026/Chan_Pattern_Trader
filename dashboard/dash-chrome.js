@@ -377,6 +377,8 @@
     // 后端取不到当日因子时**不给**这两个字段（不伪造 ×1.0），此处整行隐藏。
     const priceRatio = num(market.price_ratio);
     const lastPriceRaw = num(market.last_price_raw);
+    // R64：整段不复权兜底 ⇒ 面板上的价**就是**不复权价（口径行也会这么写）。
+    const priceBasisRaw = market.price_basis === "raw";
     const rawPriceNode = setText(
       "[data-testid=market-last-price-raw]",
       lastPriceRaw === null ? "" : `（${formatPrice(lastPriceRaw)}）`,
@@ -386,17 +388,24 @@
       rawPriceNode.setAttribute(
         "title",
         lastPriceRaw === null
-          ? "缺当日复权因子，无法给出不复权价（不显示假倍率）"
+          ? priceBasisRaw
+            ? "整段不复权：面板上的价就是不复权价"
+            : "缺当日复权因子，无法给出不复权价（不显示假倍率）"
           : `不复权价（后复权 ÷ 同一根 K 线的因子 ×${priceRatio}）`,
       );
     }
+    // R64：整段不复权兜底（``market.price_basis === "raw"``）时口径行必须改口 ——
+    // 后端这时**不发** price_ratio/last_price_raw（原始价没有可对比的第二套尺子），
+    // 若照旧显示「后复权（因子未知）」，看板会把不复权价说成后复权价。
     const basisNode = setText(
       "[data-testid=market-price-basis]",
-      isAShare && priceRatio !== null
-        ? `后复权 ×${priceRatio}（括号内为不复权）`
-        : isAShare
-          ? "后复权（因子未知）"
-          : "—",
+      !isAShare
+        ? "—"
+        : priceBasisRaw
+          ? "不复权（当日缺复权因子，整段未复权）"
+          : priceRatio !== null
+            ? `后复权 ×${priceRatio}（括号内为不复权）`
+            : "后复权（因子未知）",
     );
     const basisLabel = q("[data-testid=market-price-basis-label]");
     const basisRowShown = isAShare;
@@ -455,9 +464,12 @@
       const divisor =
         quoteFactor !== null && quoteFactor > 0 ? quoteFactor : priceRatio !== null && priceRatio > 0 ? priceRatio : null;
       if (divisor !== null) changeAmount = realtimeRawPrice - realtimeRawPrev / divisor;
-    } else if (changeSource === "bars" && lastPriceRaw !== null && changePct !== null && changePct > -100) {
+    } else if (changeSource === "bars" && changePct !== null && changePct > -100) {
       // K 线分支只有后复权序列，用 raw 现价反推 raw 昨收（同一根 bar 的因子约掉）。
-      changeAmount = lastPriceRaw - lastPriceRaw / (1 + changePct / 100);
+      // 不复权兜底（R64）时面板上的价**就是** raw 价，没有 last_price_raw 可用，
+      // 直接用 lastPrice —— 否则这条会静默留空，涨跌幅有数、涨跌额却是「—」。
+      const amountBase = lastPriceRaw !== null ? lastPriceRaw : priceBasisRaw ? lastPrice : null;
+      if (amountBase !== null) changeAmount = amountBase - amountBase / (1 + changePct / 100);
     }
     const changeNode = q("[data-testid=market-change]");
     if (changeNode) {

@@ -113,3 +113,18 @@ def test_cron_script_propagates_exit_code() -> None:
     assert "rc=$?" in lines[end + 1], (
         f"rc 捕获被隔开了：命令在第 {end + 1} 行结束，下一行是 {lines[end + 1]!r}"
     )
+
+
+def test_cron_script_covers_full_market_and_promotes() -> None:
+    """R64：默认候选集必须是**全市场**且默认 promote —— 否则重算结果永远躺在暂存表。
+
+    原默认 ``placeholder`` 只补「从没算过」的票，跟踪池以外的票永远轮不到重算；
+    而 ``--promote`` 之前**根本不在** cron 里，于是 5206 只 × 到 10-13 的正确因子
+    没有任何自动步骤送进生产表（生产表 10-13 只有腾讯按需的那 81 只）。
+    """
+    assert 'SCOPE="${CPT_RECOMPUTE_SCOPE:-all}"' in CRON_SH
+    assert 'PROMOTE="${CPT_RECOMPUTE_PROMOTE:-1}"' in CRON_SH
+    assert '"${PROMOTE_ARGS[@]}"' in CRON_SH
+    assert "--promote" in CRON_SH
+    # 开关注解要能自证：设 0 只重算不搬（排查用）
+    assert "PROMOTE_ARGS=()" in CRON_SH

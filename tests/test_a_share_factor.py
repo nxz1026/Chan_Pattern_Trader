@@ -16,6 +16,7 @@ from typing import Any
 
 import pytest
 from cpt.adapters.a_share_factor import (
+    PROMOTE_SOURCE_URL,
     SOURCE_TX,
     CategorizedFactorUnavailableError,
     FactorRow,
@@ -24,6 +25,7 @@ from cpt.adapters.a_share_factor import (
     build_factor_rows,
     factor_source_ref,
     fetch_factor_rows,
+    promote_recompute_factors,
     upsert_factor_rows,
 )
 from cpt.application import a_share_snapshot as snap
@@ -796,3 +798,95 @@ def test_bfq_network_failure_reaches_consumer_as_network(monkeypatch: pytest.Mon
     assert outcome.fetched is False
     assert outcome.reason == "network"
     assert outcome.detail == "腾讯日线不可达"
+
+
+# --------------------------------------------------------------------------- #
+# R64：把暂存表的重算因子提升到生产表（``promote_recompute_factors``）
+#
+# 背景：``asel.ref_adjust_factor_v2`` 自 R37 起**只写不读**，生产表靠 10-04 一次
+# 全市场回填 + 每天按需拉的腾讯比值撑着。2026-10-15 实测生产表 09-30 之后每天只有
+# 25~137 只被按需更新，而 K 线只认带因子的 bar ⇒ 大量票的快照停在 09-30~10-13。
+# 暂存表里一直有正确数据（5206 只、到 10-13+），只是没人搬。
+# --------------------------------------------------------------------------- #
+
+
+class _PromoteCursor:
+    """按脚本预置的 ``fetchone()`` 返回值回答，并记录每一条 SQL。"""
+
+    def __init__(self, log: list[tuple[str, Any]], script: list[tuple]) -> None:
+        self._log = log
+        self._script = script
+        self.rowcount = 0
+        self._row: tuple | None = None
+
+    def execute(self, sql: str, params: Any = None) -> None:
+        self._log.append((sql, params))
+        self._row = self._script.pop(0) if self._script else (None,)
+
+    def fetchone(self) -> tuple | None:
+        return self._row
+
+    def __enter__(self) -> _PromoteCursor:
+        return self
+
+    def __exit__(self, *exc: Any) -> None:
+        return None
+
+
+class _PromoteConn:
+    def __init__(self, script: list[tuple]) -> None:
+        self.log: list[tuple[str, Any]] = []
+        self.commits = 0
+        self._script = list(script)
+
+    def cursor(self) -> _PromoteCursor:
+        return _PromoteCursor(self.log, self._script)
+
+    def commit(self) -> None:
+        self.commits += 1
+
+
+def test_promote_dry_run_counts_without_writing() -> None:
+    """dry_run 只数不写：不出现 INSERT，也不 commit。"""
+    conn = _PromoteConn([(3393715, 93073)])
+    assert promote_recompute_factors(conn, dry_run=True) == (3393715, 93073)
+    sql = conn.log[0][0]
+    assert "INSERT" not in sql
+    assert "LEFT JOIN asel.ref_adjust_factor" in sql
+    assert conn.commits == 0
+
+
+def test_promote_updates_only_rows_beyond_tolerance() -> None:
+    """判据必须是**带容差的数值比较**，不能用 ``IS DISTINCT FROM``。
+
+    numeric ↔ double precision 的表示差异会让同一个 Python float 看起来不同 ——
+    实测容差 1e-9 会白写 1,806,097 行、``IS DISTINCT FROM`` 更是 2,248,057 行，
+    而真实修正只有 1e-8 那一簇 92,924 行。
+    """
+    conn = _PromoteConn([(200_000, 51, "000002", "2024-01-05"), (0, 0, None, None)])
+    assert promote_recompute_factors(conn, batch=200_000) == (200_000, 51)
+    sql = conn.log[0][0]
+    assert "ON CONFLICT (code, trade_date) DO UPDATE" in sql
+    assert "abs(asel.ref_adjust_factor.hfq_factor - EXCLUDED.hfq_factor)" in sql
+    assert "1e-08" in sql
+    assert "RETURNING 1" in sql
+    # 来源标记要能区分「按公司行动重算」与「按需拉的腾讯比值」
+    assert conn.log[0][1][3] == PROMOTE_SOURCE_URL
+    # 每批各自 commit（含最后那批扫到空、用来收尾的事务）—— 一个事务锁全表是事故
+    assert conn.commits == 2
+
+
+def test_promote_paginates_by_keyset() -> None:
+    """按 ``(code, trade_date)`` 键集分批：一个事务里锁住全表是事故。"""
+    conn = _PromoteConn(
+        [
+            (200_000, 3, "000002", "2024-01-05"),
+            (200_000, 0, "600519", "2024-03-01"),
+            (0, 0, None, None),
+        ]
+    )
+    assert promote_recompute_factors(conn) == (400_000, 3)
+    # 第二批必须从上一批的尾部继续（游标推进），而不是从头再扫
+    assert conn.log[1][1][:2] == ("000002", "2024-01-05")
+    assert conn.log[2][1][:2] == ("600519", "2024-03-01")
+    assert conn.commits == 3

@@ -18,6 +18,7 @@ import pytest
 from cpt.application.a_share_snapshot import (
     _attach_last_bar_stats,
     _attach_price_basis,
+    _attach_price_basis_source,
     _attach_staleness,
     _is_tradable_price,
     _pct_from,
@@ -489,3 +490,127 @@ def test_stale_reason_omitted_when_probe_raises(stale_env, monkeypatch) -> None:
     quality = snapshot["data_quality"]
     assert quality["stale"] is True
     assert "stale_reason" not in quality
+
+
+# ---------------------------------------------------------------------------
+# 6. R64：不复权兜底（口径传播 + 面板改口 + 陈旧基准日）
+# ---------------------------------------------------------------------------
+
+
+class _FakeResult:
+    """适配器结果的替身：只带 R64 关心的两个字段。"""
+
+    def __init__(self, price_basis: str = "hfq", factor_last_date: str | None = None) -> None:
+        self.price_basis = price_basis
+        self.factor_last_date = factor_last_date
+
+
+def test_price_basis_source_propagates_raw_and_factor_last_date() -> None:
+    snapshot: dict = {"market": {}}
+    _attach_price_basis_source(snapshot, _FakeResult("raw", "2026-10-13"))
+    assert snapshot["market"]["price_basis"] == "raw"
+    assert snapshot["market"]["factor_last_date"] == "2026-10-13"
+
+
+def test_price_basis_source_defaults_to_hfq_for_duck_typed_results() -> None:
+    """老测试的假结果对象没有这两个字段 —— 必须默认后复权，而不是 KeyError。"""
+    snapshot: dict = {"market": {}}
+
+    class _Bare:
+        pass
+
+    _attach_price_basis_source(snapshot, _Bare())
+    assert snapshot["market"]["price_basis"] == "hfq"
+    assert "factor_last_date" not in snapshot["market"]
+
+
+def test_price_basis_source_skips_factor_last_date_when_hfq() -> None:
+    """后复权口径下 ``factor_last_date`` 没有意义（基准日就是末根 bar）。"""
+    snapshot: dict = {"market": {}}
+    _attach_price_basis_source(snapshot, _FakeResult("hfq", "2026-10-13"))
+    assert "factor_last_date" not in snapshot["market"]
+
+
+def test_price_basis_source_tolerates_missing_market() -> None:
+    snapshot: dict = {}
+    _attach_price_basis_source(snapshot, _FakeResult("raw", "2026-10-13"))
+    assert snapshot == {}
+
+
+def test_price_basis_raw_mode_skips_ratio_and_duplicate_raw_price() -> None:
+    """整段不复权时 ``last_price`` 本身就是原始价，不再并排第二个同样的数。"""
+    snapshot: dict = {"market": {"price_basis": "raw"}}
+    _attach_price_basis(
+        snapshot,
+        _PriceBasis(last_close=1274.89, last_date=dt.date(2026, 10, 15), factor=6.394),
+    )
+    market = snapshot["market"]
+    assert market["last_bar_date"] == "2026-10-15"
+    assert "price_ratio" not in market
+    assert "last_price_raw" not in market
+
+
+def test_last_bar_stats_raw_mode_omits_duplicate_raw_prices() -> None:
+    """高低同理：raw 口径下 ``_raw`` 变体只是同一份数，不该发两份。"""
+    snapshot: dict = {"candles": [_bar()], "market": {"price_basis": "raw"}}
+    _attach_last_bar_stats(
+        snapshot,
+        _PriceBasis(last_close=1274.89, last_date=dt.date(2026, 10, 15), factor=6.394),
+    )
+    market = snapshot["market"]
+    assert market["last_high"] == 8151.84
+    assert "last_high_raw" not in market
+    assert "last_low_raw" not in market
+    # 量/额不受口径影响
+    assert market["last_volume_lots"] == 26573.0
+    assert market["last_amount"] == 3393315572.0
+
+
+def test_staleness_uses_factor_last_date_in_raw_fallback(stale_env) -> None:
+    """不复权兜底：末根是今天，但陈旧判定必须以**因子末日**为基准。
+
+    否则「今天有图」会把因子链路停摆伪装成健康 —— 告警直接静音。
+    """
+    calls = stale_env(
+        dt.datetime(2026, 10, 15, 20, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+        missing=[dt.date(2026, 10, 14), dt.date(2026, 10, 15)],
+    )
+    snapshot = _quality([{"open_time": _bar_ms(dt.date(2026, 10, 15))}])
+    snapshot["market"] = {"price_basis": "raw", "factor_last_date": "2026-10-13"}
+    _attach_staleness(snapshot, object())
+    quality = snapshot["data_quality"]
+    assert quality["stale"] is True
+    assert quality["stale_last_bar_date"] == "2026-10-13"
+    assert quality["stale_price_basis"] == "raw"
+    assert calls == [(dt.date(2026, 10, 14), dt.date(2026, 10, 15))]
+
+
+def test_staleness_raw_without_any_factor_uses_window_start(stale_env) -> None:
+    """整个窗口一个因子都没有 → 基准日退到窗口首日（宁可报大，不可静音）。"""
+    calls = stale_env(
+        dt.datetime(2026, 10, 15, 20, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+        missing=[dt.date(2026, 10, 1)],
+    )
+    snapshot = _quality(
+        [
+            {"open_time": _bar_ms(dt.date(2026, 9, 30))},
+            {"open_time": _bar_ms(dt.date(2026, 10, 15))},
+        ]
+    )
+    snapshot["market"] = {"price_basis": "raw"}
+    _attach_staleness(snapshot, object())
+    assert snapshot["data_quality"]["stale_last_bar_date"] == "2026-09-30"
+    assert calls == [(dt.date(2026, 10, 1), dt.date(2026, 10, 15))]
+
+
+def test_staleness_ignores_factor_last_date_when_hfq(stale_env) -> None:
+    """后复权口径下 ``factor_last_date`` 不参与判定（基准日就是末根 bar）。"""
+    calls = stale_env(
+        dt.datetime(2026, 10, 15, 20, 0, tzinfo=dt.timezone(dt.timedelta(hours=8))),
+        missing=[dt.date(2026, 10, 14)],
+    )
+    snapshot = _quality([{"open_time": _bar_ms(dt.date(2026, 10, 15))}])
+    snapshot["market"] = {"price_basis": "hfq", "factor_last_date": "2026-09-30"}
+    _attach_staleness(snapshot, object())
+    assert snapshot["data_quality"]["stale"] is False
+    assert calls == []

@@ -101,7 +101,7 @@ _SNAPSHOT: dict = {
 }
 
 
-def _harness(tmp_path: Path) -> Path:
+def _harness(tmp_path: Path, snapshot: dict | None = None) -> Path:
     """把真实 dashboard 目录**软链**进临时目录，只替换 index.html 的取数地址。"""
     for entry in DASH.iterdir():
         if entry.name == "index.html":
@@ -118,7 +118,7 @@ def _harness(tmp_path: Path) -> Path:
         '  window.addEventListener("error", function (e) {\n'
         "    window.__ERRS.push(String(e.message));\n"
         "  });\n"
-        "  var SNAP = " + json.dumps(_SNAPSHOT) + ";\n"
+        "  var SNAP = " + json.dumps(snapshot if snapshot is not None else _SNAPSHOT) + ";\n"
         "  window.fetch = function (input) {\n"
         '    var url = typeof input === "string" ? input : (input && input.url) || "";\n'
         '    var body = url.indexOf("/llm/") >= 0 ? { available: false } : SNAP;\n'
@@ -205,3 +205,62 @@ def test_ashare_overview_renders_both_price_bases(tmp_path: Path) -> None:
     assert _text(dom, "data-quality-stale") == "true"
     assert _text(dom, "data-quality-stale-reason-label") == "K 线滞后原因"
     assert _text(dom, "data-quality-stale-reason") == "当日 bar 已入库，缺复权因子（2026-10-14）"
+
+
+@pytest.mark.skipif(
+    not chromium_runnable(),
+    reason="Chromium 本机不可运行（aarch64 环境 SIGTRAP/缺 GUI·沙箱依赖，非代码缺陷）",
+)
+def test_ashare_overview_renders_raw_fallback_basis(tmp_path: Path) -> None:
+    """R64：整段不复权兜底时面板不能把原始价说成后复权价。
+
+    这是 2026-10-15 的真实形态：600519 的因子只到 10-13，K 线只认带因子的 bar ⇒
+    旧行为下快照停在 10-13（「今天多少钱」都看不到）。兜底后末根是**今天**、
+    面板上的价**就是**不复权价 —— 口径行必须改口，且不能再并排一个同样的数。
+    """
+    browser = chromium_path()
+    assert browser is not None
+    snapshot = json.loads(json.dumps(_SNAPSHOT))
+    market = snapshot["market"]
+    market["price_basis"] = "raw"
+    market["factor_last_date"] = "2026-10-13"
+    for key in ("price_ratio", "last_price_raw", "last_high_raw", "last_low_raw"):
+        market.pop(key, None)
+    market["last_price"] = 1274.89
+    market["last_high"] = 1288.48
+    market["last_low"] = 1268.11
+    market["last_bar_date"] = "2026-10-15"
+    harness = _harness(tmp_path, snapshot)
+
+    result = subprocess.run(
+        [
+            browser,
+            *CHROME_FLAGS,
+            "--virtual-time-budget=4000",
+            "--dump-dom",
+            f"file://{harness}?market=a_share&code=600519",
+        ],
+        capture_output=True,
+        text=True,
+        check=True,
+        env={**os.environ, "HOME": str(Path.home())},
+        timeout=CHROME_TIMEOUT_SECONDS,
+    )
+    dom = result.stdout
+
+    errs = re.search(r"<pre id=\"__errs_out\">(.*?)</pre>", dom, re.S)
+    assert errs and errs.group(1).strip() == "ERRS=[]", (
+        f"渲染期有 JS 错误: {errs and errs.group(1)}"
+    )
+
+    assert _text(dom, "market-last-price") == "1,274.89"
+    # 不再并排第二个同样的数（后端也不发这个键）
+    assert _text(dom, "market-last-price-raw") == ""
+    assert _text(dom, "market-price-basis") == "不复权（当日缺复权因子，整段未复权）"
+    assert _text(dom, "market-data-asof") == "2026-10-15"
+    # 高低只有一套数，不带括号里的第二口径
+    assert _text(dom, "market-high-24h") == "1,288.48"
+    assert _text(dom, "market-low-24h") == "1,268.11"
+    # 涨跌额在不复权兜底时也要有：此时没有 last_price_raw，反推基准必须用 lastPrice
+    amount = _text(dom, "market-change-amount")
+    assert amount.startswith("+") and amount != "+", f"涨跌额丢了: {amount!r}"

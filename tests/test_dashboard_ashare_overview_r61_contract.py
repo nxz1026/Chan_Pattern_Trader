@@ -108,3 +108,17 @@ def test_change_amount_converts_hfq_prev_close_before_subtracting() -> None:
     assert "realtimeRawPrev / divisor" in js, "昨收必须先除回不复权域"
     # 带分号才是"直接相减后收工"的那个坏写法（正确写法后面还跟着 `/ divisor`）
     assert "realtimeRawPrice - realtimeRawPrev;" not in js, "禁止直接相减（量纲不同）"
+
+
+def test_raw_fallback_basis_changes_the_price_basis_wording() -> None:
+    """R64：``market.price_basis === "raw"`` 时口径行必须改口，且不许并排同样的数。
+
+    2026-10-15 的真实形态：因子只到 10-13，K 线只认带因子的 bar ⇒ 旧行为下快照停在
+    10-13。兜底（整段不复权）之后面板上的价**就是**不复权价，若照旧显示
+    「后复权（因子未知）」，看板会把不复权价说成后复权价 —— 比不显示更坏。
+    """
+    js = dashboard_js()
+    assert "market.price_basis" in js
+    assert '"raw"' in js
+    assert "不复权（当日缺复权因子，整段未复权）" in js
+    assert "整段不复权：面板上的价就是不复权价" in js

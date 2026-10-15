@@ -430,3 +430,53 @@ def test_second_track_still_compares_crypto(monkeypatch) -> None:
     assert report["counts_jumped"], "把加密侧的突变也一起关掉了"
     assert report["fingerprint_changes"]
     assert any("结构计数突变" in d for d in report["degraded"])
+
+
+def test_raw_fallback_basis_is_spelled_out_in_the_alert(monkeypatch) -> None:
+    """R64：不复权兜底时告警要说明「有当日图但因子断了」。
+
+    否则正文只有「滞后 N 个交易日」，而面板上明明有今天的价 —— 收到告警的人
+    会先怀疑快照没更新，排查方向从一开始就是错的。
+    """
+    lag = ri.ASHARE_STALE_LAG_ALERT_DAYS
+    detail = _stale_detail(lag=lag, reason="factor_missing", day="2026-09-30")
+    detail["ashare_staleness"]["stale_price_basis"] = "raw"
+    _install(
+        monkeypatch,
+        main_rows=[],
+        cn_rows=[
+            _row(
+                market="cn",
+                symbol="300299",
+                observed_at=_NOW_MS - 3_000,
+                health="failing",
+                stale=True,
+                detail=detail,
+            )
+        ],
+    )
+    report = ri.build_report(None)  # type: ignore[arg-type]
+    msg = next(p for p in report["problems"] if "cn/300299" in p)
+    assert "口径 不复权兜底（有当日图，但当日缺复权因子）" in msg
+
+
+def test_hfq_rows_do_not_get_the_raw_fallback_clause(monkeypatch) -> None:
+    """后复权的行不许出现兜底那句 —— 措辞一旦无差别追加就变成噪音。"""
+    lag = ri.ASHARE_STALE_LAG_ALERT_DAYS
+    _install(
+        monkeypatch,
+        main_rows=[],
+        cn_rows=[
+            _row(
+                market="cn",
+                symbol="300299",
+                observed_at=_NOW_MS - 3_000,
+                health="failing",
+                stale=True,
+                detail=_stale_detail(lag=lag),
+            )
+        ],
+    )
+    report = ri.build_report(None)  # type: ignore[arg-type]
+    msg = next(p for p in report["problems"] if "cn/300299" in p)
+    assert "不复权兜底" not in msg

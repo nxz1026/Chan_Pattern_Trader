@@ -186,6 +186,10 @@ def _ashare_stale_suffix(row: Any) -> str:
     last_bar = block.get("stale_last_bar_date")
     if last_bar:
         parts.append(f"末根 K 线 {last_bar}")
+    if block.get("stale_price_basis") == "raw":
+        # R64：面板上有今天的价（整段不复权兜底），但因子链路是断的 ——
+        # 不补这句，「滞后 N 个交易日」与面板上的当日价看着互相矛盾。
+        parts.append("口径 不复权兜底（有当日图，但当日缺复权因子）")
     return ("、" + "、".join(parts)) if parts else ""
 
 

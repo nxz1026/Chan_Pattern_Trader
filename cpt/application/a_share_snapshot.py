@@ -419,6 +419,10 @@ def build_ashare_snapshot(
     # 裸码 ``SH`` 分不出主板/科创板（实测 ``board='SH'`` 里混着 617 只 688/689），
     # 前端直接显示 ``SH`` 等于没显示。原值 ``board`` 保留不动，另给一个可读标签。
     snapshot["market"]["board_label"] = board_label(code, security_board)
+    # R64：K 线**口径**与「因子覆盖到哪天」从适配器一路带下来。
+    # 不复权兜底（``price_basis="raw"``）时前端要改口（价格口径行），
+    # 陈旧判定要换基准日（见 :func:`_attach_staleness`）。
+    _attach_price_basis_source(snapshot, result)
     snapshot["summary"]["structural_alert"] = structural_alert
     _attach_factor_fetch(snapshot, outcome)
     _attach_ashare_tags(snapshot, tags_audit)
@@ -1184,6 +1188,23 @@ def _resolve_price_basis(snapshot: dict[str, Any], code: str, client: Any) -> _P
     return _PriceBasis(last_close=last_close, last_date=last_date, factor=factor)
 
 
+def _attach_price_basis_source(snapshot: dict[str, Any], result: Any) -> None:
+    """把适配器给的 **K 线口径**（``price_basis``）与「因子覆盖到哪天」挂进 ``market``。
+
+    R64：这两个字段是「不复权兜底」这一路的状态载体 —— 前端据此改口（价格口径行），
+    :func:`_attach_staleness` 据此把陈旧基准日退到因子末日。用 ``getattr`` 取值兼容
+    测试里的 duck-type 假结果对象（它们的默认口径就是后复权）。
+    """
+    market = snapshot.get("market")
+    if not isinstance(market, dict):
+        return
+    price_basis = str(getattr(result, "price_basis", "hfq") or "hfq")
+    market["price_basis"] = price_basis
+    factor_last = getattr(result, "factor_last_date", None)
+    if price_basis == "raw" and isinstance(factor_last, str) and factor_last:
+        market["factor_last_date"] = factor_last
+
+
 def _attach_price_basis(snapshot: dict[str, Any], basis: _PriceBasis) -> None:
     """把「价格口径」挂到 ``market``：后复权价旁边给出不复权价与倍率。
 
@@ -1198,12 +1219,17 @@ def _attach_price_basis(snapshot: dict[str, Any], basis: _PriceBasis) -> None:
     不复权价 = ``last_close / 同一根 bar 的因子``。因子取不到时**只给
     ``last_bar_date``，不给 ``price_ratio``/``last_price_raw``**：显示 ``×1.0``
     等于把"不知道"说成"没除权"，比不显示更坏。前端对缺失字段隐藏该行。
+
+    R64：``price_basis="raw"``（整段不复权兜底）时直接跳过 —— 那时
+    ``last_price`` **本来就是**不复权价，再并排一个同样的数只让人以为出了错。
     """
     market = snapshot.get("market")
     if not isinstance(market, dict):
         return
     if basis.last_date is not None:
         market["last_bar_date"] = basis.last_date.isoformat()
+    if str(market.get("price_basis") or "hfq") == "raw":
+        return
     factor = basis.factor
     if not factor or factor <= 0:
         return
@@ -1238,6 +1264,9 @@ def _attach_last_bar_stats(snapshot: dict[str, Any], basis: _PriceBasis) -> None
         return
 
     factor = basis.factor if basis.factor and basis.factor > 0 else None
+    if str(market.get("price_basis") or "hfq") == "raw":
+        # R64：整段不复权 ⇒ 高低只有一套数，给 ``_raw`` 变体等于发两份一样的值。
+        factor = None
 
     def _price(value: Any) -> float | None:
         try:
@@ -1281,6 +1310,9 @@ def _attach_staleness(snapshot: dict[str, Any], client: Any) -> None:
     * **今天**：A 股快照批 16:00（北京）跑，盘中运行时库里本来就没有今天的 bar。
       所以收盘（15:00）前把截止日取到**昨天**，15:00 之后才把今天算进去。
     * **日历查不到**：保持不动（fail-open 到不误报），绝不能因为查库失败就报陈旧。
+    * **R64 不复权兜底**：``market.price_basis="raw"`` 时末根 K 线是没有因子的
+      原始价，基准日改用 ``market.factor_last_date``（窗口内一个因子都没有时用
+      窗口首日）—— 见下面的注释，这是为了让兜底不把因子链路的故障静音。
 
     时区一律走 :mod:`cpt.domain.market_time`（生产机是 UTC，用宿主 ``now()``
     会在北京 00:00–08:00 之间算错一天 —— R59 已为此踩过一次）。
@@ -1297,6 +1329,26 @@ def _attach_staleness(snapshot: dict[str, Any], client: Any) -> None:
     last_bar_day = datetime.fromtimestamp(raw_open / 1000, tz=UTC).date()
     market = snapshot.get("market")
     code = str(market.get("symbol") or "") if isinstance(market, dict) else ""
+    # R64：不复权兜底时末根 K 线是**没有因子的原始价** —— 基准日必须退到
+    # 「因子覆盖到哪天」（适配器给的 ``factor_last_date``），否则「今天有图」
+    # 会把因子链路停摆伪装成健康，巡检告警就被静音了。
+    price_basis = str(market.get("price_basis") or "hfq") if isinstance(market, dict) else "hfq"
+    factor_last = market.get("factor_last_date") if isinstance(market, dict) else None
+    if price_basis == "raw":
+        # 基准日退到「因子覆盖到哪天」。整个窗口**一个因子都没有**（这只票从未被
+        # 因子表覆盖）时退到窗口首日 —— 宁可把滞后报得很大（真实含义：整个窗口
+        # 都没因子），也不能因为「今天有图」就把因子链路的停摆静音掉。
+        baseline: Any = factor_last
+        if not (isinstance(baseline, str) and baseline) and candles:
+            first = candles[0]
+            first_open = first.get("open_time") if isinstance(first, dict) else None
+            if isinstance(first_open, (int, float)):
+                baseline = datetime.fromtimestamp(first_open / 1000, tz=UTC).date().isoformat()
+        if isinstance(baseline, str) and baseline:
+            try:
+                last_bar_day = datetime.fromisoformat(baseline).date()
+            except ValueError:
+                _LOG.debug("因子末日不是 ISO 日期，忽略：%r", baseline)
 
     from cpt.adapters.a_share_local import open_days_between  # noqa: PLC0415
     from cpt.domain.market_time import MARKET_CLOSE, market_now  # noqa: PLC0415
@@ -1325,6 +1377,9 @@ def _attach_staleness(snapshot: dict[str, Any], client: Any) -> None:
     # 2026-10-14 实测：跟踪清单 51 只里 lag=0 的 9 只、lag=1 的 20 只（因子当日
     # 未发布，**常态**）、lag≥2 的 22 只（其中 20 只卡在 09-30）。
     quality["stale_lag_days"] = len(missing)
+    # R64：口径也是诊断的一部分 —— 不复权兜底意味着「有图，但图是原始价」，
+    # 告警正文要说清这一点，否则「滞后 N 个交易日」与面板上的今日价看着矛盾。
+    quality["stale_price_basis"] = price_basis
     # 「K 线没跟上」不等于「上游没入库」：2026-10-14 实拉 600519，
     # ``public.daily_bar`` 有当天行（全市场 5224 只），但 ``asel.ref_adjust_factor``
     # 当天只有 16 个 code、600519 不在其中 —— K 线只认带因子的 bar，于是末根

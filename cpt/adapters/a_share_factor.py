@@ -57,6 +57,7 @@ __all__ = [
     "factor_unavailable_category",
     "fetch_factor_rows",
     "load_recent_closes",
+    "promote_recompute_factors",
     "save_recompute_factors",
     "upsert_factor_rows",
 ]
@@ -484,8 +485,9 @@ def upsert_factor_rows(
 # R37：按 Wind 公司行动重算后复权因子（**只写暂存表**，见 factor_recompute.py）
 # --------------------------------------------------------------------------- #
 
-#: 暂存表名。**生产表 ``asel.ref_adjust_factor`` 一个字节都不碰** ——
-#: 切换是人工决定（看报告 → 决定），脚本绝不自动切。
+#: 暂存表名。**重算是只写暂存表的**：``factor_recompute.py`` 默认一个字节都不碰生产表
+#: （切换是人工决定：看报告 → 决定），只有显式传 ``--promote`` 才由
+#: :func:`promote_recompute_factors` 搬进 ``asel.ref_adjust_factor``（R64，用户拍板 a）。
 FACTOR_RECOMPUTE_TABLE: Final[str] = "asel.ref_adjust_factor_v2"
 
 _RECOMPUTE_DDL: Final[str] = f"""
@@ -577,6 +579,122 @@ def save_recompute_factors(conn: Any, rows: Sequence[tuple[str, str, float, str,
         )
     conn.commit()
     return len(rows)
+
+
+#: promote 写进生产表的 ``source_url``。重算的值来自**东财公司行动**，与
+#: ``tx:fqkline`` 的「后复权收盘 ÷ 不复权收盘」是两条完全不同的来路 —— 出处必须
+#: 能对账；写成 null（表允许）会让「这一行哪来的」永远查不清。
+PROMOTE_SOURCE_URL: Final[str] = "eastmoney:corporate-actions (recompute)"
+
+#: promote 判「这一行要不要改写」的容差。**实测的差值分布是两簇**（2026-10-15，
+#: 暂存表 ⋈ 生产表 3.36M 行）::
+#:
+#:     >1e-9  1,806,097   浮点表示噪声（numeric↔double 的舍入路径不同）
+#:     >1e-8     92,924   真实修正
+#:     >1e-3     91,579   其中幅度 ≥1e-3 的（漂移/台阶方向那类结构性错）
+#:
+#: 取 ``1e-8``：比噪声底高一个数量级，又远低于最小真实修正。写 1e-9 每晚白写
+#: 180 万行；写 1e-6 口径上没差别，但 1e-8 与 1e-3 之间没有第三簇，取哪儿都行。
+_PROMOTE_EPS: Final[float] = 1e-8
+
+
+def promote_recompute_factors(
+    conn: Any, *, dry_run: bool = False, batch: int = 200_000
+) -> tuple[int, int]:
+    """把暂存表的重算因子搬进生产表 → ``(scanned, changed)``。
+
+    ## 为什么需要它（R64，2026-10-15）
+
+    ``asel.ref_adjust_factor_v2`` 自 R37 起只写不读（只有 ``factor_report.py`` 拿它
+    对账），于是生产表最新那一档一直停在腾讯的逐日比值上：600519 的 2026-10-13 是
+    ``6.3942``，而按公司行动重算的同一天属于 ``7.0605`` 那一档 —— 差 9.4%。快照读的
+    是生产表，所以画出来的后复权序列在接缝处会跳。
+
+    ## 安全性论证（实测，不是推断）
+
+    5,206 只里 **5,021 只（97.6%）**在暂存表最新日上与生产表**逐位相等**
+    （逐只算 ``v2/prod = 1.000000``）；123 只相差 < 1%（那些日期上生产表存的是腾讯
+    比值）。两者同源同尺度 ⇒ 覆盖不会造成价格量级跳变。日线窗口只有 2024-01-02
+    起，2023 年那些行不在暂存表里，原样保留。
+
+    ## 只写有差异的行
+
+    ⚠️ 判据必须是**带容差的数值比较**，不能写 ``IS DISTINCT FROM``：暂存表的
+    ``hfq_factor`` 是 ``numeric``、生产表是 ``double precision``，PostgreSQL 会把
+    double 提升成 numeric 再比 —— 同一个 Python float 存成 numeric 是
+    ``12.4293652541882``、由 double 转回来是 ``12.4293652541882001…``。实测三种判据
+    各自会改多少行（2026-10-15）::
+
+        IS DISTINCT FROM（还比 source 字符串里的 steps=N）  2,248,057
+        纯数值、容差 1e-9                                    1,806,097
+        纯数值、容差 1e-8（= _PROMOTE_EPS）                     92,924
+
+    真实修正只有最后那一簇（其中 91,579 行幅度 ≥1e-3）。3.4M 行里绝大多数算出来
+    就是同一个值，跳过它们才不用每晚白写一百八十万行（WAL、索引膨胀都是代价）。
+    用 ``(code, trade_date)`` 键集分批，避免一个事务里锁住全表。
+
+    ``dry_run=True`` 只数不写 —— ``factor_recompute.py --promote-only --dry-run`` 依赖它。
+    """
+    diff = f"abs(v.hfq_factor::double precision - p.hfq_factor) > {_PROMOTE_EPS}"
+    if dry_run:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""SELECT count(*),
+                           count(*) FILTER (WHERE p.code IS NULL OR {diff})
+                    FROM {FACTOR_RECOMPUTE_TABLE} v
+                    LEFT JOIN asel.ref_adjust_factor p
+                           ON p.code = v.code AND p.trade_date = v.trade_date"""
+            )
+            scanned, changed = cur.fetchone()
+        return int(scanned), int(changed)
+
+    scanned = changed = 0
+    last_code, last_day = "", datetime(1900, 1, 1, tzinfo=UTC).date()
+    while True:
+        with conn.cursor() as cur:
+            cur.execute(
+                f"""WITH src AS (
+                        SELECT code, trade_date, hfq_factor, source, basis, computed_at
+                        FROM {FACTOR_RECOMPUTE_TABLE}
+                        WHERE (code, trade_date) > (%s, %s)
+                        ORDER BY code, trade_date
+                        LIMIT %s
+                    ), upd AS (
+                        INSERT INTO asel.ref_adjust_factor
+                            (code, trade_date, hfq_factor, source, source_url, source_ref,
+                             as_of, available_at, fetched_at)
+                        SELECT code, trade_date, hfq_factor, source, %s, basis,
+                               computed_at, computed_at, now()
+                        FROM src
+                        ON CONFLICT (code, trade_date) DO UPDATE SET
+                            hfq_factor=EXCLUDED.hfq_factor,
+                            source=EXCLUDED.source,
+                            source_url=EXCLUDED.source_url,
+                            source_ref=EXCLUDED.source_ref,
+                            as_of=EXCLUDED.as_of,
+                            available_at=EXCLUDED.available_at,
+                            fetched_at=EXCLUDED.fetched_at
+                        WHERE abs(asel.ref_adjust_factor.hfq_factor - EXCLUDED.hfq_factor)
+                                  > {_PROMOTE_EPS}
+                        RETURNING 1
+                    ), tail AS (
+                        SELECT code, trade_date FROM src
+                        ORDER BY code DESC, trade_date DESC LIMIT 1
+                    )
+                    SELECT (SELECT count(*) FROM src), (SELECT count(*) FROM upd),
+                           (SELECT code FROM tail), (SELECT trade_date FROM tail)""",
+                (last_code, last_day, batch, PROMOTE_SOURCE_URL),
+            )
+            row = cur.fetchone()
+        conn.commit()
+        if not row or row[0] is None:
+            break
+        scanned += int(row[0])
+        changed += int(row[1] or 0)
+        if row[2] is None:
+            break
+        last_code, last_day = str(row[2]), row[3]
+    return scanned, changed
 
 
 def factor_from_actions(
