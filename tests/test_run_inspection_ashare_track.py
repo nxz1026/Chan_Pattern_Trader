@@ -311,3 +311,83 @@ def test_rows_from_both_windows_are_merged_in_time_order(monkeypatch) -> None:
     assert times == sorted(times), f"合并后必须时间正序，实际 {times}"
     # 去重：主窗与 cn 窗各有一条 (cn,600519,_NOW_MS-2_000) → 合并后只留 1 条
     assert len([t for t in times if t == _NOW_MS - 2_000]) == 1
+
+
+# ── R63：行龄超期改记降级 + 流整体停摆（用户 2026-10-14 拍板）────
+def test_expired_row_is_downgraded_not_reported(monkeypatch) -> None:
+    """行龄 > ``ASHARE_ROW_MAX_AGE_DAYS`` ⇒ 只记降级，不当问题报。
+
+    这类行是**被轮换落下的历史快照**（水位表 154 只、批次每天测 50 只，一只
+    隔 ~3 天才轮到），拿它天天报警等于用一条永远修不掉的提醒训练人无视告警。
+    这里另有一只**新鲜**的 cn 行，确保"流整体没停"，从而只测行龄这一条判据。
+    """
+    _install(
+        monkeypatch,
+        main_rows=[_row(market="crypto", symbol="BTCUSDT", observed_at=_NOW_MS - 1_000)],
+        cn_rows=[
+            _row(
+                market="cn",
+                symbol="300299",
+                observed_at=_NOW_MS - 6 * 86_400_000,
+                health="failing",
+                gap_count=4,
+                stale=True,
+                detail=_stale_detail(lag=5, day="2026-10-08"),
+            ),
+            _row(market="cn", symbol="600519", observed_at=_NOW_MS - 1_000),
+        ],
+    )
+    report = ri.build_report(None)  # type: ignore[arg-type]
+    assert not [p for p in report["problems"] if "300299" in p], "旧账被当成问题报了"
+    assert any("行龄 6 天" in d for d in report["degraded"]), report["degraded"]
+    assert not [p for p in report["problems"] if "水位流已停" in p]
+
+
+def test_ashare_stream_stall_is_a_problem(monkeypatch) -> None:
+    """A 股整条流停了 ⇒ **problem**（这道单独的检查是必须的）。
+
+    行龄超期的标的全被降级之后，若恰恰是批处理整体死了，逐标的降级会让告警
+    彻底安静 —— 而那正是最该响的时候。也不能靠全局那条：水位流是加密轮询在喂，
+    加密活着时全局那行永远新鲜。
+    """
+    _install(
+        monkeypatch,
+        main_rows=[_row(market="crypto", symbol="BTCUSDT", observed_at=_NOW_MS - 1_000)],
+        cn_rows=[
+            _row(market="cn", symbol="600519", observed_at=_NOW_MS - 40 * 3_600_000),
+        ],
+    )
+    report = ri.build_report(None)  # type: ignore[arg-type]
+    assert any("A 股水位流已停 40 小时" in p for p in report["problems"]), report["problems"]
+
+
+def test_missing_ashare_rows_entirely_is_a_problem(monkeypatch) -> None:
+    """水位表活着、但 A 股一条都没有 ⇒ problem（定时器可能从未跑成）。"""
+    _install(
+        monkeypatch,
+        main_rows=[_row(market="crypto", symbol="BTCUSDT", observed_at=_NOW_MS - 1_000)],
+        cn_rows=[],
+    )
+    report = ri.build_report(None)  # type: ignore[arg-type]
+    assert any("A 股水位流一条都没有" in p for p in report["problems"]), report["problems"]
+
+
+def test_fresh_lag_row_is_still_a_problem(monkeypatch) -> None:
+    """对照组：**新鲜**且 lag≥2 ⇒ 照旧进 problems（行龄闸门不能把真故障吞掉）。"""
+    _install(
+        monkeypatch,
+        main_rows=[_row(market="crypto", symbol="BTCUSDT", observed_at=_NOW_MS - 1_000)],
+        cn_rows=[
+            _row(
+                market="cn",
+                symbol="300299",
+                observed_at=_NOW_MS - 3_000,
+                health="failing",
+                gap_count=4,
+                stale=True,
+                detail=_stale_detail(lag=5),
+            ),
+        ],
+    )
+    report = ri.build_report(None)  # type: ignore[arg-type]
+    assert any("cn/300299" in p and "滞后 5 个交易日" in p for p in report["problems"])

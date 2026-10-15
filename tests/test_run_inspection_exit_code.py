@@ -177,3 +177,43 @@ def test_record_is_appended_regardless(monkeypatch) -> None:
     rms = _install(monkeypatch, problems=["x"], degraded=[], notified=False)
     ri.main(["--force"])
     assert rms.appended, "没落库 —— 看板上的巡检状态会一直是空的"
+
+
+# ── R63：只在状态变化时发（用户 2026-10-14 拍板）─────────────────
+def test_persistent_problems_are_not_re_sent_daily(monkeypatch) -> None:
+    """⚠️ 问题**一直在**、但状态指纹没变 ⇒ **不发**。
+
+    原判据 ``changed or bool(problems)``：只要有问题就每天推一条一模一样的卡片。
+    A 股那 20 只链路断的标的在修好之前会天天响 —— 天天响等于不响，人会连
+    「新变坏的那条」一起无视掉。判别力靠假 ``notify_problem`` 恒返回 False：
+    只要它**尝试**发，rc 就是 3（见 R45 那组），所以 rc=0 就证明没发。
+    """
+    problems = ["cn/300299 health=failing（缺口 4、stale=True、bars=118）"]
+    _install(monkeypatch, problems=problems, degraded=[], notified=False)
+    report = ri.build_report(None)  # type: ignore[arg-type]
+    _install(
+        monkeypatch,
+        problems=problems,
+        degraded=[],
+        notified=False,
+        prev={"detail": {"state_key": ri._state_key(report)}},  # noqa: SLF001
+    )
+    assert ri.main([]) == 0, "问题没变却又发了一遍 —— 天天响等于不响"
+
+
+def test_state_change_still_alerts(monkeypatch) -> None:
+    """对照组：状态指纹变了 ⇒ 照发（收紧的是「重发」，不是「变化」）。"""
+    _install(
+        monkeypatch,
+        problems=["水位断了"],
+        degraded=[],
+        notified=True,
+        prev={"detail": {"state_key": "上一次的指纹"}},
+    )
+    assert ri.main([]) == 0
+
+
+def test_first_run_with_problems_still_alerts(monkeypatch) -> None:
+    """首次巡检发现问题**要发**：「没有基线」不等于「没有故障」。"""
+    _install(monkeypatch, problems=["水位断了"], degraded=[], notified=False, prev=None)
+    assert ri.main([]) == 3, "首次发现问题却没发 —— 空 prev_state 被当成「状态没变」了"

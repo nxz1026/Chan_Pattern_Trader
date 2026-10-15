@@ -209,6 +209,36 @@ MUTATIONS: tuple[Mutation, ...] = (
         "恒不报，全仓再出现同类除法没人拦，而门禁**依然全绿**（它只是什么都没查）。"
         "变异前这条测试必须在，否则本门禁自己也在恒真",
     ),
+    Mutation(
+        name="A 股旧水位行不再天天报警（行龄闸门）",
+        rel="scripts/run_inspection.py",
+        old=(
+            "        expired = row_age_days is not None and row_age_days > ASHARE_ROW_MAX_AGE_DAYS"
+        ),
+        new="        expired = False",
+        tests=(
+            "tests/test_run_inspection_ashare_track.py::"
+            "test_expired_row_is_downgraded_not_reported",
+        ),
+        why="行龄闸门是「用旧账天天报警 ⇒ 人开始无视整个通道」的唯一防线；"
+        "退化成恒 False 时巡检与门禁**照样全绿**，只是那批被轮换落下的标的"
+        "又会天天推卡片（2026-10-14 用户拍板）。",
+    ),
+    Mutation(
+        name="巡检只在状态变化时发（不再「有问题就天天发」）",
+        rel="scripts/run_inspection.py",
+        old="should = args.force or (not args.quiet and not first_run and changed)",
+        new=(
+            "should = args.force or (not args.quiet and not first_run"
+            ' and (changed or bool(report["problems"])))'
+        ),
+        tests=(
+            "tests/test_run_inspection_exit_code.py::"
+            "test_persistent_problems_are_not_re_sent_daily",
+        ),
+        why="2026-10-14 用户拍板收紧：原判据在 A 股接入后等于每天重发同一条问题卡片。"
+        "退回旧写法时巡检仍全绿，只有「每天多响一次」这个行为悄悄回来。",
+    ),
 )
 
 

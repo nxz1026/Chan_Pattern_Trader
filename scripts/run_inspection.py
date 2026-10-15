@@ -22,14 +22,21 @@ not callable``）没人发现。**记下来 ≠ 有人看**。所以巡检要把
   - ``backend`` / ``dataset_hash`` 变了但结构没变？那更可疑（指纹变了说明输入或
     实现变了，结果却一样）。
 
-## 告警策略：**只在「坏了」或「状态变了」时发**
+## 告警策略：**只在「状态变了」时发**（R63 收紧）
 
 R38 有一条硬结论：常态降级占了日志 41% 的量，把真信号淹了。告警同理 ——
-每天发一条"czsc 还没装"没有任何价值。所以：
+每天发一条"czsc 还没装"没有任何价值。R38 据此写成「有 ``failing`` **或** 状态变了
+就发」，2026-10-14 拍板收紧为**只看状态指纹**：
 
-- 首次巡检：只记录基线，**不发**（没有"变化"可言）；
-- 之后：**只在**有 ``failing``、或与上次结论**状态不同**时发；
-- 恢复时也发一条（从坏到好，值得知道）。
+- 首次巡检：只记录基线，**不发**（没有"变化"可言）；**但首次就发现问题要发**
+  ——「没有基线」不等于「没有故障」；
+- 之后：**只在**状态指纹（全量 problems + degraded + 数据源）与上次不同时发；
+- 恢复时也发一条（从坏到好，值得知道）；
+- 为什么再收紧一次：A 股接进来后，"有问题就发"意味着那 20 只链路断的标的在
+  修好之前**每天**推一条一模一样的卡片。天天响等于不响 —— 人会开始无视整个
+  通道，连"新变坏的那条"一起无视掉。
+
+要强制重发用 ``--force``。
 
 ## 用法
 
@@ -58,6 +65,8 @@ _LOG = logging.getLogger("run_inspection")
 
 __all__ = [
     "ASHARE_STALE_LAG_ALERT_DAYS",
+    "ASHARE_ROW_MAX_AGE_DAYS",
+    "ASHARE_STREAM_STALL_HOURS",
     "STALE_METRIC_MS",
     "build_report",
     "main",
@@ -87,6 +96,23 @@ ASHARE_STALE_LAG_ALERT_DAYS: Final[int] = 2
 #: 而截断砍掉的正好是最后那几条（最可能是这轮**新变坏**的）。状态指纹
 #: ``_state_key(report)`` 仍用**全量**问题列表：省的是版面，不是信息。
 ALERT_PROBLEM_LINES: Final[int] = 15
+
+#: A 股水位行的**最大可信行龄**（天）。超过它就只记降级，不当问题报。
+#:
+#: 为什么需要这条（2026-10-14 拍板、当天实测）：水位表里累计着 154 只 A 股，
+#: 而批次一天只测 50 只（热池）⇒ 一只标的隔 ~3 天才被重新测一次，**行龄 ≤3 天
+#: 是正常的轮换节奏**（实测行龄分布：0 天 47 只 / 1 天 26 / 2 天 19 / 4-6 天 49 /
+#: ≥11 天 12）。行龄 4 天以上说明这只已经不在批次覆盖里了，它身上记的那次
+#: ``stale`` 是**历史快照** —— 拿旧账天天报警，等于用一条永远修不掉的提醒
+#: 训练人无视告警。「批次是不是整体停了」由下面那条全局检查回答，那里报才是真故障。
+ASHARE_ROW_MAX_AGE_DAYS: Final[int] = 4
+
+#: A 股水位流**整体停摆**的阈值（小时）。
+#:
+#: 批次每天 16:00（北京）一轮 ⇒ 正常间隔 24h，36h 还没新行就是没跑成。
+#: 必须有这条：行龄超期的标的全被降级之后，如果**恰恰是批处理整体死了**，
+#: 逐标的降级会让告警彻底安静 —— 而那正是最该响的时候（R38 同款教训）。
+ASHARE_STREAM_STALL_HOURS: Final[int] = 36
 
 
 def _now_ms() -> int:
@@ -163,6 +189,16 @@ def _ashare_stale_suffix(row: Any) -> str:
     return ("、" + "、".join(parts)) if parts else ""
 
 
+def _row_age_days(row: Any, now_ms: int) -> float:
+    """水位行的年龄（天）。没有时间戳返回 ``inf``。
+
+    判不了就**不当它是新的**：拿一条来路不明的行去报警，比漏报更糟 ——
+    告警的价值全在"可信"上，一条说不清年龄的告警只会让人开始怀疑所有告警。
+    """
+    ts = row["observed_at"] or 0
+    return (now_ms - ts) / 86_400_000 if ts else float("inf")
+
+
 def build_report(conn: Any) -> dict[str, Any]:
     """只读：把水位流 + 数据源状态汇成一份结论。"""
     rows = _recent_rows(conn)  # 时间正序（含 A 股单开的那一窗，见 _recent_rows）
@@ -175,20 +211,46 @@ def build_report(conn: Any) -> dict[str, Any]:
     if not rows:
         problems.append("水位表为空 —— 巡检/轮询可能从未成功落过一行")
 
+    now_ms = _now_ms()
     newest = max((r["observed_at"] or 0) for r in rows) if rows else 0
-    age = _now_ms() - newest if newest else None
+    age = now_ms - newest if newest else None
     if age is not None and age > STALE_METRIC_MS:
         problems.append(
             f"水位流已断 {age // 60000} 分钟"
             f"（阈值 {STALE_METRIC_MS // 60000}）—— 轮询或落库可能挂了"
         )
 
+    # A 股流整体停摆（R63）。**不能**用上面那条全局检查代替它：水位流是被加密
+    # 轮询喂着的（30s 一行），加密活着的时候全局那行永远是"新鲜"的 ——
+    # A 股整条流停了都看不出来。这正是 _recent_rows 单开一窗要解决的同一个盲区。
+    cn_times = [r["observed_at"] or 0 for r in rows if r["market"] == "cn" and r["observed_at"]]
+    if cn_times:
+        cn_age_h = (now_ms - max(cn_times)) / 3_600_000
+        if cn_age_h > ASHARE_STREAM_STALL_HOURS:
+            problems.append(
+                f"A 股水位流已停 {cn_age_h:.0f} 小时（阈值 {ASHARE_STREAM_STALL_HOURS}）"
+                "—— cpt-dashboard-ashare.timer / 批次脚本可能没跑成"
+            )
+    elif rows:
+        # 整张水位表都空的情况上面已经报过；这里回答的是"水位表活着、但 A 股一条都没有"。
+        problems.append("A 股水位流一条都没有 —— cpt-dashboard-ashare.timer 可能从未成功跑过")
+
     for (market, symbol), row in per_symbol.items():
         tag = f"{market}/{symbol}"
         lag = _ashare_stale_lag(row) if market == "cn" else None
         shallow = lag is not None and lag < ASHARE_STALE_LAG_ALERT_DAYS
+        row_age_days = _row_age_days(row, now_ms) if market == "cn" else None
+        expired = row_age_days is not None and row_age_days > ASHARE_ROW_MAX_AGE_DAYS
         if row["health"] == "failing":
-            if shallow:
+            if expired:
+                # 行龄超期 ⇒ 已不在批次覆盖内，行上是历史快照（见常量注释）。
+                # 只记降级；"批次整体停了"由上面那条全局检查负责喊。
+                degraded.append(
+                    f"{tag} 行龄 {row_age_days:.0f} 天 > {ASHARE_ROW_MAX_AGE_DAYS}"
+                    f" 天，已不在批次覆盖内，只记降级"
+                    f"（{_ashare_stale_suffix(row).lstrip('、') or '无诊断'}）"
+                )
+            elif shallow:
                 # A 股当日因子未发布是**常态**（阈值理由见常量注释）：只记降级，
                 # 不进告警正文，免得每天 20+ 条噪音把真断的那批淹掉。
                 degraded.append(
@@ -346,9 +408,15 @@ def main(argv: list[str] | None = None) -> int:
         # 没有旧状态可比。R38 写这条规则时先只写进了 docstring，真跑起来
         # 第一次就发了告警（空 prev_state 必然 != state），这里补上实现。
         first_run = not prev_state
-        should = args.force or (
-            not args.quiet and not first_run and (changed or bool(report["problems"]))
-        )
+        # R63（用户 2026-10-14 拍板）：**只在状态变化时发**。
+        #
+        # 原判据是 ``changed or bool(report["problems"])`` —— 只要有问题就天天发。
+        # R38 时代那还说得过去（问题项少、修得快），A 股接进来之后含义变了：
+        # 那 20 只链路断的标的在修好之前，会**每天**推一条一模一样的卡片。天天响
+        # 等于不响 —— 人会开始无视整个通道，连"新变坏的那条"一起无视掉。
+        # 状态指纹 ``_state_key`` 覆盖全量 problems + degraded + 数据源，
+        # 所以"没变"确实等于"没有新信息"；要强制重发有 ``--force``。
+        should = args.force or (not args.quiet and not first_run and changed)
         if args.force or (report["problems"] and first_run and not args.quiet):
             # 首次就发现真问题：**要发**（"没有基线"不等于"没有故障"）
             should = True
@@ -396,7 +464,7 @@ def main(argv: list[str] | None = None) -> int:
                     print("[!] 巡检发现了问题，但告警未送达 —— 告警通道可能已失效", flush=True)
                     return 3
         else:
-            print("状态无变化且无问题 → 不打扰")
+            print("状态无变化 → 不打扰（问题项没变就不再重发；要重发用 --force）")
         return 0
     finally:
         client.close()
