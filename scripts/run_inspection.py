@@ -267,11 +267,23 @@ def build_report(conn: Any) -> dict[str, Any]:
         if not row["bar_count"]:
             problems.append(f"{tag} 没有 K 线（bar_count=0）")
 
-    # --- 第二轨：结构计数突变 + 指纹变化 ---
+    # --- 第二轨：结构计数突变 + 指纹变化（**只比加密**）---
+    #
+    # ⚠️ 为什么把 A 股排除在这条轨之外（R63，触发一次真告警时现场发现）：
+    # A 股的水位行是**不同日期的快照**（一天一批、每批 50 只，宽窗口里凑出好几天），
+    # 把"今天这行"和"上周那行"逐字段相减，得到的必然是几百条
+    # 「笔数 56 → 33」「dataset_hash 变了」—— K 线本来就在往前长，这不是信号。
+    # 实测 2026-10-15 触发：189 条突变 / 433 条指纹变化，**全部来自 cn**，白占两行。
+    # 更要命的是它们**每天都在变**，而 ``_state_key`` 把 degraded 也纳入指纹
+    # ⇒ 状态永远"有变化" ⇒ 刚收紧的"只在状态变化时发"会被这两行噪音架空。
+    # 加密侧是 30s 一轮，相邻两行是同一段行情的连续观测，那里的突变才是真信号
+    # （R36 装机换后端就是靠它发现的）；A 股的对应诊断在 staleness 那条线上。
     jumps: list[str] = []
     fingerprint_changes: list[str] = []
     by_symbol: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for row in rows:
+        if row["market"] == "cn":
+            continue
         by_symbol.setdefault((row["market"], row["symbol"]), []).append(row)
     for (market, symbol), seq in by_symbol.items():
         tag = f"{market}/{symbol}"

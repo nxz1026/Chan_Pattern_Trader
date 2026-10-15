@@ -239,6 +239,24 @@ MUTATIONS: tuple[Mutation, ...] = (
         why="2026-10-14 用户拍板收紧：原判据在 A 股接入后等于每天重发同一条问题卡片。"
         "退回旧写法时巡检仍全绿，只有「每天多响一次」这个行为悄悄回来。",
     ),
+    Mutation(
+        name="第二轨不拿 A 股跨日快照相减",
+        rel="scripts/run_inspection.py",
+        old=(
+            "    for row in rows:\n"
+            '        if row["market"] == "cn":\n'
+            "            continue\n"
+            '        by_symbol.setdefault((row["market"], row["symbol"]), []).append(row)'
+        ),
+        new=(
+            "    for row in rows:\n"
+            '        by_symbol.setdefault((row["market"], row["symbol"]), []).append(row)'
+        ),
+        tests=("tests/test_run_inspection_ashare_track.py::test_second_track_ignores_ashare_rows",),
+        why="A 股一天一批 ⇒ 窗口里相邻两行是**不同日期的快照**，相减必然产出几百条"
+        "「笔数变了」（实测 189/433）。它们进 degraded ⇒ 进 _state_key ⇒ 状态永远"
+        "有变化，把「只在状态变化时发」架空；而门禁与巡检**照样全绿**。",
+    ),
 )
 
 

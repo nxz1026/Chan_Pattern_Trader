@@ -391,3 +391,42 @@ def test_fresh_lag_row_is_still_a_problem(monkeypatch) -> None:
     )
     report = ri.build_report(None)  # type: ignore[arg-type]
     assert any("cn/300299" in p and "滞后 5 个交易日" in p for p in report["problems"])
+
+
+# ── R63：第二轨只比加密（触发真告警时现场发现）──────────────────
+def test_second_track_ignores_ashare_rows(monkeypatch) -> None:
+    """A 股的**跨日快照**不做逐字段相减：那几百条「笔数变了」每天都在变。
+
+    触发真告警时实测：189 条突变 / 433 条指纹变化全来自 cn。它们进了 degraded
+    ⇒ 进 ``_state_key`` ⇒ 状态永远"有变化" ⇒ 刚收紧的"只在状态变化时发"被架空。
+    """
+    old = _row(market="cn", symbol="600519", observed_at=_NOW_MS - 6 * 86_400_000)
+    new = _row(market="cn", symbol="600519", observed_at=_NOW_MS - 1_000)
+    old["bi_count"], new["bi_count"] = 33, 56
+    old["dataset_hash"], new["dataset_hash"] = "56c98ddc5f73", "b938d35663e3"
+    _install(
+        monkeypatch,
+        main_rows=[_row(market="crypto", symbol="BTCUSDT", observed_at=_NOW_MS - 1_000)],
+        cn_rows=[old, new],
+    )
+    report = ri.build_report(None)  # type: ignore[arg-type]
+    assert report["counts_jumped"] == [], report["counts_jumped"]
+    assert report["fingerprint_changes"] == [], report["fingerprint_changes"]
+    assert not [d for d in report["degraded"] if "突变" in d or "指纹变化" in d]
+
+
+def test_second_track_still_compares_crypto(monkeypatch) -> None:
+    """对照组：加密侧（30s 一轮、相邻行是连续观测）的突变**必须照旧报**。"""
+    a = _row(market="crypto", symbol="BTCUSDT", observed_at=_NOW_MS - 200_000)
+    b = _row(market="crypto", symbol="BTCUSDT", observed_at=_NOW_MS - 100_000)
+    a["bi_count"], b["bi_count"] = 33, 56
+    a["dataset_hash"], b["dataset_hash"] = "aaa", "bbb"
+    _install(
+        monkeypatch,
+        main_rows=[a, b],
+        cn_rows=[_row(market="cn", symbol="600519", observed_at=_NOW_MS - 1_000)],
+    )
+    report = ri.build_report(None)  # type: ignore[arg-type]
+    assert report["counts_jumped"], "把加密侧的突变也一起关掉了"
+    assert report["fingerprint_changes"]
+    assert any("结构计数突变" in d for d in report["degraded"])
