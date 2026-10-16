@@ -113,6 +113,7 @@ from cpt.adapters.wind_source import (  # noqa: E402
     WindSourceError,
     WindUnavailableError,
 )
+from cpt.domain.market_time import market_today  # noqa: E402
 
 _LOG = logging.getLogger("factor_recompute")
 
@@ -698,7 +699,11 @@ def main(argv: list[str] | None = None) -> int:
             "候选集 scope=%s：待处理 %d 只（已完成跳过 %d 只）", args.scope, len(todo), len(done)
         )
 
-    today = dt.date.today().isoformat()
+    # R59/L11：日期一律走 ``cpt.domain.market_time`` 的唯一口径。这里曾用
+    # ``dt.date.today()``（宿主 UTC）—— ``state['days']`` 的键就是「哪天用掉多少次
+    # 调用」，生产 cron 在北京 10:20 跑、两个口径落在同一天所以没症状；北京
+    # 00:00–08:00 手跑会把它记到错的那天上。
+    today = market_today().isoformat()
     calls = 0
     # ⚠️ R44：``state["stopped"]`` 会**留在进度文件里跨轮次**，所以不能用它判断
     # 「本轮是否被打断」—— 必须用这个只在本轮存活的局部标志。
