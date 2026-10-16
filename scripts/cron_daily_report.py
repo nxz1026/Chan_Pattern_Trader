@@ -31,9 +31,15 @@ R57 上线前审计的结论：**四条 cron 作业失败时「非零退出 + �
 一切正常时**只打印到日志、不发飞书**（与 ``run_inspection.py`` 的静默日语义一致）。
 有异常才发。
 
-⚠️ **持久性失败会每天报一次**，这是刻意的：一个还没被修掉的失败，天天提醒
+⚠️ **没被修掉的失败会每天报一次**，这是刻意的：一个还没被修掉的失败，天天提醒
 比「报一次然后没人记得」强。真嫌吵再加去重（存上次状态做差分），
 但那时应该先问「这个失败为什么还没人处理」。
+
+⚠️ 但「日志里有 ``!!!!!``」**不能直接当成「现在还在失败」**（2026-10-16 的真实故障）：
+日志没有 logrotate，历史标记会一直躺在文件里，于是 6 条作业全部 ``rc=0`` 的那天，
+日报照样报出 5 条**早就修好**的失败 —— 而真正的告警（日报自己送不出去）被这条噪音
+和飞书限频一起埋掉了。判据因此取了「**这条标记之后有没有出现过一次 ``结束 rc=0``**」：
+后来成功过 ⇒ 是历史残留；没有 ⇒ 确实还没修掉。
 """
 
 from __future__ import annotations
@@ -81,6 +87,12 @@ FAIL_MARKER: Final[str] = "!!!!!"
 #: 「上一轮还在跑，跳过」—— exit 0，所以 FAIL_MARKER 扫不到，得单独认。
 SKIP_MARKER: Final[str] = "还在跑，跳过"
 
+#: 日报**自己**打印失败行时用的引用前缀（``  · {失败行}``）。
+#: ⚠️ 日报扫的日志里**包含它自己**（见 JOBS），而它会把别的作业的失败行原样抄进
+#: 自己的日志 ⇒ 不把这些引用行排掉，抄来的标记会被当成日报自己的失败，一路滚雪球：
+#: 2026-10-16 实测它的日志里已有 4 条抄来的标记，且每天的抄写还多套一层 ``·``。
+QUOTE_PREFIX: Final[str] = "·"
+
 _TS = re.compile(r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z)")
 
 
@@ -95,7 +107,16 @@ def _line_time(line: str) -> dt.datetime | None:
 
 
 def scan(path: str, since: dt.datetime) -> tuple[list[str], list[str], str]:
-    """返回 (失败行, 跳过行, 最后一次「结束 rc=」的原始行)。"""
+    """返回 (失败行, 跳过行, 最后一次「结束 rc=」的原始行)。
+
+    两条排除规则，缺一条日报就会自己制造噪音：
+
+    1. **已被后续成功覆盖的失败标记不算** —— 这些日志没有 logrotate，标记写进去就
+       一直躺在文件里（见模块 docstring）。判据取「标记之后有没有出现过 ``结束 rc=0``」，
+       所以与标记写在 rc 行之前还是之后无关。
+    2. **引用行不算** —— 日报把别的作业的失败行抄进自己日志（``QUOTE_PREFIX``），
+       抄来的标记属于**那条作业**，不属于日报。
+    """
     p = Path(path)
     if not p.exists():
         return [], [], f"（日志不存在：{path}）"
@@ -106,14 +127,22 @@ def scan(path: str, since: dt.datetime) -> tuple[list[str], list[str], str]:
         raw = p.read_text(encoding="utf-8", errors="replace")
     except OSError as exc:  # pragma: no cover - 读日志失败本身就是异常信号
         return [f"读日志失败 {path}: {exc}"], [], last_rc
-    for line in raw.splitlines():
+    rows = [
+        (i, line)
+        for i, line in enumerate(raw.splitlines())
+        if not line.strip().startswith(QUOTE_PREFIX)
+    ]
+    #: 最后一次成功的位置。在它**之前**的失败标记都已被这次成功盖掉。
+    last_ok = max((i for i, line in rows if "结束 rc=0" in line), default=-1)
+    for i, line in rows:
         stamp = _line_time(line)
         if stamp is not None and stamp < since:
             continue
         if "结束 rc=" in line:
             last_rc = line.strip()
         if FAIL_MARKER in line:
-            failures.append(line.strip())
+            if i > last_ok:
+                failures.append(line.strip())
         elif SKIP_MARKER in line:
             skips.append(line.strip())
     return failures, skips, last_rc

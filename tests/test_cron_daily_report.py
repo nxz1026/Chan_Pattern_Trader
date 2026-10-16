@@ -86,6 +86,71 @@ def test_fail_marker_is_reported(tmp_path: pathlib.Path, monkeypatch: pytest.Mon
     assert any("未完成" in line for line in sent[0][1])
 
 
+def test_fail_marker_behind_a_later_success_is_not_reported(tmp_path: pathlib.Path) -> None:
+    """⚠️ 历史 ``!!!!!`` 不能当成当前故障（2026-10-16 的真实故障）。
+
+    日志没有 logrotate，标记写进去就一直躺着。那天 6 条作业全部 ``rc=0``，
+    日报却报了 5 条早就修好的失败，把真问题（日报自己送不出去）一起埋掉。
+    后来成功过 ⇒ 历史残留，不算。
+    """
+    _seed_all_logs(tmp_path, ok=True)
+    name = pathlib.Path(cdr.JOBS[0][1]).name
+    _write(
+        tmp_path,
+        name,
+        f"===== {_ts(30)} 开始（保留 7 天 env=yes）=====\n"
+        f"===== {_ts(30)} 结束 rc=1 =====\n"
+        "!!!!! 清理未完成（rc=1）—— dashboard 运行行会继续堆积 !!!!!\n"
+        f"===== {_ts(2)} 开始（保留 7 天 env=yes）=====\n"
+        f"===== {_ts(2)} 结束 rc=0 =====\n",
+    )
+    report = cdr.build_report(24, str(tmp_path))
+    assert report["problems"] == [], f"已修好的失败仍被上报：{report['problems']}"
+
+
+def test_fail_marker_after_the_last_success_is_still_reported(tmp_path: pathlib.Path) -> None:
+    """反向控制：**确实还没修掉**的失败不能被上面那条规则顺手静默。"""
+    _seed_all_logs(tmp_path, ok=True)
+    name = pathlib.Path(cdr.JOBS[0][1]).name
+    _write(
+        tmp_path,
+        name,
+        f"===== {_ts(3)} 结束 rc=0 =====\n"
+        f"===== {_ts(2)} 开始 =====\n"
+        f"===== {_ts(2)} 结束 rc=4 =====\n"
+        "!!!!! 关注列表收盘汇总未完成（rc=4）—— 当天没有汇总推送 !!!!!\n",
+    )
+    report = cdr.build_report(24, str(tmp_path))
+    assert len(report["problems"]) == 1, report["problems"]
+    assert "失败标记" in report["problems"][0]
+
+
+def test_quoted_failures_from_other_jobs_are_not_the_reports_own(tmp_path: pathlib.Path) -> None:
+    """⚠️ 日报扫的日志里包含它自己，而它会把别的作业的失败行抄进自己日志。
+
+    2026-10-16 实测：它的日志里有 4 条 ``  · !!!!!`` 引用行（还一天多套一层 ``·``），
+    全被当成日报自己的失败 —— 于是那条真问题（日报 rc=4 送不出去）被噪音埋掉。
+    引用行属于**那条作业**，不属于日报。
+    """
+    _seed_all_logs(tmp_path, ok=True)
+    name = pathlib.Path(cdr.JOBS[-1][1]).name
+    _write(
+        tmp_path,
+        name,
+        f"[{_ts(1)}] 日报开始（回看 24 小时）\n"
+        "扫描窗口：最近 24 小时\n"
+        f"  run-inspection：正常 · [{_ts(1)}] 巡检结束 rc=0\n"
+        "**run-metric-prune** 失败 1 条：\n"
+        "  · !!!!! 清理未完成（rc=1）—— run 类行会继续堆积 !!!!!\n"
+        "  · · !!!!! 上一轮抄写留下的嵌套引用 !!!!!\n"
+        f"===== {_ts(1)} 日报结束 rc=4 =====\n"
+        "!!!!! 日报未完成（rc=4）—— 作业失败可能仍然没人知道 !!!!!\n",
+    )
+    report = cdr.build_report(24, str(tmp_path))
+    assert len(report["problems"]) == 1, report["problems"]
+    assert report["problems"][0].startswith("cron-daily-report: 1 条"), report["problems"]
+
+
 # ── ③ 「没跑」≠「跑成功」 ───────────────────────────────────────────────────
 
 
