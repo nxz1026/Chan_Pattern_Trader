@@ -6,8 +6,14 @@
 # `cpt/storage/track_store.py` 里的 `prune_snapshots()`（SNAPSHOT_RETENTION_DAYS=30）
 # 与 `prune_removed()`（RECYCLE_RETENTION_DAYS=90）此前**零调用方**：
 # `cpt/web/track_api.handle_track_maintenance()` 把两者包成一个「日常维护」入口，
-# 但它自己的分发没接上 —— `GET /api/dashboard/track/maintenance` 会 404，
+# 但**当时**它自己的分发没接上 —— `GET /api/dashboard/track/maintenance` 会 404，
 # 于是这两张表只涨不消。本脚本按天把它接上。
+#
+# ⚠️ **R66 更正（2026-10-16）**：上面「分发没接上」是 M18 当时的实况，**现已不成立** ——
+# R59 审计已把 `elif handler_name == "maintenance"` 接进
+# `cpt/web/app.py::_handle_track_get`，本脚本实跑返回 HTTP 200（`applied`/`pruned_*` 字段）。
+# 保留这句是因为它解释了**本脚本为什么存在**（历史理由），不是当前状态。
+# 另一个易错点：它是 **GET**，不是 POST —— POST 该路径会 405。
 #
 # ## 为什么走 HTTP 而不是像另外两个 prune 脚本那样直连 store
 #

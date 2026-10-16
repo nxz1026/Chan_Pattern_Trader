@@ -156,13 +156,25 @@ shared memory` / `cannot create directory`。是的话就是环境，不是代�
 
 > ⚠️ **R45 更正（2026-10-04）：「16 个」已经过时。**
 > **R22（2026-09-30）接掉了 9 个模块 + 3 个函数**，R41 复核、R45 再次 grep 确认，
-> 现在**只剩 1 项**：`cpt/domain/a_share_rules.py::t_plus_one_purchase_allowed`
-> （仍无任何生产调用方）。
+> 现在**只剩 1 项**：`cpt/domain/a_share_rules.py` 里的
+> `t_plus_one_purchase_allowed`（仍无任何生产调用方）。
+> > （原文这里写成 `模块路径::符号`；R66 删掉该符号后，这个写法会让
+> > `scripts/check_all_claims.py` 的 S 类断言把**历史叙述**当成现行符号，故拆开写。）
+>
+> ⚠️ **R66 更正（2026-10-16）：「只剩 1 项」也已经过时 —— 现在是在册 0 项。**
+> 最后那一项经 R66 查清为「**CPT 层接不了**」（依赖消失：账户持仓与「当日已买入」在
+> emotion-core 的 `position` 表），owner 拍板**删除**：符号 + `tests/test_a_share_rules.py`
+> 两个自证式用例 + `whitelist.py` §4b 豁免**三处同步移除**。
+> ⇒ `docs/pending-wiring.md` 与 `whitelist.py` §4 均为空，这就是目标态。
 >
 > ⇒ 本条的**结论仍成立**（剩下的那一项确实是有意不接），但**数量必须改口**。
 > 照原文的「16 个」去理解，会以为这批模块整体没动过 —— 而实际上
 > 一多半已经接进生产了。**这是「数量过时」比「结论过时」更危险的一类漂移**：
 > 结论对，容易让人以为整条都还成立。
+>
+> 📌 **而 R66 的更正正是同类漂移的第二个实例**：「只剩 1 项」也是数量，也会过时。
+> 凡在文档里写「N 个模块 / N 项」这类**计数**，要么每次轮次收尾重数，要么干脆写成
+> 指向 `docs/pending-wiring.md` 的**指针**而不写数 —— 数量是唯一必然过期的信息。
 
 ---
 
@@ -1544,3 +1556,49 @@ R36 装机换后端就是靠它发现的）；A 股的对应诊断在 staleness 
 配套事实：`cpt_track` 现在只剩 `default/000002` 一行。`is_tracked` 的跨用户口径
 ~~**本轮未改**（改它会动推送语义），属已知设计缺陷。~~ **R66 已改**（见上，白名单收口）；
 剩下的「生产/测试同表」是**表结构**层面的缺陷，仍未解。
+
+---
+
+## 52. 跨仓端点漂移：单侧单测把「自己拼出来的 URL」当成契约钉住（R66 实测）
+
+**现象**：emotion-core 的「关注 / 取关 / 复活」自 S1（`d712ae0`，2026-10-14）交付起
+**从未成功过** —— 它每次都 POST `/api/dashboard/track`（裸前缀）+ body `{"action":"add"}`，
+而 CPT 只认 `/api/dashboard/track/{add,remove,restore}` 三条**字面量**、**从不读 `action`**，
+线上稳定返回 **405**。两侧测试全绿、CI 门禁全绿，UI 上只表现为「加不进去」。
+
+**判定命令（3 秒复现）**：
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8010/api/dashboard/track \
+     -H 'Content-Type: application/json' -d '{"action":"add","code":"000002"}'      # -> 405
+curl -sS -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8010/api/dashboard/track/add \
+     -H 'Content-Type: application/json' -d '{}'                                    # -> 400 code required（路径对了）
+```
+
+**为什么全绿**：
+
+1. **两侧各自自洽**。emotion 的 `tests/unit/test_cpt_client.py` 用 `monkeypatch` 拦掉
+   `urlopen`，断言的是「**实现的 URL 拼得对不对**」—— 等于把自己拼的串当成了契约；
+   CPT 的单测只测自己的 `route_for` / `_handle_track_post`。**没有任何一侧去读对方仓里的
+   分发字面量。**
+2. **失败被降级成语义模糊的 `False`**：emotion 侧那个 CPT 客户端的 `_post_json` 捕获
+   `urllib.error.HTTPError` 后返回 `None` ⇒ `track_add` 返回 `False` ⇒
+   `watchlist_service` 只说「CPT 不可达：track_add 返回失败」，**看不出是路径错了**。
+3. **路由风格撞车**：CPT 其它模块确实大量使用「POST 裸路径 + `{"action": …}`」+ `startswith`
+   分发，于是「裸前缀 + action」看着完全合理 —— 但**唯独 track 是三条字面量**，
+   只有读 `cpt/web/app.py::_handle_track_post` 才知道。
+
+**修法（R66 已做）**：emotion 侧加常量 `TRACK_ADD_PATH` / `TRACK_REMOVE_PATH` /
+`TRACK_RESTORE_PATH`，并加回归门禁
+`tests/unit/test_cpt_client.py::TestTrackWritePathsMatchCptLive` —— 从 CPT
+`cpt/web/app.py::_handle_track_post` 的**函数体**里
+`re.findall(r'path == "([^"]+)"', body)` 抽字面量，断言本仓要用的三条路径 ⊆ 该集合。
+**双向反向控制已验**：本仓改回裸路径会红；CPT 把 `/remove` 改成别的字面量也会红。
+
+⚠️ 该门禁的**第一版是错的**：写的是 `f'"{path}"' in app_py`（「这个串在文件里出现过」），
+反向控制时**被 bug 放过去了** —— 裸前缀 `/api/dashboard/track` 在 `do_GET` 的
+`startswith("/api/dashboard/track")` 里也出现。教训与 **#42** 同源：
+**先确定你把哪段文本当成了什么，再断言它存在。**
+
+**通用判据**：跨仓 / 跨服务型单测，断言对象必须是**对方仓里的字面量或契约文件**，
+不能是本仓拼出来的串；同仓单测用替身拦 IO **最多只能证明自己自洽**。

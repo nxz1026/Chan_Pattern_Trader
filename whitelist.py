@@ -62,11 +62,16 @@ occurred_at  # cpt/domain/models.py —— StructureEvent dataclass 字段
 # compare_snapshots / slice_snapshot / level_tree / align_runs / quality_report /
 # realtime_update / signal_statistics / watch_metrics / watchlist_rows
 # 已从本文件移除，逐个接线点见 `docs/pending-wiring.md` 的 R22 记录。
-# 4b. A 股信号层
+# 4b（R66 已清空）. A 股信号层
 # `fetch_daily_tags` / `apply_ashare_tags_to_bis` / `AShareDailyTag` 已于 R19 接进
 # A 股主看板（adapters/a_share_local.py::AShareLocalClient.fetch_daily_tags →
 # application/a_share_snapshot.py::_apply_daily_tags），故不再豁免。
-t_plus_one_purchase_allowed  # domain/a_share_rules —— C4 T+1（待 signal 桥接线）
+# 最后一条 `t_plus_one_purchase_allowed` 于 R66 **删除**（不是接线）：它恒返 True、
+# 零生产调用方，而「账户持仓 + 当日是否已买入同一标的」在 emotion-core 的 position
+# 表 —— CPT 侧没有实现基础。真正的 T+1 读点是
+# adapters/a_share_local.py::check_t_plus_one_calendar →
+# application/a_share_snapshot.py::_attach_t_plus_one。
+# §4 至此没有任何在册符号（详见 docs/pending-wiring.md 的 R66 复核段）。
 # 4c. ~~门禁盲区~~ **R57 已消解**：vulture 的扫描范围已扩到 `scripts/`，
 #     所以下面这几个「调用方在 scripts/」的符号不再被误判为死代码，
 #     豁免随之撤销 —— 保留它们等于让白名单掩盖未来的真死代码。

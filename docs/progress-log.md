@@ -70,7 +70,7 @@
 | R64 | A 股因子链路修复（`9d4c5d3e2`）：`promote_recompute_factors()` 幂等提升生产表、候选集默认**全市场**（5206 只）+ 默认 `--promote`、末根缺因子 ⇒ 整段退不复权。复核批：ruff format 5 个落后文件（`6cffa082e`）、`trade_api` 默认日期断言改用市场口径（`3b02d78bb`，此前每天 16:00 UTC 后必红）、`docs/architecture.md` 行数重数（`393f74039`）。 |
 | R65 | 告警链路的**四种静默**（`4c2040dc7`）：`cpt/adapters/feishu.py` + `deploy/systemd/cpt-dashboard-ashare.service` 补 `EnvironmentFile=`（缺 webhook 则跃迁告警静默丢弃，曾静默 148 条）。同批：`9ed354842` 进度文件「今天」改用 `market_today`（R59/L11）、`d5cd7aebf` 给 `fetch_raw_bar_on` 补失败语义豁免（CI 门禁②）。 |
 | R4（并行） | emotion×CPT 整合轮（C1/S0/C2①②③④），与 R61–R65 在 10-14 同日交叠，**编号体系独立**（权威文档 `emotion-core/docs/18-情绪+缠论整合-功能与代码设计.md`）：`0e2c9e802` 倍率配对放宽为同日可配对（C1）、`3680c2b5f` 空建议点补 `reason`（S0·C4）、`075d38b10` 飞书推送收敛到关注列表（C2①）、`a084156b1` 推送带参考买卖点 + 说人话（C2②③）、`ee237a2d2` 关注列表收盘汇总 `scripts/watchlist_daily_summary.py`(162) + cron `watchlist-daily-summary`（C2④）。 |
-| R66 | （本轮）① `is_tracked` 跨用户闸门收口：新增 `CPT_NOTIFY_USERS` 白名单（默认 `default`），`cpt/storage/track_store.py::is_tracked(conn, code, users=None)` 支持按 user 过滤 + `parse_notify_users`，`cpt/application/signal_notify.py::_notify_users` 接线；② 补上 `apiHistory` 自 R58 起**零调用**的 UI 入口（`dashboard/dash-track.js` 历史按钮 + `renderHistory`，`track.html` 版本号 `r59-poll-merge`→`r66-track-history`）+ 新门禁「定义了 `async function apiXxx(` 就必须有人调」；③ 台账回填 R60–R65 与本文 §9 销账。 |
+| R66 | （本轮）① `is_tracked` 跨用户闸门收口：新增 `CPT_NOTIFY_USERS` 白名单（默认 `default`），`cpt/storage/track_store.py::is_tracked(conn, code, users=None)` 支持按 user 过滤 + `parse_notify_users`，`cpt/application/signal_notify.py::_notify_users` 接线；② 补上 `apiHistory` 自 R58 起**零调用**的 UI 入口（`dashboard/dash-track.js` 历史按钮 + `renderHistory`，`track.html` 版本号 `r59-poll-merge`→`r66-track-history`）+ 新门禁「定义了 `async function apiXxx(` 就必须有人调」；③ 台账回填 R60–R65 与本文 §9 销账；④ 删除 `cpt/domain/a_share_rules.py` 里的 `t_plus_one_purchase_allowed`（R22 起零生产调用方、恒返 `True`；连带 `tests/test_a_share_rules.py` 两个自证式用例与 `whitelist.py` §4b 那一行）⇒ §4 待接线清单**归零**；⑤ **对齐 CPT↔emotion 的代码与文档**：查出 emotion 侧那个 CPT 客户端的写路径自 S1 起就是错的（裸前缀 + `{"action":…}`，而本仓只认 `/add` `/remove` `/restore` 三条字面量 ⇒ 线上 **405**，「关注/取关/复活」从未成功过）—— 对方已改真路径并加跨仓门禁；本仓侧同步更正 `docs/18`（端点表、§13 R6、§14 销账）与 `deploy/cron/track-maintenance-daily.sh` 的过期注释，并把教训写成 **known-traps #52**。 |
 
 > 缺口成因与 R43 那次一样：`docs/pending-wiring.md` 把本文指定为「唯一的轮次记录
 > 台账」，但**没有任何检查保证台账与实际轮次同步** —— 门禁全绿，台账却断档。
@@ -229,7 +229,7 @@ llm  独立于 web/application/storage，SQL 只经 cpt/storage
 ### 2.5 A 股规则标签
 
 `cpt/domain/a_share_rules.py` 只留纯逻辑（`AShareDailyTag` /
-`apply_ashare_tags_to_bis` / `t_plus_one_purchase_allowed` / `AShareTagsError`）；
+`apply_ashare_tags_to_bis` / `AShareTagsError`）；
 所有 SQL 下沉到 `cpt/adapters/a_share_local.py`。
 
 - **C2 涨跌停**直接读 `public.derived_bar` 的 `is_limit_up`/`is_limit_down`/
@@ -241,8 +241,10 @@ llm  独立于 web/application/storage，SQL 只经 cpt/storage
 - 审计块 `data_quality.ashare_tags` 刻意区分三种「没标签」：客户端没实现
   （`client_unsupported`）/ 查了但失败（`tag_fetch_failed`）/ 查通了但区间内确实没有
   极端日（`available: true` + `tagged_bis: 0`）。
-- `t_plus_one_purchase_allowed` 是**全仓唯一零生产引用的公开符号**（R22 起至今未接）。
-  真正的 T+1 日历读点在 `check_t_plus_one_calendar` + `_attach_t_plus_one`。
+- **T+1**：日历读点在 `check_t_plus_one_calendar`（`adapters/a_share_local.py`，查
+  `public.trade_calendar`）+ `_attach_t_plus_one`（`application/a_share_snapshot.py`），
+  挂成快照的 `t_plus_one` 给前端。R22 起在册的那个恒返 `True` 的
+  `t_plus_one_purchase_allowed` **已于 R66 删除**（不是接线，理由见 §9.1）。
 
 ---
 
@@ -896,20 +898,21 @@ whitelist.py`、`ruff check`、`ruff format --check`、`mypy cpt scripts`。
 
 ## 9. 仍开放的事项
 
-1. `t_plus_one_purchase_allowed`（`cpt/domain/a_share_rules.py:112`）是**全仓唯一零生产
-   引用的公开符号**，R22 起至今未接。R66 复查后**仍未处置，等 owner 拍板**：
+1. ~~`t_plus_one_purchase_allowed` 未接线（全仓唯一零生产引用的公开符号）。~~
+   **R66 销账（2026-10-16）：已删除，不是接线。**
    - 它恒返 `True`（`None → True`，非 `None → True`），函数内注释自写着「实际生产应查询…
      此处只返 True 保持 A 股日历允许」；`tests/test_a_share_rules.py` 两个用例也都断言
      `True`，属**自证式测试**（把常量当契约钉住）。
    - 真正的 T+1 日历读点早在另一条活路径上：`cpt/adapters/a_share_local.py:230
      check_t_plus_one_calendar()` → `cpt/application/a_share_snapshot.py:1549
      _attach_t_plus_one()` → `snapshot["t_plus_one"]` → 前端 `dashboard/dash-chrome.js`。
-   - **CPT 层实现不了真 T+1**：该约束需要账户持仓与「当日买入」数据，CPT 是行情看板，
-     没有这个数据源 —— 属 `docs/pending-wiring.md` 分类里的「依赖消失」。
-   ⇒ 二选一待拍板：**(a) 删除**该符号 + `tests/test_a_share_rules.py` 两个用例 +
-   `whitelist.py` §4b 那一行（推荐，与「依赖消失」的既有处置一致）；**(b) 保留**但把
-   `whitelist.py` 的理由从「待 signal 桥接线」改成「永不在本仓接线」。**不要**把它接进
-   任何生产路径 —— 接一个恒 `True` 的闸门等于给 T+1 约束盖了个空章。
+   - **CPT 层实现不了真 T+1**：该约束需要「账户持仓 + 当日是否已买入同一标的」，而这两样
+     在 **emotion-core**（`position` 表 + `presentation/templates/stock.html` 的「我的持仓」
+     成本价/数量录入 + `GET /api/holding`）；CPT 是行情看板，没有账户概念 —— 属
+     `docs/pending-wiring.md` 分类里的「依赖消失」。
+   ⇒ owner 选 (a)：符号 + 两个用例 + `whitelist.py` §4b 那条豁免**三处同步删除**
+     （`docs/pending-wiring.md` 约束 5 的要求）。该清单与 `whitelist.py` §4 至此
+     **在册 0 项**。**不要**在 CPT 里另造一个恒 `True` 的闸门 —— 那等于给 T+1 约束盖空章。
 2. **17 只新股** K 线不足 30 根 ⇒ 因子算不出来。根因在 ingest 侧（另一个项目）要往前
    拉历史，owner 已明确不在本仓范围。
 3. ~~`daily_bar` 缺口成因未定位（集中在每年 4 月底，2026-04-29 有 44 只票同时缺）。~~

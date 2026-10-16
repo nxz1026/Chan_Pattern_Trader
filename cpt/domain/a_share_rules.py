@@ -13,8 +13,8 @@
 ======================  ==================================  ============
 
 留在本模块的是**不碰 IO 的部分**：值对象 ``AShareDailyTag``、纯函数
-``apply_ashare_tags_to_bis`` 与 ``t_plus_one_purchase_allowed``、错误类
-``AShareTagsError``。domain 不 import 任何上层，也不该出现 SQL 字符串 ——
+``apply_ashare_tags_to_bis``、错误类 ``AShareTagsError``。domain 不 import 任何上层，
+也不该出现 SQL 字符串 ——
 这条由 CI 门禁「SQL 只许出现在 ``adapters/`` 与 ``storage/``」强制。
 
 按 plan §5.3：
@@ -23,9 +23,13 @@
   不可靠（ST/科创/创业/北交规则不同），**直接读 ``public.derived_bar.is_limit_up``**。
 - **C3 停牌**：``public.daily_bar`` 是交易日表，停牌日本来就没行——已在
   :mod:`cpt.adapters.a_share_local` 隐含处理。
-- **C4 T+1**：在 ``Signal`` 上打 ``t_plus_one: bool``，由 :mod:`cpt.domain.signal`
-  在评估一买/一卖时读取。**本模块提供纯谓词**，不直接改 ``Signal`` schema
-  （避免污染跨市场语义——加密没有 T+1）；日历查询在 adapters 层。
+- **C4 T+1**：日历约束由 adapters 层的 ``check_t_plus_one_calendar``（查
+  ``public.trade_calendar``）回答，再由
+  :func:`cpt.application.a_share_snapshot._attach_t_plus_one` 挂进快照的
+  ``t_plus_one`` 供前端读；不改 ``Signal`` schema（避免污染跨市场语义——加密
+  没有 T+1）。**R66 删除了本模块那个恒返 ``True`` 的 ``t_plus_one_purchase_allowed``**：
+  账户持仓与"当日是否已买入同一标的"都不在 CPT（在 emotion-core 的 ``position``
+  表），该谓词在这里没有实现基础，留着只会让白名单掩盖一条永不生效的接线目标。
 - **C5 非交易日**：`public.daily_bar` 天然不画图，不需额外处理。
 
 ## 决定
@@ -46,7 +50,6 @@ __all__ = [
     "AShareDailyTag",
     "apply_ashare_tags_to_bis",
     "AShareTagsError",
-    "t_plus_one_purchase_allowed",
 ]
 
 
@@ -107,17 +110,3 @@ def apply_ashare_tags_to_bis(
         merged = tuple(dict.fromkeys((*bi.source_ids, *extra_ids)))
         out.append(replace(bi, source_ids=merged))
     return out
-
-
-def t_plus_one_purchase_allowed(previous_close_date_iso: str | None) -> bool:
-    """``Signal`` 评估用：给定前一日收盘日期，返回"今日能否买入"。
-
-    加密市场无 T+1 — ``previous_close_date_iso=None`` 表示无前一交易日 → 允许
-    （即"首次建仓无前置"）。A 股语义下：若前日已收盘 → 今日允许买入（标的没在
-    已持仓名单里）；持仓状态由仓位管理模块决定，本函数**只回答日历约束**。
-    """
-    if previous_close_date_iso is None:
-        return True
-    # 实际生产应查询"当前账户持仓 + 是否当日已买入同一标的"；此处只返 True 保持
-    # A 股日历允许 — 持仓层面的 T+1 由仓位层负责。
-    return True

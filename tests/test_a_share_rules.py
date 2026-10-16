@@ -17,7 +17,6 @@ from cpt.application.a_share_snapshot import build_ashare_snapshot
 from cpt.domain.a_share_rules import (
     AShareDailyTag,
     apply_ashare_tags_to_bis,
-    t_plus_one_purchase_allowed,
 )
 from cpt.domain.models import Bi
 
@@ -218,21 +217,6 @@ def test_apply_ashare_tags_to_bis_skips_bars_without_tag():
     b = bi(ms(date(2026, 9, 22)) + 24 * 3600 * 1000 - 1)
     out = apply_ashare_tags_to_bis([b], {})
     assert out[0].source_ids == ()
-
-
-# --------------------------------------------------------------------------- #
-# t_plus_one
-# --------------------------------------------------------------------------- #
-
-
-def test_t_plus_one_returns_true_when_no_previous_close():
-    """无前置日 → 视为"首次建仓"，允许。"""
-    assert t_plus_one_purchase_allowed(None) is True
-
-
-def test_t_plus_one_returns_true_after_close():
-    """前一日已收盘 → 日历允许（持仓层面由仓位模块处理）。"""
-    assert t_plus_one_purchase_allowed("2026-09-23") is True
 
 
 # --------------------------------------------------------------------------- #
