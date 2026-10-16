@@ -464,6 +464,12 @@ def fetch_raw_bar_on(code: str, trade_date: date) -> tuple[date, float] | None:
 
     交易日不存在 / ``close`` 为 NULL / DB 不可达 → ``None``，**不抛**（理由同
     :func:`fetch_latest_raw_bar`：消费方把 ``None`` 当正常分支「这天没有倍率」）。
+
+    # gate: allow-silent: 拿不到就**不给倍率**，不崩 —— 消费方
+    # ``cpt/application/a_share_snapshot.py`` 的 ``_stale_reason`` 把 None 当正常
+    # 分支（「这天没有行情」），不会拿它冒充「有值但算错」。且本函数自己
+    # ``with psycopg.connect(...)`` 建连、用完即弃，**不复用调用方的连接**，
+    # 所以吞掉不会把同连接后续语句拖进 aborted 事务（那才是门禁担心的放大路径）。
     """
     try:
         import psycopg  # noqa: PLC0415 — 与 fetch_latest_raw_bar 同款「自己建连、用完即弃」
