@@ -259,10 +259,18 @@ def test_corrupt_state_raises_rather_than_silent_reset(trade_dir):
 
 
 def test_today_default_date_is_iso(trade_dir, monkeypatch):
+    """不传 ``date`` ⇒ 用 ``_today()`` 那天（**市场口径**，不是宿主本地日期）。
+
+    ⚠️ 原断言是 ``date.today().isoformat()`` —— 宿主时区（生产是 ``Etc/UTC``）
+    的今天，而 :func:`cpt.web.trade_api._today` 走 ``market_today()``
+    （``Asia/Shanghai``）。每天 **16:00 UTC 之后两者差一天**，这条测试就会红
+    整整 8 小时（R64 复核时踩到）。钉住 ``_today`` 才与时钟无关。
+    """
+    monkeypatch.setattr(trade_api, "_today", lambda: date(2026, 10, 8))
     seen = []
     monkeypatch.setattr(trade_api, "_fetch_signals", lambda d: seen.append(d) or ())
     trade_api.handle_trade_decisions("")
-    assert seen == [date.today().isoformat()]
+    assert seen == ["2026-10-08"]
 
 
 # ── 真机才暴露的那一层：SQL 参数的 psycopg 适配 ─────────────────────
