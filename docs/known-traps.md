@@ -1526,6 +1526,21 @@ R36 装机换后端就是靠它发现的）；A 股的对应诊断在 staleness 
    关注它吗」，不区分 user_id ⇒ 一条 `X-CPT-User: smoke_*` 打真库留下的测试行，
    足以把告警推给**全局**飞书群，而且日志里看起来完全正常。测试数据与生产数据
    同表这件事本身没有任何隔离（R65 清掉 8 条 smoke/ui 行 + 8 条孤儿快照）。
+   > **R66 已修（2026-10-16）**：`is_tracked(conn, code, users=None)` 新增可选的 user
+   > 白名单；`cpt/application/signal_notify.py` 的推送闸门改为传
+   > `_notify_users()` = `parse_notify_users(os.environ.get("CPT_NOTIFY_USERS"))`，
+   > **每次调用重读 env、不缓存**。`users=None` 保留 R57 旧口径（任一用户）供通用查询用。
+   > 新环境变量 `CPT_NOTIFY_USERS` 默认 `default`，写进
+   > `deploy/env/cpt-dashboard.env.example`（生产 env 未改 —— 默认值等价于旧行为）。
+   > **`parse_notify_users` 在 None/空/全空白时回落默认，绝不返回空元组**：空元组 =
+   > 谁都不认 = 推送永久静默，正是本条第 1 种静默的翻版。
+   > ⚠️ **仍未解决的部分**：`cpt_track` 依然是**生产/测试同表**，表结构没动 ——
+   > 现在只是「测试行不再影响推送范围」，不是「测试行写不进来」。彻底解法要加来源列
+   > 或把测试指向独立 schema（表结构变更，见 `docs/progress-log.md` §9.12）。
+   > 回归：`tests/test_track.py::test_is_tracked_scopes_to_allowlist`（真库）+
+   > `tests/test_signal_notify.py::test_notify_users_defaults_to_default_allowlist`
+   > / `test_notify_users_env_overrides_allowlist`。
 
 配套事实：`cpt_track` 现在只剩 `default/000002` 一行。`is_tracked` 的跨用户口径
-**本轮未改**（改它会动推送语义），属已知设计缺陷。
+~~**本轮未改**（改它会动推送语义），属已知设计缺陷。~~ **R66 已改**（见上，白名单收口）；
+剩下的「生产/测试同表」是**表结构**层面的缺陷，仍未解。

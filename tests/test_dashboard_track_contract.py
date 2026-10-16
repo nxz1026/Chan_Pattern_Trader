@@ -16,6 +16,7 @@
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 
 import pytest
@@ -127,3 +128,19 @@ def test_track_html_cache_busts_the_script(track_html: str) -> None:
     assert len(tags) == 1
     assert "?v=" in tags[0]
     assert "llm-ok-fix" not in tags[0]
+
+
+def test_every_api_helper_has_a_caller(track_js: str) -> None:
+    """R66：定义了 ``async function apiXxx(`` 就必须有人调 —— 本节是那条门禁。
+
+    ``apiHistory`` 自 R58 段 1 起就定义了，但**全仓零调用方**：后端
+    ``GET /track/{code}/history`` 一直可用、30 天快照一直在落库，页面上却连
+    一个入口都没有（emotion-core/docs/18 §14.4 记的就是这一项，直到 R66 才补）。
+    这类「定义了但没接线」在 UI 上完全看不出来，只能扫源码发现。
+    """
+    defined = re.findall(r"async function (api\w+)\(", track_js)
+    assert defined, "没扫到任何 api 辅助函数 —— 正则或文件结构变了，别让本节变成空转"
+    code = _code_only(track_js)
+    # 定义处算 1 次，所以「有人调」= 出现次数 ≥ 2。
+    uncalled = [name for name in defined if len(re.findall(rf"\b{re.escape(name)}\(", code)) < 2]
+    assert uncalled == [], f"这些 api 辅助函数定义了但没接线：{uncalled}"

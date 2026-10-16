@@ -21,14 +21,24 @@ from __future__ import annotations
 
 import json
 import logging
+from collections.abc import Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 
 _LOG = logging.getLogger(__name__)
 
+#: 推送范围默认白名单（R66）——「谁算真实关注者」的部署默认值。
+#:
+#: 只有这些 ``user_id`` 的活跃追踪行才构成「有人关注 ⇒ 可以推全局飞书群」的
+#: 依据。任何**其它** ``user_id`` 的行都不推 —— 这正是 ``X-CPT-User: smoke_*``
+#: 这类打真库的测试行曾经能把告警推给全局群的原因（known-traps #51 第 4 条）。
+#: 部署可用 ``CPT_NOTIFY_USERS``（逗号分隔）覆盖。
+DEFAULT_NOTIFY_USERS: Final[tuple[str, ...]] = ("default",)
+
 __all__ = [
     "SNAPSHOT_RETENTION_DAYS",
     "RECYCLE_RETENTION_DAYS",
+    "DEFAULT_NOTIFY_USERS",
     "TrackStoreError",
     "active_pairs",
     "add",
@@ -36,6 +46,7 @@ __all__ = [
     "count_prunable_snapshots",
     "ensure_table",
     "is_tracked",
+    "parse_notify_users",
     "track_note",
     "latest_active_snapshots",
     "list_active",
@@ -186,28 +197,63 @@ def restore(conn: Any, user_id: str, code: str) -> bool:
     return bool(affected > 0)
 
 
-def is_tracked(conn: Any, code: str) -> bool:
-    """该 ``code`` 是否被**任一**用户的活跃追踪行包含（推送范围判据）。
+def parse_notify_users(raw: str | None) -> tuple[str, ...]:
+    """把 ``CPT_NOTIFY_USERS`` 的逗号分隔值解析成推送白名单（R66）。
 
-    不带 ``user_id`` 过滤：飞书 webhook 是全局一条，没有「谁的关注列表」这一维度，
-    所以判据取「有人关注即可」。软删（``removed_at`` 非空）不算。
+    - ``None`` / 空串 / 全空白 → :data:`DEFAULT_NOTIFY_USERS`；
+    - 逐个 ``strip``，丢弃空项，保序去重。
+
+    ⚠️ **绝不返回空元组**：空白名单会让推送**永久静默**，那是比本文档要修的
+    「测试行误推」更坏的方向（推送静默比误推难发现得多，见 known-traps #51）。
+    真要关掉推送，应该让 ``CPT_FEISHU_WEBHOOK`` 为空，而不是留一个空白名单。
+    """
+    if raw is None:
+        return DEFAULT_NOTIFY_USERS
+    seen: list[str] = []
+    for part in raw.split(","):
+        name = part.strip()
+        if name and name not in seen:
+            seen.append(name)
+    return tuple(seen) if seen else DEFAULT_NOTIFY_USERS
+
+
+def is_tracked(conn: Any, code: str, users: Sequence[str] | None = None) -> bool:
+    """该 ``code`` 是否被活跃追踪行包含（推送范围判据）。
+
+    :param users: **只认**这些 ``user_id`` 的活跃行。``None`` 是 R57 旧口径
+        「**任一**用户」—— 那口径只适合不带推送语义的通用查询。推送路径
+        （:func:`cpt.application.signal_notify.maybe_notify`）**必须**传白名单：
+        否则 ``public.cpt_track`` 里任何一行别人留下的记录都足以把告警推给
+        **全局**飞书群 —— 典型是 ``X-CPT-User: smoke_*`` 的测试行，而日志里
+        看起来完全正常（known-traps #51 第 4 条，R66 修）。空序列 = 谁都不认。
+    :param code: 股票代码。软删（``removed_at`` 非空）不算。
 
     :raises TrackStoreError: 读失败 —— 与 ``list_active`` 同一纪律，
         **绝不用 False 冒充「没人追踪」**（那会让推送范围静默失效；
         R59 的取舍是 fail-closed：读不到就不推）。
     """
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
+    if users is None:
+        sql = """
                 SELECT EXISTS (
                     SELECT 1
                     FROM public.cpt_track
                     WHERE code = %s AND removed_at IS NULL
                 )
-                """,
-                (code,),
-            )
+                """
+        params: tuple[Any, ...] = (code,)
+    else:
+        # psycopg3 把 Python list 适配成 PG 数组，`= ANY(%s)` 直接吃。
+        sql = """
+                SELECT EXISTS (
+                    SELECT 1
+                    FROM public.cpt_track
+                    WHERE code = %s AND user_id = ANY(%s) AND removed_at IS NULL
+                )
+                """
+        params = (code, list(users))
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, params)
             row = cur.fetchone()
     except Exception as exc:
         raise TrackStoreError(f"is_tracked(code={code!r}) failed: {exc}") from exc

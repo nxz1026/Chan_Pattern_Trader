@@ -11,11 +11,40 @@
 > **结论未变**：九个模块与「另有 3 个函数」仍全部接线，本期只改坐标。
 > ⚠️ **行号还会继续漂** —— 引用本文档时以**符号名 / 路由路径**为准，行号只当快速定位。
 > 顺带发现 `_format_multi_level` 已被删除（原文并列引用它），已在原处更正。
+> **R66 复核（2026-10-16）**：全篇按**符号名**重查（行号继续漂，勿信）。三条结论：
+> ① 本清单**唯一在册项仍是 T+1**，但性质从「待接线」改为「**CPT 层接不了**」（依赖消失，
+>    等 owner 拍板删除 or 永久豁免）—— 见下方 R66 复核段与 `docs/progress-log.md` §9.1；
+> ② 更正一处**错的在册记录**：一卖 `check_first_sell` **早已接线**（见簇一末尾 R66 更正）；
+> ③ 本文档**全文不含 R58+ 任何内容** —— 但 R58+ 的产物（「我的追踪」、`apiHistory`）确实
+>    出过「定义了没人调用」的缺口，正是本清单该管的那类。R66 给 `apiHistory` 补上 UI 入口，
+>    并把这条判据做成**门禁**（`tests/test_dashboard_track_contract.py::
+>    test_every_api_helper_has_a_caller`：`async function apiXxx(` 定义了就必须有调用方）。
+>    ⇒ 本清单从「人工登记」升级为「人工登记 + 门禁兜底」；新增未接线符号仍须登记在此。
 
 ## R22 收尾：本清单现状（2026-09-30，R41 复核仍成立）
 
 **唯一仍在册的待接线项**：`cpt/domain/a_share_rules.py::t_plus_one_purchase_allowed`
 （T+1 读取点。标签能力 R19 已接，R22 未动，仍留 `whitelist.py` §4b 豁免）。
+
+> **R66 复核（2026-10-16）**：结论不变 —— 全仓 grep `t_plus_one_purchase_allowed`
+> 仍只在 4 处出现：`cpt/domain/a_share_rules.py` 自己的 docstring（:16）、`__all__`（:49）、
+> 定义（:112），加 `tests/test_a_share_rules.py`（:20 导入、:230/:235 两个断言）与
+> `whitelist.py:69` —— **零生产调用方**。
+>
+> 但 R66 把这条的**性质**查清楚了，它不再是「等着接线」，而是「**接不了**」：
+> - 函数恒返 `True`（`None` 与非 `None` 都返 `True`），函数内注释自写着「实际生产应查询
+>   『当前账户持仓 + 是否当日已买入同一标的』；此处只返 True 保持 A 股日历允许」。
+> - **真 T+1 读点早在另一条活路径上**：`cpt/adapters/a_share_local.py::check_t_plus_one_calendar()`
+>   （查 `public.trade_calendar`）→ `cpt/application/a_share_snapshot.py::_attach_t_plus_one()`
+>   → `snapshot["t_plus_one"]` → 前端 `dashboard/dash-chrome.js`。
+> - **CPT 层没有实现它的数据源**：约束需要账户持仓与当日买入信息，CPT 是行情看板。
+>   按本文档「处境」分类，这属于**依赖消失**那一类 —— 而本文档对该类的处置原则是
+>   「先拍功能去留，**不能直接接**」。
+> - 两个测试用例都断言 `True`，属**自证式**（把常量当契约钉住），不构成「行为被需要」的证据。
+>
+> ⇒ **本轮不接**，改为等 owner 在两条路里拍一条：**(a) 删除**该符号 + 两个用例 + `whitelist.py`
+> 那一行（推荐）；**(b) 保留**但把 `whitelist.py` 的理由改成「永不在本仓接线」。详见
+> `docs/progress-log.md` §9.1。
 
 > **R41 复核（2026-10-02）**：R31~R41 又接进了一批（飞书告警通道、运行水位表、
 > 每日巡检、结构事件归因、golden set、因子重算与对账报告），**没有新增待接线项**，
@@ -189,7 +218,14 @@ R22 的 9 个接线点（路由与调用方均已 grep 复核）：
 >   实时能力**而非补线；在此之前 `trade_api` 的白名单里不该出现这两个状态。
 >   已由 `tests/test_signal.py::test_structure_ready_stays_put_without_a_closed_reversal`
 >   钉住。
-> - **仍未接**：一卖 `check_first_sell`、T+1 读取点。
+> - ~~**仍未接**：一卖 `check_first_sell`、T+1 读取点。~~
+>   **R66 更正**：① **一卖 `check_first_sell` 已接** —— `cpt/application/first_buy_bridge.py:37`
+>   导入、`:235` 调用（`return "detected" if check_first_sell(segment) else "not_detected"`），
+>   活路径 `cpt/application/a_share_snapshot.py:707-708`（局部导入 `derive_first_sell_facts` /
+>   `assess_first_sell`）→ `:715` → `:747` → `:764`（`transition_first_sell`）；
+>   `first_buy_bridge.py:168 derive_first_sell_facts` 是其事实来源。这句「仍未接」是 R22 之后
+>   的残留，已过时至少一个轮次。
+>  ② **T+1 读取点**仍在册，但性质改为「**CPT 层接不了**」—— 见本文件开头 R66 复核段。
 
 ---
 

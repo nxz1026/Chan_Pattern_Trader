@@ -29,9 +29,12 @@
 ## 推送范围（R4/C2）
 
 只推**关注列表里**的股票：推送前查 ``public.cpt_track`` 是否有该 code 的活跃行
-（:func:`cpt.storage.track_store.is_tracked`，**不带 user** —— 飞书 webhook 是全局
-一条，没有"谁的关注列表"这一维度）。不在关注列表 → ``return False``，且**不写**
-节流表（"没人关注"与"被节流"是两回事）。
+（:func:`cpt.storage.track_store.is_tracked`）。飞书 webhook 是全局一条，没有
+"谁的关注列表"这一维度 —— 但"**有人**关注"还不够：R66 起只认
+``CPT_NOTIFY_USERS`` 白名单（默认 :data:`~cpt.storage.track_store.DEFAULT_NOTIFY_USERS`）
+里的 ``user_id``，否则往真库打过一行 ``X-CPT-User: smoke_*`` 的测试数据就足以把
+告警推给全局群（known-traps #51 第 4 条）。不在白名单或不在关注列表
+→ ``return False``，且**不写**节流表（"没人关注"与"被节流"是两回事）。
 
 ⚠️ fail-closed：``conn`` 为 ``None`` 或查询抛 ``TrackStoreError`` 时**不推**并记
 warning —— 与 ``record_signal_event`` 调用点上游的 R59 取舍一致（读不到就不推），
@@ -52,23 +55,31 @@ warning —— 与 ``record_signal_event`` 调用点上游的 R59 取舍一致�
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Callable
-from typing import Any
+from typing import Any, Final
 
 from cpt.adapters.feishu import notify
 from cpt.domain.models import Signal
-from cpt.storage.track_store import TrackStoreError, is_tracked
+from cpt.storage.track_store import TrackStoreError, is_tracked, parse_notify_users
 
 _LOG = logging.getLogger(__name__)
 
 __all__ = [
+    "ENV_NOTIFY_USERS",
     "_set_clock_for_test",
     "_set_pusher_for_test",
     "build_watchlist_summary",
     "maybe_notify",
     "reset_for_test",
 ]
+
+#: 推送范围白名单的部署开关（逗号分隔 ``user_id``）；未设时用
+#: :data:`cpt.storage.track_store.DEFAULT_NOTIFY_USERS`。空白值同样回落默认值
+#: （见 ``parse_notify_users``：空白名单会让推送永久静默，比误推更难发现）。
+ENV_NOTIFY_USERS: Final[str] = "CPT_NOTIFY_USERS"
+
 
 #: 24 小时（毫秒）。同 ``(signal_id, status)`` 在此窗口内不重推。
 THROTTLE_WINDOW_MS: int = 24 * 60 * 60 * 1000
@@ -147,6 +158,15 @@ def _set_pusher_for_test(pusher: Callable[[str, list[str]], bool]) -> None:
     """测试用：注入推送函数。"""
     global _pusher
     _pusher = pusher
+
+
+def _notify_users() -> tuple[str, ...]:
+    """本次推送认可的关注用户白名单（``CPT_NOTIFY_USERS``，逗号分隔）。
+
+    每次调用都重读环境（不缓存）—— 单测改 ``monkeypatch.setenv`` 即刻生效，
+    也避免"改了 unit 的 EnvironmentFile 但常驻进程还拿着旧值"这类静默。
+    """
+    return parse_notify_users(os.environ.get(ENV_NOTIFY_USERS))
 
 
 def _fmt_num(value: Any, digits: int) -> str | None:
@@ -302,11 +322,12 @@ def maybe_notify(
 
     # 推送范围（R4/C2）：只推关注列表里的票。放在节流**之前** ——
     # 不在列表就不算「本可以推但被节流」，不写 _LAST_PUSH_MS。
+    # R66：再加一层 user 白名单 —— "有人关注"不等于"真实用户关注"。
     if conn is None:
         _LOG.warning("跳过飞书推送（未提供连接，无法判定关注范围）code=%s", code)
         return False
     try:
-        tracked = is_tracked(conn, code)
+        tracked = is_tracked(conn, code, _notify_users())
     except TrackStoreError as exc:
         # fail-closed：读不到关注范围就不推，绝不把「读失败」当成「不需要推」
         _LOG.warning("跳过飞书推送（关注范围读取失败）code=%s: %s", code, exc)

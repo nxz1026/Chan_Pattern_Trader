@@ -11,6 +11,11 @@
   const LS_KEY = "cpt_track_user";
   const API = "/cpt/api/dashboard/track";
   const FETCH_OPTS = { credentials: "same-origin" };
+  //: 历史快照表最多渲染多少行（R66）—— 后端按 as_of 倒序，取头部即最近。
+  const MAX_HISTORY_ROWS = 30;
+  //: ``/history`` 的查询窗口天数。必须 ≤ 后端 ``SNAPSHOT_RETENTION_DAYS``(30)：
+  //: ``handle_track_history`` 会 ``min(days, 30)``，写大于 30 只是骗自己。
+  const HISTORY_DAYS = 30;
 
   // ── DOM 工具 ────────────────────────────────────────────────
 
@@ -402,6 +407,10 @@
     card.appendChild(head);
     const acts = el("div", { class: "card-actions", style: { marginTop: "8px" } });
     acts.appendChild(el("button", { type: "button", "data-action": "advice", "data-code": item.code }, "拉取建议"));
+    // R66：`apiHistory` 自 R58 段 1 起就定义了，但**全仓零调用方** ——
+    // 后端 `/track/{code}/history?days=30` 一直在跑，页面上却没有入口，
+    // 等于 30 天快照只能从数据库里看（docs/18 §14.4 记的就是这一项）。
+    acts.appendChild(el("button", { type: "button", "data-action": "history", "data-code": item.code }, "历史"));
     acts.appendChild(
       el("button", { type: "button", class: "danger", "data-action": "remove", "data-code": item.code }, "移除"),
     );
@@ -409,6 +418,53 @@
     const body = el("div", { "data-body": item.code });
     card.appendChild(body);
     return card;
+  }
+
+  /** 历史快照表（R66）。
+   *
+   * 后端契约见 `cpt/web/track_api.py::handle_track_history`：
+   * `{code, since, snapshots: [{id, code, as_of, payload}]}`，按 as_of **倒序**。
+   * `payload` 是当时整份 advice JSON，所以价格/动作/状态都在 `payload.current` 里。
+   *
+   * 只渲染最近 MAX_HISTORY_ROWS 行：30 天窗口里按天最多 ~30 行，但 60s 轮询
+   * 期间同一票会反复落快照，不设上限时一屏能滚出几百行。
+   */
+  function renderHistory(code, payload, status) {
+    const wrap = el("div");
+    if (status !== 200) {
+      wrap.appendChild(el("div", { class: "error", text: `历史读取失败：${formatErr(payload, status)}` }));
+      return wrap;
+    }
+    const snaps = (payload && payload.snapshots) || [];
+    if (!snaps.length) {
+      wrap.appendChild(el("div", { class: "hint", text: "30 天内没有历史快照（拉取一次建议就会落一条）" }));
+      return wrap;
+    }
+    const shown = snaps.slice(0, MAX_HISTORY_ROWS);
+    wrap.appendChild(
+      el("div", {
+        class: "hint",
+        text: `最近 ${shown.length} / ${snaps.length} 条快照（窗口自 ${fmtDate(payload && payload.since)}）`,
+      }),
+    );
+    const tbl = el("table", { class: "points" });
+    const head = el("tr");
+    head.appendChild(el("th", { text: "时间" }));
+    head.appendChild(el("th", { text: "现价" }));
+    head.appendChild(el("th", { text: "动作" }));
+    head.appendChild(el("th", { text: "状态" }));
+    tbl.appendChild(head);
+    for (const snap of shown) {
+      const cur = (snap && snap.payload && snap.payload.current) || {};
+      const tr = el("tr");
+      tr.appendChild(el("td", { text: fmtDate(snap && snap.as_of) }));
+      tr.appendChild(el("td", { className: "num", text: price(cur.price) }));
+      tr.appendChild(el("td", { text: cur.action_label || "—" }));
+      tr.appendChild(el("td", { text: cur.status || "—" }));
+      tbl.appendChild(tr);
+    }
+    wrap.appendChild(tbl);
+    return wrap;
   }
 
   function renderAdvice(code, payload, status) {
@@ -578,6 +634,17 @@
       const [payload, status] = await apiAdvice(code);
       clear(card);
       card.appendChild(renderAdvice(code, payload, status));
+      return;
+    }
+    if (action === "history") {
+      // R66：补上 `apiHistory` 的调用方（此前全仓零调用，见 renderCard 注释）。
+      const card = document.querySelector(`[data-body="${code}"]`);
+      if (!card) return;
+      clear(card);
+      card.appendChild(el("div", { class: "hint", text: "读取历史…" }));
+      const [payload, status] = await apiHistory(code, HISTORY_DAYS);
+      clear(card);
+      card.appendChild(renderHistory(code, payload, status));
       return;
     }
     if (action === "remove") {

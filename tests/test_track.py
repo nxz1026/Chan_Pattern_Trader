@@ -96,6 +96,28 @@ def test_route_for_rejects_unknown_subpath() -> None:
     assert route_for("/") is None
 
 
+# ── 推送范围白名单（R66，纯逻辑） ────────────────────────────────────
+
+
+def test_parse_notify_users_defaults_when_unset_or_blank() -> None:
+    """``CPT_NOTIFY_USERS`` 缺失/空白 ⇒ 默认白名单，**绝不**返回空元组。
+
+    空白名单会让推送永久静默 —— 那比"测试行误推"更难发现（known-traps #51）。
+    """
+    from cpt.storage.track_store import DEFAULT_NOTIFY_USERS, parse_notify_users
+
+    for raw in (None, "", "   ", ",", " , , "):
+        assert parse_notify_users(raw) == DEFAULT_NOTIFY_USERS, raw
+    assert DEFAULT_NOTIFY_USERS == ("default",)
+
+
+def test_parse_notify_users_strips_dedupes_keeps_order() -> None:
+    from cpt.storage.track_store import parse_notify_users
+
+    assert parse_notify_users(" default , alice ") == ("default", "alice")
+    assert parse_notify_users("alice,alice,bob") == ("alice", "bob")
+
+
 # ── 仓储：需 psycopg ──────────────────────────────────────────────────
 
 
@@ -321,6 +343,46 @@ def test_users_are_isolated(pg_conn: Any) -> None:
         cur.execute(
             "DELETE FROM public.cpt_track WHERE user_id IN (%s, %s) AND code=%s",
             ("userA", "userB", code),
+        )
+        pg_conn.commit()
+
+
+def test_is_tracked_scopes_to_allowlist(pg_conn: Any) -> None:
+    """R66：``is_tracked(users=...)`` 只认白名单里的 user_id。
+
+    真库回归（known-traps #51 第 4 条）：``cpt_track`` 生产/测试同表，
+    ``X-CPT-User: smoke_*`` 的一行足以让**全局**飞书群收到告警。这里用两个
+    中性测试用户名复现「只有非白名单用户关注」的票 —— 旧口径返 True（误推），
+    新口径必须返 False。
+
+    同时钉住 ``users=None`` 的旧口径仍在（它是通用查询原语，不是推送路径）。
+    """
+    from cpt.storage import track_store
+
+    track_store.ensure_table(pg_conn)
+    mine, other = "r66allow", "r66other"
+    code_mine, code_other = "998891", "998892"
+    try:
+        track_store.add(pg_conn, mine, code_mine)
+        track_store.add(pg_conn, other, code_other)
+
+        # 白名单内 → 认
+        assert track_store.is_tracked(pg_conn, code_mine, (mine,)) is True
+        # 白名单外（只有 other 关注）→ 不认 —— 这正是修复点
+        assert track_store.is_tracked(pg_conn, code_other, (mine,)) is False
+        # 空白名单 = 谁都不认
+        assert track_store.is_tracked(pg_conn, code_mine, ()) is False
+        # users=None 保留旧口径（任一用户）
+        assert track_store.is_tracked(pg_conn, code_other) is True
+        # 软删后白名单口径同样不认
+        assert track_store.remove(pg_conn, mine, code_mine) is True
+        assert track_store.is_tracked(pg_conn, code_mine, (mine,)) is False
+    finally:
+        pg_conn.rollback()
+        cur = pg_conn.cursor()
+        cur.execute(
+            "DELETE FROM public.cpt_track WHERE user_id IN (%s, %s) AND code IN (%s, %s)",
+            (mine, other, code_mine, code_other),
         )
         pg_conn.commit()
 

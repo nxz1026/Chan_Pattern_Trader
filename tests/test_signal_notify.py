@@ -83,8 +83,11 @@ def _tracked(monkeypatch: pytest.MonkeyPatch) -> None:
 
     本文件测的是节流与消息形状，不是范围收敛（那组用例自己在用例内改这个
     假实现），所以默认放行 —— 否则每个用例都得造一条真库记录。
+
+    签名必须带 ``users``（R66）：``maybe_notify`` 现在传
+    ``is_tracked(conn, code, _notify_users())``，两参假实现会直接 ``TypeError``。
     """
-    monkeypatch.setattr(signal_notify, "is_tracked", lambda conn, code: True)
+    monkeypatch.setattr(signal_notify, "is_tracked", lambda conn, code, users=None: True)
 
 
 @pytest.fixture(autouse=True)
@@ -268,7 +271,7 @@ def test_not_tracked_is_skipped_without_writing_throttle(monkeypatch: pytest.Mon
     "没人关注"与"被节流"是两回事：写进 ``_LAST_PUSH_MS`` 会让该信号即使后来被
     加入关注，24h 内也推不出来。
     """
-    monkeypatch.setattr(signal_notify, "is_tracked", lambda conn, code: False)
+    monkeypatch.setattr(signal_notify, "is_tracked", lambda conn, code, users=None: False)
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
 
@@ -297,7 +300,7 @@ def test_track_store_failure_fails_closed(
     fail-closed：读不到就当作"没资格推"，绝不把读失败当成"不需要推"静默放行。
     """
 
-    def _boom(conn: object, code: str) -> bool:
+    def _boom(conn: object, code: str, users: object = None) -> bool:
         raise TrackStoreError("库挂了")
 
     monkeypatch.setattr(signal_notify, "is_tracked", _boom)
@@ -314,7 +317,7 @@ def test_scope_check_runs_before_throttle(monkeypatch: pytest.MonkeyPatch) -> No
     """范围判定在节流**之前**：不在列表的信号不占用节流名额。"""
     seen: list[str] = []
 
-    def _tracked(conn: object, code: str) -> bool:
+    def _tracked(conn: object, code: str, users: object = None) -> bool:
         seen.append(code)
         return False
 
@@ -324,6 +327,45 @@ def test_scope_check_runs_before_throttle(monkeypatch: pytest.MonkeyPatch) -> No
     assert _notify(_mk_signal(), prev_status=None, event_time=1, conn=_CONN) is False
     assert seen == ["600519"]
     assert not signal_notify._LAST_PUSH_MS
+
+
+def test_notify_users_defaults_to_default_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """R66：未设 ``CPT_NOTIFY_USERS`` 时，传给仓储的是默认白名单 ``("default",)``。
+
+    这条钉住「朴素调用 ``is_tracked(conn, code)``」不会悄悄回归 —— 那个旧口径
+    会把任意 user_id 的行算作「有人关注」。
+    """
+    monkeypatch.delenv("CPT_NOTIFY_USERS", raising=False)
+    seen_users: list[object] = []
+
+    def _tracked(conn: object, code: str, users: object = None) -> bool:
+        seen_users.append(users)
+        return False
+
+    monkeypatch.setattr(signal_notify, "is_tracked", _tracked)
+    assert _notify(_mk_signal(), prev_status=None, event_time=1, conn=_CONN) is False
+    assert seen_users == [("default",)]
+
+
+def test_notify_users_env_overrides_allowlist(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``CPT_NOTIFY_USERS`` 覆盖白名单；空白值回落默认值（绝不留空白名单）。"""
+    seen_users: list[object] = []
+
+    def _tracked(conn: object, code: str, users: object = None) -> bool:
+        seen_users.append(users)
+        return False
+
+    monkeypatch.setattr(signal_notify, "is_tracked", _tracked)
+
+    monkeypatch.setenv("CPT_NOTIFY_USERS", " default , alice ")
+    assert _notify(_mk_signal(), prev_status=None, event_time=1, conn=_CONN) is False
+    assert seen_users == [("default", "alice")]
+
+    monkeypatch.setenv("CPT_NOTIFY_USERS", "   ")
+    assert _notify(_mk_signal(), prev_status=None, event_time=2, conn=_CONN) is False
+    assert seen_users[-1] == ("default",)
 
 
 # ── C2 ③：说人话段 ───────────────────────────────────────────────────

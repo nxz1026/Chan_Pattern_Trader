@@ -62,8 +62,15 @@
 | R58 | 「我的追踪」段 1：数据 + API + 建议点。`cpt_track` + `cpt_track_snapshot` 两表（`X-CPT-User` 头提取，缺省 `default`，字符白名单 + 截断）；BUY/SELL **reference 与 confirmed 双版**（reference 永远有 = 中枢下沿/笔低 × 缓冲 ÷ 倍率；confirmed 仅 `status==confirmed`+动作匹配时填 = 最新结构位无缓冲）；30 天快照 / 6h 人话缓存 / 90 天回收站；缺 `price_ratio` 全 None（除零风险） |
 | R58-2 | 同轮续：段 2 + 段 3 一起落地（用户先选「段 1 完即停」、后改主意）。① **段 3 推送**：`cpt/application/signal_notify.py`，maybe_notify + 24h 内存节流 + best-effort + 异常吞掉；`a_share_snapshot.py` 一买/一卖两处 `record_signal_event + commit` 之后立即调；放在 application 层而非 storage 层，保持 R24「storage 越纯越好」精神；标题前缀 `[CPT 追踪]` 区分 emotion-core 同群机器人。② **段 2 UI**：`dashboard/track.html + dash-track.js`（IIFE 独立页面，与现有 dashboard 解耦）；加入表单 + 列表卡（折叠 current / algorithm / points / human + 「再讲一次人话」按钮 + 回收站区块）；nginx `/cpt/track/` 路由 + `dashboard-sync.sh` 加 FILES。③ 实测：端到端烟雾通过（add/list/advice/history/remove/restore 全 200）+ 推送一条到群验证联通 |
 | R58-3 | 同轮再续：① **CPT 主页加「我的追踪」入口**：`dashboard/index.html` topbar 加 `<a href="/cpt/track/">我的追踪</a>` 硬链接，**不动 JS**（最小风险）。② **「再讲一次人话」走真 LLM**：`cpt/web/track_api.py::handle_track_speak` + `POST /api/dashboard/track/{code}/speak`；**复用现成** `cpt.application.llm_cases.summarize_recommendation`（R38 入口，prompt 严密：模型只看到确定性三行结果，没有机会编造）；note 拼进 disclaimer 段（"用户偏好：长期持有。…"），让模型语气贴近用户意图但不参与动作判断；`subject_id="track:{user}:{code}"`；6h TTL 由 LLM `request_hash` 幂等 + `SPEAK_TTL_HOURS=6`（**绝对值断言**钉死）实现。③ **前端** dash-track.js：「再讲一次」按钮 POST `/speak` 拿 call_id → 每 2s 轮询 `/api/dashboard/llm/calls?subject_id=…`（30s 超时）→ 完成后 reload advice 渲染新 human。`duplicate` status 直接 reload（6h 内已写过）。**不**写 `cpt_track_snapshot`（人话是异步结果，由前端轮询完成后 update UI，不污染历史）。 |
-
 | R59 | 上线前 360° 审计（外部只读审计：4 严重 / 10 高 / 29 中 / 18 低）**修复批次**。① 严重：S3 `signal_id` 主路径补 `code`（`first_buy:{level}:{structure_id}:{code}`，迁移 `scripts/migrations/2026-10-09_r59_signal_id_code_scope.sql`，幂等 + scratch 库 5 行夹具实证；生产 dry-run 71/72 行待补、补后撞号 12 组 → 0）；② 高：H5 保存点回滚、H6 `test_track.py` 全局 `DELETE` 作用域化、H7 CI 真起 Postgres + `CPT_REQUIRE_DB=1`（此前 DB 用例因不装 `db` extra 静默 skip）、H8 飞书解析响应体（**200 不等于送达**）+ webhook token 脱敏、H9 伪笔（`build_bis` 合并端点不校验两端类型与方向交替）、H10 收盘倒计时/`date.today()` 改用 `Asia/Shanghai`（新增 `cpt/domain/market_time.py`）；③ 中 29 项：web 限流/符号白名单/access log/并发上限/写库副作用显式、trade 回执 Content-Type+`for_date` 窗口+留存、异常原文不再回客户端（只回稳定代号）、inspection 趋势改走单条 `LATERAL` 批查（`run_metric_store.waterline_trends_bulk`：20 个 key 从 20 次往返变 1 次，配真库逐 key 等价性测试）、LLM 总 deadline+响应体上限+`finish_reason` 校验、signal 并发 `pg_advisory_xact_lock` 去重、parity/水位口径、结构事件状态映射等；④ 低 18 项：systemd 沙箱（`ProtectSystem=strict` 等）、`innerHTML` 逃生口、cron 作业表更正为 6 条、nginx 模板补 `auth_basic`、curl 凭据不再进 argv、`dashboard.bundle.js` 一致性检查、每日 track 留存维护作业 + `MAINTENANCE_PATH`、市场时区残留、`transition_time` 索引（迁移 `scripts/migrations/2026-10-10_r59_signal_event_transition_time_idx.sql`，50k 行实测 1143→262 shared buffers）、节流表上限。⑤ 门禁：`check_doc_counts` / `check_doc_drift` / `check_line_refs` / `check_job_poll_unique`（`pollSpeak` 并入全站唯一实现 `CPTJob.poll`）/ `vulture` 全部转绿 —— 其中前三条在 HEAD 本就红。 |
+| R60 | **未开设**（编号空号，不是漏记）—— R59 之后直接进 R61。 |
+| R61 | A 股「市场概览」九项口径修复（`923aa2a9d`）：`cpt/application/a_share_snapshot.py` +292、`dashboard/dash-chrome.js` +260。 |
+| R62 | 值管道探针 + K 线停更接巡检：① 新增 `scripts/check_value_plumbing.py`（486 行，R1–R4）作 CI 门禁⑮，发现写 `docs/audit/probe-findings.log`（`6b89ffbf2`）；② A 股 K 线停更进巡检告警（`ASHARE_STALE_LAG_ALERT_DAYS=2`）+ 诊断随水位行落库（`b99344022`）；③ 区分「上游没入库」与「缺复权因子」（`1fbd8e3b5`）；④ 顺手刷 `docs/architecture.md` §2.1 行数与三处行号引用（`c0c4b1279`）。 |
+| R63 | 告警噪音收敛：① 巡检只在**状态指纹变化**时发（`scripts/run_inspection.py`），并加 `ASHARE_ROW_MAX_AGE_DAYS=4`、`ASHARE_STREAM_STALL_HOURS=36`（`cd13c9018`）；② 第二轨不再拿 A 股跨日快照相减（`2ff1b85c6`，触发真告警时才发现）；③ 告警正文带「连续 N 天 / 本状态起于 D」（`05040bb48`，与 R65 同批）。 |
+| R64 | A 股因子链路修复（`9d4c5d3e2`）：`promote_recompute_factors()` 幂等提升生产表、候选集默认**全市场**（5206 只）+ 默认 `--promote`、末根缺因子 ⇒ 整段退不复权。复核批：ruff format 5 个落后文件（`6cffa082e`）、`trade_api` 默认日期断言改用市场口径（`3b02d78bb`，此前每天 16:00 UTC 后必红）、`docs/architecture.md` 行数重数（`393f74039`）。 |
+| R65 | 告警链路的**四种静默**（`4c2040dc7`）：`cpt/adapters/feishu.py` + `deploy/systemd/cpt-dashboard-ashare.service` 补 `EnvironmentFile=`（缺 webhook 则跃迁告警静默丢弃，曾静默 148 条）。同批：`9ed354842` 进度文件「今天」改用 `market_today`（R59/L11）、`d5cd7aebf` 给 `fetch_raw_bar_on` 补失败语义豁免（CI 门禁②）。 |
+| R4（并行） | emotion×CPT 整合轮（C1/S0/C2①②③④），与 R61–R65 在 10-14 同日交叠，**编号体系独立**（权威文档 `emotion-core/docs/18-情绪+缠论整合-功能与代码设计.md`）：`0e2c9e802` 倍率配对放宽为同日可配对（C1）、`3680c2b5f` 空建议点补 `reason`（S0·C4）、`075d38b10` 飞书推送收敛到关注列表（C2①）、`a084156b1` 推送带参考买卖点 + 说人话（C2②③）、`ee237a2d2` 关注列表收盘汇总 `scripts/watchlist_daily_summary.py`(162) + cron `watchlist-daily-summary`（C2④）。 |
+| R66 | （本轮）① `is_tracked` 跨用户闸门收口：新增 `CPT_NOTIFY_USERS` 白名单（默认 `default`），`cpt/storage/track_store.py::is_tracked(conn, code, users=None)` 支持按 user 过滤 + `parse_notify_users`，`cpt/application/signal_notify.py::_notify_users` 接线；② 补上 `apiHistory` 自 R58 起**零调用**的 UI 入口（`dashboard/dash-track.js` 历史按钮 + `renderHistory`，`track.html` 版本号 `r59-poll-merge`→`r66-track-history`）+ 新门禁「定义了 `async function apiXxx(` 就必须有人调」；③ 台账回填 R60–R65 与本文 §9 销账。 |
 
 > 缺口成因与 R43 那次一样：`docs/pending-wiring.md` 把本文指定为「唯一的轮次记录
 > 台账」，但**没有任何检查保证台账与实际轮次同步** —— 门禁全绿，台账却断档。
@@ -889,14 +896,60 @@ whitelist.py`、`ruff check`、`ruff format --check`、`mypy cpt scripts`。
 
 ## 9. 仍开放的事项
 
-1. `t_plus_one_purchase_allowed`（`cpt/domain/a_share_rules.py`）是**全仓唯一零生产
-   引用的公开符号**，R22 起至今未接。
+1. `t_plus_one_purchase_allowed`（`cpt/domain/a_share_rules.py:112`）是**全仓唯一零生产
+   引用的公开符号**，R22 起至今未接。R66 复查后**仍未处置，等 owner 拍板**：
+   - 它恒返 `True`（`None → True`，非 `None → True`），函数内注释自写着「实际生产应查询…
+     此处只返 True 保持 A 股日历允许」；`tests/test_a_share_rules.py` 两个用例也都断言
+     `True`，属**自证式测试**（把常量当契约钉住）。
+   - 真正的 T+1 日历读点早在另一条活路径上：`cpt/adapters/a_share_local.py:230
+     check_t_plus_one_calendar()` → `cpt/application/a_share_snapshot.py:1549
+     _attach_t_plus_one()` → `snapshot["t_plus_one"]` → 前端 `dashboard/dash-chrome.js`。
+   - **CPT 层实现不了真 T+1**：该约束需要账户持仓与「当日买入」数据，CPT 是行情看板，
+     没有这个数据源 —— 属 `docs/pending-wiring.md` 分类里的「依赖消失」。
+   ⇒ 二选一待拍板：**(a) 删除**该符号 + `tests/test_a_share_rules.py` 两个用例 +
+   `whitelist.py` §4b 那一行（推荐，与「依赖消失」的既有处置一致）；**(b) 保留**但把
+   `whitelist.py` 的理由从「待 signal 桥接线」改成「永不在本仓接线」。**不要**把它接进
+   任何生产路径 —— 接一个恒 `True` 的闸门等于给 T+1 约束盖了个空章。
 2. **17 只新股** K 线不足 30 根 ⇒ 因子算不出来。根因在 ingest 侧（另一个项目）要往前
    拉历史，owner 已明确不在本仓范围。
-3. `daily_bar` 缺口成因未定位（集中在每年 4 月底，2026-04-29 有 44 只票同时缺）。
+3. ~~`daily_bar` 缺口成因未定位（集中在每年 4 月底，2026-04-29 有 44 只票同时缺）。~~
+   **已定位，R66 销账，且不是缺陷**：4 月**年报披露截止日**前后被实施 ST/*ST 的票
+   **停牌一天**，停牌日本来就没有行（库是交易日表），与 `cpt/domain/a_share_rules.py:24`
+   的「C3 停牌」语义一致。
+   - 「孤立缺口」度量（前/后一交易日都有行、当天无行）Top 9 全在 4 月下旬且**三年复现**：
+     2026-04-29 **40** / 2026-04-30 **33** / 2025-04-29 **32** / 2025-04-30 27 /
+     2024-04-30 23 …（基线 2026-06-10 仅 2）。
+   - 关键实证：40 只票 `close(04-28)` 与 `pre_close(04-30)` **40/40 完全相等** ⇒ 上游自己的
+     价格链就承认 04-29 无成交（若是「取到行后被丢」，04-30 的 `pre_close` 会是 04-29 收盘价）；
+     且 40/40 在 04-30 恢复。跨表复验 `public.daily_bar` vs `asel.ref_adjust_factor` 在 04-29
+     的 code 集**对称差 = 0**（均 5139）⇒ 与 `daily_bar` 专属写逻辑无关。
+   - ST 富集：缺的 40 只中 **39 只 `is_st=true`**（当日全市场 ST 基线 3.5% ⇒ ≈11×）；
+     同日非 ST 票 4981 只只缺 1 只。
+   - ⚠️ **数值更正**：原文写「2026-04-29 有 44 只票同时缺」——基准取 04-28 与取 04-27∩04-30
+     都得 **40**；44 的口径未能复现，以 40 为准。
+   - ⚠️ 写入方不在本仓：`grep` 全仓**零**命中写 `daily_bar`/`derived_bar` 的语句；
+     `scripts/check_shared_tables.py:6` 写明这 7 张 A 股表由 **emotion-core 拥有并写入**、
+     CPT 只读。要逐只坐实「交易所停牌公告」需外部停复牌源 —— 库内没有。
 4. `asel.security_master` 名称里的 `N`/`ST`/`*ST` 前缀是**源里的当前名称**，会随源更新
    变化，CPT 不做额外标注或推断；不做名称搜索。
-5. `cpt_signal_event` 里旧口径信号的**纪元标记**待处理。
+5. ~~`cpt_signal_event` 里旧口径信号的**纪元标记**待处理。~~ **已做，R66 销账**：
+   - 「旧口径」指 **R45 因子复权口径切换**（`asel.ref_adjust_factor`：`tx:fqkline` →
+     `eastmoney:events`）之前写入的事件行，**不是** R59 的 `signal_id` 缺 code（后者叫
+     「旧格式」，实测 `signal_id NOT LIKE '%:'||code` = **0 行**，回填 100% 生效）。
+   - 纪元用**单行表** `public.cpt_factor_epoch` 表达（`e7b9639fb`，迁移
+     `scripts/migrations/2026-10-03_r45_factor_epoch.sql:18-31` 刻意**不给每行加列** ——
+     加列会造成「新行有纪元 / 老行没纪元」的新旧混态；口径切换本质是一个时间点，归属可由
+     `cpt_signal_event.created_at` 推导）。
+   - 读取侧按 `created_at < switched_at` 分组（`85ddc11a5`：
+     `cpt/application/recommendation.py::build_history` 出 `legacy_count`/`current_count`/
+     `items[].legacy`，`cpt/web/a_share_routes.py::_signal_history` 注入 `epoch_ms`，
+     `dashboard/market_a_share.js` 印「旧口径 N · 新口径 M」）；`3a9edf263` 让推荐留痕复用。
+   - 生产实测（2026-10-16）：总 **311** 行，旧口径 **43** 行 / 39 只 code，新口径 268 行；
+     `switched_at = 2026-10-04T05:47:41.917494Z`。
+   - ⚠️ 数值漂移已更正：`e7b9639fb` commit 正文写的 `2026-10-03T10:34:24Z` / 41 条是当时
+     预估；以生产表与 `docs/web-api-reference.md` 的 **43** 为准。
+   - ⚠️ **别按 `signal_id` 段数判口径**：5 段 vs 6 段只差 `structure_id` 有没有 `:empty`
+     无中枢分支（实测 27 行 5 段里含 2026-10-16 的新写入）。id 形状与因子口径**正交**。
 6. `cpt_job.js` 里**奇数个 ``` 围栏**会撑破 user 消息的 json 围栏（低危；
    `structured.py` 本就防御式解析）。
 7. 导出的结构块**要不要真按时间过滤**（R32 起挂账）—— 决定是「不做」：现在保留完整
@@ -910,9 +963,17 @@ whitelist.py`、`ruff check`、`ruff format --check`、`mypy cpt scripts`。
    **风险大于收益**，记此不拆。
 10. `?level=abc` 的行为随模式而变（realtime 回 400，demo/fixture 静默回 200）——
     要先决定「demo 模式收到不支持的参数该怎么办」，已写成显式测试钉住现状。
-11. **R58 「我的追踪」段 2 + 段 3 已落地（R58-2）**：UI 独立页面 `/cpt/track/` + 推送
-    hook 在 `record_signal_event + commit` 之后。**「再讲一次人话」按钮当前是占位**——
-    handler 只刷新缓存视图，不调 LLM worker；human 缓存由运维 cron 触发；这是段 2
-    已知不完整项（用户没明确要求前端调 LLM）。如要补：新增 `POST /api/dashboard/track/
-    {code}/speak` 端点 → application 层调 `cpt.llm` worker → 写
-    `cpt_track_snapshot.human_text`。
+11. ~~R58「我的追踪」段 2 + 段 3……**「再讲一次人话」按钮当前是占位**~~ **已做，R66 销账**：
+    `POST /api/dashboard/track/{code}/speak`（`cpt/web/track_api.py::handle_track_speak`）
+    已在 R58-3 落地并**走真 LLM**（复用 `cpt.application.llm_cases.summarize_recommendation`，
+    6h TTL 由 `request_hash` 幂等 + `SPEAK_TTL_HOURS=6` 实现），前端
+    `dashboard/dash-track.js::pollSpeak` 经全站唯一实现 `CPTJob.poll` 轮询
+    `subject_id="track:{user}:{code}"`。本节旧的「占位」描述已不成立。
+    R66 补的是同页另一处缺口：`apiHistory` 自 R58 段 1 起**零调用方**（后端
+    `GET /track/{code}/history` 一直可用、30 天快照一直在落库），现已在卡片上加「历史」
+    按钮（`renderHistory`），并新增门禁「定义了 `async function apiXxx(` 就必须有调用方」。
+12. **`cpt_track` 仍是生产/测试同表**：R66 已把推送范围收到 `CPT_NOTIFY_USERS` 白名单
+    （默认 `default`，见 `docs/known-traps.md` #51 第 4 条），但**表本身**没有任何东西
+    阻止测试行写入。彻底解法是给追踪行加 `is_smoke`/来源列或把测试指向独立 schema ——
+    那是表结构变更，未在本轮动。
+
