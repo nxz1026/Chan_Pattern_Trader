@@ -40,6 +40,7 @@ def _notify(signal, *, prev_status, code="600519", event_time, conn=_CONN):
         signal, prev_status=prev_status, code=code, event_time=event_time, conn=conn
     )
 
+
 # ── 工具 ──────────────────────────────────────────────────────────
 
 
@@ -114,10 +115,7 @@ def test_same_signal_same_status_within_24h_skipped() -> None:
     sig = _mk_signal()
     assert _notify(sig, prev_status=None, event_time=1, conn=_CONN) is True
     # 推第二次同 (signal_id, status)
-    assert (
-        _notify(sig, prev_status="structure_ready", event_time=2, conn=_CONN)
-        is False
-    )
+    assert _notify(sig, prev_status="structure_ready", event_time=2, conn=_CONN) is False
     assert len(rec.calls) == 1
 
 
@@ -125,18 +123,10 @@ def test_same_signal_different_status_pushes_again() -> None:
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
     # 第一次：structure_ready
-    assert (
-        _notify(_mk_signal(), prev_status=None, event_time=1, conn=_CONN)
-        is True
-    )
+    assert _notify(_mk_signal(), prev_status=None, event_time=1, conn=_CONN) is True
     # 第二次：跳到 confirmed（key 不同）
     sig_confirmed = _mk_signal(status="confirmed")
-    assert (
-        _notify(
-            sig_confirmed, prev_status="structure_ready", event_time=2, conn=_CONN
-        )
-        is True
-    )
+    assert _notify(sig_confirmed, prev_status="structure_ready", event_time=2, conn=_CONN) is True
     assert len(rec.calls) == 2
     assert rec.calls[1][0].endswith("· confirmed")
 
@@ -146,16 +136,10 @@ def test_different_signal_same_status_pushes_again() -> None:
     signal_notify._set_pusher_for_test(rec)
     # 同一 status、不同 signal_id —— key 不同，第二次也推
     assert (
-        _notify(
-            _mk_signal(signal_id="sig-A"), prev_status=None, event_time=1, conn=_CONN
-        )
-        is True
+        _notify(_mk_signal(signal_id="sig-A"), prev_status=None, event_time=1, conn=_CONN) is True
     )
     assert (
-        _notify(
-            _mk_signal(signal_id="sig-B"), prev_status=None, event_time=2, conn=_CONN
-        )
-        is True
+        _notify(_mk_signal(signal_id="sig-B"), prev_status=None, event_time=2, conn=_CONN) is True
     )
     assert len(rec.calls) == 2
 
@@ -165,10 +149,7 @@ def test_status_unchanged_short_circuits_without_recording() -> None:
     signal_notify._set_pusher_for_test(rec)
     sig = _mk_signal()
     # prev_status 与 signal.status 相同（兜底，正常不会到这里）
-    assert (
-        _notify(sig, prev_status="structure_ready", event_time=1, conn=_CONN)
-        is False
-    )
+    assert _notify(sig, prev_status="structure_ready", event_time=1, conn=_CONN) is False
     assert rec.calls == []
 
 
@@ -176,10 +157,7 @@ def test_confirmed_message_carries_signal_id_and_prev() -> None:
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
     sig = _mk_signal(signal_id="sig-X", status="confirmed")
-    assert (
-        _notify(sig, prev_status="structure_ready", event_time=42, conn=_CONN)
-        is True
-    )
+    assert _notify(sig, prev_status="structure_ready", event_time=42, conn=_CONN) is True
     _, lines = rec.calls[0]
     assert any("signal_id: sig-X" in ln for ln in lines)
     assert any("prev_status: structure_ready" in ln for ln in lines)
@@ -191,15 +169,9 @@ def test_pusher_returning_false_does_not_consume_throttle() -> None:
     rec = _Recorder(ok=False)
     signal_notify._set_pusher_for_test(rec)
     sig = _mk_signal(status="confirmed")
-    assert (
-        _notify(sig, prev_status="structure_ready", event_time=1, conn=_CONN)
-        is False
-    )
+    assert _notify(sig, prev_status="structure_ready", event_time=1, conn=_CONN) is False
     # 同 (sig, status) —— 节流未消耗，再次调
-    assert (
-        _notify(sig, prev_status="structure_ready", event_time=2, conn=_CONN)
-        is False
-    )
+    assert _notify(sig, prev_status="structure_ready", event_time=2, conn=_CONN) is False
     assert len(rec.calls) == 2
 
 
@@ -220,22 +192,13 @@ def test_throttle_window_can_be_advanced_by_clock() -> None:
     signal_notify._set_pusher_for_test(rec)
     sig = _mk_signal(status="confirmed")
     # t = 0
-    assert (
-        _notify(sig, prev_status="structure_ready", event_time=0, conn=_CONN)
-        is True
-    )
+    assert _notify(sig, prev_status="structure_ready", event_time=0, conn=_CONN) is True
     # t = 23h —— 仍在窗口内
     signal_notify._set_clock_for_test(lambda: 1_700_000_000_000 + 23 * 3600 * 1000)
-    assert (
-        _notify(sig, prev_status="structure_ready", event_time=1, conn=_CONN)
-        is False
-    )
+    assert _notify(sig, prev_status="structure_ready", event_time=1, conn=_CONN) is False
     # t = 25h —— 窗口外
     signal_notify._set_clock_for_test(lambda: 1_700_000_000_000 + 25 * 3600 * 1000)
-    assert (
-        _notify(sig, prev_status="structure_ready", event_time=2, conn=_CONN)
-        is True
-    )
+    assert _notify(sig, prev_status="structure_ready", event_time=2, conn=_CONN) is True
     assert len(rec.calls) == 2
 
 
@@ -252,9 +215,7 @@ def test_expired_throttle_entries_are_pruned_on_write() -> None:
 
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
-    pushed = _notify(
-        _mk_signal(signal_id="new-signal"), prev_status=None, event_time=1, conn=_CONN
-    )
+    pushed = _notify(_mk_signal(signal_id="new-signal"), prev_status=None, event_time=1, conn=_CONN)
 
     assert pushed is True
     assert stale_key not in signal_notify._LAST_PUSH_MS
@@ -270,9 +231,7 @@ def test_throttle_table_is_bounded_by_max_entries() -> None:
 
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
-    pushed = _notify(
-        _mk_signal(signal_id="new-signal"), prev_status=None, event_time=1, conn=_CONN
-    )
+    pushed = _notify(_mk_signal(signal_id="new-signal"), prev_status=None, event_time=1, conn=_CONN)
 
     assert pushed is True
     assert len(signal_notify._LAST_PUSH_MS) <= signal_notify.MAX_THROTTLE_ENTRIES
@@ -295,9 +254,7 @@ def test_not_tracked_is_skipped_without_writing_throttle(monkeypatch: pytest.Mon
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
 
-    pushed = _notify(
-        _mk_signal(), prev_status=None, event_time=1, conn=_CONN
-    )
+    pushed = _notify(_mk_signal(), prev_status=None, event_time=1, conn=_CONN)
     assert pushed is False
     assert rec.calls == []
     assert signal_notify._LAST_PUSH_MS == {}
@@ -308,9 +265,7 @@ def test_missing_conn_fails_closed(caplog: pytest.LogCaptureFixture) -> None:
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
     with caplog.at_level("WARNING"):
-        pushed = _notify(
-            _mk_signal(), prev_status=None, event_time=1, conn=None
-        )
+        pushed = _notify(_mk_signal(), prev_status=None, event_time=1, conn=None)
     assert pushed is False
     assert rec.calls == []
     assert "未提供连接" in caplog.text
@@ -331,9 +286,7 @@ def test_track_store_failure_fails_closed(
     rec = _Recorder()
     signal_notify._set_pusher_for_test(rec)
     with caplog.at_level("WARNING"):
-        pushed = _notify(
-            _mk_signal(), prev_status=None, event_time=1, conn=_CONN
-        )
+        pushed = _notify(_mk_signal(), prev_status=None, event_time=1, conn=_CONN)
     assert pushed is False
     assert rec.calls == []
     assert "关注范围读取失败" in caplog.text
@@ -350,9 +303,7 @@ def test_scope_check_runs_before_throttle(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(signal_notify, "is_tracked", _tracked)
     signal_notify._set_pusher_for_test(_Recorder())
 
-    assert _notify(
-        _mk_signal(), prev_status=None, event_time=1, conn=_CONN
-    ) is False
+    assert _notify(_mk_signal(), prev_status=None, event_time=1, conn=_CONN) is False
     assert seen == ["600519"]
     assert not signal_notify._LAST_PUSH_MS
 

@@ -65,9 +65,7 @@ def read_pairs() -> list[tuple[str, str]]:
         return track_store.active_pairs(conn)
 
 
-def refresh_snapshots(
-    pairs: list[tuple[str, str]], *, base_url: str = DEFAULT_BASE_URL
-) -> int:
+def refresh_snapshots(pairs: list[tuple[str, str]], *, base_url: str = DEFAULT_BASE_URL) -> int:
     """逐对打 loopback advice 端点，把 ``cpt_track_snapshot`` 刷到当天。
 
     ``cpt_track_snapshot`` 只在「有人打开追踪页 / 主动拉建议」时才写。收盘汇总
@@ -101,9 +99,7 @@ def refresh_snapshots(
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(
-        description="关注列表收盘汇总（飞书，每个交易日一次）"
-    )
+    parser = argparse.ArgumentParser(description="关注列表收盘汇总（飞书，每个交易日一次）")
     parser.add_argument(
         "--dry-run",
         action="store_true",
@@ -111,9 +107,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    logging.basicConfig(
-        level=logging.INFO, format="%(levelname)s %(name)s: %(message)s"
-    )
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
     try:
         pairs = read_pairs()

@@ -293,9 +293,7 @@ def latest_active_snapshots(conn: Any) -> list[dict[str, Any]]:
             rows = cur.fetchall()
     except Exception as exc:
         raise TrackStoreError(f"latest_active_snapshots() failed: {exc}") from exc
-    return [
-        {"code": r[0], "note": r[1], "as_of": _iso(r[2]), "payload": r[3]} for r in rows
-    ]
+    return [{"code": r[0], "note": r[1], "as_of": _iso(r[2]), "payload": r[3]} for r in rows]
 
 
 def list_active(conn: Any, user_id: str) -> list[dict[str, Any]]:

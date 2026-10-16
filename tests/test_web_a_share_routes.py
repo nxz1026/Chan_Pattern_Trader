@@ -703,14 +703,14 @@ def test_price_ratio_uses_the_snapshot_day_when_it_lags_behind(
     """
     rec = _ratio_site(
         monkeypatch,
-        open_time=_OPEN_0929,           # 快照末根 = 09-29（09-30 缺因子被拒而退根）
+        open_time=_OPEN_0929,  # 快照末根 = 09-29（09-30 缺因子被拒而退根）
         adj_close=8886.54,
-        raw_day=date(2026, 9, 29),      # 09-29 那天的 raw
+        raw_day=date(2026, 9, 29),  # 09-29 那天的 raw
         raw_close=1000.0,
-        latest_day=date(2026, 9, 30),   # daily_bar 最新 = 09-30（旧实现只看得到它）
+        latest_day=date(2026, 9, 30),  # daily_bar 最新 = 09-30（旧实现只看得到它）
         latest_close=1258.62,
     )
-    assert rec["raw_close"] == 1000.0   # 与快照同日，卡片上的价才对得上图
+    assert rec["raw_close"] == 1000.0  # 与快照同日，卡片上的价才对得上图
     assert rec["price_ratio"] == round(8886.54 / 1000.0, 4)
 
 

@@ -124,10 +124,7 @@ def _ratio_reason(snapshot: dict[str, Any]) -> str:
     day = _last_bar_day(snapshot)
     if day is None:
         return "price_ratio 不可用（快照缺少末根 K 线日期）→ 结构位无法换算为 raw"
-    return (
-        f"price_ratio 不可用（快照末根 {day} 与 daily_bar 无同日配对）"
-        "→ 结构位无法换算为 raw"
-    )
+    return f"price_ratio 不可用（快照末根 {day} 与 daily_bar 无同日配对）→ 结构位无法换算为 raw"
 
 
 # ── 主入口 ────────────────────────────────────────────────────────────
