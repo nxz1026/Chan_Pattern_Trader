@@ -44,7 +44,9 @@ def _notify(signal, *, prev_status, code="600519", event_time, conn=_CONN):
 # ── 工具 ──────────────────────────────────────────────────────────
 
 
-def _mk_signal(signal_id: str = "sig-1", status: str = "structure_ready") -> Signal:
+def _mk_signal(
+    signal_id: str = "sig-1", status: str = "structure_ready", price: float = 10.0
+) -> Signal:
     """最小可用 ``Signal`` —— 测试不依赖完整字段。"""
     return Signal(
         signal_id=signal_id,
@@ -58,7 +60,7 @@ def _mk_signal(signal_id: str = "sig-1", status: str = "structure_ready") -> Sig
         candidate_time=None,
         confirmed_time=None,
         invalidated_time=None,
-        price=10.0,
+        price=price,
         source_revision=1,
     )
 
@@ -173,6 +175,22 @@ def test_pusher_returning_false_does_not_consume_throttle() -> None:
     # 同 (sig, status) —— 节流未消耗，再次调
     assert _notify(sig, prev_status="structure_ready", event_time=2, conn=_CONN) is False
     assert len(rec.calls) == 2
+
+
+def test_undelivered_push_logs_at_warning_level(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """推送未送达必须 WARNING（2026-10-15：000002 那次漏报藏在 INFO 里）。
+
+    能走到这一行说明**已过关注列表闸门** ⇒ 是一次真实漏报，不是「与本机无关」。
+    """
+    signal_notify._set_pusher_for_test(_Recorder(ok=False))
+    sig = _mk_signal(status="confirmed")
+    with caplog.at_level("WARNING"):
+        assert _notify(sig, prev_status="structure_ready", event_time=1, conn=_CONN) is False
+    assert any(r.levelno == 30 and "飞书推送未送达" in r.getMessage() for r in caplog.records), (
+        caplog.text
+    )
 
 
 def test_pusher_raising_is_swallowed() -> None:
@@ -445,4 +463,64 @@ def test_watchlist_summary_falls_back_to_action_and_skips_bad_numbers() -> None:
     }
     title, lines = signal_notify.build_watchlist_summary([row])
     assert "1 只" in title
-    assert lines == ["000002 watch · 止损 3.3"]
+    assert lines == ["000002 watch · 止损 3.30"]
+
+
+def test_watchlist_summary_keeps_two_decimals_on_round_numbers() -> None:
+    """R4/C2 ⑤：``:g`` 会把 ``3.5`` 写成 ``3.5``、``3.9`` 写成 ``3.9``。
+
+    汇总与跃迁推送必须同一套位数（两位），否则同一个价格在两处长得不一样。
+    """
+    title, lines = signal_notify.build_watchlist_summary(
+        [_summary_row("000002", buy=3.5, sell=3.9, raw_close=3.7)]
+    )
+    assert "1 只" in title
+    assert lines == ["000002 观望 · 买点 3.50 · 卖点 3.90 · 现价 3.70"]
+
+
+def test_points_lines_rounds_prices_but_keeps_four_ratio_digits() -> None:
+    """R4/C2 ⑤：价格两位；后复权倍率不是价格 ⇒ 四位（否则判不了复权基准）。"""
+    lines = signal_notify._points_lines(
+        {
+            "action": "sell",
+            "status": "structure_ready",
+            "buy": {"reference": {"price_level": 1245.7299}},
+            "sell": {"reference": {"price_level": 1274.969}},
+            "stop_loss_reference": 1183.4399,
+            "raw_close": 1312.9701,
+            "price_ratio": 6.39415165,
+            "reason": "结构就绪",
+        }
+    )
+    assert lines == [
+        "动作: sell（structure_ready）",
+        "参考买点: 1245.73",
+        "参考卖点: 1274.97",
+        "止损参考: 1183.44",
+        "现价: 1312.97",
+        "后复权倍率: 6.3942",
+        "说明: 结构就绪",
+    ]
+
+
+def test_points_lines_skips_non_numeric_prices() -> None:
+    """字符串/布尔不是价格 ⇒ 少写一行，而不是把 ``True``、``"abc"`` 推给用户。"""
+    lines = signal_notify._points_lines(
+        {
+            "buy": {"reference": {"price_level": "1245.73"}},
+            "sell": {"reference": {"price_level": True}},
+            "stop_loss_reference": None,
+            "raw_close": 3.6666,
+        }
+    )
+    assert lines == ["现价: 3.67"]
+
+
+def test_notify_message_price_is_two_decimals() -> None:
+    """跃迁推送的 ``price:`` 是后复权原值（线上曾推出 ``8395.3292919005``）。"""
+    rec = _Recorder()
+    signal_notify._set_pusher_for_test(rec)
+    sig = _mk_signal(signal_id="sig-P", price=8395.3292919005)
+    assert _notify(sig, prev_status=None, event_time=1, conn=_CONN) is True
+    _, lines = rec.calls[0]
+    assert "price: 8395.33" in lines

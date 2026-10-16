@@ -76,6 +76,16 @@ THROTTLE_WINDOW_MS: int = 24 * 60 * 60 * 1000
 #: 推送标题前缀，便于群里一眼看出是哪个项目的信号推送。
 _TITLE_PREFIX: str = "[CPT 追踪]"
 
+#: 推送里的价格小数位（R4/C2 ⑤）：``signal.price`` 是后复权原值，形如
+#: ``8395.3292919005`` —— 直接进消息只会把关键数字淹掉。所有价格一律两位，
+#: 与前端（``dash-track.js`` 的 ``toFixed(2)``）和 LLM 提示词（``prompts.py``
+#: 的 ``{price:.2f}``）保持一致。
+_PRICE_DIGITS: int = 2
+
+#: 后复权倍率的小数位：它**不是价格**，两位会把 ``6.3941`` 与 ``6.3950`` 抹成
+#: 同一个数，而倍率是判断"参考价与现价能否直接比"的依据 ⇒ 留四位。
+_RATIO_DIGITS: int = 4
+
 #: 节流缓存：``(signal_id, status) -> 上次推送时间（Unix 毫秒）``。
 #: 进程重启清空 —— 设计上接受"重启后历史信号再推一次"作为可接受代价。
 _LAST_PUSH_MS: dict[tuple[str, str], int] = {}
@@ -139,11 +149,24 @@ def _set_pusher_for_test(pusher: Callable[[str, list[str]], bool]) -> None:
     _pusher = pusher
 
 
+def _fmt_num(value: Any, digits: int) -> str | None:
+    """把数值格式化成固定小数位；**不是数就返回 ``None``**（调用方据此少写一行）。
+
+    与 :func:`_level` 同一套判据：``bool`` 是 ``int`` 的子类但绝不是价格，
+    字符串 ``"3.56"`` 也不当数用（那说明上游字段错了，宁可少一行）。
+    """
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    return f"{float(value):.{digits}f}"
+
+
 def _points_lines(points: dict[str, Any]) -> list[str]:
     """把 ``track_points.compute_points`` 的结果折成几行推送文本（R4/C2 ②）。
 
     取值一律走 ``.get`` —— 这个 dict 来自另一个模块的纯函数，字段缺了宁可少一
     行，也不能让整条推送因为 ``KeyError`` 丢掉。
+
+    价格一律两位小数（R4/C2 ⑤，见 :data:`_PRICE_DIGITS`）。
     """
     out: list[str] = []
     action = points.get("action")
@@ -152,20 +175,22 @@ def _points_lines(points: dict[str, Any]) -> list[str]:
         suffix = f"（{status}）" if status else ""
         out.append(f"动作: {action}{suffix}")
     buy = (points.get("buy") or {}).get("reference") or {}
-    if buy.get("price_level") is not None:
-        out.append(f"参考买点: {buy['price_level']}")
+    buy_text = _fmt_num(buy.get("price_level"), _PRICE_DIGITS)
+    if buy_text is not None:
+        out.append(f"参考买点: {buy_text}")
     sell = (points.get("sell") or {}).get("reference") or {}
-    if sell.get("price_level") is not None:
-        out.append(f"参考卖点: {sell['price_level']}")
-    stop = points.get("stop_loss_reference")
-    if stop is not None:
-        out.append(f"止损参考: {stop}")
-    raw_close = points.get("raw_close")
-    if raw_close is not None:
-        out.append(f"现价: {raw_close}")
-    ratio = points.get("price_ratio")
-    if ratio is not None:
-        out.append(f"后复权倍率: {ratio}")
+    sell_text = _fmt_num(sell.get("price_level"), _PRICE_DIGITS)
+    if sell_text is not None:
+        out.append(f"参考卖点: {sell_text}")
+    stop_text = _fmt_num(points.get("stop_loss_reference"), _PRICE_DIGITS)
+    if stop_text is not None:
+        out.append(f"止损参考: {stop_text}")
+    close_text = _fmt_num(points.get("raw_close"), _PRICE_DIGITS)
+    if close_text is not None:
+        out.append(f"现价: {close_text}")
+    ratio_text = _fmt_num(points.get("price_ratio"), _RATIO_DIGITS)
+    if ratio_text is not None:
+        out.append(f"后复权倍率: {ratio_text}")
     reason = points.get("reason")
     if reason:
         out.append(f"说明: {reason}")
@@ -213,15 +238,15 @@ def build_watchlist_summary(
             buy = _level(points, "buy")
             sell = _level(points, "sell")
             if buy is not None:
-                parts.append(f"买点 {buy:g}")
+                parts.append(f"买点 {buy:.{_PRICE_DIGITS}f}")
             if sell is not None:
-                parts.append(f"卖点 {sell:g}")
+                parts.append(f"卖点 {sell:.{_PRICE_DIGITS}f}")
             stop = points.get("stop_loss_reference")
-            if isinstance(stop, (int, float)):
-                parts.append(f"止损 {stop:g}")
+            if isinstance(stop, (int, float)) and not isinstance(stop, bool):
+                parts.append(f"止损 {float(stop):.{_PRICE_DIGITS}f}")
         raw_close = current.get("raw_close")
-        if isinstance(raw_close, (int, float)):
-            parts.append(f"现价 {raw_close:g}")
+        if isinstance(raw_close, (int, float)) and not isinstance(raw_close, bool):
+            parts.append(f"现价 {float(raw_close):.{_PRICE_DIGITS}f}")
         entries.append(" · ".join(parts))
     if not entries:
         return None
@@ -304,11 +329,12 @@ def maybe_notify(
         return False
 
     title = f"{_TITLE_PREFIX} {signal.signal_type} · {code} · {signal.status}"
+    price_text = _fmt_num(signal.price, _PRICE_DIGITS)
     lines = [
         f"signal_id: {signal.signal_id}",
         f"level: {signal.level}",
         f"prev_status: {prev_status or 'none'}",
-        f"price: {signal.price}",
+        f"price: {price_text if price_text is not None else signal.price}",
         f"event_time: {event_time}",
     ]
     if points:
@@ -332,8 +358,10 @@ def maybe_notify(
         return False
 
     if not pushed:
-        # 没配 webhook 或推送失败 —— 不记节流，下次状态再变时还试
-        _LOG.info("飞书推送未送达 signal=%s status=%s", signal.signal_id, signal.status)
+        # 没配 webhook 或推送失败 —— 不记节流，下次状态再变时还试。
+        # WARNING：能走到这里说明**已经过了关注列表闸门**，即「本该送到却没送到」，
+        # 是一次真实的漏报（2026-10-15 的 000002 就丢在这一行，当时是 INFO）。
+        _LOG.warning("飞书推送未送达 signal=%s status=%s", signal.signal_id, signal.status)
         return False
 
     # 先写入再清理：``MAX_THROTTLE_ENTRIES`` 是**写入之后**的不变量。若先清理

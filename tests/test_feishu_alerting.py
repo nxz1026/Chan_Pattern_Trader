@@ -7,7 +7,8 @@
 隔离清单，**没有测过它的行为**。
 
 而这个模块是**生产告警通道**：`deploy/cron/run-inspection-daily.sh` 每天
-03:40 UTC 跑巡检，告警发不出去时日志只会写一行「未配置，跳过告警」。
+03:40 UTC 跑巡检，告警发不出去时日志只写一行「未配置，跳过告警」——
+**WARNING 级**（2026-10-15 事故前是 INFO，见下）。
 
 ## 本文件钉住什么
 
@@ -16,7 +17,8 @@
    哪天有人「顺手」加个 raise，巡检就会被告警通道带崩。
 2. **「没配」与「送失败」不能同码到无法区分** ——
    都返回 False 是刻意的（业务只看「有没有送到」），
-   但**日志必须留痕**（``_LOG.info``），否则排查时看不到发生了什么。
+   但**日志必须留痕且必须是 WARNING**（``_LOG.warning``），否则排查时看不到
+   发生了什么 —— 2026-10-15 那次就是被 INFO 掩掉了 148 条漏报。
 3. **截断必须留痕**：超长文本被裁掉时要在消息里写明丢了多少字符，
    否则「消息少了一截」会变成第二个谜题。
 
@@ -55,6 +57,23 @@ def test_not_configured_returns_false(monkeypatch: pytest.MonkeyPatch) -> None:
         raise AssertionError("没配 webhook 时不该尝试发送")
 
     assert feishu.notify("标题", ["一行"], opener=_boom) is False
+
+
+def test_not_configured_logs_at_warning_level(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """缺 webhook 是**故障**，不是「跳过」—— 必须 WARNING。
+
+    2026-10-15 事故：A 股批处理进程没引 ``deploy/env/cpt-dashboard.env``，
+    每次跃迁只留一行 INFO「未配置 …，跳过告警」，8 天 148 条告警静默丢弃。
+    这条日志若掉回 INFO，同级故障会再次变成无人可见。
+    """
+    monkeypatch.delenv(feishu.ENV_WEBHOOK, raising=False)
+    with caplog.at_level(logging.WARNING):
+        assert feishu.notify("标题", ["一行"]) is False
+    assert any(
+        r.levelno == logging.WARNING and "未配置" in r.getMessage() for r in caplog.records
+    ), caplog.text
 
 
 def test_send_failure_returns_false_not_raise(monkeypatch: pytest.MonkeyPatch) -> None:

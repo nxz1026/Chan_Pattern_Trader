@@ -1499,3 +1499,33 @@ R36 装机换后端就是靠它发现的）；A 股的对应诊断在 staleness 
 固定顺序：改 `dash-*.js` → `python scripts/build_dashboard_bundle.py` → 渲染测试 →
 `deploy/dashboard-sync.sh`。`tests/test_build_dashboard_bundle.py` 只保证「仓内 bundle 与
 源一致」，不会替你构建。
+
+## 51. 「推不出去」不报错：告警链路的四种静默（R65）
+
+一次真实漏报（用户收到 600519 的告警、却没收到自己在跟的 000002）把整条链路查了
+一遍，四种静默同时存在，**每一种单看都像「今天没信号」**：
+
+1. **没配凭据 ⇒ INFO**：`cpt/adapters/feishu.py` 在 `CPT_FEISHU_WEBHOOK` 为空时
+   `return False` 并记一条 **INFO**。INFO 在生产 journal 里等于没有 —— 148 条
+   「未配置」横跨 6 天，没有任何人看见。**未送达是事故、不是噪声，必须 WARNING**
+   （R65 已改，含 `signal_notify.maybe_notify` 那条「推送未送达」；级别用 `caplog`
+   钉住，不靠人记）。
+2. **告警能力跟着进程环境走**：同一条 `build_ashare_snapshot` 路径，web 服务
+   （`cpt-dashboard.service`）推得出去、每日批处理
+   （`cpt-dashboard-ashare.service`）推不出去 —— 差的只是后者没引
+   `EnvironmentFile=`。⇒ **新增任何入口（timer / batch / 新 unit）都要先问一句：
+   它能不能发告警？** 而且旧 unit 的注释会替这个缺口辩护（原话是「不引是为了避免
+   隐式耦合」）—— **注释里写下的理由会过期**，改 unit 时要重读它是否还成立。
+3. **cron 的真相源不是仓内文件**：`deploy/cron/crontab` 里有那行 ≠ 机器上装了那行。
+   实测 `watchlist-daily-summary` 只在（已被清掉的）root crontab 里装过，ubuntu 的
+   crontab 里从来没有它 ⇒ 作业无人执行，而日志文件是上次被 root 跑出来的残留。
+   **核对口径：`crontab -u <user> -l` 逐行比，不看仓内文件。** 另外**不能整份重装**：
+   本机 ubuntu 的 crontab 有仓内没有的 3 条（jc-ingest / ec-dash-watchdog /
+   backup-db），`crontab deploy/cron/crontab` 会一并抹掉，只能追加行。
+4. **闸门是 code 级、跨用户**：`track_store.is_tracked(conn, code)` 只问「**有人**
+   关注它吗」，不区分 user_id ⇒ 一条 `X-CPT-User: smoke_*` 打真库留下的测试行，
+   足以把告警推给**全局**飞书群，而且日志里看起来完全正常。测试数据与生产数据
+   同表这件事本身没有任何隔离（R65 清掉 8 条 smoke/ui 行 + 8 条孤儿快照）。
+
+配套事实：`cpt_track` 现在只剩 `default/000002` 一行。`is_tracked` 的跨用户口径
+**本轮未改**（改它会动推送语义），属已知设计缺陷。

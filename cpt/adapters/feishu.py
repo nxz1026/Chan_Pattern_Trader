@@ -136,7 +136,11 @@ def notify(
     """
     url = (webhook or os.environ.get(ENV_WEBHOOK, "")).strip()
     if not url:
-        _LOG.info("未配置 %s，跳过告警（title=%s）", ENV_WEBHOOK, title)
+        # WARNING 而不是 INFO：这条日志是**告警能力不可用**的唯一痕迹。
+        # 2026-10-15 踩过 —— A 股批处理进程没引 `deploy/env/cpt-dashboard.env`
+        # ⇒ 进程内没有 webhook ⇒ 每次跃迁只留一行 INFO，8 天里 148 条告警
+        # 全被静默丢弃而无人发现。缺 webhook 是**故障**，不是「跳过」。
+        _LOG.warning("未配置 %s，跳过告警（title=%s）", ENV_WEBHOOK, title)
         return False
 
     body = [f"**{title}**", *(f"· {line}" for line in lines if line)]

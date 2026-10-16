@@ -269,8 +269,13 @@ PGPASSWORD=$(grep '^\$DB_PW' ~/.dbconfig | cut -d= -f2-) \
   才会按 schedule 触发；不带 `--now` 也不会开机自跑（只 enable 不启动）。
 - **`Persistent=true`**：上次因机器关停错过的时间点，开机后会补跑一次（避免周末
   /夜间重启导致的事件链长期空段）。
-- **不引 `EnvironmentFile=cpt-dashboard.env`**：本脚本不需要那 6 个加密参数，避免
-  与主服务形成隐式耦合（删那个 env 文件不应打挂 A 股快照）。
+- **引 `EnvironmentFile=-cpt-dashboard.env`**（2026-10-16 改，原为「不引」）：旧判断
+  漏了一件事 —— 这条批处理里 `build_ashare_snapshot` 的 status 跃迁会走
+  `signal_notify.maybe_notify`，**它也要发飞书告警**，而 `CPT_FEISHU_WEBHOOK` 只在
+  这份 env 里。没引的代价：10-15 那次 `first_sell · 000002 · invalidated` 静默丢掉
+  （日志只有 INFO 级「未配置 CPT_FEISHU_WEBHOOK」，148 条没人看见）。前缀 `-` =
+  文件缺失不弄挂批处理。副作用已评估：批处理不读 LLM 配置（`CPT_*` 的读者只有
+  `cpt/llm/config.py`），引进来只多一个 webhook。
 - **DB 鉴权走 `~/.dbconfig`**：`AShareLocalClient` 默认 lazy 连接读
   `pathlib.Path.home()/".dbconfig"`（仅 ubuntu 可读 600）。如果哪天 env 与 home
   文件冲突以 home 为准。
@@ -280,6 +285,12 @@ PGPASSWORD=$(grep '^\$DB_PW' ~/.dbconfig | cut -d= -f2-) \
 
 > 2026-09-30 状态：单元已写入 `deploy/systemd/cpt-dashboard-ashare.{service,timer}`
 > 并随仓推送；首次安装命令见上方。
+>
+> 2026-10-16 更正：上述「不引 env」的判断**已于本日改掉**（见上方设计要点），并已
+> 覆盖安装到 `/etc/systemd/system/`（备份 `.bak-20261016`）。同时补了一处与本单元
+> 无关但同一天查出的缺口：`10 10` 的 `watchlist-daily-summary` 只装在 root 的
+> crontab 里（ubuntu 那份从来没有它），**等于没人跑**；现已追加进 ubuntu 的 crontab，
+> 并把被 root 跑成 `root:root` 的日志/锁文件改回 `ubuntu:ubuntu`。
 
 ## 数据库迁移（R20 / R21 / R23）
 
@@ -507,7 +518,8 @@ R57 上线前审计发现：作业失败时的行为是「非零退出 + 写一�
 ### ⚠️ cron 必须自己 source env 文件 —— 现在**六个脚本都会 source**（R57 起）
 
 `CPT_FEISHU_WEBHOOK` 只存在于 `deploy/env/cpt-dashboard.env`（被 gitignore）。
-systemd 那边靠 `EnvironmentFile=`，**cron 没有等价物** —— 忘了 source 的话，
+systemd 那边靠 `EnvironmentFile=`（2026-10-16 起**两个 unit 都引** —— A 股快照批处理
+原来没引，正是因此静默丢过一条跃迁告警），**cron 没有等价物** —— 忘了 source 的话，
 每天只会往日志里写「未配置」，一条告警也发不出去，而且**不报错**。
 
 > ⚠️ **R57 审计发现的历史**：原来**只有 `run-inspection-daily.sh`** 会 source，
