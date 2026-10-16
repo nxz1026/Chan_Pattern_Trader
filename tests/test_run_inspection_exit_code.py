@@ -28,7 +28,9 @@ from __future__ import annotations
 
 import dataclasses
 import importlib.util
+import json
 import sys
+from datetime import UTC, datetime
 from pathlib import Path
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -49,6 +51,8 @@ def _install(
     notified: bool,
     webhook: bool = True,
     prev: dict | None = None,
+    history: list[dict] | None = None,
+    capture: list | None = None,
 ):
     """把巡检的所有外部依赖换成假实现。"""
     # ⚠️ 键要**对齐** ``build_report`` 的真实返回（run_inspection.py:147）——
@@ -68,7 +72,13 @@ def _install(
     }
     monkeypatch.setattr(ri, "build_report", lambda conn: report)
     monkeypatch.setattr(ri, "webhook_configured", lambda: webhook)
-    monkeypatch.setattr(ri, "notify_problem", lambda *a, **k: notified)
+
+    def _notify(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        if capture is not None:
+            capture.append((args, kwargs))
+        return notified
+
+    monkeypatch.setattr(ri, "notify_problem", _notify)
 
     class _Client:
         def _get_conn(self):  # noqa: ANN202
@@ -96,6 +106,8 @@ def _install(
         RunMetric = _Row  # main 用 ``rms.RunMetric(kind=…, …)`` 构造
         KIND_INSPECTION = "inspection"
         appended: list = []
+        history: list = []
+        last_query: dict = {}
 
         @staticmethod
         def latest_inspection(conn):  # noqa: ANN001
@@ -104,6 +116,15 @@ def _install(
         @staticmethod
         def append_metrics(conn, rows):  # noqa: ANN001
             _RMS.appended = list(rows)
+
+        @staticmethod
+        def recent_metrics(conn, *, kind=None, market=None, symbol=None, limit=200):  # noqa: ANN001, E501
+            # main 里为告警正文数「连续 N 天」要走这里。顺序必须与真 store 一致：
+            # ``observed_at`` **倒序**（否则起点会被算成最新那条）。
+            _RMS.last_query = {"kind": kind, "limit": limit}
+            return tuple(_RMS.history[:limit])
+
+    _RMS.history = list(history or [])
 
     monkeypatch.setattr(ri, "AShareLocalClient", _Client)
     monkeypatch.setattr(ri, "rms", _RMS)
@@ -217,3 +238,90 @@ def test_first_run_with_problems_still_alerts(monkeypatch) -> None:
     """首次巡检发现问题**要发**：「没有基线」不等于「没有故障」。"""
     _install(monkeypatch, problems=["水位断了"], degraded=[], notified=False, prev=None)
     assert ri.main([]) == 3, "首次发现问题却没发 —— 空 prev_state 被当成「状态没变」了"
+
+
+# ── 告警正文的「连续 N 天 / 本状态起于」那一行 ──────────────────────
+#
+# 这一行是并行 session 加的功能（R64 期间别人写进 main 的），原先**没有假体也
+# 没有测试**：``_RMS`` 缺 ``recent_metrics`` ⇒ 8 条退出码测试全报
+# ``AttributeError: type object '_RMS' has no attribute 'recent_metrics'``。
+# 下面既补假体，也把这一行的语义钉住。
+def _ms(year: int, month: int, day: int) -> int:
+    return int(datetime(year, month, day, tzinfo=UTC).timestamp() * 1000)
+
+
+def _row(state_key: str, day_ms: int, *, as_text: bool = False) -> dict:
+    """造一条巡检水位行：``detail`` 是 dict，或（真库里也可能是）JSON 串。"""
+    payload = {"state_key": state_key}
+    detail: object = json.dumps(payload, ensure_ascii=False) if as_text else payload
+    return {"detail": detail, "observed_at": day_ms}
+
+
+def _patch_rms(monkeypatch, rows: list[dict]):
+    class _RMS:
+        KIND_INSPECTION = "inspection"
+
+        @staticmethod
+        def recent_metrics(conn, *, kind=None, market=None, symbol=None, limit=200):  # noqa: ANN001, E501
+            return tuple(rows[:limit])
+
+    monkeypatch.setattr(ri, "rms", _RMS)
+    return _RMS
+
+
+def test_streak_counts_history_rows_including_this_run(monkeypatch) -> None:
+    """轮数**不 +1**：``main`` 是先落库再拼正文，窗口里最新那条就是本轮。
+
+    这串是「本轮 + 昨天（同状态）+ 前天（旧状态）」⇒ 连续 2 天，起点是昨天
+    （这一串最旧那条），不是前天（那是旧状态的最后一天）。
+    """
+    _patch_rms(
+        monkeypatch,
+        [
+            _row("S", _ms(2026, 10, 15)),
+            _row("S", _ms(2026, 10, 14)),
+            _row("OLD", _ms(2026, 10, 13)),
+        ],
+    )
+    assert ri._state_streak_info(None, "S") == (2, "2026-10-14")
+
+
+def test_streak_is_first_day_without_history(monkeypatch) -> None:
+    """历史为空（本轮没落成）⇒ 报第 1 天，不报「连续 0 天」。"""
+    _patch_rms(monkeypatch, [])
+    assert ri._state_streak_info(None, "S") == (1, "")
+
+
+def test_streak_omits_start_when_window_all_matches(monkeypatch) -> None:
+    """窗口内全同 ⇒ 数到边界了，起点在窗口外：宁可不说，不编日期。"""
+    _patch_rms(monkeypatch, [_row("S", _ms(2026, 10, 15)), _row("S", _ms(2026, 10, 14))])
+    assert ri._state_streak_info(None, "S") == (2, "")
+
+
+def test_streak_reads_state_key_from_json_string_detail(monkeypatch) -> None:
+    """``detail`` 存成 JSON 串（旧行）时也要认得出来。"""
+    _patch_rms(
+        monkeypatch,
+        [_row("S", _ms(2026, 10, 15), as_text=True), _row("OLD", _ms(2026, 10, 14))],
+    )
+    assert ri._state_streak_info(None, "S") == (1, "2026-10-15")
+
+
+def test_extract_state_key_survives_broken_json() -> None:
+    assert ri._extract_state_key({"detail": "{不是 JSON"}) == ""
+    assert ri._extract_state_key({"detail": None}) == ""
+    assert ri._extract_state_key({}) == ""
+
+
+def test_observed_date_ignores_non_numeric_timestamp() -> None:
+    assert ri._observed_date({"observed_at": "2026-10-15"}) == ""
+    assert ri._observed_date({}) == ""
+
+
+def test_alert_body_carries_streak_line(monkeypatch) -> None:
+    """函数返回对了但没接进告警正文是另一回事 —— 这条钉接线。"""
+    sent: list = []
+    _install(monkeypatch, problems=["水位断了"], degraded=[], notified=True, capture=sent)
+    assert ri.main(["--force"]) == 0
+    lines = sent[0][0][1] if sent else []
+    assert any(line.startswith("连续 ") for line in lines), lines

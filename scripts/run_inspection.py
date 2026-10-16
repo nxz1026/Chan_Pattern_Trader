@@ -52,6 +52,7 @@ import json
 import logging
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final
 
@@ -350,6 +351,68 @@ def _state_key(report: dict[str, Any]) -> str:
     return json.dumps(payload, ensure_ascii=False, sort_keys=True)
 
 
+def _extract_state_key(row: dict[str, Any]) -> str:
+    """从一条巡检记录里提取 state_key（处理 dict/str 两种形态）。"""
+    raw = row.get("detail")
+    if isinstance(raw, dict):
+        return str(raw.get("state_key", ""))
+    if isinstance(raw, str):
+        try:
+            return str(json.loads(raw).get("state_key", ""))
+        except (json.JSONDecodeError, TypeError, AttributeError):
+            return ""
+    return ""
+
+
+def _observed_date(row: dict[str, Any]) -> str:
+    """一条水位行的 ``observed_at`` 落在哪一天（UTC，``YYYY-MM-DD``）。
+
+    ``observed_at`` 由 :func:`cpt.storage.run_metric_store._row_to_dict` 统一转成
+    **毫秒时间戳**（库里是 timestamptz）。这里按 UTC 取日期：巡检固定 03:40 UTC
+    跑，行落库时 UTC 与北京同一天，不会差一天。
+    """
+    observed = row.get("observed_at")
+    if not isinstance(observed, (int, float)):
+        return ""
+    try:
+        return datetime.fromtimestamp(observed / 1000, tz=UTC).strftime("%Y-%m-%d")
+    except (OSError, OverflowError, ValueError):
+        return ""
+
+
+def _state_streak_info(conn: Any, state: str, *, history_limit: int = 30) -> tuple[int, str]:
+    """当前状态已经连续出现了几轮、这一串从哪天开始的。
+
+    **数的是历史行，而历史行里已经含本轮那条** —— ``main`` 先 ``append_metrics``
+    + ``commit``（:457）再拼告警正文，这里才被调到。所以**不要再 +1**：那会把
+    「第 1 天」说成第 2 天。
+
+    Returns:
+        ``(连续轮数, 起点日期 "YYYY-MM-DD")``。起点取这一串里**最旧那条**的日期
+        —— 不是「上一次变化」那天：变化发生在旧状态最后一条与这一串之间，报旧状态
+        那天会差一天。起点为空串 = 窗口内全部相同（找不到变化点），此时不编日期。
+
+    ``recent_metrics`` 按 ``observed_at`` **倒序**返回：从最新往前数，第一次遇到
+    不同的 state_key 就停。
+    """
+    history = rms.recent_metrics(conn, kind=rms.KIND_INSPECTION, limit=history_limit)
+    streak = 0
+    start = ""
+    for row in history:
+        if _extract_state_key(row) != state:
+            break
+        streak += 1
+        start = _observed_date(row) or start
+    if streak == 0:
+        # 历史为空、或最新一条就不是这个状态（本轮那行没落成）：当第 1 天报，
+        # 别报「连续 0 天」。
+        return 1, ""
+    if streak == len(history):
+        # 数到窗口边界了，那之前的起点在哪不知道 —— 说「一直是」比编个日期诚实。
+        start = ""
+    return streak, start
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="CPT 每日巡检（水位 + 源 + 突变）")
     parser.add_argument("--print", action="store_true", help="只打印，不落库不发告警")
@@ -418,6 +481,13 @@ def main(argv: list[str] | None = None) -> int:
         lines.append(
             "飞书通道：" + ("已配置" if webhook_configured() else f"**未配置 {ENV_WEBHOOK}**")
         )
+
+        # 连续天数 + 当前状态的起点（判断「新问题还是老问题」用）
+        streak_days, streak_start = _state_streak_info(conn, state)
+        streak_text = f"连续 {streak_days} 天"
+        if streak_start:
+            streak_text += f" / 本状态起于 {streak_start}"
+        lines.append(streak_text)
 
         changed = prev_state != state
         # 首次巡检（没有上次结论）**只记基线不发**：那时"变化"没有意义 ——
