@@ -55,6 +55,16 @@ _SYMBOL_RE = re.compile(r"^[A-Z0-9]{2,20}$")
 #: （LLM/数据库）就能把线程数顶到几百。超限的连接直接回 503，而不是排队到超时。
 _DEFAULT_MAX_WORKERS = 32
 
+#: R67（审计 P2-9）：破坏性维护端点（``GET …/track/maintenance?apply=1``）要求的确认头。
+#:
+#: 为什么不是「改成 POST」：cron 的契约是 GET（``deploy/cron/track-maintenance-daily.sh``
+#: 与 ``deploy/README.md`` 都按 GET 写，:mod:`cpt.web.track_api` 也把 ``/maintenance``
+#: 归在读路由里），而**浏览器发不出自定义请求头** —— 服务在 loopback 且不带凭据，
+#: 一个第三方页面的 ``<img src="http://127.0.0.1:8010/api/dashboard/track/maintenance?apply=1">``
+#: 就能让浏览器替它做全表全用户的删除。自定义头正是这类请求过不去的那道门，
+#: 而 urllib / curl 加一行即可。**dry-run（不带 ``apply``）不受影响**：它不删东西。
+MAINTENANCE_CONFIRM_HEADER = "X-CPT-Maintenance"
+
 #: R59（审计 M5）：分页/窗口参数的统一上界。
 #:
 #: 原实现只做 ``int()``，``?limit=100000000`` 会让每个 (market, symbol) 都去
@@ -674,6 +684,16 @@ def _watchlist_payload() -> dict[str, Any]:
         "as_of": pool.get("as_of"),
         "rows": list(watchlist_rows(markets)),
     }
+
+
+def _maintenance_confirmed(headers: Any) -> bool:
+    """请求是否带了破坏性维护的确认头（R67 / 审计 P2-9）。
+
+    只认精确的 ``1``（拒绝 ``0``/``false``/空值这类"看起来像开了"的写法）——
+    与 ``?apply=1`` 同一口径：宁可少删一次（第二天 cron 再来），
+    也不能因为写法不认识就把用户的回收站行删了。
+    """
+    return (headers.get(MAINTENANCE_CONFIRM_HEADER) or "").strip() == "1"
 
 
 def make_handler(
@@ -1432,7 +1452,14 @@ def make_handler(
                         HTTPStatus.BAD_REQUEST, "code_required", "缺少 code 参数"
                     )
                     return
-                level = (query.get("level") or [""])[0].strip()
+                # R67（审计 P2-8）：客户端传的 `level` **不再透传**。
+                # 它进的是 `_persist_recommendation` 的去重键（`(code, level)`）与
+                # `cpt_recommendation.level` 列，却**改变不了任何计算** ——
+                # A 股推荐只在主级别上算（`config.levels[0]`）。于是它唯一的作用是
+                # 「一个随机字符串 = 一个新键 = 一次无条件 INSERT+COMMIT 到共享生产库」
+                # ⇒ 只读 GET 被用来无限放大写入（`?level=<随机>`）。
+                # 真正的级别标签由服务端决定；这里既不透传，也不报错（拒绝会让
+                # 文档里那个 `&level=1d` 示例突然 400）。
                 hdays = (query.get("history_days") or [""])[0]
                 # R67（P1-3）：原来写的是 `int(hdays) if hdays.isdigit() else 0`。
                 # `str.isdigit()` 对 **Unicode 数字**也返回 True —— `'²'.isdigit()`
@@ -1443,7 +1470,6 @@ def make_handler(
                 self._write_json(
                     a_share_routes.build_recommendation(
                         code,
-                        level=level or None,
                         history_days=history_days,
                     )
                 )
@@ -1602,9 +1628,20 @@ def make_handler(
                     # 清理是破坏性动作，宁可少删一次（第二天再来），
                     # 也不能因为参数写法不认识就把用户的回收站行删了。
                     apply_raw = ((query.get("apply") or [""])[0] or "").strip().lower()
-                    payload, status = track_api.handle_track_maintenance(
-                        apply=apply_raw in {"1", "true"}
-                    )
+                    wants_apply = apply_raw in {"1", "true"}
+                    # R67（审计 P2-9）：真删必须先过确认头。GET 是安全方法，
+                    # 第三方页面的 <img>/预取就能触发它，而浏览器带不上自定义头。
+                    # 缺头时**不报错语义含糊的 400**，回 403 + 明确的 code，
+                    # 让 cron 日志一眼看出「头没带上」而不是「端点坏了」。
+                    if wants_apply and not _maintenance_confirmed(self.headers):
+                        self._write_json_error(
+                            HTTPStatus.FORBIDDEN,
+                            "maintenance_needs_confirmation",
+                            f"破坏性清理必须带 {MAINTENANCE_CONFIRM_HEADER}: 1 头"
+                            "（防被第三方页面的 GET 触发）；不带 apply 的 dry-run 不受影响",
+                        )
+                        return
+                    payload, status = track_api.handle_track_maintenance(apply=wants_apply)
                 else:
                     self._write_json_error(HTTPStatus.NOT_FOUND, "not_found", "")
                     return
@@ -1631,6 +1668,12 @@ def make_handler(
             ):
                 return False
             user_id = _track_api.extract_user_id(self.headers)
+            # R67（审计 P2-7）：speak 是**第三个付费 LLM 端点**，此前全程无限流 ——
+            # 唯一的护栏是 6h bucket 去重（改一个字符就是新的付费调用）。
+            # 与 llm/summarize、llm/explain 同一条纪律：付费之前先过 limiter，
+            # 键是「端点标签 + 对端 IP」，超限 429 + Retry-After。
+            if self._rate_limit_or_reject(_llm_limiter, "track_speak"):
+                return True
             try:
                 payload, status = _track_api.handle_track_speak(user_id, parts[3])
             except Exception:  # noqa: BLE001

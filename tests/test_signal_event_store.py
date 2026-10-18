@@ -335,8 +335,16 @@ def test_derive_signal_with_client_invokes_load(monkeypatch) -> None:
 
     monkeypatch.setattr(mod, "derive_first_buy_facts", fake_facts)
 
-    # Mock assess_first_buy 返回一个信号
-    out_signal = _make_signal(status="structure_ready")
+    # Mock assess_first_buy 返回一个信号。
+    #
+    # ⚠️ 状态取 ``confirmed`` 而不是以前的 ``structure_ready``：这不是迁就实现，
+    # 而是**替身必须与真函数同域的纪律**。真 ``assess_first_buy`` 在
+    # ``has_reversal_bi=True`` 时**只可能**返回 ``confirmed``（判定顺序见
+    # ``cpt/domain/signal.py::assess_first_buy``：``elif has_reversal_bi:
+    # status = _STATUS_CONFIRMED``），而本替身配的 FakeFacts 正是
+    # ``has_reversal_bi=True``。以前那个 ``structure_ready`` 是**真函数造不出来的
+    # 组合**，正是它让 R21 那条恒为假的守卫看起来还在工作（P2-10）。
+    out_signal = _make_signal(status="confirmed")
     monkeypatch.setattr(
         mod,
         "assess_first_buy",
@@ -387,11 +395,12 @@ def test_derive_signal_with_client_invokes_load(monkeypatch) -> None:
     # 靠它区分股票；漏传就等于退回「不同股票共用一行信号历史」。
     assert facts_calls[0]["code"] == "600519"
     # 验证 record 被调用（首次评估，prev_status=None）
-    # has_reversal_bi=True 触发状态推进：structure_ready → confirmed
     assert len(record_calls) == 1
     assert record_calls[0]["prev_status"] is None
+    # P2-10：这里断言的是**上游**（assess_first_buy）给的就是 confirmed，
+    # 不再有本地推进；``result is out_signal`` 钉住「本函数不再二次改写信号」。
     assert record_calls[0]["status"] == "confirmed"
-    assert result is not out_signal  # 推进后是新对象
+    assert result is out_signal  # 无本地推进 ⇒ 原样透传
     # 2026-10-06：写之前的前值也一并回传，供 _attach_signal_change 用
     assert prev_status is None
 

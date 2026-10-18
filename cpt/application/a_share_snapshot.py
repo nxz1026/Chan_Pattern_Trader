@@ -53,7 +53,7 @@ from cpt.application.structure_event_recorder import record_structure_events
 from cpt.domain.a_share_rules import apply_ashare_tags_to_bis
 from cpt.domain.config import RulesConfig
 from cpt.domain.models import Bi, CanonicalBar, Signal, ZhongShu
-from cpt.domain.signal import assess_first_buy, transition_first_buy, transition_first_sell
+from cpt.domain.signal import assess_first_buy
 from cpt.storage.signal_event_store import (
     load_previous_signal,
     record_signal_event,
@@ -126,9 +126,17 @@ def _rollback_quietly(client: Any, context: str) -> None:
     全程 best-effort：回滚本身再失败也只记 debug，绝不让降级路径抛出 ——
     它的存在目的就是**别让异常处理本身制造新异常**。
 
+    R67（审计 P2-2）：入参既可以是 ``AShareLocalClient``，也可以是**裸连接** ——
+    本文件里有三条路径手上只有连接（``_stale_reason`` 的 ``conn``、
+    ``MetricRecorder(conn)``、以及内部复用 ``_active_client_conn`` 的地方）。
+    判据是「对象自己有没有 ``rollback``」（psycopg 连接有、A 股客户端没有）。
+
     :param context: 记进 debug 日志的场景名，便于定位是哪条路径 poisoned 连接。
     """
-    conn = _active_client_conn(client)
+    if client is not None and callable(getattr(client, "rollback", None)):
+        conn = client  # 已经是连接
+    else:
+        conn = _active_client_conn(client)
     rollback = getattr(conn, "rollback", None)
     if not callable(rollback):
         return
@@ -465,6 +473,10 @@ def build_ashare_snapshot(
             )
         except Exception as exc:  # noqa: BLE001
             _LOG.warning("A 股运行水位记录失败 %s：%s: %s", code, type(exc).__name__, exc)
+            # R67（审计 P2-2）：水位行用的是**复用**的 A 股连接（上面刻意不 commit，
+            # 事务边界归路由）。失败不回滚 ⇒ 路由随后 `commit()` 时整条事务已 aborted，
+            # 快照连同水位一起消失，而且 `_attach_calendar_gaps` 会先一步连锁失败。
+            _rollback_quietly(conn, f"metric:{code}")
     return snapshot
 
 
@@ -583,6 +595,25 @@ def _derive_first_buy_signal(
     ``public.cpt_signal_event`` 加载同 ``signal_id`` 的最新事件作为
     ``previous``，让状态机跨轮询推进；评估完成后若 status 变化则 append 一条
     事件。``client=None`` 时退化为 ``previous=None``（首次评估），不写事件。
+
+    **R21 的状态推进调用已删除（P2-10，2026-10-17）**：原实现在评估之后追加
+    ``if signal is not None and facts.has_reversal_bi and signal.status ==
+    "structure_ready": signal = transition_first_buy(...)``。该守卫**恒为假** ——
+    ``assess_first_buy`` 的判定顺序是「``has_reversal_bi`` 为真 ⇒ 直接
+    ``confirmed``」，所以「``has_reversal_bi`` 为真」与「``status`` 还是
+    ``structure_ready``」互斥：穷举 48 组入参（``has_two_centers`` ×
+    ``has_divergence_leg`` × ``has_reversal_bi`` × 6 种 ``previous.status``）
+    守卫命中 **0 次**。
+
+    删它**不改变任何一条输出**，因为守卫想做的推进，上游**已经做了**：
+    ``has_reversal_bi=True`` 时 ``assess_first_buy`` 直接返回 ``confirmed``，
+    而守卫那条分支若真被走到，``reversal_closed=True`` 也只会得到同一个
+    ``confirmed``。所以它是一条**冗余回声**，不是漏掉的推进。
+
+    真正的缺口是 ``alert`` / ``candidate`` **不可达**（``_advance`` 只在
+    ``previous.status == "alert"`` 时产出 ``candidate``，而 ``assess_first_buy``
+    从不产出 ``alert``）—— 那是需要**盘中反向 K 线**的新增能力，不是补线，
+    故本函数不再保留一条走不到的空接线。
     """
     config = RulesConfig()
     level = config.levels[0] if config.levels else 0
@@ -645,14 +676,8 @@ def _derive_first_buy_signal(
         previous=previous,
     )
 
-    # 状态推进（R21 扩展）：有反向笔时从 structure_ready 推进到 confirmed
-    if signal is not None and facts.has_reversal_bi and signal.status == "structure_ready":
-        signal = transition_first_buy(
-            signal,
-            reversal_closed=True,
-            structure_valid=True,
-            event_time=event_time,
-        )
+    # R21 的状态推进（``transition_first_buy``）在这里**没有调用点** ——
+    # 原先那个守卫恒为假且属冗余回声，见本函数 docstring 的 P2-10 说明。
 
     # R59（审计 M22）fail-closed：历史未知 ⇒ 本轮**不推进持久化状态机**。
     # 取舍（三个可选做法里取最保守的）：
@@ -759,14 +784,10 @@ def _derive_first_sell_signal(
         previous=previous,
     )
 
-    # 状态推进（R21 扩展）：有反向笔时从 structure_ready 推进到 confirmed
-    if signal is not None and facts.has_reversal_bi and signal.status == "structure_ready":
-        signal = transition_first_sell(
-            signal,
-            reversal_closed=True,
-            structure_valid=True,
-            event_time=event_time,
-        )
+    # R21 的状态推进（``transition_first_sell``）在这里**没有调用点** ——
+    # 与 ``_derive_first_buy_signal`` 同因（P2-10）：``assess_first_sell`` 的
+    # ``_advance`` 同样在 ``has_reversal_bi`` 为真时直接给 ``confirmed``，
+    # 那个 ``status == "structure_ready"`` 守卫恒为假。
 
     # R59（审计 M22）fail-closed：同 first_buy —— 历史未知则本轮不落库、不写事件、
     # 不推送，并回传本轮 status 让变化检测恒为「无变化」。
@@ -1185,6 +1206,9 @@ def _resolve_price_basis(snapshot: dict[str, Any], code: str, client: Any) -> _P
             factor = hfq_factor_on(_active_client_conn(client), code, last_date)
         except Exception as exc:  # noqa: BLE001 — 查不到因子不该让整个面板消失
             _LOG.debug("取后复权因子失败 %s %s: %s", code, last_date, exc)
+            # R67（审计 P2-2）：这条 SQL 共用 `active_client` 的连接，失败后不把它
+            # 从 aborted 态拉回来，后面 `_attach_staleness` / 水位记录会连锁全废。
+            _rollback_quietly(client, f"price_basis:{code}")
     return _PriceBasis(last_close=last_close, last_date=last_date, factor=factor)
 
 
@@ -1398,20 +1422,42 @@ def _stale_reason(conn: Any, code: str, missing: set[date]) -> tuple[str, str] |
     * ``unusable`` —— 行和因子都在、K 线仍然跳过了它（别在面板上编原因，去查日志）。
 
     拿不到 ``code``、探不出结果（DB 不可达等）→ ``None``，面板不显示这一行。
+
+    ## R67（审计 P2-1）：三态的判据必须比「上游」更硬
+
+    原先这里用 :func:`~cpt.adapters.a_share_local.fetch_raw_bar_on` 判第一态，
+    而那个函数**自己建连、吞掉一切异常、拿不到就返回 ``None``**。于是「DB 不可达」
+    与「这天真的没有 bar」在调用点**分不开**，两条路径都落进
+
+        quality["stale_reason"] = "upstream_lag"   # 面板/告警写「上游当日 bar 未入库」
+
+    运维看到的是**一句确信的错话**：让他去查 emotion-core 的入库管道，而真相是
+    CPT 自己连不上库。诊断字段的价值全在「确定」二字上，这里必须把两态分开 ——
+    故第一态改用会抛的 :func:`~cpt.adapters.a_share_local.raw_bar_exists_on`
+    （走**共享连接**，不另建连），抛了就整体 ``return None``：**不写原因，
+    也不编原因**。
+
+    第二态的 :func:`~cpt.adapters.a_share_local.hfq_factor_on` 本来就是会抛的
+    （它在共享连接上执行、不吞异常），故保持不变。
     """
     if not code:
         return None
-    from cpt.adapters.a_share_local import fetch_raw_bar_on, hfq_factor_on  # noqa: PLC0415
+    from cpt.adapters.a_share_local import hfq_factor_on, raw_bar_exists_on  # noqa: PLC0415
 
     day = min(missing)
     try:
-        if fetch_raw_bar_on(code, day) is None:
+        # ``raw_bar_exists_on`` 判不了会抛（不是返回 False）⇒ 走 except ⇒ 不写原因。
+        if not raw_bar_exists_on(conn, code, day):
             return ("upstream_lag", day.isoformat())
         if hfq_factor_on(conn, code, day) is None:
             return ("factor_missing", day.isoformat())
         return ("unusable", day.isoformat())
     except Exception as exc:  # noqa: BLE001 — 判不出就不写原因，绝不编一个
         _LOG.debug("滞后原因判定失败 %s %s: %s: %s", code, day, type(exc).__name__, exc)
+        # R67（审计 P2-2）：`hfq_factor_on(conn, ...)` 用的是调用方的**共享**连接。
+        # 这里是「失败时无条件 rollback」中**唯一正确的时机**：事务已经 aborted，
+        # 回滚销毁不了任何还有价值的东西，反而救回后续所有查询（陷阱 #31）。
+        _rollback_quietly(conn, f"stale_reason:{code}")
         return None
 
 

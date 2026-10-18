@@ -502,3 +502,190 @@ def test_recent_calls_clamps_limit(limit: int) -> None:
     recent_calls(conn, limit=limit)
     _sql, params = conn.executed[0]
     assert 1 <= params[0] <= 200
+
+
+# ── R67 P2-14：find_conflicting_call 的条件必须与唯一索引同源 ────────
+
+
+def test_find_conflicting_call_uses_the_unique_index_predicate() -> None:
+    """查询条件必须**逐字**等于 ``idx_cpt_llm_call_request_hash`` 的谓词。
+
+    为什么值得钉死：这个函数的整个存在理由就是「去重窗口是**永久**的」，
+    而它要替代的旧实现（``recent_calls(limit=50)`` + Python 里比 hash）恰好
+    只看得到最近 50 行。条件一旦与索引漂移，就退化成
+    「真冲突了但查不到」（回幽灵 call_id）或「查到了但没冲突」（回错 id），
+    两种都静默。
+
+    索引谓词的事实源是**迁移 SQL**，所以这里从 SQL 文件正则抽出谓词与代码比
+    —— 不抄一份常量进测试，否则测试自己就会漂。
+    """
+    from cpt.storage.llm_call_store import find_conflicting_call
+
+    conn = FakeConn(rows=[("c-real",)])
+    found = find_conflicting_call(conn, purpose="summarize_recommendation", request_hash_value="D")
+    assert found == "c-real"
+    sql, params = conn.executed[0]
+    assert params == ("summarize_recommendation", "D"), (
+        "purpose 必须进 WHERE，不能只在 Python 里过滤"
+    )
+    assert "purpose = %s" in sql
+    assert "request_hash = %s" in sql
+    assert "status IN ('queued','running','ok')" in sql, (
+        "状态条件丢了 ⇒ 会捞到 error/interrupted 的历史行"
+    )
+    migration = MIGRATION_PATH.read_text(encoding="utf-8")
+    match = re.search(
+        r"idx_cpt_llm_call_request_hash.*?WHERE status IN \(([^)]*)\)",
+        migration,
+        re.S,
+    )
+    assert match, "迁移 SQL 里找不到那条唯一索引 —— 事实源变了，本测试要跟着改"
+    # ⚠️ 比**状态集合**而不是字符串：迁移里写 `'queued', 'running', 'ok'`（分隔符带
+    # 空格），代码常量里是 `'queued','running','ok'`。SQL 里逗号后的空格不改变语义，
+    # 拿它当「漂移」判据只会逼出一次无意义的字符串对齐（第一版就是这么红的）。
+    # 真正要保证的是**同一批状态**，那才是决定「谁挡住了我」的东西。
+    sql_match = re.search(r"status IN \(([^)]*)\)", sql)
+    assert sql_match, "代码 SQL 里没有 status IN (...) 条件"
+
+    def _statuses(raw: str) -> set[str]:
+        return {s.strip().strip("'") for s in raw.split(",")}
+
+    assert _statuses(sql_match.group(1)) == _statuses(match.group(1)), (
+        f"代码条件与索引谓词漂移：索引是 {match.group(1)}，代码是 {sql_match.group(1)}"
+    )
+    # 确定性取一条，不依赖「唯一索引保证至多一行」这种跨文件隐式契约
+    assert "ORDER BY created_at DESC" in sql
+    assert sql.rstrip().upper().endswith("LIMIT 1")
+
+
+def test_find_conflicting_call_returns_none_when_no_conflict() -> None:
+    """没有冲突行 ⇒ ``None``，不是空字符串（调用方靠 ``or`` 回退）。"""
+    from cpt.storage.llm_call_store import find_conflicting_call
+
+    assert find_conflicting_call(FakeConn(rows=[]), purpose="p", request_hash_value="D") is None
+    assert (
+        find_conflicting_call(FakeConn(rows=[(None,)]), purpose="p", request_hash_value="D") is None
+    )
+
+
+def test_find_conflicting_call_raises_on_db_error() -> None:
+    """读失败**抛**，不能返回 ``None`` 冒充「没有冲突」。
+
+    返回 ``None`` 会让调用方回退到刚生成、从未入库的 id —— 正是 P2-14 要修的
+    那个幽灵 id。降级口径归调用方（``llm_cases._existing_call_id`` catch 它），
+    与 ``recent_calls`` 同一纪律。
+    """
+    from cpt.storage.llm_call_store import find_conflicting_call
+
+    class Broken:
+        def cursor(self) -> Any:
+            raise RuntimeError("relation does not exist")
+
+    with pytest.raises(LLMCallError):
+        find_conflicting_call(Broken(), purpose="p", request_hash_value="D")  # type: ignore[arg-type]
+
+
+def test_conflict_row_outside_the_recent_50_window_is_still_found() -> None:
+    """**P2-14 的原始病案**：冲突行落在最近 50 行之外时，旧实现查不到。
+
+    造一张 500 行的表，目标冲突行 ``created_at`` 最旧（第 1 行），后面压着
+    499 行别的调用（模拟同一个热点提示词引起的堆积，或别的 purpose 把时间轴
+    挤满）。``recent_calls(limit=50)`` 按时间倒序只看得到最新 50 行 ⇒
+    老实现返回 ``None`` ⇒ 调用方回退到刚生成、从未入库的 id ⇒ 前端轮询幽灵 id。
+
+    这里用**同一个假表**把新旧两种查法各跑一遍：新口径查到、老口径查不到。
+    只验新口径能查到是不够的 —— 那证明不了「旧实现真的会错」，也就证明不了
+    这次改动修掉了什么。
+    """
+    from cpt.storage.llm_call_store import _COLUMNS, find_conflicting_call
+
+    def _row(call_id: str, purpose: str, digest: str, status: str, created: int) -> dict[str, Any]:
+        """一行 12 列。**必须按真 ``_COLUMNS`` 个数吐全** —— ``_row_to_dict`` 里是
+        ``zip(_COLUMNS, row)``，只吐 1 个值的话 12 个列名全对到那一个值上，结果
+        只剩 ``call_id`` 一个键（第一版就是这样踩的 ``KeyError: 'request_hash'``）。
+        ``created_at`` 用整数：只用于排序，免去时区口舌。
+        """
+        return {
+            "call_id": call_id,
+            "purpose": purpose,
+            "subject_id": None,
+            "status": status,
+            "request_hash": digest,
+            "result_text": None,
+            "error_text": None,
+            "model": None,
+            "prompt_tokens": None,
+            "completion_tokens": None,
+            "created_at": created,
+            "finished_at": None,
+        }
+
+    #: 目标冲突行 ``created_at`` 最旧（0），后面 499 行全是别的 purpose。
+    target = _row("c-the-real-one", "summarize_recommendation", "DIGEST", "ok", 0)
+    noise = [
+        _row(f"c-other-{i}", "explain_structure", f"other-{i}", "ok", i + 1) for i in range(499)
+    ]
+    #: 真行池，按 ``ORDER BY created_at DESC`` 排好。
+    ordered = sorted([target, *noise], key=lambda row: row["created_at"], reverse=True)
+
+    class TableCursor:
+        def __init__(self, conn: TableConn) -> None:
+            self._conn = conn
+            self.rowcount = 0
+            self._rows: tuple[tuple, ...] = ()
+
+        def __enter__(self) -> TableCursor:
+            return self
+
+        def __exit__(self, *args: Any) -> None:
+            pass
+
+        def execute(self, sql: str, params: tuple = ()) -> None:
+            self._conn.executed.append((sql, params))
+            if "request_hash = %s" in sql:
+                # find_conflicting_call：只选 call_id，按索引谓词过滤后取 1 条
+                purpose, digest = params[0], params[1]
+                hits = [
+                    row
+                    for row in ordered
+                    if row["purpose"] == purpose
+                    and row["request_hash"] == digest
+                    and row["status"] in ("queued", "running", "ok")
+                ]
+                self._rows = tuple((row["call_id"],) for row in hits[:1])
+            else:
+                # recent_calls（老口径）：SQL 里**没有** purpose / request_hash /
+                # 状态条件，只是全表按时间倒序截前 limit 行，选全部 12 列。
+                self._rows = tuple(
+                    tuple(row[col] for col in _COLUMNS) for row in ordered[: int(params[-1])]
+                )
+
+        def fetchall(self) -> tuple[tuple, ...]:
+            return self._rows
+
+        def fetchone(self) -> tuple | None:
+            return self._rows[0] if self._rows else None
+
+    class TableConn:
+        def __init__(self) -> None:
+            self.executed: list[tuple[str, tuple]] = []
+
+        def cursor(self) -> TableCursor:
+            return TableCursor(self)
+
+    # 新口径：按索引谓词查，500 行里照样命中
+    conn = TableConn()
+    found = find_conflicting_call(
+        conn, purpose="summarize_recommendation", request_hash_value="DIGEST"
+    )
+    assert found == "c-the-real-one"
+
+    # 老口径：只拉最近 50 行、再在 Python 里比 hash ⇒ **查不到**
+    conn2 = TableConn()
+    recent = recent_calls(conn2, limit=50)
+    assert len(recent) == 50
+    old_hit = next((row for row in recent if row["request_hash"] == "DIGEST"), None)
+    assert old_hit is None, (
+        "这条断言失败**反而是好事**：说明 50 行窗口已经能覆盖目标行，本用例不再是 "
+        "P2-14 的有效复现 —— 需要把表造得更大，别急着删断言"
+    )

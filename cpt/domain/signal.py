@@ -4,17 +4,23 @@
 `assess_first_sell` 已由 :mod:`cpt.application.first_buy_bridge` 补算三结构事实，
 并接进 A 股主看板。
 
-:func:`transition_first_buy` / :func:`transition_first_sell` 的状态推进**也已接**
-（``a_share_snapshot.py`` 的 ``_derive_first_buy_signal``，配
-``load_previous_signal`` / ``record_signal_event`` 做持久化）——R21 之前这里写的是
-「仍未接」，R21 之后没回头改，属于过期描述。
+:func:`transition_first_buy` / :func:`transition_first_sell` 的状态推进**没有生产
+调用点**（P2-10，2026-10-17 更正）——R21 曾在 ``a_share_snapshot.py`` 的
+``_derive_first_buy_signal`` 里接了一条，但它的守卫
+（``facts.has_reversal_bi and signal.status == "structure_ready"``）恒为假，已删。
+两个函数本身保留：``_derive_first_buy_signal`` / ``_derive_first_sell_signal`` 已经
+把 ``load_previous_signal`` / ``record_signal_event`` 的跨轮持久化做完了，而这里的
+推进规则在生产路径上**由 ``assess_first_buy`` 自己完成**（``has_reversal_bi`` 为真
+即给 ``confirmed``）。本段此前写的「也已接」是 R21 当时的自述，未回头核实守卫可达性，
+属过期描述。
 
 **仍未接**，且要分清两种「没接」：
 
 - ``alert`` / ``candidate`` **不可达**（不是「待接线」）。``_advance`` 只有在
   ``previous.status == alert`` 时才产出 ``candidate``，而 ``assess_first_buy``
-  从不产出 ``alert``；生产路径只在「有反向笔且收盘确认」时推进，于是
-  ``structure_ready`` 直接跳到 ``confirmed``。生产上 ``status`` 的取值集合恒为
+  从不产出 ``alert``；生产路径在 ``has_reversal_bi`` 成立时**由
+  ``assess_first_buy`` 直接给 ``confirmed``**，于是 ``structure_ready`` 直接跳到
+  ``confirmed``。生产上 ``status`` 的取值集合恒为
   ``{structure_ready, confirmed, invalidated}``。要真接上需要盘中反向 K 线，
   由实时引擎标注 —— 那是**新增能力**，不是补线。
   （``tests/test_signal.py::test_structure_ready_stays_put_without_a_closed_reversal``
@@ -48,8 +54,9 @@
    ``invalidated`` 是终态——已失效信号不被后续入参复活。``alert``（反向K线盘中
    出现）与 ``candidate``（反向K线收盘后仍成立）需要盘中/收盘信息，本函数没有
    盘中参数，因此**不主动产生**这两个状态，只保持 ``previous`` 已有的取值；
-   ``alert → candidate → confirmed`` 的推进由 :func:`transition_first_buy`
-   （收盘后调用）承担。
+   ``alert → candidate → confirmed`` 的推进本应由 :func:`transition_first_buy`
+   （收盘后调用）承担，但该函数**当前没有生产调用点**（见模块 docstring 第 3 段，
+   P2-10）：缺的正是盘中反向 K 线，属新增能力而非补线。
 6. **时间戳**：``event_time`` 只写入与本次产出状态对应的字段（``alert_time`` /
    ``candidate_time`` / ``confirmed_time`` / ``invalidated_time``）；``previous``
    上已有的时间戳一律保留（§8.6「历史最终结果不能覆盖实时预警」）。

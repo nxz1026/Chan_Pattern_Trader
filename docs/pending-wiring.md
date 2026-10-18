@@ -193,7 +193,7 @@ R22 的 9 个接线点（路由与调用方均已 grep 复核）：
 
 > **R20 处置：新增 `cpt/application/first_buy_bridge.py`（翻译层），接进 A 股主看板。**
 > - 桥输出 `FirstBuyFacts`（三事实 + `center_ids` + `structure_id` + `divergence_status`），
->   再由 `a_share_snapshot.py:556 _derive_first_buy_signal` 调 `assess_first_buy` 出
+>   再由 `a_share_snapshot.py:568 _derive_first_buy_signal` 调 `assess_first_buy` 出
 >   `Signal`，经 `build_dashboard_snapshot_v2(..., signal=signal)` 落到
 >   `v2["signal"]`。接线点干净：v2 早有该形参，只是没人传。
 > - **保守口径四条**（全选「宁可判否」一侧）：①取本级别**最后两个**中枢，不是任意两个；
@@ -211,12 +211,17 @@ R22 的 9 个接线点（路由与调用方均已 grep 复核）：
 >   两个中枢（实测 60 组参数都造不出，`_extend` 会一路吞并），会「因为数据没结构」
 >   变红。`test_production_entry_calls_bridge` 用 monkeypatch 盯住「生产入口有没有
 >   调这个函数」，未接线时实测红（`assert []`），且不挑数据。
-> - **`transition_first_buy` 的状态推进：已接（R21，本条为过期描述已更正）** ——
->   `a_share_snapshot.py::_derive_first_buy_signal` 里调，配
->   `load_previous_signal` / `record_signal_event` 做跨日持久化。
+> - **`transition_first_buy` 的状态推进：没有生产调用点**（P2-10，2026-10-17 更正）
+>   —— R21 曾在 `a_share_snapshot.py::_derive_first_buy_signal` 里接过一条，但守卫
+>   `facts.has_reversal_bi and signal.status == "structure_ready"` **恒为假**
+>   （穷举 48 组入参命中 0 次），已删除。跨日持久化本身仍在（`load_previous_signal`
+>   / `record_signal_event`），推进则由 `assess_first_buy` **自己完成**：
+>   `has_reversal_bi` 为真即直接给 `confirmed`。本条此前写的「已接（R21）」是
+>   当时的自述，未回头核实守卫可达性。
 > - **`alert` / `candidate` 不可达**（不是「待接线」）：`_advance` 只在
 >   `previous.status == alert` 时产出 `candidate`，而 `assess_first_buy` 从不产出
->   `alert`；生产路径仅在「有反向笔 + 收盘确认」时推进，故 `structure_ready`
+>   `alert`；生产路径在 `has_reversal_bi` 成立时由 `assess_first_buy` 直接给
+>   `confirmed`，故 `structure_ready`
 >   **直接跳到 `confirmed`**。生产上 `status` 取值集合恒为
 >   `{structure_ready, confirmed, invalidated}`。真要接需要盘中反向 K 线，属**新增
 >   实时能力**而非补线；在此之前 `trade_api` 的白名单里不该出现这两个状态。
@@ -345,7 +350,7 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:98` 的
 |---:|---|---|
 | 94 | `market_24h` | `{"available": False, "reason": "upstream_aggregate_unavailable"}` |
 | 98 | `parity` | `{"available": False, "reason": "oracle_reference_unavailable"}` |
-| ~~62~~→`99` | `runs` | v2 体内的 `[]` **仍在**，但活路径不经它：`cpt/web/app.py:428 _with_run_index()` 在**HTTP 响应层**注入真值（R20），`:1054`/`:1114` 调用 |
+| ~~62~~→`99` | `runs` | v2 体内的 `[]` **仍在**，但活路径不经它：`cpt/web/app.py:438 _with_run_index()` 在**HTTP 响应层**注入真值（R20），`:1054`/`:1114` 调用 |
 | 101 | `multi_level` | `{"available": False, "reason": "multi_level_unavailable"}` |
 | 109 | `config_compare` | `{"available": False, "reason": "config_compare_unavailable"}` |
 
@@ -366,7 +371,7 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:98` 的
 
 | 函数 | 产品位置 | 处境 | R22 处置 |
 |---|---|---|---|
-| `dashboard_reproducibility.py::snapshot_diff` | roadmap R5 | **已接线（R22）** | 调用方 `dashboard_compare.py` 已接进 C3 `/compare`（`cpt/web/app.py:862`）；序列型值由 `cpt/web/app.py:462 _summarize_diff_value` 递归降级，避免原始 candles 灌进响应 |
+| `dashboard_reproducibility.py::snapshot_diff` | roadmap R5 | **已接线（R22）** | 调用方 `dashboard_compare.py` 已接进 C3 `/compare`（`cpt/web/app.py:862`）；序列型值由 `cpt/web/app.py:472 _summarize_diff_value` 递归降级，避免原始 candles 灌进响应 |
 | `adapters/a_share_local.py::_to_wind_code` | 台账决策 C1 | **已接线（R22）** | 调用方 `scripts/factor_backfill.py:199`（`def fetch_wind_factor_rows`）→ 循环体 `:594` 的 `_wind_fallback`，由 `--wind-fallback`（`:506`，**默认关闭**）开启；同时把非法输入从静默兜底改成抛 `ValueError` |
 | `adapters/wind_source.py::fetch_adjust_factors` | 台账决策 C1 | **已接线（R22）** | 同上调用链 `scripts/factor_backfill.py:210`（引用）与 `:221`（`fetch_adjust_factors` 调用）；取数失败只转文案、绝不向上抛 |
 

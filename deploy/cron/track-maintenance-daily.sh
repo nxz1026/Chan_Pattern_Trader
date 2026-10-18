@@ -15,6 +15,14 @@
 # 保留这句是因为它解释了**本脚本为什么存在**（历史理由），不是当前状态。
 # 另一个易错点：它是 **GET**，不是 POST —— POST 该路径会 405。
 #
+# ⚠️ **R67（审计 P2-9）新增：真删必须带 `X-CPT-Maintenance: 1` 请求头。**
+# 为什么：GET 是安全方法，服务又在 loopback 上不带凭据 —— 一个第三方页面的
+# `<img src="http://127.0.0.1:8010/api/dashboard/track/maintenance?apply=1">`
+# 就能让用户的浏览器替它做全表全用户的删除。**浏览器发不出自定义头**，
+# 而 urllib/curl 加一行即可。缺头时端点回 **403 `maintenance_needs_confirmation`**
+# （不是 400，也不是 500）—— 日志里看到这个码就是「头没带上」，
+# 不是「端点坏了」。dry-run（不带 apply）不需要这个头。
+#
 # ## 为什么走 HTTP 而不是像另外两个 prune 脚本那样直连 store
 #
 # 分发接上后，维护逻辑的**唯一入口**就是那个端点；cron 直连 store 会让
@@ -85,7 +93,9 @@ import urllib.request
 
 url = os.environ["CPT_MAINT_URL"]
 try:
-    with urllib.request.urlopen(url, timeout=60) as resp:
+    # R67（审计 P2-9）：破坏性清理必须带确认头，否则 403 maintenance_needs_confirmation。
+    req = urllib.request.Request(url, headers={"X-CPT-Maintenance": "1"})
+    with urllib.request.urlopen(req, timeout=60) as resp:
         body = resp.read().decode("utf-8", "replace")
         status = resp.status
 except urllib.error.HTTPError as exc:

@@ -30,6 +30,7 @@ bug（``LLM 状态落库失败 ... 'str' object is not callable``，2026-10-01 1
 
 from __future__ import annotations
 
+import http.client
 import json
 import logging
 import os
@@ -164,7 +165,12 @@ def notify(
             headers={"Content-Type": "application/json; charset=utf-8"},
         )
         result = send(req, timeout)
-    except (urllib.error.URLError, OSError, ValueError) as exc:
+    except (urllib.error.URLError, OSError, ValueError, http.client.HTTPException) as exc:
+        # ⚠️ `http.client.HTTPException` **不是** `OSError` 的子类（`IncompleteRead`
+        # / `BadStatusLine` / `RemoteDisconnected` 都直接继承 Exception）——
+        # R67（审计 P2-5）：漏了它，一条被截断的响应就会从 `notify()` 里穿出去，
+        # 把调用方的业务路径（批处理、巡检、跃迁推送）一起炸掉，而上面的
+        # docstring 恰恰承诺「观测通道不该有能力让业务路径崩掉」。
         # 这一条 warning 是**该记的**：告警通道本身坏了，必须让人知道。
         # 但异常原文常带完整 webhook（含 token）⇒ 落日志前先抹掉（M9）。
         _LOG.warning(

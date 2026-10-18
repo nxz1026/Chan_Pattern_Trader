@@ -485,7 +485,7 @@ crontab -l   # 逐条看，别只看数量
 | 03:40 | `run-inspection-daily.sh` | 巡检水位+数据源 → 飞书告警 | 只写巡检结论行 |
 | 04:10 | `run-metric-prune-daily.sh` | 清 `cpt_run_metric` 过期行 | run 90 天 / inspection 30 天 |
 | 04:30 | `dashboard-run-prune-daily.sh` | 清 `cpt_dashboard_run` 过期行 | 默认 7 天（R57 新增） |
-| 07:30 | `track-maintenance-daily.sh` | 清追踪过期快照/回收站（loopback 调 `GET /api/dashboard/track/maintenance?apply=1`） | 快照 30 天 / 回收站 90 天（R59 审计 M18 新增） |
+| 07:30 | `track-maintenance-daily.sh` | 清追踪过期快照/回收站（loopback 调 `GET /api/dashboard/track/maintenance?apply=1` + `X-CPT-Maintenance: 1` 头，R67/审计 P2-9） | 快照 30 天 / 回收站 90 天（R59 审计 M18 新增） |
 | 11:00 | `cron-daily-report.sh` | 扫上面 5 条的日志，发现失败发飞书 | R57 新增 |
 
 刻意错开：两条清理依次排在巡检之后；`track-maintenance` 放在北京 15:30（A 股收盘后

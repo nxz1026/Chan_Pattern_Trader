@@ -25,6 +25,7 @@ __all__ = [
     "TERMINAL_STATUSES",
     "call_row",
     "enqueue_call",
+    "find_conflicting_call",
     "finish_call",
     "latest_ok_text",
     "mark_interrupted",
@@ -173,6 +174,16 @@ _ON_CONFLICT = (
     "\nON CONFLICT (purpose, request_hash) WHERE status IN ('queued','running','ok') DO NOTHING"
 )
 
+#: 唯一索引 ``idx_cpt_llm_call_request_hash`` 的**部分条件**，原样在这里复用。
+#:
+#: ⚠️ 必须与索引谓词**逐字同源**（索引定义在
+#: ``scripts/migrations/2026-10-03_r25_llm_call.sql``：
+#: ``... (purpose, request_hash) WHERE status IN ('queued','running','ok')``）。
+#: 两者一旦漂移，问的就不是「谁挡了我」：会出现「真冲突了但查不到」（退化成
+#: 幽灵 call_id，正是 R67 P2-14 要修的 bug）与「查到了但其实没冲突」（把不相关
+#: 的 id 当本次结果回给前端）两种错，且都**静默**。
+_CONFLICT_PREDICATE = "purpose = %s AND request_hash = %s AND status IN ('queued','running','ok')"
+
 
 def enqueue_call(conn: Any, row: dict[str, Any]) -> bool:
     """写入一条 ``queued`` 记录。
@@ -293,6 +304,57 @@ def recent_calls(
         _LOG.warning("读取 LLM 调用列表失败: %s", exc)
         raise LLMCallError(f"读取 LLM 调用列表失败: {exc}") from exc
     return tuple(_row_to_dict(row) for row in rows)
+
+
+def find_conflicting_call(conn: Any, *, purpose: str, request_hash_value: str) -> str | None:
+    """找出**挡住了本次插入**那条记录的 ``call_id``；没有则返回 ``None``。
+
+    ## 为什么需要它（R67 P2-14）
+
+    ``enqueue_call`` 撞唯一索引时返回 ``False``，调用方（``llm_cases.
+    _enqueue_and_submit``）必须回一条**库里真实存在**的 ``call_id`` ——
+    否则前端拿着刚生成、从未入库的 id 去轮询，永远查不到，表现是
+    「明明算过，刷新一下摘要就没了」。
+
+    原来那个补救是 ``llm_cases._existing_call_id``：它翻 ``recent_calls(limit=50)``
+    找同 hash 的行。**两个方向都会错**：
+
+    - 去重窗口是**永久**的（部分唯一索引无时间条件），而它只看得到最近 50 行。
+      冲突那条一旦被挤出 50 行外（同 purpose 的热点提示词、或表里其它 purpose
+      的调用大量堆积），它就查不到、回退成幽灵 id —— **这正是要修的 bug 本身，
+      只是概率低**。
+    - 反过来，``recent_calls`` 是**全局**按时间倒序取 50 行、再在 Python 里比
+      ``request_hash``。它既没按 ``purpose`` 过滤（不同 purpose 撞同一个 hash
+      理论上可能），也没有状态条件 —— 所以它可能返回一条**与本次冲突无关**、
+      甚至已经是 ``error``/``interrupted`` 的历史行。
+
+    所以查询条件必须是**索引谓词本身**（见 :data:`_CONFLICT_PREDICATE`），
+    并且**确定性排序后取一条**：同一 ``(purpose, request_hash)`` 在索引覆盖的
+    状态集合里至多有一行（索引是 UNIQUE），但仍显式 ``ORDER BY created_at DESC
+    LIMIT 1`` —— 不靠「唯一索引保证了只有一行」这种跨文件的隐式契约，
+    排序让「取哪一条」在唯一索引哪天被放宽后依然确定。
+
+    :returns: 命中行 ``status`` 在 ``('queued','running','ok')`` 里的 ``call_id``；
+        没有 ``None``。
+    :raises LLMCallError: 读失败。与 :func:`recent_calls` 同一纪律 —— 读不到时
+        **不能**返回 ``None`` 冒充「没有冲突」，那正是把幽灵 id 放回给前端。
+        调用方（``llm_cases._existing_call_id``）捕获它并降级，由它决定降级口径。
+    """
+    sql = (
+        f"SELECT call_id FROM public.cpt_llm_call WHERE {_CONFLICT_PREDICATE}"
+        " ORDER BY created_at DESC LIMIT 1"
+    )
+    try:
+        with conn.cursor() as cur:
+            cur.execute(sql, (purpose, request_hash_value))
+            row = cur.fetchone()
+    except Exception as exc:
+        _LOG.warning("查询 LLM 冲突行失败: %s", exc)
+        raise LLMCallError(f"查询 LLM 冲突行失败: {exc}") from exc
+    if not row:
+        return None
+    call_id = row[0]
+    return str(call_id) if call_id else None
 
 
 def latest_ok_text(conn: Any, *, subject_like: str) -> str | None:

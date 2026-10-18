@@ -352,9 +352,11 @@ def _enqueue_and_submit(
         # 去轮询**永远查不到**，表现是「明明算过，刷新一下摘要就没了」。
         # ⇒ 重复时回**已存在那条**的真实 call_id。
         # ⚠️ **两处都有这个 bug**（explain + summarize），一起改。
+        # R67 P2-14：查找口径从「最近 50 行里翻 hash」改为按唯一索引谓词查，
+        # 两者范围原本不一致（去重窗口是永久的）—— 见 `_existing_call_id`。
         return {
             "available": False,
-            "call_id": _existing_call_id(conn, digest) or row["call_id"],
+            "call_id": _existing_call_id(conn, request.purpose, digest) or row["call_id"],
             "status": "duplicate",
             "reason": "same_request_in_flight_or_done",
         }
@@ -391,8 +393,8 @@ def _enqueue_and_submit(
     }
 
 
-def _existing_call_id(conn: Any, digest: str) -> str | None:
-    """按 ``request_hash`` 找出**已存在**那条调用的 ``call_id``；查不到返回 ``None``。
+def _existing_call_id(conn: Any, purpose: str, digest: str) -> str | None:
+    """按 ``(purpose, request_hash)`` 找出**挡住了本次插入**那条调用的 ``call_id``。
 
     为什么需要它：``enqueue_call`` 在重复时返回 ``False``，而调用方手里的
     ``row["call_id"]`` 是**新生成**的、库里根本不存在。直接回给前端，
@@ -400,15 +402,24 @@ def _existing_call_id(conn: Any, digest: str) -> str | None:
 
     ⚠️ R45 补这个时才发现：**explain_structure 早就带着同一个 bug** ——
     同一段代码抄了两份，bug 也抄了两份。
+
+    ## R67 P2-14：查询条件必须与唯一索引同源
+
+    原实现翻 ``recent_calls(limit=50)`` 再在 Python 里比 hash，与它要补救的那个
+    约束**范围不一致**：部分唯一索引
+    （``idx_cpt_llm_call_request_hash``，见
+    ``scripts/migrations/2026-10-03_r25_llm_call.sql``）的去重窗口是**永久**且带
+    ``purpose`` 与状态条件的，而 ``recent_calls`` 只看最近 50 行、不按
+    ``purpose`` 过滤、也没有状态条件。冲突行一旦被挤出 50 行外就查不到 ⇒
+    回退成幽灵 id（本函数要修的 bug 又在更窄的窗口里复现）；反过来也可能捞到
+    一条与本次冲突无关的历史行。
+
+    现在改为让 storage 按**索引谓词本身**查（``find_conflicting_call``），
+    条件与唯一索引逐字同源（``_CONFLICT_PREDICATE``）。
     """
-    from cpt.storage.llm_call_store import recent_calls  # noqa: PLC0415
+    from cpt.storage.llm_call_store import find_conflicting_call  # noqa: PLC0415
 
     try:
-        rows = recent_calls(conn, limit=50)
+        return find_conflicting_call(conn, purpose=purpose, request_hash_value=digest)
     except LLMCallError:
         return None
-    for item in rows:
-        if item.get("request_hash") == digest:
-            call_id = item.get("call_id")
-            return str(call_id) if call_id else None
-    return None

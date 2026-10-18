@@ -41,6 +41,42 @@ from typing import Any, Final
 
 _LOG = logging.getLogger(__name__)
 
+#: 批次保存点名。固定一个即可：同一连接上重复 ``SAVEPOINT`` 同名会顶掉旧的，
+#: 而同一连接本来就不可并发使用。
+_SAVEPOINT: Final[str] = "SAVEPOINT cpt_run_metric_batch"
+_ROLLBACK_TO_SAVEPOINT: Final[str] = "ROLLBACK TO SAVEPOINT cpt_run_metric_batch"
+_RELEASE_SAVEPOINT: Final[str] = "RELEASE SAVEPOINT cpt_run_metric_batch"
+
+
+def _supports_savepoints(conn: Any) -> bool:
+    """这条连接值不值得用保存点保护。
+
+    判据是 ``autocommit`` 属性**显式为真**时返回 False，其余（包括测试替身那种
+    没有该属性的）返回 True。方向是刻意选的：一个不认识保存点的替身最坏结果是
+    ``cur.execute("SAVEPOINT …")`` 被记进调用列表而无害（假游标不真跑 SQL），
+    比反过来「以为没有保存点、于是继续谎报行数」安全得多。
+
+    真连接上 ``psycopg`` 的 ``conn.autocommit`` 默认是 False（每条语句都在事务里），
+    那时保存点才有意义 —— autocommit 下每条语句自成一个事务，先前的行**真的**
+    已经落库，撤不回来，只能照实报数。
+    """
+    return getattr(conn, "autocommit", False) is not True
+
+
+def _needs_savepoint(conn: Any, rows: Sequence[RunMetric]) -> bool:
+    """这一批需不需要保存点。
+
+    **单行批次不需要，而且这是刻意的**：只有一行时失败就是「一行都没写」，
+    返回 0 本来就已经是真话，调用方自己的 rollback 足以把连接从 aborted 态救回来
+    （R45 那条路径今天仍然正确）。谎报**只**出现在 2 行及以上 —— 那时前 n-1 行
+    真的进过事务、又会随 aborted 事务一起消失，必须先撤掉才能诚实地报 0。
+
+    生产上今天所有调用方都是单行（``MetricRecorder.record``、``run_inspection``），
+    所以这个条件等于「热路径零开销、只给坏路径加两次往返」。
+    """
+    return len(rows) > 1 and _supports_savepoints(conn)
+
+
 __all__ = [
     "HEALTH_VALUES",
     "KIND_INSPECTION",
@@ -167,16 +203,32 @@ def ensure_table(conn: Any) -> None:
 
 
 def append_metrics(conn: Any, rows: Sequence[RunMetric]) -> int:
-    """批量写入。返回写入行数。
+    """批量写入。返回**将要随调用方 ``commit()`` 落库**的行数。
 
     # gate: allow-silent: 观测/记账数据是**旁路**，写失败不该让主计算路径挂。
     # 调用方 ``run_metric.RunMetricRecorder.record`` 不因此中断，
     # 且已按此契约补上 rollback（R45）。
 
     **写入失败只记 warning、不抛** —— 观测数据丢了不该让计算路径跟着挂。
-    但**返回的行数是「已入事务的行数」**：第 n 行失败时前 n-1 行已经在调用方的
-    事务里了（store 层不 commit），谎报 0 会让人以为「一行都没写」→ 重跑整批 →
-    前 n-1 行变重复行。
+
+    ## R67（审计 P2-11）：返回值曾经在 PG 上是**谎报**
+
+    R45 把返回语义定成「已入事务的行数」（第 n 行失败就报 n-1），理由是
+    「那 n-1 行已经在调用方的事务里了，报 0 会导致重跑出重复行」。这个推理在
+    **PG 上不成立**：一句语句失败会让**整条事务**进 aborted 态，那 n-1 行根本
+    提交不上（后续 ``commit()`` 不抛、等价于 ROLLBACK）。于是调用方读到非 0
+    就以为成功 —— 既不回滚也不重试，整批**静默丢弃**。返回值越"诚实"，谎越大。
+
+    修法：批次用 ``SAVEPOINT`` 包住。失败时 ``ROLLBACK TO SAVEPOINT`` 只撤本批，
+    事务从 aborted 态恢复，调用方手上还留着它自己先前的语句（不牵累）。
+    此时**确实一行都没入事务**，返回 0 才是真话，重跑也安全。
+
+    **只对多行批次加保存点**（见 :func:`_needs_savepoint`）：单行失败本来就是
+    「一行都没写」，返回值天然诚实，R45 那条 rollback 路径今天仍然正确 ——
+    不必为它多付两次往返。
+
+    autocommit 连接没有事务可保护（每条语句自成一个事务，先前的行**真的**已落库），
+    那里退回老语义：成功几行就报几行，且不失败即不回滚。
 
     ⚠️ **值为 ``None`` 的列整列省略**（让 DB 的 ``DEFAULT`` 生效），而不是写 NULL。
     DEFAULT 只在"不写这一列"时生效，显式 NULL 照样触发 NOT NULL 违约。
@@ -184,13 +236,24 @@ def append_metrics(conn: Any, rows: Sequence[RunMetric]) -> int:
     其中几列 —— 第一版逐列判断结果只特判了 ``observed_at``，于是巡检行一写就
     炸 ``null value in column "config_hash"``。规则统一之后就不用再逐列踩。
     （代价：本表没有可空列，所以"想写 NULL"这个语义用不上。）
+
+    R67 备选方案（未采用）：逐行 SAVEPOINT、跳过坏行继续写。收益是坏行不连累
+    兄弟行，代价是**部分成功**对调用方不可见（它只拿到一个数字，不知道哪些没写、
+    也不知道该不该重试）。生产上今天所有调用方都是单行（``MetricRecorder.record``、
+    ``run_inspection``），批量语义不值得为它牺牲「要么整批、要么重试」的干净边界。
     """
     if not rows:
         return 0
+    #: 批次保存点。同名 SAVEPOINT 重复定义是合法的（旧的被顶掉），所以并发调用
+    #: 同一连接也只会撤掉自己那批（同一连接本来就不可并发，这里只是不额外制造
+    #: 名字冲突面）。
+    savepoint = _needs_savepoint(conn, rows)
     written = 0
     # ⚠️ ``with conn.cursor() as cur``：原来只 ``conn.cursor()`` 不进上下文
     # 管理器，游标一路泄漏到 GC（每个 batch 一个）。
     with conn.cursor() as cur:
+        if savepoint:
+            cur.execute(_SAVEPOINT)
         try:
             for row in rows:
                 cols: list[str] = []
@@ -213,17 +276,39 @@ def append_metrics(conn: Any, rows: Sequence[RunMetric]) -> int:
                 )
                 written += 1
         except Exception as exc:  # noqa: BLE001
-            # 返回值必须**诚实**：前 n-1 行已经在**调用方的事务里**了（store 层
-            # 不 commit），原来的 ``return 0`` 会让人以为「一行都没写」——
-            # 而重跑整批会把那 n-1 行写成重复行。所以报**已入事务**的行数。
+            if savepoint:
+                # 撤掉本批。**这一步是整条修复的支点**：不做它，事务留在 aborted 态，
+                # 下面无论返回几行都是谎话（提交时整批消失）。
+                #
+                # 撤不回去（极少）也照样报 0 —— 那时事务仍是 aborted，返回非 0 会让
+                # 调用方跳过 rollback，反而把「静默丢弃」重现一遍。报 0 让调用方
+                # 走它的 rollback 兜底，与下面的告警一起形成 fail-closed。
+                try:
+                    cur.execute(_ROLLBACK_TO_SAVEPOINT)
+                except Exception as undo_exc:  # noqa: BLE001 — 兜底失败只能记录
+                    _LOG.warning(
+                        "cpt_run_metric 批次回滚失败（事务可能仍 aborted）：%s: %s",
+                        type(undo_exc).__name__,
+                        undo_exc,
+                    )
+            # 返回值必须**诚实**。R67 前这里报 ``written``（「前 n-1 行已入事务」），
+            # 但 PG 上那 n-1 行随 aborted 事务一起没了 ⇒ 谎报 ⇒ 调用方以为成功。
+            # 现在：有保存点 ⇒ 真的一行都没留下 ⇒ 0；没有保存点 ⇒ 只有两种情形，
+            # 要么单行（written 必为 0 或根本没有失败行）要么 autocommit
+            # （先前的行各自已落库、撤不回来），都照实报 written 才是真话。
             _LOG.warning(
-                "cpt_run_metric 写入中断（%d/%d 行已入事务）：%s: %s",
+                "cpt_run_metric 写入中断（本批 %d/%d 行，事务状态：%s）：%s: %s",
                 written,
                 len(rows),
+                "已回退到保存点" if savepoint else "无保存点，已入事务的行保留",
                 type(exc).__name__,
                 exc,
             )
-            return written
+            return 0 if savepoint else written
+        if savepoint:
+            # 批次成功 ⇒ 释放保存点。不释放也能工作（下一个同名 SAVEPOINT 会顶掉它），
+            # 但长事务里保存点会一直累积（PG 不自动回收），所以显式收尾。
+            cur.execute(_RELEASE_SAVEPOINT)
     return written
 
 

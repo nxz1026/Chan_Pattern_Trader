@@ -297,3 +297,49 @@ def test_body_error_reports_unparseable_code() -> None:
     assert feishu._body_error('{"code": null}') is not None
     assert feishu._body_error('{"code": 0}') is None
     assert feishu._body_error("[]") is not None
+
+
+def test_truncated_response_does_not_escape_notify(
+    monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    """★R67（审计 P2-5）：`http.client.HTTPException` 不是 `OSError` 子类。
+
+    `IncompleteRead` / `RemoteDisconnected` / `BadStatusLine` 都直接继承
+    `Exception`。修前：一条被截断的飞书响应会从 `notify()` 里穿出去，
+    把调用方的业务路径（批处理 / 巡检 / 跃迁推送）一起炸掉 —— 而 docstring
+    承诺「观测通道不该有能力让业务路径崩掉」。
+    """
+    import http.client  # noqa: PLC0415 — 只在异常类型上用到
+
+    monkeypatch.setenv(feishu.ENV_WEBHOOK, _WEBHOOK)
+
+    def _truncated(req: object, timeout: float) -> tuple[int, str]:
+        raise http.client.IncompleteRead(b'{"code": 0, "msg": "succ')
+
+    with caplog.at_level(logging.WARNING):
+        assert feishu.notify("巡检", ["一行"], opener=_truncated) is False
+    assert "IncompleteRead" in caplog.text, caplog.text
+
+
+def test_remote_disconnected_is_swallowed_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同类病换入口复发（陷阱 #30）：对端把连接关掉也不许穿出去。"""
+    import http.client  # noqa: PLC0415
+
+    monkeypatch.setenv(feishu.ENV_WEBHOOK, _WEBHOOK)
+
+    def _boom(req: object, timeout: float) -> tuple[int, str]:
+        raise http.client.RemoteDisconnected("Remote end closed connection")
+
+    assert feishu.notify("巡检", opener=_boom) is False
+
+
+def test_bad_status_line_is_swallowed_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    """同一个洞的第三个入口：状态行是垃圾（代理返回非 HTTP 内容）。"""
+    import http.client  # noqa: PLC0415
+
+    monkeypatch.setenv(feishu.ENV_WEBHOOK, _WEBHOOK)
+
+    def _boom(req: object, timeout: float) -> tuple[int, str]:
+        raise http.client.BadStatusLine("<html>502</html>")
+
+    assert feishu.notify("巡检", opener=_boom) is False

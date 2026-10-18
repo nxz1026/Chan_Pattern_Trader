@@ -147,33 +147,70 @@ def _iter_braces(text: str) -> Iterator[tuple[str, bool]]:
 
     顶层 = 不被另一个容器包住的。嵌套的 ``{"a": {"b": 1}}`` 只产出外层那个 ——
     内层单独拿去解析当然也能过，但它几乎不会是调用方要的 shape。
+
+    ## R67（审计 P2-13）：深度是**一次前向扫描**算出来的
+
+    原实现每遇到一个 ``{``/``[`` 就调 :func:`_inside_open_container` 从下标 0
+    重扫一遍前缀 ⇒ **O(n²)**。provider 允许 512 KiB 的回复、队列默认 1 个 worker，
+    实测 20k 个括号 17.4s（8k 2.75s）—— 一个畸形回复就能把队列堵住。
+
+    现在把「字符串状态 + 深度」两个变量在**同一个循环**里往下推：总代价 O(n)。
+
+    ## 与旧实现**逐位等价**的那条细节
+
+    旧实现的候选判据**只看深度**（``depth > 0`` 就跳过），位置本身是否落在
+    字符串里**不参与**判据 —— 字符串的含义交给 :func:`_scan_balanced` 从候选点
+    重新判定。所以这里也必须让候选检查发生在字符串分支**之前**：
+    形如 ``he said "{"a": 1}`` 的输出（引号没配平、JSON 在"字符串"里）在旧实现下
+    是**能捞出来**的，而「先判 in_string 再判候选」的写法会把它整条丢掉。
+
+    （差异测试见 ``tests/test_llm_structured_scan_linear.py``：手工边界 + 固定种子
+    模糊语料上与「重扫前缀」的参考实现比对。）
     """
+    depth = 0
+    in_string = False
+    escaped = False
     index = 0
     length = len(text)
+    skip_until = 0
     while index < length:
         char = text[index]
-        if char not in "{[":
-            index += 1
-            continue
-        # 往前看：若落在另一个未闭合的容器内部，就跳过
-        if _inside_open_container(text, index):
-            index += 1
-            continue
-        fragment, closed = _scan_balanced(text, index)
-        if not fragment:
-            return
-        yield fragment, closed
-        # 闭合：跳过整个片段（下一个候选一定在它之后）；
-        # 未闭合（多半被 max_tokens 截断）：只前进一个字符，好在同一段残片里
-        # 继续找下一个起始括号。
-        # ⚠️ R67：这里曾是 `index += 1 if not closed else index + len(fragment)` ——
-        # 复合赋值的右值又含 index 自己 ⇒ 闭合分支实际是 `2*index + len(fragment)`：
-        # 游标被**双计数**，跳过了后面的合法候选，还把 reason 谎报成 schema_mismatch。
-        index += len(fragment) if closed else 1
+        # ① 候选检查：判据只有深度（与旧实现一致），**不看** in_string。
+        #    旧实现碰到配平片段就 ``index += len(fragment)`` 跳过去，
+        #    所以片段内部的位置**即使深度又回到 <=0 也不再当候选** ——
+        #    skip_until 就是复刻这个跳转的（状态仍然逐字符推进，所以深度与
+        #    「从 0 重扫」完全一致）。
+        if index >= skip_until and char in "{[" and depth <= 0:
+            fragment, closed = _scan_balanced(text, index)
+            if not fragment:
+                return
+            yield fragment, closed
+            if closed:
+                skip_until = index + len(fragment)
+        # ② 状态推进：逐字符走，保证 depth/in_string 与「从 0 重扫」完全一致。
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+        elif char == '"':
+            in_string = True
+        elif char in "{[":
+            depth += 1
+        elif char in "}]":
+            # 多余的右括号把深度推成负数 —— 与旧实现一致。
+            depth -= 1
+        index += 1
 
 
 def _inside_open_container(text: str, position: int) -> bool:
-    """``position`` 处是否在某个**尚未闭合**的容器内部。"""
+    """``position`` 处是否在某个**尚未闭合**的容器内部。
+
+    仅供测试与诊断使用 —— 热路径（:func:`_iter_braces`）已改为一次前向扫描
+    （R67/审计 P2-13：原来每个候选都从这里重扫前缀 ⇒ O(n²)）。
+    """
     depth = 0
     in_string = False
     escaped = False

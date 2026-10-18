@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -139,15 +140,15 @@ def test_duplicate_returns_existing_call_id(monkeypatch, fn) -> None:
     # 我第一版按 dataclass 写、还 import 了一个不存在的 CallRow —— 全是猜的。
     monkeypatch.setattr(lc, "enqueue_call", lambda *a, **k: False)  # 重复
     # ⚠️ 要 patch **store 模块**里的那个 —— ``_existing_call_id`` 是
-    # 函数内 `from cpt.storage.llm_call_store import recent_calls`，
-    # patch ``llm_cases.recent_calls`` 对它**无效**（第一版踩了，
-    # 于是真函数拿着假连接跑，报 no attribute 'cursor'）。
+    # 函数内 `from cpt.storage.llm_call_store import find_conflicting_call`，
+    # patch ``llm_cases.find_conflicting_call`` 对它**无效**（第一版踩了；
+    # 那时查的是 recent_calls，于是真函数拿着假连接跑、报 no attribute 'cursor'）。
     import cpt.storage.llm_call_store as store
 
     monkeypatch.setattr(
         store,
-        "recent_calls",
-        lambda *a, **k: [{"call_id": "REAL-1", "request_hash": "DIGEST"}],
+        "find_conflicting_call",
+        lambda *a, **k: "REAL-1",
     )
     monkeypatch.setattr(lc, "request_hash", lambda *a: "DIGEST")
     monkeypatch.setattr(
@@ -173,3 +174,52 @@ def test_duplicate_returns_existing_call_id(monkeypatch, fn) -> None:
     assert out["status"] == "duplicate"
     assert out["call_id"] == "REAL-1", "回的是刚生成、库里不存在的 id"
     assert out["call_id"] != "FRESH-NOT-IN-DB"
+
+
+def test_duplicate_lookup_is_scoped_to_purpose_and_index_predicate(monkeypatch) -> None:
+    """R67 P2-14：查冲突必须把 ``purpose`` 传下去，且**不**再翻 recent_calls。
+
+    原来的实现翻 ``recent_calls(limit=50)``、在 Python 里比 hash —— 去重窗口
+    是永久的（部分唯一索引无时间条件），50 行外就查不到 ⇒ 回退成幽灵 id。
+    这里钉住「传了哪些参数」，防止哪天又退回「拉一批历史行自己过滤」。
+    """
+    import cpt.storage.llm_call_store as store
+
+    monkeypatch.setattr(lc, "enqueue_call", lambda *a, **k: False)
+    monkeypatch.setattr(lc, "request_hash", lambda *a: "DIGEST")
+    monkeypatch.setattr(
+        lc,
+        "call_row",
+        lambda **k: {
+            "call_id": "FRESH-NOT-IN-DB",
+            "request_hash": "DIGEST",
+            "status": "queued",
+            "purpose": k.get("purpose", ""),
+        },
+    )
+    seen: dict[str, Any] = {}
+
+    def fake_find(conn, *, purpose, request_hash_value):  # noqa: ANN001
+        seen["purpose"] = purpose
+        seen["request_hash_value"] = request_hash_value
+        return "REAL-2"
+
+    monkeypatch.setattr(store, "find_conflicting_call", fake_find)
+    # 旧实现依赖 recent_calls；若它又被调起来，说明查询口径回退了。
+    calls: list[Any] = []
+    monkeypatch.setattr(store, "recent_calls", lambda *a, **k: calls.append(a) or ())
+
+    out = lc.summarize_recommendation(
+        _FakeConn(),
+        code="600519",
+        name="",
+        action_label="观望",
+        headline="h",
+        reason="r",
+        price=1.0,
+    )
+    assert out["status"] == "duplicate"
+    assert out["call_id"] == "REAL-2"
+    assert seen["request_hash_value"] == "DIGEST"
+    assert seen["purpose"] not in ("", None), "purpose 没传下去 ⇒ 又变成全局扫 hash"
+    assert calls == [], "又退回 recent_calls 全表拉取了 —— 去重窗口是永久的，50 行外查不到"

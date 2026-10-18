@@ -738,6 +738,16 @@ def factor_from_actions(
         drop = float(cash) / prev
         if not 0 <= drop < 1:  # 派息不可能超过除权前收盘，否则是数据错
             _LOG.warning("跳过异常除权 %s：派息 %s / 前收 %s", act.ex_date, cash, prev)
+            # R67（审计 P2-6）：**只丢这次现金，不能连送转一起丢**。
+            # 一条 CorporateAction 可以同时带现金与 `share_ratio`（送转 + 派息同日）、
+            # 而 Wind 的列集合按标的而变（`cash_pre_tax` 有时是 `cash_after_tax`
+            # 的近似，见上面的 docstring）。坏现金只否定"派息"那一半 ——
+            # 原来的 `continue` 会把**与该现金无关的送转台阶**一起丢掉，
+            # 于是该除权日的因子偏小，并且从那天起**向后全错**（分段常数一旦错
+            # 就不是局部误差）。这与上面 `cash is None` 分支的处置保持一致。
+            if ratio:
+                acc *= 1.0 + ratio
+                out[act.ex_date] = acc
             continue
         acc *= (1.0 + ratio) / (1.0 - drop)
         out[act.ex_date] = acc

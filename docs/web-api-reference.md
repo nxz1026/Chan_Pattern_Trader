@@ -132,8 +132,18 @@ python scripts/verify_public_contracts.py    # 外部契约（adapters 层）
 ## R45 新增：`/api/dashboard/a-share/recommendation`
 
 ```
-GET /api/dashboard/a-share/recommendation?code=600519[&level=1d]
+GET /api/dashboard/a-share/recommendation?code=600519
 ```
+
+> ⚠️ **R67（审计 P2-8）：这个 GET 有写副作用。** 主路径会 `INSERT+COMMIT` 一行
+> 到共享生产库的 `public.cpt_recommendation`（推荐留痕，供 `history_days` 读回）。
+> 留痕是 **best-effort + 心跳去重**（内容未变且未到心跳点则跳过），失败只记日志、不让接口 500。
+> 因此**它不是幂等的只读端点**：刷新一次就可能多一行。
+>
+> ⚠️ **`level` 参数已不再生效**（同一个审计条目）：它进的是留痕去重键
+> `(code, level)` 与 `cpt_recommendation.level` 列，但改变不了任何计算
+> （A 股推荐只在主级别 `config.levels[0]` 上算）。保留这个参数只会让
+> `?level=<随机串>` 变成「一个新键 = 一次无条件写入」。级别标签由服务端决定。
 
 结构判断摘要：**动作 + 参考价 + 依据**。**纯确定性** ——
 买卖与价格由 `cpt/application/recommendation.py` 算出，**不经 LLM**
@@ -198,7 +208,7 @@ GET /api/dashboard/a-share/recommendation?code=600519[&level=1d]
 ### P2 追加：`history_days=N` 读回推荐留痕
 
 ```
-GET /api/dashboard/a-share/recommendation?code=600519&level=1d&history_days=30
+GET /api/dashboard/a-share/recommendation?code=600519&history_days=30
 ```
 
 多返回一个 `recommendation_history`：

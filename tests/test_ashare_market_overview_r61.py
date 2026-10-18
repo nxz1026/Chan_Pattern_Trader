@@ -395,7 +395,12 @@ def _quality_with_symbol(candles: list[dict], code: str = "600519") -> dict:
 def _reason_env(
     stale_env, monkeypatch: pytest.MonkeyPatch, **probe: object
 ) -> list[tuple[str, object]]:
-    """收盘后（北京 16:00）+ 末根 10-13 → 缺口 [10-14]，并把两个探针换成假实现。"""
+    """收盘后（北京 16:00）+ 末根 10-13 → 缺口 [10-14]，并把两个探针换成假实现。
+
+    R67（审计 P2-1）：第一态探针从 ``fetch_raw_bar_on``（自建连、吞异常）换成
+    ``raw_bar_exists_on``（走共享连接、会抛）。桩必须跟着换 —— 否则打的是**不再
+    被调用**的函数，实现改坏了测试也会照样绿。
+    """
     import cpt.adapters.a_share_local as local
 
     stale_env(
@@ -404,7 +409,7 @@ def _reason_env(
     )
     seen: list[tuple[str, object]] = []
 
-    def fake_bar(code: str, day: dt.date):
+    def fake_bar(_conn: object, code: str, day: dt.date):
         seen.append(("bar", day))
         value = probe.get("bar")
         return _raise(value) if isinstance(value, Exception) else value
@@ -414,7 +419,7 @@ def _reason_env(
         value = probe.get("factor")
         return _raise(value) if isinstance(value, Exception) else value
 
-    monkeypatch.setattr(local, "fetch_raw_bar_on", fake_bar)
+    monkeypatch.setattr(local, "raw_bar_exists_on", fake_bar)
     monkeypatch.setattr(local, "hfq_factor_on", fake_factor)
     return seen
 
@@ -424,8 +429,11 @@ def _raise(exc: object) -> object:
 
 
 def test_stale_reason_upstream_lag_when_daily_bar_absent(stale_env, monkeypatch) -> None:
-    """库里根本没有这天 → 真·上游滞后，且**不该**再问因子（省一次查询）。"""
-    seen = _reason_env(stale_env, monkeypatch, bar=None, factor=6.39)
+    """库里根本没有这天 → 真·上游滞后，且**不该**再问因子（省一次查询）。
+
+    ``raw_bar_exists_on`` 返回 ``False``（该日**确无** bar）才是 ``upstream_lag``。
+    """
+    seen = _reason_env(stale_env, monkeypatch, bar=False, factor=6.39)
     snapshot = _quality_with_symbol([{"open_time": _bar_ms(dt.date(2026, 10, 13))}])
     _attach_staleness(snapshot, object())
     quality = snapshot["data_quality"]
@@ -437,7 +445,7 @@ def test_stale_reason_upstream_lag_when_daily_bar_absent(stale_env, monkeypatch)
 
 def test_stale_reason_factor_missing_when_bar_in_db_without_factor(stale_env, monkeypatch) -> None:
     """2026-10-14 的真实情形：bar 已在库、当天复权因子没有。"""
-    seen = _reason_env(stale_env, monkeypatch, bar=(dt.date(2026, 10, 14), 1286.0), factor=None)
+    seen = _reason_env(stale_env, monkeypatch, bar=True, factor=None)
     snapshot = _quality_with_symbol([{"open_time": _bar_ms(dt.date(2026, 10, 13))}])
     _attach_staleness(snapshot, object())
     quality = snapshot["data_quality"]
@@ -449,10 +457,58 @@ def test_stale_reason_factor_missing_when_bar_in_db_without_factor(stale_env, mo
 
 def test_stale_reason_unusable_when_bar_and_factor_both_present(stale_env, monkeypatch) -> None:
     """行和因子都在、K 线仍跳过了它 → 不编原因，交给日志。"""
-    _reason_env(stale_env, monkeypatch, bar=(dt.date(2026, 10, 14), 1286.0), factor=6.39415165)
+    _reason_env(stale_env, monkeypatch, bar=True, factor=6.39415165)
     snapshot = _quality_with_symbol([{"open_time": _bar_ms(dt.date(2026, 10, 13))}])
     _attach_staleness(snapshot, object())
     assert snapshot["data_quality"]["stale_reason"] == "unusable"
+
+
+@pytest.mark.parametrize(
+    "exc_name",
+    ["OperationalError", "UndefinedTable", "TimeoutError"],
+)
+def test_stale_reason_is_omitted_when_the_db_cannot_be_probed(
+    stale_env, monkeypatch, exc_name: str
+) -> None:
+    """★P2-1 核心：DB/驱动故障 ⇒ **不写原因**，而不是写一句确信的 ``upstream_lag``。
+
+    修复前 ``fetch_raw_bar_on`` 自建连 + 吞异常 ⇒「DB 不可达」与「这天没有 bar」
+    在调用点都返回 ``None`` ⇒ 面板与巡检告警上写着「上游当日 bar 未入库」，运维于是
+    去查 emotion-core 的入库管道 —— 而真相是 CPT 自己连不上库。
+
+    异常类型用**同名替身**构造（真 ``psycopg`` 类的等价用例在
+    ``tests/test_audit_p2_1_stale_reason_db_failure.py``）：本函数判的是
+    「抛没抛」，不挑类型，所以替身足以钉住这条语义，同时让本文件不依赖 psycopg。
+    """
+    exc = (
+        TimeoutError("statement timeout")
+        if exc_name == "TimeoutError"
+        else type(exc_name, (RuntimeError,), {})("db unreachable")
+    )
+    _reason_env(stale_env, monkeypatch, bar=exc, factor=6.39)
+    snapshot = _quality_with_symbol([{"open_time": _bar_ms(dt.date(2026, 10, 13))}])
+    _attach_staleness(snapshot, object())
+    quality = snapshot["data_quality"]
+    assert quality["stale"] is True, "stale 本身的含义不受影响"
+    assert "stale_reason" not in quality, "判不了就不许写原因（更不许写 upstream_lag）"
+    assert quality["stale_lag_days"] == 1, "滞后的深度照旧带着"
+
+
+def test_stale_reason_is_omitted_when_the_factor_probe_cannot_reach_the_db(
+    stale_env, monkeypatch
+) -> None:
+    """第二态同样：因子查询抛错 ⇒ 不写原因（不许降级成 ``factor_missing``）。"""
+    _reason_env(
+        stale_env,
+        monkeypatch,
+        bar=True,
+        factor=RuntimeError("server closed the connection unexpectedly"),
+    )
+    snapshot = _quality_with_symbol([{"open_time": _bar_ms(dt.date(2026, 10, 13))}])
+    _attach_staleness(snapshot, object())
+    quality = snapshot["data_quality"]
+    assert quality["stale"] is True
+    assert "stale_reason" not in quality
 
 
 def test_stale_reason_probes_earliest_missing_day(stale_env, monkeypatch) -> None:
@@ -464,7 +520,8 @@ def test_stale_reason_probes_earliest_missing_day(stale_env, monkeypatch) -> Non
         missing=[dt.date(2026, 10, 14), dt.date(2026, 10, 15)],
     )
     seen: list[dt.date] = []
-    monkeypatch.setattr(local, "fetch_raw_bar_on", lambda code, day: seen.append(day))
+    # R67（P2-1）：第一态探针换成了 raw_bar_exists_on，桩必须跟着换。
+    monkeypatch.setattr(local, "raw_bar_exists_on", lambda _c, code, day: seen.append(day))
     monkeypatch.setattr(local, "hfq_factor_on", lambda _c, code, day: 6.39)
     snapshot = _quality_with_symbol([{"open_time": _bar_ms(dt.date(2026, 10, 13))}])
     _attach_staleness(snapshot, object())

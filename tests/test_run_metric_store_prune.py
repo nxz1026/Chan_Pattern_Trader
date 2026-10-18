@@ -200,17 +200,40 @@ class _PartialFailCursor(_Cur):
             self.inserts += 1
 
 
-def test_append_metrics_returns_rows_actually_inserted() -> None:
-    """中途失败的返回值**不许**撒谎。
+def test_append_metrics_rolls_the_whole_batch_back_to_a_savepoint() -> None:
+    """★R67（审计 P2-11）：中途失败 ⇒ 撤掉**整批** + 返回 **0**。
 
-    第 n 行失败时前 n-1 行已经在**调用方的事务里**了（store 层不 commit），
-    返回 0 会让人以为「一行都没写」→ 重跑整批 → 前 n-1 行变重复行。
+    旧断言是 ``== 2``（「前 2 行已入事务」）。那个语义在 PG 上是**谎报**：
+    第 3 行一抛，整条事务进 aborted 态，前 2 行随调用方随后的 ``commit()``
+    一起消失（aborted 事务上的 commit 不抛、等价于 ROLLBACK）。返回值越"诚实"，
+    调用方越会以为成功 ⇒ 既不回滚也不重试 ⇒ 整批静默丢弃。
+
+    现在批次被 ``SAVEPOINT`` 包着，失败即 ``ROLLBACK TO SAVEPOINT``：
+    确实一行都没留下 ⇒ 返回 0 才是真话，调用方重跑也安全（不会出重复行）。
     """
     conn = _Conn()
     conn.cursor = lambda: _PartialFailCursor(conn, 2)  # type: ignore[method-assign]
     rows = [{"observed_at": i, "market": "a_share", "symbol": "600519"} for i in range(5)]
+    assert rms.append_metrics(conn, rows) == 0
+    assert conn.commits == 0, "store 层一律不 commit"
+    # 保存点：先 SAVEPOINT，失败后 ROLLBACK TO SAVEPOINT
+    assert any("SAVEPOINT cpt_run_metric_batch" in c for c in conn.calls)
+    assert any(c.startswith("ROLLBACK TO SAVEPOINT") for c in conn.calls)
+
+
+def test_append_metrics_keeps_the_honest_count_when_autocommit() -> None:
+    """autocommit 连接撤不回已落库的行 ⇒ 退回老语义（成功几行报几行），且不假装回滚。
+
+    这条分支存在是因为两条真实路径不同：事务连接上「已入事务」是**暂时**的
+    （提交前可撤），autocommit 上「已插入」是**永久**的（每句自成事务）。
+    老语义只对后者成立，R67 之前它被套用到了前者身上。
+    """
+    conn = _Conn()
+    conn.autocommit = True  # type: ignore[attr-defined]
+    conn.cursor = lambda: _PartialFailCursor(conn, 2)  # type: ignore[method-assign]
+    rows = [{"observed_at": i, "market": "a_share", "symbol": "600519"} for i in range(5)]
     assert rms.append_metrics(conn, rows) == 2
-    assert conn.commits == 0
+    assert not any("SAVEPOINT" in c for c in conn.calls), "autocommit 下不该发保存点语句"
 
 
 def test_append_metrics_closes_cursor_as_context_manager() -> None:

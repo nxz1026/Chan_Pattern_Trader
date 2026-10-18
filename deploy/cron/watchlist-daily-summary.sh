@@ -57,7 +57,10 @@ rc=$?
 {
   echo "===== $(date -u +%FT%TZ) 结束 rc=$rc ====="
   # 「跑完了」和「跑挂了」不能同码（同 factor-recompute / track-maintenance 的教训）。
-  if [ "$rc" -ne 0 ]; then
+  # rc=5 是「送达了但价位可能过期」—— 与「没推送」必须分开说，日志不许撒谎。
+  if [ "$rc" -eq 5 ]; then
+    echo "!!!!! 关注列表收盘汇总：快照刷新全量失败，推的可能是过期价位（rc=5）!!!!!"
+  elif [ "$rc" -ne 0 ]; then
     echo "!!!!! 关注列表收盘汇总未完成（rc=$rc）—— 当天没有汇总推送 !!!!!"
   fi
 } >> "$LOG"

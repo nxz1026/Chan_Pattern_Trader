@@ -17,6 +17,8 @@
 - ``0``：播报完成（含「关注列表为空，不发」）
 - ``3``：渲染出内容但飞书没送达（含 ``CPT_FEISHU_WEBHOOK`` 未配置）
 - ``4``：读库失败 —— 拿不到关注列表，**不能让「读失败」看起来像「没有内容」**
+- ``5``：**汇总已送达，但快照刷新全量失败**（``refreshed == 0``）—— 正文里已插入
+  警示行，同时用非零码让 cron 日志能发现（R67/审计 P2-15）
 
 用法::
 
@@ -44,6 +46,12 @@ EXIT_OK: Final[int] = 0
 EXIT_UNDELIVERED: Final[int] = 3
 #: 读库失败 —— 与 ``track_store`` 的纪律一致：不用空列表冒充「没人追踪」。
 EXIT_STORE: Final[int] = 4
+#: 汇总送达了，但快照刷新**全量失败** ⇒ 推的可能是昨天的价位（R67/审计 P2-15）。
+#:
+#: 为什么不直接返 ``EXIT_UNDELIVERED``：那会让 ``deploy/cron`` 的封装打印
+#: 「当天没有汇总推送」，而实际上推了 —— 日志不许撒谎。这里单独一个码，
+#: 让封装能说清「推的是**过期**价位」。
+EXIT_STALE: Final[int] = 5
 
 #: loopback 刷新端点（与 ``deploy/env/cpt-dashboard.env`` 的 ``CPT_PORT`` 一致）。
 DEFAULT_BASE_URL: Final[str] = "http://127.0.0.1:8010"
@@ -117,9 +125,16 @@ def main(argv: list[str] | None = None) -> int:
 
     # 先刷新再读快照。`--dry-run` 不写库，所以跳过刷新（否则「只打印」也会
     # 往 cpt_track_snapshot 里加行）。
+    refreshed: int | None = None
     if pairs and not args.dry_run:
         refreshed = refresh_snapshots(pairs)
         _LOG.info("快照刷新完成：%d/%d 对", refreshed, len(pairs))
+        if refreshed == 0:
+            # R67（审计 P2-15）：**全量**刷新失败（仪表盘挂着）= 下面的价位可能
+            # 是昨天甚至更早，而正文里没有任何日期 ⇒ 收件人看不出来。
+            # 本文件 `refresh_snapshots` 的 docstring 自己写着「看着像真的却没有
+            # 参考价值（比不推更糟）」，那就不能照发不误。
+            _LOG.error("快照刷新全量失败（0/%d 对）—— 汇总里的价位可能已过期", len(pairs))
 
     try:
         rows = read_rows()
@@ -133,6 +148,12 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_OK
 
     title, lines = summary
+    if refreshed == 0:
+        # 警示行放在**最前面**：飞书正文里它紧跟标题，收件人第一眼就看到。
+        lines = [
+            f"⚠️ 快照刷新全部失败（0/{len(pairs)} 对）—— 下面的价位可能不是今天的",
+            *lines,
+        ]
     for line in lines:
         print(f"· {line}")
 
@@ -149,6 +170,9 @@ def main(argv: list[str] | None = None) -> int:
         return EXIT_UNDELIVERED
 
     print(f"已发送：{title}")
+    if refreshed == 0:
+        print("汇总已送达，但快照刷新全量失败 —— 推的是可能过期的价位。", file=sys.stderr)
+        return EXIT_STALE
     return EXIT_OK
 
 

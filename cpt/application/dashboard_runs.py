@@ -35,6 +35,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import threading
 import time
 from collections import deque
 from collections.abc import Callable, Iterable, Mapping
@@ -66,6 +67,22 @@ _RUN_RING: deque[dict[str, Any]] = deque(maxlen=RUN_RING_SIZE)
 #: 内存上界：``RUN_RING_SIZE × RUN_BODY_MAX_BYTES ≈ 50 × 4MB = 200MB``
 #: 序列化体积；Python 对象图还有常量倍数的开销，属于本进程的显式预算。
 _RUN_BODIES: deque[dict[str, Any] | None] = deque(maxlen=RUN_RING_SIZE)
+
+#: 保护上面两个 deque 的**唯一**一把锁。
+#:
+#: 2026-10-18 之前没有这把锁，而 ``cpt/web/app.py::_with_run_index`` 在 **32 线程**
+#: 的 HTTP 服务器上**每请求**调 :func:`record_run`，读写是真的并发。两个后果都实测过：
+#:
+#: 1. **错位配对**：两次交错 append 后 ``_RUN_RING[i]`` 与 ``_RUN_BODIES[i]`` 属于
+#:    不同 run，:func:`run_body` 返回**另一个 run 的本体** ⇒ ``/compare`` 与
+#:    ``/multi-run`` 拿到错误基线（复现出 ``[('B', 'bA'), ('A', 'bB')]``）。
+#: 2. ``RuntimeError: deque mutated during iteration``：append 撞上 :func:`run_body`
+#:    里 ``zip(reversed(_RUN_RING), reversed(_RUN_BODIES))`` 的迭代（8 次试验复现 7 次），
+#:    经 P1-1（``do_GET`` 无兜底）变成连接重置。
+#:
+#: 用 ``RLock`` 而非 ``Lock``：本模块的函数可能在已持锁的调用栈里被重入
+#: （测试的 ``clear_runs`` 之后紧接着记账是最常见的形态），可重入省掉一类死锁。
+_RUN_LOCK = threading.RLock()
 
 
 def _snapshot_body(snapshot: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -150,18 +167,22 @@ def record_run(
         fallback = runtime.get("generated_at") or runtime.get("as_of_ms")
         row["generated_at"] = fallback if fallback is not None else time.time() * 1000
     row["created_at"] = row.get("generated_at")
-    if _RUN_RING and _same_run(_RUN_RING[-1], row):
-        # 去重命中：**本体也不动**。命中意味着这是同一份快照被重复请求，
-        # 已存的本体就是它，绝不能用新的一份去覆盖（可能是不同的 runtime 包装）。
-        # 同样**不触发 on_recorded**——见参数说明。
-        return dict(_RUN_RING[-1])
-    # 两个 deque 必须**同步 append**：这里是唯一的写入点，顺序不可调换、
-    # 中间不能有任何会抛的语句，否则索引行与本体就错位了。
+    # 序列化与体积闸门放在锁外：``_snapshot_body`` 会 ``json.dumps`` 整份快照，
+    # 拿到锁再做就等于把一次 HTTP 记账变成全局串行点。
     body = _snapshot_body(snapshot)
-    _RUN_RING.append(row)
-    _RUN_BODIES.append(body)
+    with _RUN_LOCK:
+        if _RUN_RING and _same_run(_RUN_RING[-1], row):
+            # 去重命中：**本体也不动**。命中意味着这是同一份快照被重复请求，
+            # 已存的本体就是它，绝不能用新的一份去覆盖（可能是不同的 runtime 包装）。
+            # 同样**不触发 on_recorded**——见参数说明。
+            return dict(_RUN_RING[-1])
+        # 两个 deque 必须**同步 append**：这里是唯一的写入点，顺序不可调换、
+        # 中间不能有任何会抛的语句，否则索引行与本体就错位了。
+        _RUN_RING.append(row)
+        _RUN_BODIES.append(body)
     if on_recorded is not None:
-        # 放在两个 append **之后**：ring 是主路径，必须先落住；DB 双写是旁路。
+        # 放在两个 append **之后、锁外**：ring 是主路径，必须先落住；DB 双写是旁路，
+        # 且是**慢操作**（真连 PG），持锁调用等于让所有请求排在这条 DB 写后面。
         on_recorded(row, body)
     return row
 
@@ -179,10 +200,15 @@ def recent_runs(limit: int | None = None) -> tuple[dict[str, Any], ...]:
     注意与 :func:`build_run_index` 的顺序相反：后者按 ``generated_at`` **升序**
     排序（deterministic browser index，有测试锁定），运行索引面板要的是「最新的
     在最上面」。
+
+    在锁内快照一份元组再返回：直接返回 ``reversed(_RUN_RING)`` 会把**活的迭代器**
+    交给调用方，下一次 :func:`record_run` 的 append 就会在迭代到一半时抛
+    ``RuntimeError: deque mutated during iteration``。
     """
-    if limit is None or limit >= len(_RUN_RING):
-        return tuple(reversed(_RUN_RING))
-    return tuple(reversed(list(_RUN_RING)[-limit:]))
+    with _RUN_LOCK:
+        if limit is None or limit >= len(_RUN_RING):
+            return tuple(reversed(_RUN_RING))
+        return tuple(reversed(list(_RUN_RING)[-limit:]))
 
 
 def run_body(run_id: str) -> dict[str, Any] | None:
@@ -194,9 +220,12 @@ def run_body(run_id: str) -> dict[str, Any] | None:
     返回**深拷**：本体是进程级状态，调用方（``dashboard_compare`` 等）若就地
     改动会把环里的那份也改坏，下一轮比较就拿到被污染的基线。
     """
-    for row, body in zip(reversed(_RUN_RING), reversed(_RUN_BODIES), strict=False):
-        if row.get("run_id") == run_id:
-            return copy.deepcopy(body) if body is not None else None
+    with _RUN_LOCK:
+        # 两个 deque 在同一把锁内读，配对是原子的 —— 这是 P2-4 修的核心：
+        # 修复前这里可能读到「索引行 A + 本体 B」。
+        for row, body in zip(reversed(_RUN_RING), reversed(_RUN_BODIES), strict=False):
+            if row.get("run_id") == run_id:
+                return copy.deepcopy(body) if body is not None else None
     return None
 
 
@@ -205,13 +234,15 @@ def find_run(run_id: str) -> dict[str, Any] | None:
 
     与 :func:`run_body` 一样取最新的一条；返回的是副本，调用方改不到环里。
     """
-    for row in reversed(_RUN_RING):
-        if row.get("run_id") == run_id:
-            return dict(row)
+    with _RUN_LOCK:
+        for row in reversed(_RUN_RING):
+            if row.get("run_id") == run_id:
+                return dict(row)
     return None
 
 
 def clear_runs() -> None:
     """清空环形缓冲（测试与运维用）。索引行与本体**必须一起清**，否则错位。"""
-    _RUN_RING.clear()
-    _RUN_BODIES.clear()
+    with _RUN_LOCK:
+        _RUN_RING.clear()
+        _RUN_BODIES.clear()

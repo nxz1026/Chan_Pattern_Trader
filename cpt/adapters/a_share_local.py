@@ -91,6 +91,7 @@ __all__ = [
     "hfq_factor_on",
     "is_trade_day",
     "open_days_between",
+    "raw_bar_exists_on",
 ]
 
 #: ``public.daily_bar`` 实际列名（与 DB schema 对齐）
@@ -465,9 +466,17 @@ def fetch_raw_bar_on(code: str, trade_date: date) -> tuple[date, float] | None:
     交易日不存在 / ``close`` 为 NULL / DB 不可达 → ``None``，**不抛**（理由同
     :func:`fetch_latest_raw_bar`：消费方把 ``None`` 当正常分支「这天没有倍率」）。
 
+    ⚠️ R67（审计 P2-1）：**不要再拿本函数去断言「上游没入库」**。「DB 不可达」与
+    「这天没有 bar」在这里都返回 ``None``，两者**分不开**；判因方
+    （``a_share_snapshot._stale_reason``）已改用会抛的
+    :func:`raw_bar_exists_on`，因为它是把答案翻译成 ``stale_reason=upstream_lag``
+    写上面板与告警的 —— 那句「上游当日 bar 未入库」必须是**确定**的。本函数仍留
+    给「拿倍率」的消费方（``cpt/web/a_share_routes.py`` 的 price_ratio 分支），
+    那里 ``None`` 就是正常分支「今天没有倍率」，不会冒充「有值但算错」。
+
     # gate: allow-silent: 拿不到就**不给倍率**，不崩 —— 消费方
-    # ``cpt/application/a_share_snapshot.py`` 的 ``_stale_reason`` 把 None 当正常
-    # 分支（「这天没有行情」），不会拿它冒充「有值但算错」。且本函数自己
+    # ``cpt/web/a_share_routes.py`` 的 price_ratio 分支把 None 当**正常分支**
+    # （就是「今天没有倍率」），不会拿它冒充「有值但算错」。且本函数自己
     # ``with psycopg.connect(...)`` 建连、用完即弃，**不复用调用方的连接**，
     # 所以吞掉不会把同连接后续语句拖进 aborted 事务（那才是门禁担心的放大路径）。
     """
@@ -491,6 +500,39 @@ def fetch_raw_bar_on(code: str, trade_date: date) -> tuple[date, float] | None:
         return bar_day, float(row[1])
     except Exception:  # noqa: BLE001 — 拿不到就不给倍率，不崩
         return None
+
+
+def raw_bar_exists_on(conn: Any, code: str, trade_date: date) -> bool:
+    """**指定交易日**是否有一根可用的不复权 bar（同 :func:`fetch_raw_bar_on` 的判据）。
+
+    R67（审计 P2-1）新增。与 :func:`fetch_raw_bar_on` 的两处差异**都是刻意的**：
+
+    1. **用调用方的连接**，不自己 ``psycopg.connect`` —— 判因方（``_stale_reason``）
+       本来就握着共享连接，多建一次连纯属浪费；
+    2. **DB 判不了就抛**，不返回 ``False`` —— 这是本函数存在的全部理由。
+
+    为什么必须有一个「会抛」的版本：消费方拿这个答案去**断言原因**。
+    ``_stale_reason`` 把「没有这根 bar」翻译成 ``stale_reason=upstream_lag``，
+    面板与巡检告警上写的是「上游当日 bar 未入库」。若 DB 不可达也被吞成「没有
+    这根 bar」，运维会拿着这条**确信的错话**去查 emotion-core 的入库链路 ——
+    而真相是 CPT 自己连不上库。``None``（判不了）与 ``False``（真的没有）在
+    这里**不能合并**。
+
+    :param conn: 调用方的连接（共享）。本函数不 commit / 不 rollback；失败时
+        事务已 aborted，**回滚是调用方的事**（见 ``_stale_reason`` 的 except）。
+    :param trade_date: ``datetime.date``。
+    :returns: 该日有行**且** ``close`` 非 NULL 时 ``True``，否则 ``False``。
+    :raises Exception: 任何 DB / 驱动层错误原样抛出，由调用方决定怎么处置。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT close FROM public.daily_bar WHERE code=%s AND date=%s LIMIT 1",
+            (code, trade_date),
+        )
+        row = cur.fetchone()
+    # 行在但 close 为 NULL ⇒ 这根 bar 用不了，与「没有行」对 K 线而言等价
+    # （``fetch_raw_bar_on`` 也是这么判的），故合并成 False。
+    return row is not None and row[0] is not None
 
 
 def fetch_latest_raw_close(code: str) -> float | None:

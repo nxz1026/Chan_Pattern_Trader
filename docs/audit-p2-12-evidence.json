@@ -1,0 +1,302 @@
+[
+  {
+    "fixture": "btcusdt_5m_2024-02-01",
+    "native_fx": 327,
+    "czsc_fx": 202,
+    "czsc_bi": 50,
+    "czsc_start_viol": 0,
+    "czsc_end_viol": 0,
+    "czsc_cont": true,
+    "czsc_hetero": true,
+    "native": [
+      {
+        "gate": null,
+        "bi": 326,
+        "zs": 33,
+        "start_viol": 0,
+        "end_viol": 0,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": "-"
+      },
+      {
+        "gate": 3,
+        "bi": 175,
+        "zs": 24,
+        "start_viol": 47,
+        "end_viol": 39,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 132
+      },
+      {
+        "gate": 4,
+        "bi": 144,
+        "zs": 24,
+        "start_viol": 51,
+        "end_viol": 47,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 89
+      },
+      {
+        "gate": 5,
+        "bi": 112,
+        "zs": 19,
+        "start_viol": 47,
+        "end_viol": 51,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 57
+      },
+      {
+        "gate": 6,
+        "bi": 98,
+        "zs": 21,
+        "start_viol": 53,
+        "end_viol": 49,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 41
+      },
+      {
+        "gate": 7,
+        "bi": 82,
+        "zs": 16,
+        "start_viol": 51,
+        "end_viol": 53,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 33
+      },
+      {
+        "gate": 8,
+        "bi": 78,
+        "zs": 14,
+        "start_viol": 46,
+        "end_viol": 48,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 32
+      },
+      {
+        "gate": 10,
+        "bi": 61,
+        "zs": 10,
+        "start_viol": 42,
+        "end_viol": 44,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 26
+      }
+    ]
+  },
+  {
+    "fixture": "btcusdt_5m_2024-09-01",
+    "native_fx": 357,
+    "czsc_fx": 203,
+    "czsc_bi": 49,
+    "czsc_start_viol": 1,
+    "czsc_end_viol": 0,
+    "czsc_cont": true,
+    "czsc_hetero": true,
+    "native": [
+      {
+        "gate": null,
+        "bi": 356,
+        "zs": 37,
+        "start_viol": 0,
+        "end_viol": 0,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": "-"
+      },
+      {
+        "gate": 3,
+        "bi": 176,
+        "zs": 23,
+        "start_viol": 61,
+        "end_viol": 47,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 123
+      },
+      {
+        "gate": 4,
+        "bi": 144,
+        "zs": 25,
+        "start_viol": 70,
+        "end_viol": 59,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 89
+      },
+      {
+        "gate": 5,
+        "bi": 124,
+        "zs": 24,
+        "start_viol": 67,
+        "end_viol": 52,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 61
+      },
+      {
+        "gate": 6,
+        "bi": 104,
+        "zs": 21,
+        "start_viol": 57,
+        "end_viol": 52,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 53
+      },
+      {
+        "gate": 7,
+        "bi": 90,
+        "zs": 17,
+        "start_viol": 50,
+        "end_viol": 49,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 41
+      },
+      {
+        "gate": 8,
+        "bi": 79,
+        "zs": 17,
+        "start_viol": 46,
+        "end_viol": 43,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 35
+      },
+      {
+        "gate": 10,
+        "bi": 65,
+        "zs": 11,
+        "start_viol": 37,
+        "end_viol": 43,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 21
+      }
+    ]
+  },
+  {
+    "fixture": "btcusdt_5m_2025-04-01",
+    "native_fx": 353,
+    "czsc_fx": 245,
+    "czsc_bi": 49,
+    "czsc_start_viol": 2,
+    "czsc_end_viol": 0,
+    "czsc_cont": true,
+    "czsc_hetero": true,
+    "native": [
+      {
+        "gate": null,
+        "bi": 352,
+        "zs": 40,
+        "start_viol": 0,
+        "end_viol": 0,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": "-"
+      },
+      {
+        "gate": 3,
+        "bi": 192,
+        "zs": 30,
+        "start_viol": 56,
+        "end_viol": 41,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 137
+      },
+      {
+        "gate": 4,
+        "bi": 142,
+        "zs": 26,
+        "start_viol": 71,
+        "end_viol": 62,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 70
+      },
+      {
+        "gate": 5,
+        "bi": 128,
+        "zs": 21,
+        "start_viol": 65,
+        "end_viol": 62,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 60
+      },
+      {
+        "gate": 6,
+        "bi": 110,
+        "zs": 19,
+        "start_viol": 59,
+        "end_viol": 57,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 38
+      },
+      {
+        "gate": 7,
+        "bi": 93,
+        "zs": 20,
+        "start_viol": 54,
+        "end_viol": 57,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 32
+      },
+      {
+        "gate": 8,
+        "bi": 83,
+        "zs": 14,
+        "start_viol": 54,
+        "end_viol": 46,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 30
+      },
+      {
+        "gate": 10,
+        "bi": 70,
+        "zs": 15,
+        "start_viol": 49,
+        "end_viol": 46,
+        "cont": true,
+        "hetero": true,
+        "unmapped": 0,
+        "dp_max": 22
+      }
+    ]
+  }
+]

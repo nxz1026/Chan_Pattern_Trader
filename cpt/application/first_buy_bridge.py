@@ -19,8 +19,10 @@
 2. **背驰段** = 中枢二 ``end_time`` **之后**、方向与 ``trend_direction`` 相同的第一笔。
    不含中枢连接笔——连接笔属于中枢本身，不算「离开中枢后的延续」。
 3. **反向笔** = 背驰段之后第一笔方向相反的笔。**出现即算**，不要求收盘确认：
-   收盘确认需要盘中反向 K 线，由 :func:`transition_first_buy` 的
-   ``reversal_closed`` 承担，本层不重复把关。
+   收盘确认需要盘中反向 K 线，本应由 :func:`transition_first_buy` 的
+   ``reversal_closed`` 承担，但该函数当前**没有生产调用点**（P2-10），故本层
+   按「出现即算」把 ``has_reversal_bi=True`` 交给 ``assess_first_buy`` ——
+   后者据此直接给 ``confirmed``。
 4. **背驰不是硬门槛**。沿用 :func:`cpt.domain.signal._structure_ready` 的现状：
    ``divergence_status`` 只被记录，不参与状态门控。
 
