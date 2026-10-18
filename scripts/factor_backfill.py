@@ -21,7 +21,7 @@
 - ``incremental``：跑"热门池（hot_rank 最新日）∪ 连板梯队（ladder_day
   cont_days≥2 最新日）∪ 近 7 天上市新股 ∪ 已有覆盖的近 30 天票" —
   约 100~300 只/日（仅每日有除权事件的几只真正写入新行）。
-- ``full``: 全市场 ``asel.daily_bar_raw`` 去重代码（~5850 只）。首次跑。
+- ``full``: 全市场 ``public.daily_bar`` 去重代码（~5850 只）。首次跑。
 - 幂等：``(code, trade_date, source)`` 主键 upsert。多次跑结果一致。
 
 ## 单只工作量
@@ -310,10 +310,16 @@ def list_incremental_codes() -> list[str]:
             )
             lad = {r[0] for r in cur.fetchall()}
 
+            # R67（P1-4）：这里原来查 `asel.daily_bar_raw` —— 那张表**不存在**
+            # （实测 pg_class 只有 `public.daily_bar` 与 `asel.ref_adjust_factor`），
+            # 于是**默认的 `--mode incremental` 启动即崩**：
+            # `psycopg.errors.UndefinedTable: relation "asel.daily_bar_raw" does not exist`。
+            # 姊妹函数 `list_all_a_codes` 早就修过同一个错（见其 docstring），
+            # `docs/progress-log.md` 也留了档，唯独这条路径被漏掉 —— 而它是默认值。
             cur.execute(
-                """SELECT code FROM asel.daily_bar_raw
+                """SELECT code FROM public.daily_bar
                    GROUP BY code
-                   HAVING min(date) >= (SELECT max(date) FROM asel.daily_bar_raw) - 7"""
+                   HAVING min(date) >= (SELECT max(date) FROM public.daily_bar) - 7"""
             )
             fresh = {r[0] for r in cur.fetchall()}
 

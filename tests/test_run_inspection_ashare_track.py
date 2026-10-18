@@ -358,7 +358,15 @@ def test_ashare_stream_stall_is_a_problem(monkeypatch) -> None:
         ],
     )
     report = ri.build_report(None)  # type: ignore[arg-type]
-    assert any("A 股水位流已停 40 小时" in p for p in report["problems"]), report["problems"]
+    hit = [p for p in report["problems"] if "A 股水位流已停" in p]
+    assert hit, report["problems"]
+    # R67（审计 P1-5）：正文里不许再出现「已停 40 小时」这种**随时间单调增长**的量。
+    # `_state_key` 把全部 problems 算进指纹，写了时长就等于停摆期间每天换一次指纹、
+    # 天天重发（known-traps #49 / R63「只在状态变化时发」）。只放冻结的「最后一行」
+    # 时间戳与常量阈值 —— 判据也改成前缀 + 阈值常量，而不是那个会变的数字。
+    assert "40 小时" not in hit[0], hit[0]
+    assert f"阈值 {ri.ASHARE_STREAM_STALL_HOURS} 小时" in hit[0], hit[0]
+    assert "最后一行" in hit[0], hit[0]
 
 
 def test_missing_ashare_rows_entirely_is_a_problem(monkeypatch) -> None:

@@ -719,19 +719,35 @@ def make_handler(
             # 否则 (a) 每次 A 股请求都白建一次加密快照，(b) 加密侧不可达时这里
             # 会先 send_error(500)，A 股路由永远走不到。
             if path.path.startswith("/api/dashboard/a-share/"):
-                self._handle_a_share_get(path.path, query)
+                # R67（P1-3）：读路由当时是唯一**没有兜底**的一族 —— 只有写侧
+                # （do_POST）接了 `_handle_unexpected`。路由体内任何未捕获异常
+                # 都会冒到 socketserver，客户端看到的是**空响应/连接被重置**，
+                # 而不是一个能读的 500。2026-10-18 现场实证：服务进程里
+                # `cpt.domain.market_time` 是启动时的旧模块，A 股路由新加的
+                # import 抛 ImportError ⇒ `curl` 拿到 `rc=52 Empty reply`，
+                # journal 里才有栈，调用方完全不知道发生了什么。
+                try:
+                    self._handle_a_share_get(path.path, query)
+                except Exception:  # noqa: BLE001 — 读路由的最后一道兜底
+                    self._handle_unexpected("GET")
                 return
             # Trade API（对 LKL-Trade 交易机的决策投喂）必须排在 provider() **之前**，
             # 理由同 A 股路由：否则 (a) 每次拉决策都白建一次加密快照，
             # (b) 加密侧 provider 不可达时这里直接 500，交易机拿到的是「服务挂了」
             # 而不是「今天没有信号」——两者在上游是**完全不同的处置**。
             if path.path.startswith("/api/trade/"):
-                self._handle_trade_get(path.path, query)
+                try:
+                    self._handle_trade_get(path.path, query)
+                except Exception:  # noqa: BLE001 — 同 A 股，见上
+                    self._handle_unexpected("GET")
                 return
             # 我的追踪（Track）也必须在 provider() 之前：与 A 股 / Trade 同理，
             # 否则加密侧不可达时 500 把追踪路由挡在门外。
             if path.path.startswith("/api/dashboard/track"):
-                self._handle_track_get(path.path, query)
+                try:
+                    self._handle_track_get(path.path, query)
+                except Exception:  # noqa: BLE001 — 同 A 股，见上
+                    self._handle_unexpected("GET")
                 return
             try:
                 if callable(provider) and not hasattr(provider, "snapshot_payload"):
@@ -1418,11 +1434,17 @@ def make_handler(
                     return
                 level = (query.get("level") or [""])[0].strip()
                 hdays = (query.get("history_days") or [""])[0]
+                # R67（P1-3）：原来写的是 `int(hdays) if hdays.isdigit() else 0`。
+                # `str.isdigit()` 对 **Unicode 数字**也返回 True —— `'²'.isdigit()`
+                # 是 True 而 `int('²')` 抛 `ValueError: invalid literal for int()`
+                # （同理还有 `'٣'`、`'５'` 这类形状），异常直接冒到 socketserver。
+                # 先限 ASCII 再转：非法值退化成 0（保持原有「不报错、忽略参数」语义）。
+                history_days = int(hdays) if hdays.isascii() and hdays.isdigit() else 0
                 self._write_json(
                     a_share_routes.build_recommendation(
                         code,
                         level=level or None,
-                        history_days=int(hdays) if hdays.isdigit() else 0,
+                        history_days=history_days,
                     )
                 )
                 return

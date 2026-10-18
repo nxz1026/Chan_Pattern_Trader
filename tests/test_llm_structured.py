@@ -163,6 +163,30 @@ def test_embedded_object_among_prose_without_fence() -> None:
     assert out.data is not None and out.data["summary"] == "上移"
 
 
+def test_second_candidate_is_reachable_after_a_closed_fragment() -> None:
+    """★回归（R67 / P1-2）：闭合片段之后的候选必须还能被看到。
+
+    ``_iter_braces`` 的游标曾写成
+    ``index += 1 if not closed else index + len(fragment)`` —— 复合赋值的右值
+    又引用了 ``index`` 自己，闭合分支实际是 ``2*index + len(fragment)``：游标
+    被**双计数**，后面所有候选整个被跳过，``reason`` 还谎报成
+    ``schema_mismatch``。调用方据此以为「模型没按 schema 输出」，实际是解析器
+    自己走丢了 —— 这种错最贵的地方在于它把「解析失败」伪装成「模型不听话」。
+    """
+    out = parse_structured('xx {"a": 1} {"b": 2}', required=("b",))
+    assert out.reason == "ok", out.reason
+    assert out.method == "embedded"
+    assert out.data == {"b": 2}, out.data
+
+    # 三个候选：前缀越长，老写法的游标越会飞出字符串
+    out = parse_structured('p {"a": 1} q {"b": 2} r {"c": 3}', required=("c",))
+    assert out.data == {"c": 3}, out.data
+
+    # 反向控制：第一个候选仍优先命中 —— 修的是「跳过后续」，不是「跳过第一个」
+    out = parse_structured('{"a": 1} {"b": 2}', required=("a",))
+    assert out.data == {"a": 1}, out.data
+
+
 # --------------------------------------------------------------------------- #
 # 6. 失败路径一律不抛
 # --------------------------------------------------------------------------- #

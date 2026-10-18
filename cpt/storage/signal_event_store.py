@@ -15,9 +15,10 @@
 from __future__ import annotations
 
 import logging
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
+from cpt.domain.market_time import market_day_bounds
 from cpt.domain.models import Signal
 
 _LOG = logging.getLogger(__name__)
@@ -316,7 +317,8 @@ def load_trade_decisions(
     取「当天跃迁」而非「截至当天最新状态」是刻意的：后者会让 09-30 的一条
     confirmed 一买被重复投喂到每一个后续交易日。
 
-    :param for_date: ``YYYY-MM-DD``（按 ``transition_time`` 的**服务器时区**日期切分）。
+    :param for_date: ``YYYY-MM-DD``（**北京日**，与 :func:`cpt.domain.market_time.market_today`
+        同一个口径；窗口端点由 :func:`cpt.domain.market_time.market_day_bounds` 给出）。
     :param statuses: 允许的状态白名单，如 ``("confirmed",)``。
     :returns: ``dict`` 元组，含 ``code`` / ``signal_type`` / ``status`` / ``level`` /
         ``price`` / ``transition_time`` / ``signal_id``。
@@ -324,17 +326,28 @@ def load_trade_decisions(
     """
     if not statuses:
         return ()
+    # ⚠️ R67（P1-1）：**不要再写 `transition_time >= %s::date`**。`::date` 按
+    # **服务器时区**切（生产机 `Etc/UTC`），而 `for_date` 是**北京日** ⇒ 两者在
+    # 北京 00:00–08:00 之间差一整天：生产 312/312 行的 `transition_time` 都是
+    # `23:59:59.999 UTC`（= 北京次日 07:59:59.999），恒被切进**前一天**的窗口，
+    # 交易机凌晨永远拉不到「当天」的决策。改成显式的 tz-aware 半开区间端点，
+    # 索引 `idx_cpt_signal_event_transition_time` 照样可用。
+    try:
+        start, end = market_day_bounds(date.fromisoformat(for_date))
+    except ValueError as exc:
+        raise SignalEventError(f"for_date 不是 YYYY-MM-DD: {for_date!r}") from exc
+
     # ⚠️ 2026-10-07：statuses 必须包成 **list** 才能被 psycopg 适配成 PG 数组。
     # 传 tuple 会被适配成 `('confirmed')` 这样的文本，`status = ANY($3)` 直接报
     # ``malformed array literal: "(confirmed)"``。
     # 这个坑很隐蔽：单元测试把 `_fetch_signals` 整个 mock 掉了，恰好绕开这一行，
     # 只有真机调用才暴露 —— 所以下面 test_trade_decisions_sql_params 补了回归。
-    params: list[Any] = [for_date, for_date, list(statuses), limit]
+    params: list[Any] = [start, end, list(statuses), limit]
     sql = """SELECT code, signal_type, status, level, price, signal_id,
                      transition_time, confirmed_time
               FROM public.cpt_signal_event
-              WHERE transition_time >= %s::date
-                AND transition_time <  (%s::date + interval '1 day')
+              WHERE transition_time >= %s
+                AND transition_time <  %s
                 AND status = ANY(%s)
               ORDER BY transition_time DESC, id DESC
               LIMIT %s"""

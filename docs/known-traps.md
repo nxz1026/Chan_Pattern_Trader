@@ -693,7 +693,7 @@ grep -rnE "(index|idx|col|pos|offset|ix)\w* *= *[a-z_]+\([^)]*\) +or " cpt/
 |---|---|---|
 | `reference_backend:386-390` | `int(f.get("x", 0) or 0)` | 两边都是 0，收敛成默认值本就正确 |
 | `a_share_factor:552` | `getattr(act,"share_ratio",0.0) or 0.0` | 同上（None → 0.0 是有意的） |
-| `app.py:1183` | `find_run(run_id) or _index_row_from_body(...)` | `find_run` 返回 **dict 或 None**；非空 dict 恒为真，None 才回落 ⇒ 正确 |
+| `app.py:1199` | `find_run(run_id) or _index_row_from_body(...)` | `find_run` 返回 **dict 或 None**；非空 dict 恒为真，None 才回落 ⇒ 正确 |
 
 ⇒ **判据不是「用了 `or`」，而是「左边函数的返回值合法地包含 0 / "" / []」**。
 这条 grep 只能**筛出候选**，逐个看清左边是什么才算结论。
@@ -1659,3 +1659,87 @@ psql -c "SELECT trade_date, count(DISTINCT code) FROM asel.ref_adjust_factor GRO
 （水位 / 日期 / 版本），而不是「哪些对象处理过」—— 后者的语义只在对象集合不变时成立，
 而**输入窗口每天都变**。同类必查：任何带 `done` / `processed` / `seen` / `synced`
 集合的回填、同步、迁移、缓存预热任务。
+
+---
+
+## 54. 交叉核对脚本量的是**另一个口径**，且不一致不进退出码（R67 实测）
+
+**现象**：`scripts/compare_chanlun_backends.py`（仓内**唯一**做 native↔czsc 交叉核对的
+地方）报 `native 100/99/18`，而**生产同一只票同一批 K 线是 100/28/4**；脚本还打印
+`各后端计数一致: ❌ 存在差异` 却 **`return 0`**。
+
+**根因（三层，各自独立危害）**：
+
+1. **后端是无参构造的**，而笔门槛是**构造参数**：
+
+   ```python
+   # cpt/adapters/native_chanlun.py
+   def __init__(self, *, min_bi_len: int | None = None) -> None
+   # cpt/application/a_share_snapshot.py —— 生产在**调用点**传
+   resolve_backend(DEFAULT_BACKEND, min_bi_len=RulesConfig().min_bi_len_for("1d"))  # == 6
+   ```
+   ⇒ 脚本量到的是「**没门槛的** native」：600519/300 根 **99 笔** vs 生产 **28 笔**（3.5×）。
+   两个不同口径互证，结论无论正负都没有意义。
+2. **计数不一致不进退出码**：只打印 `❌` 仍 `return 0` ⇒ 在脚本/门禁调用链里永远"通过"。
+3. **仓内测试占位算进一致性判定**：`InMemoryChanlunBackend`（按 bar 高低点做极简判定）
+   永远不等价于真后端 ⇒ 脚本**永远**报 ❌ ⇒ 报红变成背景噪音，没人再看它。
+
+**口径对齐后的真结论**（`--min-bi-len 6`，4 只 × 300 根）：
+
+```
+native 笔 28/30/32/27    czsc 笔 15/24/22/26
+```
+
+两个**真**后端在同一名义门槛下系统性不一致 ⇒ `DEFAULT_BACKEND` 硬编码 `native`
+（不许回到 `auto` 静默切换）这条**不能松**。这不是脚本的 bug，是脚本终于**量对了**。
+
+**修法（R67 已做）**：门槛统一从 `RulesConfig` 取（`--min-bi-len` 可覆盖，`0` = 关闭
+门槛**只用于复现历史数字**）；`PLACEHOLDER_LABEL` 排除在判定外；不一致写进 `problems`
+⇒ `return 1`。回归 `tests/test_compare_chanlun_backends_script.py`（9 例，含"门槛必须
+等于生产那份配置"与"不一致必须进退出码"）。
+
+**通用判据**：拿另一个实现做交叉验证之前，**先证明两个实现收到的是同一份输入** ——
+参数写在**构造函数**里还是**调用点**，是两回事；核对脚本必须自己进退出码，否则它只是
+一份日志。同类必查：任何 `scripts/compare_*` / `scripts/verify_*` / `check_*`。
+
+---
+
+## 55. 进程内锁当跨进程锁 + **固定**临时文件名（R67 实测）
+
+**现象**：6 进程 × 40 次 `handle_trade_results_post`（`CPT_TRADE_DIR` 共享），
+240 个幂等键只剩 **129**（丢 111）、3 次 `503 trade state unavailable`、约 30 条
+
+```
+processed 落盘失败（结果已存，幂等会失效）: [Errno 2] No such file or directory:
+  '/tmp/cpt-trade-race-.../state.json.tmp' -> '/tmp/cpt-trade-race-.../state.json'
+决策状态文件损坏: /tmp/cpt-trade-race-.../state.json
+json.decoder.JSONDecodeError: Extra data: line 68 column 2 (char 901)
+```
+
+**根因**：`_state_lock = threading.Lock()` 只挡得住**同进程的线程**，而 `state.json`
+是**磁盘上**的共享状态；`_save_state` 又写**固定**临时名 `state.json.tmp` 再
+`os.replace`：
+
+- 两个进程同时 `write_text` 同一个名字 ⇒ 后者的内容被**追加** ⇒ 两段 JSON（`Extra data`）；
+- `os.replace` 的源文件可能已被对方移走 ⇒ `ENOENT`，回执落盘失败、**幂等键丢失**（重复下单）。
+
+注意 `_prune_processed` 的 docstring 早就写对了：「裁剪**必须在锁内、且与 `_save_state`
+同一次写**完成，否则并发回执会用陈旧副本把别的 batch 盖回去」—— **文档写对了，实现只做了一半**。
+
+**为什么生产没炸**：`cpt-dashboard.service` 只有一个 ExecStart，`_BoundedThreadingHTTPServer`
+只多线程 ⇒ 单实例下线程锁够用，属**潜在**故障。判严重度**先看拓扑**，别只看代码。
+
+**修法（R67 已做）**：`_state_guard()` = `threading.Lock` + `fcntl.flock(LOCK_EX)`
+（锁文件 `CPT_TRADE_DIR/.state.lock`），读-改-写全程持锁；`_save_state` 临时名改成
+`.state.json.{pid}.{uuid8}.tmp` 且失败即清理。修后同一压力：**240/240、0 错误、0 残留**。
+
+**⚠️ 写复现脚本时踩到的坑（值得单独记）**：Python **3.14 起 Linux 的 multiprocessing
+默认 start method 从 `fork` 换成 `forkserver`**，子进程会**重新 import `__main__`** ——
+我第一版复现脚本在模块级算 `D = f"/tmp/...-{os.getpid()}"`，于是**每个子进程各写各的目录**，
+跑出来"0 错误、文件可解析"，其实**根本没有竞态**（假绿）。复现脚本必须：
+① 共享目录**显式传参**；② 显式 `mp.get_context("fork")`；③ 对照组要能证明它**真的在竞争**
+（这次靠"修复前丢 111 个键"反向确认）。
+
+**通用判据**：共享状态只要落在磁盘 / DB / 管道，「进程内锁」就不构成保护；**临时文件名
+固定 = 并发写入的必修 bug**。同类必查：任何 `state.json` / `*.tmp` / 缓存文件 /
+`os.replace` 写入。并发验证的正确姿势是**多进程 + 断言"一个都不许丢"**，不是"跑完没报错"。

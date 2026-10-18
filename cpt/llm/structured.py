@@ -163,7 +163,13 @@ def _iter_braces(text: str) -> Iterator[tuple[str, bool]]:
         if not fragment:
             return
         yield fragment, closed
-        index += 1 if not closed else index + len(fragment)
+        # 闭合：跳过整个片段（下一个候选一定在它之后）；
+        # 未闭合（多半被 max_tokens 截断）：只前进一个字符，好在同一段残片里
+        # 继续找下一个起始括号。
+        # ⚠️ R67：这里曾是 `index += 1 if not closed else index + len(fragment)` ——
+        # 复合赋值的右值又含 index 自己 ⇒ 闭合分支实际是 `2*index + len(fragment)`：
+        # 游标被**双计数**，跳过了后面的合法候选，还把 reason 谎报成 schema_mismatch。
+        index += len(fragment) if closed else 1
 
 
 def _inside_open_container(text: str, position: int) -> bool:

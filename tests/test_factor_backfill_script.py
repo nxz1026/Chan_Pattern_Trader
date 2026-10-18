@@ -670,3 +670,92 @@ def test_main_wind_fallback_does_not_write_on_basis_mismatch(
         "基准对不上还落库 = 静默改写主源历史"
     )
     assert "wind_basis_mismatch" in caplog.text
+
+
+# ── 增量候选集：不得再查不存在的表（R67 / P1-4）─────────────────────────
+
+
+def _install_dispatching_psycopg(script: Any, monkeypatch: Any) -> list[str]:
+    """装一个**按 SQL 分派**的假 psycopg，供候选集查询用（不真连库）。
+
+    返回执行过的 SQL 列表。``list_incremental_codes`` 会依次查
+    ``hot_rank`` / ``ladder_day`` / 新股窗口 / 已有覆盖，各给一行结果。
+    """
+    import types
+
+    logs: list[str] = []
+
+    class _Cursor:
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+        def execute(self, sql: str, params: Any = None) -> None:
+            flat = " ".join(sql.split())
+            logs.append(flat)
+            low = flat.lower()
+            if "max(date) from public.hot_rank" in low:
+                self._rows: list[Any] = [("2026-10-16",)]
+            elif "from public.hot_rank" in low:
+                self._rows = [("600519",), ("000001",)]
+            elif "max(date) from public.ladder_day" in low:
+                self._rows = [("2026-10-16",)]
+            elif "from public.ladder_day" in low:
+                self._rows = [("301132",)]
+            elif "from public.daily_bar" in low:
+                self._rows = [("688981",)]  # 近 7 天上市新股
+            elif "from asel.ref_adjust_factor" in low:
+                self._rows = [("600418",)]  # 已有覆盖
+            else:
+                raise AssertionError(f"候选集查询里出现了没见过的 SQL：{flat}")
+
+        def fetchall(self) -> list[Any]:
+            return self._rows
+
+        def fetchone(self) -> Any:
+            return self._rows[0] if self._rows else None
+
+    class _Conn:
+        def __enter__(self) -> Any:
+            return self
+
+        def __exit__(self, *exc: Any) -> bool:
+            return False
+
+        def cursor(self) -> Any:
+            return _Cursor()
+
+    module = types.ModuleType("psycopg")
+    module.connect = lambda **kwargs: _Conn()  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "psycopg", module)
+    # 冷环境纪律（known-traps #30 / check_cold_environment）：真实 ``connection_kwargs``
+    # 会去读 ``~/.dbconfig``，空 HOME 下直接 ``SystemExit`` ⇒ 这个用例的胜负就取决于
+    # 「跑它的那台机器恰好有没有那个文件」。连接参数在这里没有意义（connect 是假的），
+    # 所以由用例自己把它钉成空 dict。
+    monkeypatch.setattr(script, "connection_kwargs", lambda **kwargs: {})
+    return logs
+
+
+def test_incremental_codes_never_queries_a_missing_table(script: Any, monkeypatch: Any) -> None:
+    """★回归（R67 / P1-4）：``--mode incremental`` 是**默认值**，不能启动即崩。
+
+    原来这条路径查 ``asel.daily_bar_raw``，而库里根本没有这张表（实测 ``pg_class``
+    只有 ``public.daily_bar`` 与 ``asel.ref_adjust_factor``）⇒ 默认跑法直接
+    ``psycopg.errors.UndefinedTable: relation "asel.daily_bar_raw" does not exist``。
+    姊妹函数 ``list_all_a_codes`` 修过同一个错（其 docstring 与
+    ``docs/progress-log.md`` 都留了档），但这条被漏了。
+
+    这里既钉行为（四个来源的并集），也钉表名（不许再出现那张不存在的表）。
+    """
+    logs = _install_dispatching_psycopg(script, monkeypatch)
+
+    assert script.list_incremental_codes() == sorted(
+        {"600519", "000001", "301132", "688981", "600418"}
+    )
+
+    joined = "\n".join(logs).lower()
+    assert "asel.daily_bar_raw" not in joined, "那张表不存在，查了就崩"
+    assert "from public.daily_bar" in joined, "「近 7 天新股」口径必须来自 public.daily_bar"
+    assert len(logs) == 6, f"候选集查询条数变了，请复核来源：{logs}"

@@ -335,6 +335,56 @@ def test_empty_statuses_short_circuits_without_touching_the_db():
     assert cur.calls == []
 
 
+def test_day_window_is_market_tz_not_server_tz():
+    """★回归（R67 / P1-1）：日切窗口必须是**北京日**，不能是服务器时区日。
+
+    生产机 `SHOW timezone` = `Etc/UTC`，而 `for_date` 是北京日。老写法
+    `transition_time >= %s::date` 按 UTC 切 ⇒ 两者在北京 00:00–08:00 差一整天。
+
+    实测过的生产形态：`cpt_signal_event` **312/312** 行的 `transition_time`
+    都是 `23:59:59.999 UTC`（= 北京次日 07:59:59.999），恒被切进**前一天**窗口
+    ⇒ 交易机凌晨拉到的是昨天的决策（或什么都拉不到）。
+
+    这里断言三件事：SQL 不再出现 `::date`、窗口端点是两个 tz-aware 时刻、
+    且「UTC 23:59:59.999 那条」确实落在北京日的窗口内。
+    """
+    import datetime as dt
+
+    from cpt.domain.market_time import MARKET_TZ, market_day_bounds
+    from cpt.storage.signal_event_store import load_trade_decisions
+
+    cur = _FakeCursor(rows=())
+    load_trade_decisions(_FakeConn(cur), for_date="2026-10-08", statuses=("confirmed",))
+    sql, params = cur.calls[0]
+
+    assert "::date" not in sql, "日界不能交给服务器时区去切（生产机是 Etc/UTC）"
+    start, end = params[0], params[1]
+    assert start == dt.datetime(2026, 10, 8, 0, 0, tzinfo=MARKET_TZ)
+    assert end - start == dt.timedelta(days=1)
+    assert start.utcoffset() == dt.timedelta(hours=8), "端点必须带北京时区（+08:00）"
+
+    # 生产现场那条：北京 10-08 07:59:59.999 == UTC 10-07 23:59:59.999
+    prod_ts = dt.datetime(2026, 10, 7, 23, 59, 59, 999000, tzinfo=dt.UTC)
+    assert start <= prod_ts < end, "这条本来属于北京 10-08，老写法会漏掉它"
+    # 反向控制：按 UTC 日切（老写法）会把它切到 10-07 的窗口里
+    assert not (
+        dt.datetime(2026, 10, 8, tzinfo=dt.UTC) <= prod_ts < dt.datetime(2026, 10, 9, tzinfo=dt.UTC)
+    )
+    # market_day_bounds 是唯一来源，别在调用点手搓
+    assert market_day_bounds(dt.date(2026, 10, 8)) == (start, end)
+
+
+def test_bad_for_date_raises_instead_of_querying():
+    """`for_date` 不是 YYYY-MM-DD 就抛 —— 不要把畸形日期送到 PG 再报 503。"""
+    import pytest
+    from cpt.storage.signal_event_store import SignalEventError, load_trade_decisions
+
+    cur = _FakeCursor(rows=())
+    with pytest.raises(SignalEventError):
+        load_trade_decisions(_FakeConn(cur), for_date="10/08/2026", statuses=("confirmed",))
+    assert cur.calls == [], "不该发出一条注定报错的查询"
+
+
 def test_dedupes_same_code_and_type_within_the_day():
     """同一 (code, signal_type) 当天多条跃迁只留最新的一条。
 
@@ -355,3 +405,90 @@ def test_dedupes_same_code_and_type_within_the_day():
     assert [r["signal_id"] for r in out] == ["sig-b", "sig-a"]
     assert out[1]["status"] == "confirmed", "同 signal_id 必须保留最新状态"
     assert out[1]["price"] == 10.6
+
+
+# ── 跨进程写坏 state.json（R67 / 审计 P1-7）──────────────────────────────
+#
+# 进程内 `threading.Lock` 只挡得住**同进程的线程**，而 state.json 是磁盘上的共享
+# 状态：修复前 `_save_state` 又写**固定临时名** `state.json.tmp` —— 两个进程同时
+# load→改→save 时，后写者的 `write_text` 会**追加**到别人写了一半的文件上，
+# `os.replace` 的源还可能已被对方移走。2026-10-18 六进程 × 40 次实测：240 个幂等键
+# 只剩 **129** 个（丢 111 个）、3 次 503「决策状态文件损坏」。
+# 生产当前是单实例，所以这是**潜在**故障；但只要起第二个实例或手工脚本就会真发生。
+
+_RACE_PROCS = 4
+_RACE_PER_PROC = 15
+_RACE_DATE = trade_api._today().isoformat()  # noqa: SLF001 — 回执必须在保留窗口内
+
+
+def _race_worker(arg: tuple[int, str]) -> list[tuple[int, dict]]:
+    """在子进程里连打 N 条回执（每个 batch_id 都必须被记进 ``processed``）。"""
+    import os
+
+    n, d = arg
+    os.environ["CPT_TRADE_DIR"] = d
+    from cpt.web import trade_api as ta
+
+    bad: list[tuple[int, dict]] = []
+    for i in range(_RACE_PER_PROC):
+        body, code = ta.handle_trade_results_post(
+            {"batch_id": f"p{n}-{i}", "for_date": _RACE_DATE, "trades": []}
+        )
+        if code != 200:
+            bad.append((code, body))
+    return bad
+
+
+def test_concurrent_processes_keep_every_idempotency_key(trade_dir):
+    """★P1-7 回归：多进程并发回执后，**一个幂等键都不许丢**，且文件必须可解析。
+
+    老代码在这套压力下丢键（实测 240 丢 111）；``flock`` 串行化后必须 100% 保留。
+    """
+    import json
+    import multiprocessing as mp
+
+    ctx = mp.get_context("fork")  # 显式 fork：3.14 起 Linux 默认已换成 forkserver
+    with ctx.Pool(_RACE_PROCS) as pool:
+        out = pool.map(_race_worker, [(n, str(trade_dir)) for n in range(_RACE_PROCS)])
+
+    assert [b for lst in out for b in lst] == [], "并发回执不该出现 503/错误"
+    state = json.loads((trade_dir / "state.json").read_text(encoding="utf-8"))
+    assert len(state["processed"]) == _RACE_PROCS * _RACE_PER_PROC
+    assert not list(trade_dir.glob("*.tmp")), "临时文件必须被 os.replace 消费掉"
+
+
+def test_save_state_uses_a_unique_temp_name(trade_dir, monkeypatch):
+    """写临时文件名必须唯一 —— 固定名正是「两段 JSON」那个损坏形态的成因。"""
+    import json
+    from pathlib import Path as _Path
+
+    seen: list[str] = []
+    real_replace = trade_api.os.replace
+
+    def _spy(src, dst):
+        seen.append(_Path(src).name)
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(trade_api.os, "replace", _spy)
+    trade_api._save_state({"decisions": {}, "processed": ["a"]})
+    trade_api._save_state({"decisions": {}, "processed": ["b"]})
+
+    assert len(set(seen)) == 2, f"两次写用了同一个临时名: {seen}"
+    assert "state.json.tmp" not in seen
+    assert json.loads((trade_dir / "state.json").read_text(encoding="utf-8"))["processed"] == ["b"]
+    assert not list(trade_dir.glob("*.tmp"))
+
+
+def test_read_modify_write_is_under_the_cross_process_lock(trade_dir, monkeypatch):
+    """门禁：回执路径必须真的取 ``flock`` 排他锁（进程内锁挡不住第二个进程）。"""
+    import fcntl
+
+    ops: list[int] = []
+    monkeypatch.setattr(trade_api.fcntl, "flock", lambda fd, op: ops.append(op))
+
+    body, code = trade_api.handle_trade_results_post(
+        {"batch_id": "lock-1", "for_date": _RACE_DATE, "trades": []}
+    )
+    assert (code, body["status"]) == (200, "ok")
+    assert fcntl.LOCK_EX in ops
+    assert (trade_dir / trade_api._STATE_LOCK_FILE).exists()

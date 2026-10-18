@@ -24,10 +24,13 @@
 
 from __future__ import annotations
 
+import fcntl
 import json
 import logging
 import os
 import uuid
+from collections.abc import Iterator
+from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
@@ -104,6 +107,44 @@ _ACTION_MAP: dict[str, tuple[str, str]] = {
 
 _state_lock = Lock()
 
+#: 跨进程锁文件（``fcntl.flock`` 用）——**R67 / 审计 P1-7**。
+#:
+#: ``_state_lock`` 是 ``threading.Lock``：只挡得住**同一个进程**里的线程，而
+#: ``state.json`` 是磁盘上的共享状态，修前 ``_save_state`` 又写**固定临时名**
+#: ``state.json.tmp``。两个进程同时 load→改→save 时，后写者的 ``write_text``
+#: 会**追加**到别人写了一半的文件上，而且 ``os.replace`` 的源文件可能已被对方
+#: 移走 —— 2026-10-18 六进程复现到：
+#: ``json.decoder.JSONDecodeError: Extra data: line 68 column 2 (char 901)``
+#: 与 ``FileNotFoundError: ...state.json.tmp' -> '...state.json'``，
+#: 后果是回执落盘失败、幂等键丢失（重复下单）。
+#:
+#: 生产当前是**单实例**（``cpt-dashboard.service`` 只有一个 ExecStart），所以这是
+#: **潜在**故障、不是正在发生；但只要起第二个实例、或手工跑一个同
+#: ``CPT_TRADE_DIR`` 的脚本，就会真的写坏。
+_STATE_LOCK_FILE = ".state.lock"
+
+
+@contextmanager
+def _state_guard() -> Iterator[None]:
+    """进程内锁 + 跨进程 ``flock``：把「读-改-写 state.json」串行化。
+
+    两把锁都要：``threading`` 那把挡同进程线程（便宜、省掉无谓的 syscall 争抢），
+    ``flock`` 那把挡别的**进程**（这才是修 P1-7 的那把）。锁随 fd 释放，
+    进程崩了不会留下死锁。
+    """
+    d = trade_dir()
+    d.mkdir(parents=True, exist_ok=True)
+    with _state_lock:
+        fd = os.open(d / _STATE_LOCK_FILE, os.O_RDWR | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        finally:
+            os.close(fd)
+
 
 class TradeStateError(RuntimeError):
     """决策状态目录损坏或不可读——必须让调用方看见，不静默降级成「无信号」。"""
@@ -161,9 +202,15 @@ def _load_state() -> dict[str, Any]:
 def _save_state(state: dict[str, Any]) -> None:
     d = trade_dir()
     d.mkdir(parents=True, exist_ok=True)
-    tmp = d / "state.json.tmp"
-    tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
-    os.replace(tmp, _state_file())
+    # 临时名唯一（pid + 随机串）。固定名 ``state.json.tmp`` 正是 P1-7 的复发入口：
+    # 两个写者同时 ``write_text`` 同一个名字 ⇒ 内容被追加成两段 JSON。
+    tmp = d / f".state.json.{os.getpid()}.{uuid.uuid4().hex[:8]}.tmp"
+    try:
+        tmp.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        os.replace(tmp, _state_file())
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
 
 
 def _prune_results_files(*, today: date | None = None) -> int:
@@ -274,7 +321,7 @@ def handle_trade_decisions(query_str: str) -> tuple[dict[str, Any], int]:
         return {"error": "invalid date"}, 400
 
     key = for_date.isoformat()
-    with _state_lock:
+    with _state_guard():
         try:
             state = _load_state()
         except TradeStateError as exc:
@@ -346,7 +393,7 @@ def handle_trade_results_post(data: dict[str, Any] | None) -> tuple[dict[str, An
         return {"error": "for_date out of retention window"}, 400
     for_date = for_date_day.isoformat()
 
-    with _state_lock:
+    with _state_guard():
         try:
             state = _load_state()
         except TradeStateError as exc:
@@ -368,7 +415,7 @@ def handle_trade_results_post(data: dict[str, Any] | None) -> tuple[dict[str, An
 
         state["processed"].append(batch_id)
         # R59（审计 M2）：两个"只涨不消"的地方都在这里收口 —— ``processed`` 裁上限、
-        # 过期回执文件删除。都放在**已经持有 _state_lock 且紧随成功写入之后**，
+        # 过期回执文件删除。都放在**已经持有 _state_guard 且紧随成功写入之后**，
         # 失败只记日志：清理是维护动作，不该让已落盘的回执变成 500。
         _prune_processed(state)
         try:

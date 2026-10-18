@@ -221,6 +221,20 @@ def _ashare_stale_suffix(row: Any) -> str:
     return ("、" + "、".join(parts)) if parts else ""
 
 
+def _fmt_observed_at(ms: int) -> str:
+    """水位行时间戳 → ``YYYY-MM-DD HH:MM:SSZ``（UTC）；没有则 ``未知``。
+
+    ⚠️ R67（P1-5）：告警正文里**只放这个冻结值，不放"已断 N 分钟/小时"**。
+    ``_state_key`` 用**全量** problems 做指纹（只缩版面、不缩信息），把单调增长的
+    时长写进去就等于让状态指纹每次巡检都变 —— R63 定的「只在状态变化时发」当场
+    失效，一条停摆会变成**每天一条**「还是坏的」。停摆期间最后一行的时间戳是
+    冻结的，既能加诊断信息，又不会污染指纹。
+    """
+    if not ms:
+        return "未知"
+    return datetime.fromtimestamp(ms / 1000, tz=UTC).strftime("%Y-%m-%d %H:%M:%SZ")
+
+
 def _row_age_days(row: Any, now_ms: int) -> float:
     """水位行的年龄（天）。没有时间戳返回 ``inf``。
 
@@ -280,8 +294,8 @@ def build_report(conn: Any) -> dict[str, Any]:
     age = now_ms - newest if newest else None
     if age is not None and age > STALE_METRIC_MS:
         problems.append(
-            f"水位流已断 {age // 60000} 分钟"
-            f"（阈值 {STALE_METRIC_MS // 60000}）—— 轮询或落库可能挂了"
+            f"水位流已断（阈值 {STALE_METRIC_MS // 60000} 分钟，"
+            f"最后一行 {_fmt_observed_at(newest)}）—— 轮询或落库可能挂了"
         )
 
     # A 股流整体停摆（R63）。**不能**用上面那条全局检查代替它：水位流是被加密
@@ -292,7 +306,8 @@ def build_report(conn: Any) -> dict[str, Any]:
         cn_age_h = (now_ms - max(cn_times)) / 3_600_000
         if cn_age_h > ASHARE_STREAM_STALL_HOURS:
             problems.append(
-                f"A 股水位流已停 {cn_age_h:.0f} 小时（阈值 {ASHARE_STREAM_STALL_HOURS}）"
+                f"A 股水位流已停（阈值 {ASHARE_STREAM_STALL_HOURS} 小时，"
+                f"最后一行 {_fmt_observed_at(max(cn_times))}）"
                 "—— cpt-dashboard-ashare.timer / 批次脚本可能没跑成"
             )
     elif rows:

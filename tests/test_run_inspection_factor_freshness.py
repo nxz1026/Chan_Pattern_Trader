@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import importlib.util
 import sys
-from datetime import date
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -176,3 +176,72 @@ def test_problem_text_omits_the_monotone_values(monkeypatch: pytest.MonkeyPatch)
     assert "2026-10-2" not in hit  # 没有 K 线那侧的日期
     assert "4 个交易日" not in hit
     assert "≥2" in hit  # 阈值是常量，可以写
+
+
+# ── P1-5：水位流停摆的两条正文也不能带单调量 ─────────────────────────────
+#
+# 同一个病、另两个入口（R67 / 审计 P1-5）：`水位流已断 {age // 60000} 分钟` 与
+# `A 股水位流已停 {cn_age_h:.0f} 小时` 把**单调增长**的时长写进了 problems，而
+# `_state_key` 用全量 problems 做指纹 ⇒ R63「只在状态变化时发」当场失效：一条停摆
+# 变成每天一条「还是坏的」。上面那条因子检查立的规矩（正文只放冻结值）必须对
+# 同文件里所有告警一视同仁，否则下次照样从别的入口复发（陷阱 #30 的判据）。
+
+_FROZEN_MS = int(datetime(2026, 10, 18, 0, 0, tzinfo=UTC).timestamp() * 1000)
+
+
+def _stall_report(monkeypatch: pytest.MonkeyPatch, *, age_hours: float) -> dict[str, Any]:
+    """一条 A 股健康但**很旧**的水位行 ⇒ 只该出「水位流已断」「A 股水位流已停」两条。"""
+    monkeypatch.setattr(
+        ri,
+        "_recent_rows",
+        lambda conn: [
+            {
+                "market": "cn",
+                "symbol": "600519",
+                "observed_at": _FROZEN_MS,
+                "health": "ok",
+                "bar_count": 119,
+                "gap_count": 0,
+                "stale": False,
+            }
+        ],
+    )
+    monkeypatch.setattr(ri, "_now_ms", lambda: _FROZEN_MS + int(age_hours * 3_600_000))
+    monkeypatch.setattr(ri, "_factor_lag", lambda conn: None)
+    monkeypatch.setattr(
+        "cpt.adapters.source_registry.capabilities_payload",
+        lambda **kwargs: {"sources": []},
+    )
+    return ri.build_report(object())
+
+
+def test_watermark_stall_body_does_not_grow_with_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """**R67 / P1-5 回归**：停摆 40 小时与 50 小时的告警正文必须**逐字相同**。
+
+    停多久只说明"还坏着"，不构成新状态 —— 正文一变，指纹就变，每天重发。
+    """
+    early = _stall_report(monkeypatch, age_hours=40)
+    late = _stall_report(monkeypatch, age_hours=50)
+
+    assert [p for p in early["problems"] if "水位流已断" in p], "全局那条必须报出来"
+    assert [p for p in early["problems"] if "A 股水位流已停" in p], "A 股那条必须报出来"
+    assert early["problems"] == late["problems"], "告警正文随停摆时长变化 = 每天重发"
+    assert ri._state_key(early) == ri._state_key(late)
+
+
+def test_watermark_stall_text_keeps_the_frozen_diagnosis(monkeypatch: pytest.MonkeyPatch) -> None:
+    """去掉时长不等于丢诊断：冻结的「最后一行」时间戳必须在正文里。"""
+    report = _stall_report(monkeypatch, age_hours=40)
+    text = " ".join(report["problems"])
+    assert "2026-10-18 00:00:00Z" in text
+    assert f"阈值 {ri.STALE_METRIC_MS // 60000} 分钟" in text
+    assert f"阈值 {ri.ASHARE_STREAM_STALL_HOURS} 小时" in text
+    assert "40 小时" not in text and "2400 分钟" not in text
+
+
+def test_watermark_recovery_changes_the_fingerprint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """恢复必须能被看出来 —— 否则「从坏到好」那条通知会被指纹撞掉。"""
+    stalled = _stall_report(monkeypatch, age_hours=40)
+    recovered = _stall_report(monkeypatch, age_hours=0)
+    assert not [p for p in recovered["problems"] if "水位流" in p]
+    assert ri._state_key(stalled) != ri._state_key(recovered)

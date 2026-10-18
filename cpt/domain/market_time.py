@@ -13,9 +13,9 @@ R59（审计 H10 / L11）：仓内多处用 ``datetime.now()`` / ``date.today()`
 需要「现在几点 / 今天几号」的调用方一律走 :func:`market_now` /
 :func:`market_today` / :func:`seconds_to_close`，不要自己 ``now()``。
 
-⚠️ **本模块只回答「现在几点 / 今天几号」**。把某个 ``date`` 转成 Unix 毫秒
-（K 线 ``open_ms`` 的既有约定是「该日 UTC 零点」）是另一件事，不要在
-:mod:`cpt.domain.market_time` 里做 —— 那会把两套口径搅在一起，见
+⚠️ **本模块只回答「现在几点 / 今天几号 / 某一天的起止时刻」**。把某个 ``date``
+转成 Unix 毫秒（K 线 ``open_ms`` 的既有约定是「该日 UTC 零点」）是另一件事，
+不要在 :mod:`cpt.domain.market_time` 里做 —— 那会把两套口径搅在一起，见
 ``cpt/adapters/a_share_factor.py`` 里 ``open_ms`` 的说明。
 """
 
@@ -40,6 +40,23 @@ def market_now() -> dt.datetime:
 def market_today() -> dt.date:
     """市场时区下的今天 —— 查交易日历、算 BJT 日期分界都用它。"""
     return market_now().date()
+
+
+def market_day_bounds(day: dt.date) -> tuple[dt.datetime, dt.datetime]:
+    """市场时区下某一天的**半开区间** ``[起, 止)``，两个端点都带 ``MARKET_TZ``。
+
+    给 ``timestamptz`` 列做「某个自然日内」的过滤用。**不要**写成
+    ``transition_time >= %s::date``：那是按**服务器时区**切的，而生产机是
+    ``Etc/UTC``，传进来的日期却是**北京日** —— 两者在北京 00:00–08:00 之间差
+    一整天（R67 / P1-1：``cpt_signal_event`` 生产 312/312 行全部落错窗口，
+    交易机在凌晨拉不到当天最新决策）。用显式的 tz-aware 端点还能继续吃到
+    ``transition_time`` 上的索引。
+
+    ⚠️ 与 K 线 ``open_ms`` 的约定无关：后者是「该日 UTC 零点」的整数毫秒，
+    见 ``cpt/adapters/a_share_factor.py``；两者不可互相换算。
+    """
+    start = dt.datetime.combine(day, dt.time(0, 0), tzinfo=MARKET_TZ)
+    return start, start + dt.timedelta(days=1)
 
 
 def seconds_to_close(now: dt.datetime | None = None) -> int:
