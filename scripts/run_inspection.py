@@ -52,13 +52,13 @@ import json
 import logging
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from cpt.adapters.a_share_local import AShareLocalClient  # noqa: E402
+from cpt.adapters.a_share_local import AShareLocalClient, open_days_between  # noqa: E402
 from cpt.adapters.feishu import ENV_WEBHOOK, notify_problem, webhook_configured  # noqa: E402
 from cpt.storage import run_metric_store as rms  # noqa: E402
 
@@ -68,6 +68,8 @@ __all__ = [
     "ASHARE_STALE_LAG_ALERT_DAYS",
     "ASHARE_ROW_MAX_AGE_DAYS",
     "ASHARE_STREAM_STALL_HOURS",
+    "FACTOR_BATCH_MIN_CODES",
+    "FACTOR_LAG_ALERT_DAYS",
     "STALE_METRIC_MS",
     "build_report",
     "main",
@@ -89,6 +91,31 @@ COUNT_JUMP_RATIO: Final[float] = 0.15
 #: 那 20 只反而被淹掉 —— 正是 ``STALE_METRIC_MS`` 注释里 R38 那条教训。
 #: 只对「缺了 2 个以上交易日」报警：那已经不是发布时差，是链路断了。
 ASHARE_STALE_LAG_ALERT_DAYS: Final[int] = 2
+
+#: 「因子表整体停摆」的判定线：**批次级**因子覆盖的最新交易日落后本地 K 线最新交易日
+#: 多少个交易日才报警（R67，P0-1 的复发探测）。
+#:
+#: 为什么必须单开一条：上面所有检查看的都是**单只标的**的水位/stale，没有一条回答
+#: 「因子表整体有没有跟着日历往前走」。2026-10-17 的 P0-1 就是这样漏的 ——
+#: ``factor_recompute.py`` 的日跑因为账本按「股票」而非「交易日」记账而空转，
+#: 日志显示「成功 5208 只」，而因子表的最新日**冻结**在 10-15，全市场静默退到
+#: 不复权价（``price_basis=raw``），水位流、健康度、结构计数**全绿**。
+#:
+#: 为什么阈值是 2：K 线当天收盘后入库（08:00 UTC 批次），因子重算 cron 02:20 UTC 才跑，
+#: 白天看永远是「落后 1 个交易日」——那是时序不是故障（与 ``ASHARE_STALE_LAG_ALERT_DAYS``
+#: 同源）。
+FACTOR_LAG_ALERT_DAYS: Final[int] = 2
+
+#: 一个交易日要被算成「**批次级**覆盖」所需的最少股票数。
+#:
+#: 为什么需要它（2026-10-17 现场实测，这个坑差点让上面那条检查形同虚设）：
+#: 按需补因子（``FactorEnsurer``，热池 50 ∪ 自选）每天都在往生产表写**少量**
+#: 当前交易日的行 —— 因此 ``max(trade_date)`` 会被这几十行顶到最新。当时的真实状态是
+#: ``max(trade_date)`` ＝ 10-16（**只有 2 行**）而 5208 只的因子停在 10-15：
+#: 直接拿 ``max`` 去比，滞后算出来是 0，一切「正常」。
+#: 取一个大过按需路径日写入量（≤ 热池 50 + 自选）、又远小于全市场（5225）的数：
+#: 只有真正跑过一轮批次的交易日才会被认成「批次覆盖日」。
+FACTOR_BATCH_MIN_CODES: Final[int] = 500
 
 #: 告警正文里最多贴几条**问题项**。
 #:
@@ -204,6 +231,38 @@ def _row_age_days(row: Any, now_ms: int) -> float:
     return (now_ms - ts) / 86_400_000 if ts else float("inf")
 
 
+def _factor_lag(conn: Any) -> tuple[str, int] | None:
+    """**批次级**因子覆盖的最新交易日 → ``(该日, 相对本地 K 线最新日的滞后交易日数)``。
+
+    只认「当日覆盖 ≥ :data:`FACTOR_BATCH_MIN_CODES` 只」的交易日（理由见该常量注释：
+    ``max(trade_date)`` 会被按需补因子的几十行顶到最新，那是**假新鲜**）。
+
+    任何一步读不到（表不存在 / 权限 / 空表 / 从没跑过批次）都返回 ``None``：这是
+    **新增**的检查，不该让巡检本身因为它的失败而变成一条新的噪音源。
+    """
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            "SELECT trade_date FROM asel.ref_adjust_factor"
+            " GROUP BY trade_date HAVING count(DISTINCT code) >= %s"
+            " ORDER BY trade_date DESC LIMIT 1",
+            (FACTOR_BATCH_MIN_CODES,),
+        )
+        row = cur.fetchone()
+        batch_max = row[0] if row else None
+        cur.execute("SELECT max(date) FROM public.daily_bar")
+        row = cur.fetchone()
+        bar_max = row[0] if row else None
+
+        if batch_max is None or bar_max is None:
+            return None
+        lag_days = len(open_days_between(conn, batch_max + timedelta(days=1), bar_max))
+    except Exception as exc:  # noqa: BLE001 — 巡检的新增检查，读不到就静默跳过
+        _LOG.debug("因子表新鲜度检查跳过：%s", exc)
+        return None
+    return batch_max.isoformat(), lag_days
+
+
 def build_report(conn: Any) -> dict[str, Any]:
     """只读：把水位流 + 数据源状态汇成一份结论。"""
     rows = _recent_rows(conn)  # 时间正序（含 A 股单开的那一窗，见 _recent_rows）
@@ -239,6 +298,22 @@ def build_report(conn: Any) -> dict[str, Any]:
     elif rows:
         # 整张水位表都空的情况上面已经报过；这里回答的是"水位表活着、但 A 股一条都没有"。
         problems.append("A 股水位流一条都没有 —— cpt-dashboard-ashare.timer 可能从未成功跑过")
+
+    # 因子表整体停摆（R67）。与上面两条**正交**：水位流可以又新又稳，而因子表静默
+    # 停在三天前 —— 那 5000+ 只票正拿不复权价画图，面板、健康度、结构计数全绿。
+    #
+    # 告警正文里**只放 ``factor_max``（停摆时它是冻结的），不放 K 线日与滞后天数**：
+    # 后两者每天都在变，写进 problems 就等于把状态指纹变成每日一变，一天一条
+    # 「还是坏的」——那正是 R63 要消掉的噪音（同 ``docs/known-traps.md`` 第 49 号）。
+    factor_lag = _factor_lag(conn)
+    if factor_lag is not None:
+        factor_max, lag_days = factor_lag
+        if lag_days >= FACTOR_LAG_ALERT_DAYS:
+            problems.append(
+                f"因子批次停摆：全市场覆盖只到 {factor_max}"
+                f"（落后 ≥{FACTOR_LAG_ALERT_DAYS} 个交易日）"
+                "—— scripts/factor_recompute.py 的日跑可能空转（账本 / promote 步）"
+            )
 
     for (market, symbol), row in per_symbol.items():
         tag = f"{market}/{symbol}"

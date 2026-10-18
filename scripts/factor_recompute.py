@@ -47,7 +47,12 @@ R36 实测的后果（全部真机量过）：
   不是「分几天跑完」的机制。用 ``--source wind`` 时它才重新
   变成真正的硬边界（Wind 的 ``RATE_LIMIT_ERROR``）；
 - **通道不可用会立即停**并落盘进度（东财侧=接口不可达，Wind 侧=额度/通道）；
-- **可断点续跑**（``~/.cache/cpt/factor_recompute_state.json``）；
+- **可断点续跑**（``~/.cache/cpt/factor_recompute_state.json``）。⚠️ R67：账本按
+  「**输入窗口**」记账（``covered[code]`` = 这只票的因子已重算到哪个交易日），
+  不再按「对象全集」记账 —— 老写法只有「算过 / 没算过」，于是**新交易日到来
+  不是失效条件**：2026-10-15 跑完全市场后 ``done`` 覆盖 5208 只，此后每晚
+  ``todo`` 只剩从未成功的 18 只，日跑整夜空转、生产因子表冻结在 10-15、
+  全市场静默退到不复权价。详见 ``docs/known-traps.md`` 第 53 号；
 - **候选集与优先级由 ``--scope`` 决定**（R42）。默认 ``placeholder`` =
   **从没算过的票优先**（``source IS NULL``），其次自选、热门池 —— 理由是
   占位票的因子恒为 1.0，后复权价 == 不复权价，每个除权日的价格跳空都被
@@ -226,17 +231,64 @@ def bind_state_to_source(state: dict[str, Any], source_name: str) -> dict[str, A
         return state
     if previous:
         _LOG.warning(
-            "真值源从 %s 换成 %s，进度**不继承**（done=%d 只将重跑）",
+            "真值源从 %s 换成 %s，进度**不继承**（账本 %d 只将重跑）",
             previous,
             source_name,
-            len(state.get("done") or []),
+            len(state.get(COVERED_KEY) or state.get("done") or []),
         )
-    return {"done": [], "failed": {}, "days": {}, "source": source_name, "scope": None}
+    return {
+        "failed": {},
+        "days": {},
+        "covered": {},
+        "source": source_name,
+        "scope": None,
+    }
 
 
 def save_state(state: dict[str, Any]) -> None:
     STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
     STATE_PATH.write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+
+
+#: 账本的键：``covered[code] = "YYYY-MM-DD"``，含义是「这只票的因子已经按本地 K 线
+#: 重算**到哪一天**」。
+#:
+#: ## 为什么不是 ``done``（R67）
+#:
+#: ``done`` 记的是「算过 / 没算过」——它把**对象**当成了记账单位，而这件事的真实
+#: 输入是**交易日**。两者不等价：交易日每天前进，对象集合不动。于是 2026-10-15
+#: 跑完全市场之后 ``done`` 覆盖 5208 只，10-16 起每晚 ``todo`` 都只剩从未成功的
+#: 18 只 —— 日跑「成功」，日志「已完成 5208 只」，而生产因子表的最新日停在 10-15。
+#:
+#: 判据：**进度账本的失效条件必须来自输入窗口（这里=本地最新交易日），不能来自
+#: 上一次执行本身。** 同一类病见 ``docs/known-traps.md`` 第 53 号。
+COVERED_KEY: Final[str] = "covered"
+
+
+def coverage_of(state: dict[str, Any]) -> dict[str, str]:
+    """读出 ``covered`` 账本；老进度文件没有这个键时退化成**空账本**。
+
+    退化到空账本是**故意**的：老 ``done`` 列表里没有日期，无法反推每只票覆盖到了
+    哪一天，唯一诚实的做法是全市场重算一轮（全集约 2.1 小时，远在 cron 的 10h
+    ``timeout`` 内）。若反过来把它当作「已覆盖到最新日」，就正好复现了这个 bug。
+    """
+    covered = state.get(COVERED_KEY)
+    if not isinstance(covered, dict):
+        return {}
+    return {str(k): str(v) for k, v in covered.items() if k and v}
+
+
+def coverage_target(conn: Any) -> str | None:
+    """本地 K 线的**最新交易日** —— 因子账本追赶的目标。
+
+    「能算到哪一天」由本地 K 线决定，不由日历决定：因子是逐根 bar 算出来的，
+    没入库的交易日算不出来；停牌票的 bar 本来就停在更早的日期（用全局目标记账
+    对它是安全的 —— 它没有新 bar 可算，等新 bar 入库时目标自然又会前进）。
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT max(date) FROM public.daily_bar")
+        row = cur.fetchone()
+    return row[0].isoformat() if row and row[0] else None
 
 
 def watchlist_codes() -> list[str]:
@@ -287,8 +339,12 @@ def placeholder_codes(conn: Any) -> tuple[str, ...]:
         return tuple(sorted({str(r[0]).split(".")[0] for r in cur.fetchall()}))
 
 
-def priority_codes(conn: Any, scope: str = "placeholder") -> list[str]:
-    """候选代码，按「重算收益从大到小」排序，去重保序。
+def priority_groups(conn: Any, scope: str = "placeholder") -> list[list[str]]:
+    """候选代码**按分组**返回，顺序即「重算收益从大到小」的优先级。
+
+    ⚠️ R67：账本排序需要分组边界（自选 / 热门池各自到哪结束），否则按覆盖日期
+    排序会把「昨天刚算过」的自选票排到「从没算过」的占位票后面。原先只有扁平化的
+    :func:`priority_codes`，边界一返回就丢了。
 
     ## ⚠️ R42 修：候选集曾经**排除了全部 3025 只占位票**
 
@@ -315,27 +371,44 @@ def priority_codes(conn: Any, scope: str = "placeholder") -> list[str]:
 
     ``scope='wired'`` 保留旧行为（只重算已有真值的），仅供对照复现。
     """
-    groups: list[Any] = []
+    groups: list[list[str]] = []
     if scope == "placeholder":
-        groups.append(placeholder_codes(conn))
+        groups.append(list(placeholder_codes(conn)))
     elif scope == "wired":
-        groups.append(codes_with_factors(conn))
+        groups.append(list(codes_with_factors(conn)))
     else:  # all
-        groups.append(placeholder_codes(conn))
+        groups.append(list(placeholder_codes(conn)))
     groups.append(watchlist_codes())
-    groups.append(hot_pool_codes(conn))
+    groups.append(list(hot_pool_codes(conn)))
     if scope == "all":
-        groups.append(codes_with_bars(conn))
+        groups.append(list(codes_with_bars(conn)))
+    return groups
 
-    order: list[str] = []
+
+def pending_codes(groups: list[list[str]], covered: dict[str, str], target: str) -> list[str]:
+    """本轮待处理：**分组优先级 → 覆盖最旧优先**，去重保序。
+
+    分组优先级沿用 :func:`priority_groups`（占位票 → 自选 → 热门池 → 其余）；
+    组内按 ``covered`` 的日期升序，账本里没有记录的排最前（从没算过的最落后）。
+
+    组内排序是「其余」那一组的**轮转**机制：一轮没跑完时先补落后最多的，而不是
+    每晚都从同一头开始、尾巴永远轮不到。全市场一轮约 2.1 小时，正常情况下每晚
+    都能跑完，轮转只在中断后接力时起作用。
+    """
+    ranked: list[tuple[int, str, str]] = []
     seen: set[str] = set()
-    for group in groups:
-        for c in group:
-            c = str(c).split(".")[0]
-            if c and c not in seen:
-                seen.add(c)
-                order.append(c)
-    return order
+    for gi, group in enumerate(groups):
+        for raw in group:
+            code = str(raw).split(".")[0]
+            if not code or code in seen:
+                continue
+            seen.add(code)
+            got = covered.get(code)
+            if got == target:
+                continue
+            ranked.append((gi, got or "", code))
+    ranked.sort()
+    return [code for _, _, code in ranked]
 
 
 @dataclass
@@ -586,7 +659,14 @@ def process_code(
 
 def report(state: dict[str, Any]) -> None:
     print("=== 进度 ===")
-    print(f"  已完成 {len(state.get('done', []))} 只   失败 {len(state.get('failed', {}))} 只")
+    covered = coverage_of(state)
+    print(f"  已覆盖 {len(covered)} 只   失败 {len(state.get('failed', {}))} 只")
+    if covered:
+        dates = sorted(set(covered.values()))
+        print(f"  覆盖日期 {dates[0]} → {dates[-1]}")
+    legacy_done = len(state.get("done") or [])
+    if not covered and legacy_done:
+        print(f"  ⚠️ 老账本：done={legacy_done} 只没有覆盖日期，下次运行将全量重算一遍")
     days = state.get("days") or {}
     if days:
         print(f"  按日调用: {json.dumps(dict(sorted(days.items())), ensure_ascii=False)}")
@@ -661,24 +741,35 @@ def main(argv: list[str] | None = None) -> int:
         report(state)
         return 0
 
+    # R67 账本换代：老的 ``done=[code, …]`` 只有「算过 / 没算过」，没有覆盖日期，
+    # 无法反推每只票算到了哪一天。唯一诚实的做法是**全量重算一轮**（≈2.1 小时，
+    # 在 cron 的 10h ``timeout`` 内）；若把它当作「已覆盖到最新日」，就直接复现了
+    # P0-1 本身（日跑空转、因子表冻结）。
+    if "done" in state and COVERED_KEY not in state:
+        _LOG.warning(
+            "账本换代（R67）：老的 done=%d 只没有覆盖日期，本轮按**全量重算**",
+            len(state.get("done") or []),
+        )
+    state.pop("done", None)
+
     client = AShareLocalClient()
     source: _Source = _WindSource() if args.source == "wind" else _EastmoneySource()
     _LOG.info("真值源 = %s", source.name)
     state = bind_state_to_source(state, source.name)
-    # 候选集换了也要重开一轮：``done`` 的含义是「这只票**在某个 scope 下**算过」，
+    # 候选集换了也要重开一轮：账本的含义是「这只票**在某个 scope 下**覆盖到某日」，
     # 从 placeholder 扩到 all 之后，先前算过的不代表全集都算过。
     if state.get("scope") != args.scope:
         if state.get("scope"):
             _LOG.warning(
-                "候选集 scope 从 %s 变成 %s，进度**不继承**（done=%d 只将重跑）",
+                "候选集 scope 从 %s 变成 %s，进度**不继承**（账本 %d 只将重跑）",
                 state.get("scope"),
                 args.scope,
-                len(state.get("done") or []),
+                len(state.get(COVERED_KEY) or []),
             )
         state = {
-            "done": [],
             "failed": {},
             "days": {},
+            "covered": {},
             "source": source.name,
             "scope": args.scope,
         }
@@ -690,14 +781,24 @@ def main(argv: list[str] | None = None) -> int:
         _log_promote(*promote_recompute_factors(conn, dry_run=args.dry_run), dry_run=args.dry_run)
         return 0
 
+    covered = coverage_of(state)
+    target: str | None = None
     if args.only:
         todo = [c.strip() for c in args.only.split(",") if c.strip()]
     else:
-        done = set(state.get("done", []))
-        todo = [c for c in priority_codes(conn, scope=args.scope) if c not in done]
-        _LOG.info(
-            "候选集 scope=%s：待处理 %d 只（已完成跳过 %d 只）", args.scope, len(todo), len(done)
-        )
+        target = coverage_target(conn)
+        if target is None:
+            _LOG.warning("public.daily_bar 里一根 K 线都没有，本轮无事可做")
+            todo = []
+        else:
+            todo = pending_codes(priority_groups(conn, scope=args.scope), covered, target)
+            _LOG.info(
+                "候选集 scope=%s：待处理 %d 只（账本已覆盖到 %s 的 %d 只已跳过）",
+                args.scope,
+                len(todo),
+                target,
+                len(covered),
+            )
 
     # R59/L11：日期一律走 ``cpt.domain.market_time`` 的唯一口径。这里曾用
     # ``dt.date.today()``（宿主 UTC）—— ``state['days']`` 的键就是「哪天用掉多少次
@@ -731,7 +832,11 @@ def main(argv: list[str] | None = None) -> int:
             continue
         calls += used  # 含重试消耗的额度
         if result.ok:
-            state.setdefault("done", []).append(code)
+            # R67：成功的含义是「这只票已按本地 K 线重算**到 target 这一天**」，
+            # 不是「这只票算过了」。前者会随交易日前进自动失效，后者不会。
+            if target is not None:
+                covered[code] = target
+                state[COVERED_KEY] = covered
             _LOG.info(
                 "%s 完成：%d 行 / %d 个除权台阶%s",
                 code,

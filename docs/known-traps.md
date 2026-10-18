@@ -1602,3 +1602,60 @@ curl -sS -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8010/api/dash
 
 **通用判据**：跨仓 / 跨服务型单测，断言对象必须是**对方仓里的字面量或契约文件**，
 不能是本仓拼出来的串；同仓单测用替身拦 IO **最多只能证明自己自洽**。
+
+---
+
+## 53. 进度账本按「对象全集」记账 ⇒ 每日任务空转，而所有检查都是绿的（R67 实测）
+
+**现象**：`scripts/factor_recompute.py` 的日跑 cron 自 2026-10-15 起变成**空转** ——
+因子表 `asel.ref_adjust_factor` 的**批次覆盖日冻结在 10-15**，全市场 5208 只静默退到
+不复权价（快照里 `price_basis=raw` / `stale_reason=factor_missing`），面板上看不出异常。
+当时 `pytest`、15 道门禁、巡检**全部是绿的**。
+
+**根因**：进度账本记的是「算过的**股票集合**」：
+
+```python
+todo = [c for c in priority_codes(conn, scope=args.scope) if c not in done]
+...
+state.setdefault("done", []).append(code)   # 成功一只，加一只
+```
+
+只有**换数据源**或**换 scope** 才重置 `done`，**新增一个交易日不会**。R64 把 scope
+从占位换成 `all` 触发过一次重置，那一轮把 5208 只全部跑完并标成 `done` —— 从此
+`todo` 永远只剩那 18 只一直失败的票。**任务的输入每天都在变（多了一个交易日），
+账本却把「这只票做过没有」当成了「这只票到今天为止做完了没有」。**
+
+**判定命令（约 30 秒，只读）**：
+
+```bash
+python -c "import json,pathlib; s=json.loads(pathlib.Path('~/.cache/cpt/factor_recompute_state.json').expanduser().read_text()); print(len(s['done']), s['days'])"
+psql -c "SELECT trade_date, count(DISTINCT code) FROM asel.ref_adjust_factor GROUP BY 1 ORDER BY 1 DESC LIMIT 3"
+# 2026-10-17 现场：5208 {'2026-10-15': 5246, '2026-10-16': 18, '2026-10-17': 18}
+#                  最新批次日 2026-10-15=5208 只，而 10-16 只有 18 只（全是按需补的）
+```
+
+**为什么全绿**（三条叠加，缺一条都会有人发现）：
+
+1. 既有检查**全是「单只标的」视角**（水位行、`stale`、K 线行龄），没有一条回答
+   「因子表**整体**有没有跟着日历往前走」。
+2. 唯一沾边的 `max(trade_date)` 会被**按需补因子**（热池 50 ∪ 自选，每天都在写少量
+   **当前**交易日的行）顶到最新 ⇒ 滞后算出来是 0，是**假新鲜**。
+   2026-10-17 现场就是这样：`max`=10-16 而**只有 2 行**。
+3. 账本语义里「跑过了」与「跑到了今天」长得一模一样，代码读起来完全自洽。
+
+**修法（R67 已做）**：账本改成**按交易日记账** —— `covered: dict[code, trade_date]`，
+`coverage_target(conn)` 取 `public.daily_bar` 的 `max(date)`，候选取
+`pending_codes(priority_groups(...), covered, target)`（`covered[code] == target` 才跳过），
+成功时 `covered[code] = target`；老的 `done` 键**首次运行丢弃并告警**（迫使全量重算一轮）。
+配套新增**复发探测**：`scripts/run_inspection.py::_factor_lag` 只认「当日覆盖 ≥
+`FACTOR_BATCH_MIN_CODES = 500` 只」的**批次级**交易日（这正是为了防第 2 条的假新鲜），
+停摆写进 `problems`。
+
+**这条告警的指纹纪律**：正文**只放停摆时冻结的批次覆盖日**，绝不写 K 线日与滞后天数
+—— 那两个量在停摆期间**每天都在长**，写进 `problems` 等于把状态指纹变成每日一变，
+一天一条「还是坏的」。这与 **#49** 是同一个坑。
+
+**通用判据**：凡是「按对象逐个处理」的批处理，账本必须记**「处理到哪个输入窗口」**
+（水位 / 日期 / 版本），而不是「哪些对象处理过」—— 后者的语义只在对象集合不变时成立，
+而**输入窗口每天都变**。同类必查：任何带 `done` / `processed` / `seen` / `synced`
+集合的回填、同步、迁移、缓存预热任务。
