@@ -21,6 +21,23 @@ R67 写迁移时踩到两次「差点骗过自己」，两次都只有逐行比�
 迁移脚本自带的 `BEGIN;` / `COMMIT;` 被剥掉，由本文件控制单个外层事务，
 断言在同一事务内完成，收尾 `rollback()`。**没有任何 commit 路径** —— 这也是
 测试敢在共享生产库上跑的原因（PG 的 DDL 同样是事务性的，建的备份表也随回滚消失）。
+
+## 合成「迁移前」数据集（R67 上线后补的）
+
+第一版用例直接拿**生产库当时的真实数据**当迁移前输入，于是 R67 一上线，
+本文件整片变红：每条用例都先跑一遍迁移，而守卫正确地拒绝了重复执行
+（`已有 1992 行是真·5 段`）。那不是用例写错，是**用例把「库还没迁」当成了前提** ——
+迁移的回归钉子必须能一直跑下去，而不是只在「准备迁移的那一刻」有值。
+
+现在改为：在事务内把 `cpt_structure_event` 换成一份**合成的**迁移前数据
+（十几行，覆盖全部病灶），迁移机制类用例从此与生产库当前状态无关。
+生产库的真实行数/坏损程度仍由 `scripts/verify_migration_roundtrip.py` 在
+迁移前实测过一遍（往返逐字节一致），本文件负责钉住**机制**。
+
+⚠️ 夹具还必须把三张真实备份表**清空**、并**删掉真实唯一索引**（都在事务内）：
+真实迁移跑完后 `_id_backup_20261019` 里有 2409 行、`_dropped_20261019` 里有 17800 行，
+`CREATE TABLE IF NOT EXISTS` 会跳过建表、于是校验步「备份数 ≠ 待改数」直接抛错；
+唯一索引则会让合成数据里那组**刻意的重复**插不进去。
 """
 
 from __future__ import annotations
@@ -28,6 +45,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -135,9 +153,179 @@ def _digest(rows: dict[int, tuple[Any, ...]]) -> str:
     return hashlib.sha256(repr([rows[k] for k in sorted(rows)]).encode()).hexdigest()
 
 
+def _migration_state(cur: Any) -> str:
+    """这张表现在是「迁移前」还是「迁移后」？
+
+    判据与迁移脚本的前置守卫 1 **同源**（连那 84 行测试污染的豁免都一致）：
+    真·5 段行存在 ⇔ 迁移已经跑过了。
+    """
+    cur.execute(
+        f"""SELECT count(*) FROM {_TABLE}
+             WHERE array_length(string_to_array(structure_id, ':'), 1) = %s
+               AND NOT (structure_id LIKE 'cn:600519:%%'
+                        AND created_at = TIMESTAMPTZ '2026-10-19 01:16:05.604669+00')""",
+        (_SEGMENTS,),
+    )
+    return "after" if cur.fetchone()[0] else "before"
+
+
+# ---------------------------------------------------------------------------
+# 合成「迁移前」数据集
+# ---------------------------------------------------------------------------
+#
+# 病灶必须**全部**覆盖，否则迁移的分支就有无人走过的路：
+#   · crypto 4 段行（回填分支）——含**一组** `(structure_id, revision)` 重复，
+#     payload 逐字节相同（去重分支的前提）
+#   · cn 4 段行（删除分支）
+#   · `cn:600519:*` 5 段测试行（守卫 1 的豁免分支）
+#   · 一行 payload.id 停在 3 段（R27-4 旧伤 → 同步分支）
+#
+# id 从 900001 起，远离生产序列（`last_value=20720`），即使事务意外提交也一眼可辨。
+_FAKE_TS = datetime(2026, 10, 18, tzinfo=UTC)
+#: 测试污染行的时间戳 —— 必须与迁移脚本守卫 1 里写的那个**完全相等**（微秒级），
+#: 否则守卫不豁免它、迁移一上来就被自己的测试垃圾挡住。
+_TEST_TS = datetime(2026, 10, 19, 1, 16, 5, 604669, tzinfo=UTC)
+
+_FAKE_ROWS: tuple[tuple[int, str, str, str, int, str, datetime, datetime], ...] = (
+    # (id, structure_id, event_type, status, revision, payload_id, occurred_at, created_at)
+    (
+        900001,
+        "crypto:fractal:5:1700000000000",
+        "created",
+        "confirmed",
+        1,
+        "crypto:fractal:5:1700000000000",
+        _FAKE_TS,
+        _FAKE_TS,
+    ),
+    # ⋯ 与上一行同 (structure_id, revision) 且 payload 逐字节相同 ⇒ 并发双写
+    (
+        900002,
+        "crypto:fractal:5:1700000000000",
+        "created",
+        "confirmed",
+        1,
+        "crypto:fractal:5:1700000000000",
+        _FAKE_TS,
+        _FAKE_TS,
+    ),
+    (
+        900003,
+        "crypto:bi:5:1700003600000",
+        "created",
+        "confirmed",
+        2,
+        "crypto:bi:5:1700003600000",
+        _FAKE_TS,
+        _FAKE_TS,
+    ),
+    # payload.id 停在 3 段（连 crypto: 都没有）—— R27-4 留下来的旧伤
+    (
+        900004,
+        "crypto:zhongshu:5:1700007200000",
+        "updated",
+        "forming",
+        1,
+        "zhongshu:5:1700007200000",
+        _FAKE_TS,
+        _FAKE_TS,
+    ),
+    # cn 4 段：**必删**（一个 id 横跨多只票的那种坏）
+    (
+        900005,
+        "cn:bi:5:1782172800000",
+        "created",
+        "confirmed",
+        1,
+        "cn:bi:5:1782172800000",
+        _FAKE_TS,
+        _FAKE_TS,
+    ),
+    (
+        900006,
+        "cn:fractal:5:1782172800000",
+        "created",
+        "confirmed",
+        1,
+        "cn:fractal:5:1782172800000",
+        _FAKE_TS,
+        _FAKE_TS,
+    ),
+    # 测试污染的 5 段行：守卫 1 必须靠 created_at + symbol 豁免它
+    (
+        900007,
+        "cn:600519:fractal:5:1797206400000",
+        "created",
+        "confirmed",
+        1,
+        "cn:600519:fractal:5:1797206400000",
+        _TEST_TS,
+        _TEST_TS,
+    ),
+)
+
+_BACKUP_TABLES = (
+    "cpt_structure_event_id_backup_20261019",
+    "cpt_structure_event_dropped_20261019",
+    "cpt_structure_event_deduped_20261019",
+)
+
+
+def _install_fake_pre_migration(cur: Any) -> None:
+    """把表换成合成的「迁移前」状态（全部在调用方的事务内，随回滚消失）。
+
+    三件必须做的事，缺一件都会让迁移在真实库上跑不通：
+      1. 删掉真实备份表 —— 它们在上线后**有数据**（2409 / 17800 / 417 行），
+         而迁移脚本用 `CREATE TABLE IF NOT EXISTS`，会跳过建表，
+         于是第 3 步校验「备份数 ≠ 待改数」直接抛错。
+      2. 删掉真实唯一索引 —— 合成数据里那组**刻意的重复**否则插不进去。
+      3. 清空事件表 —— 否则合成行与真实 1992 行混在一起。
+    """
+    for table in _BACKUP_TABLES:
+        cur.execute(f"DROP TABLE IF EXISTS public.{table}")
+    cur.execute("DROP INDEX IF EXISTS public.uq_cpt_structure_event_sid_rev")
+    cur.execute(f"DELETE FROM {_TABLE}")
+
+    for row in _FAKE_ROWS:
+        cur.execute(
+            f"""INSERT INTO {_TABLE}
+                    (id, structure_id, event_type, status, revision, payload,
+                     occurred_at, created_at)
+                VALUES (%s, %s, %s, %s, %s, jsonb_build_object('id', %s::text), %s, %s)""",
+            (row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7]),
+        )
+    # 序列推到合成 id 之外，免得迁移里任何 `nextval` 撞上合成主键
+    cur.execute(
+        f"SELECT setval('public.cpt_structure_event_id_seq', (SELECT max(id) FROM {_TABLE}), true)"
+    )
+
+
 @pytest.fixture
 def conn() -> Any:
-    """一条全程 rollback 的连接 —— 断言跑完世界回到原样。"""
+    """一条全程 rollback 的连接，且表已被换成合成的「迁移前」数据集。
+
+    ⚠️ 为什么不再直接用生产库当时的真实数据：R67 一上线，本文件第一版**整片变红** ——
+    每条用例都先 `execute(_SQL_MIGRATION)`，而守卫正确地拒绝了重复执行
+    （`已有 1992 行是真·5 段`）。那不是用例写错，是**用例把「库还没迁」当成了前提**。
+    迁移的回归钉子必须能一直跑下去，而不是只在「准备迁移的那一刻」有值。
+
+    生产库的真实坏损程度由 `scripts/verify_migration_roundtrip.py` 在迁移前实测过
+    （往返逐字节一致）；本文件从此只负责钉住**机制**，与库的当前状态无关。
+    """
+    connection = _open_pg_conn()
+    try:
+        with connection.cursor() as cur:
+            _install_fake_pre_migration(cur)
+            assert _migration_state(cur) == "before", "合成数据集装完仍不是「迁移前」"
+        yield connection
+    finally:
+        connection.rollback()
+        connection.close()
+
+
+@pytest.fixture
+def live_conn() -> Any:
+    """一条全程 rollback 的连接，**不**改数据、两种状态都跑。"""
     connection = _open_pg_conn()
     try:
         yield connection
@@ -285,13 +473,19 @@ def test_rollback_is_idempotent(conn: Any) -> None:
     assert _digest(twice) == _digest(once), "回滚不幂等 —— 二次执行改变了数据"
 
 
-def test_invariant_holds_for_the_live_table_after_migration(conn: Any) -> None:
-    """在**迁移后的视图**上再验一遍全局不变量（防御性：防迁移漏掉某段）。
+def test_invariant_holds_for_the_live_table_after_migration(live_conn: Any) -> None:
+    """整张表满足五条不变量 —— **两种状态下都跑**，这正是它存在的理由。
 
-    这条与上面几条的区别：它不针对某个市场，而是断言「整张表」都满足五条不变量。
+    迁移前：先在事务内跑一遍迁移，再验（验的是「迁移的结果」）。
+    迁移后：直接验现存数据（验的是「生产库真的被治好了」）——
+    R67 上线后这条是唯一还在实际守护生产数据的用例。
+
+    区别于此前的几条：它不针对某个市场、也不依赖「表还是 4 段」这个前提。
     """
-    with conn.cursor() as cur:
-        cur.execute(_SQL_MIGRATION)
+    with live_conn.cursor() as cur:
+        state = _migration_state(cur)
+        if state == "before":
+            cur.execute(_SQL_MIGRATION)
         checks = {
             "非5段行": (
                 f"""SELECT count(*) FROM {_TABLE}
