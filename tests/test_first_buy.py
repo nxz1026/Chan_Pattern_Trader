@@ -17,7 +17,7 @@ import pathlib
 from datetime import UTC, datetime
 
 import pytest
-from cpt.adapters.czsc_chanlun import _bi_direction
+from cpt.adapters.czsc_chanlun import MAX_BI_NUM_UNLIMITED, _bi_direction
 from cpt.domain.first_buy import (
     check_first_buy,
     check_first_sell,
@@ -203,7 +203,11 @@ def test_mean_of_empty_is_zero() -> None:
 
 
 def _analyzer(path: pathlib.Path) -> object:
-    """按与适配器相同的口径构造 czsc 分析器。"""
+    """按与适配器相同的口径构造 czsc 分析器。
+
+    R68：用 :data:`MAX_BI_NUM_UNLIMITED` 而不是字面 ``0`` —— 内核把 0 当
+    「未指定」回落默认 50（``analyze/mod.rs:88``），会截掉近半笔数与分型数。
+    """
     from czsc._native import CZSC, Freq, RawBar  # noqa: PLC0415
 
     rows = list(csv.DictReader(path.open(newline="", encoding="utf-8")))
@@ -222,7 +226,7 @@ def _analyzer(path: pathlib.Path) -> object:
         )
         for i, r in enumerate(rows)
     ]
-    return CZSC(raw, max_bi_num=0, min_bi_len=6)
+    return CZSC(raw, max_bi_num=MAX_BI_NUM_UNLIMITED, min_bi_len=6)
 
 
 def _to_cpt_bis(czsc_bis: object) -> list[Bi]:

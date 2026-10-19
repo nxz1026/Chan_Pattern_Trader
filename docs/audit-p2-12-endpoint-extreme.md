@@ -57,30 +57,75 @@
 
 ## 2. 参照实现（czsc）满足这个不变量
 
-`czsc.CZSC(raw, max_bi_num=0, min_bi_len=6)`，用它的 `fx_list` 作分型集合：
+`czsc.CZSC(raw, max_bi_num=MAX_BI_NUM_UNLIMITED, min_bi_len=6)`，用它的 `fx_list` 作分型集合：
 
 | fixture | czsc 笔 | I2 违规 | I3 违规 | 连续 | 异类 |
 |---|---|---|---|---|---|
-| `btcusdt_5m_2024-02-01` | 50 | 0 | 0 | ✓ | ✓ |
-| `btcusdt_5m_2024-09-01` | 49 | 1 | 0 | ✓ | ✓ |
-| `btcusdt_5m_2025-04-01` | 49 | 2 | 0 | ✓ | ✓ |
+| `btcusdt_5m_2024-02-01` | 88 | 0 | 0 | ✓ | ✓ |
+| `btcusdt_5m_2024-09-01` | 90 | 3 | 0 | ✓ | ✓ |
+| `btcusdt_5m_2025-04-01` | 74 | 2 | 0 | ✓ | ✓ |
 
 所以 I2/I3 不是我们凭空加的标准，**它就是参照口径**。
 
+⚠️ R68 口径更新：上表原用 `max_bi_num=0`（笔数 50/49/49、违规 0/1/2）。那个 0 会被
+内核当「未指定」回落默认 50，把笔数砍掉近半（见下节）。放开后笔数 88/90/74、
+违规 0/3/2 —— **结论不变**（I2/I3 基本满足，I3 恒为 0），只是样本更完整。
+数据源已重跑：`docs/audit-p2-12-evidence.json`。
+
 ⚠️ 但 czsc 侧有 1 笔无法映射到 `fx_list`（笔端点是「已失效但被记住的分型」），
-占比 1/49~50，量测时如实标出。
+量测时如实标出。
 
 ### 但不是「一个文件的差距」
 
-| fixture | native 分型 | czsc 分型 | 差 |
+| fixture | native 分型 | czsc 分型（`max_bi_num=0`） | 差 |
 |---|---|---|---|
 | `btcusdt_5m_2024-02-01` | 327 | 202 | +125 |
 | `btcusdt_5m_2024-09-01` | 357 | 203 | +154 |
 | `btcusdt_5m_2025-04-01` | 353 | 245 | +108 |
 
-native 的分型集合本身就比 czsc 大 50%~75%（`docs/reference-audit.md:86` 已记
-`native 327/326/43` vs `czsc 202/50/6`）。**「对齐 czsc」不是改 `bi.py` 一处能完成的**
-—— 上游分型检测（是否做分型级别过滤/包含处理）差异更大，且是**既有的、已记录的口径差异**。
+⚠️ **R68 更正（2026-10-19）：上表这一列的「差」是量测伪影，不是算法差异。**
+
+「czsc 分型」用的是 `max_bi_num=0`。实测（czsc 1.0.1）那个 0 **不是「不限笔数」**，
+而是落进内核的「未指定」分支、取默认值 **50**：
+
+```rust
+// crates/czsc-core/src/analyze/mod.rs:88
+pub fn resolve_max_bi_num(explicit: usize) -> usize {
+    resolve_env_usize(explicit, "CZSC_MAX_BI_NUM", "czsc_max_bi_num", 50)
+}
+// :65 —— 第一条就是 if explicit > 0；0 走不到这里
+fn resolve_env_usize(explicit: usize, upper: &str, lower: &str, default: usize) -> usize {
+    if explicit > 0 { return explicit; }
+    ...
+    default
+}
+```
+
+截断发生在 `:229`（`bi_list.drain(0..start_idx)`），**`bars_raw` 也跟着从头 drain**
+（`:243` 用 `bi_list.first().fx_a.elements[0].dt` 反推），所以**分型集合也被截掉**：
+1000 根 fixture 下 `bars_raw` 1000 → 593、`fx_list` 322 → 202。
+
+把 `max_bi_num` 真正放开后重测：
+
+| fixture | native 分型 | czsc 分型（`max_bi_num=1e9`） | 共同窗口内序列是否相同 |
+|---|---|---|---|
+| `btcusdt_5m_2024-02-01` | 327 | 322 | **下标与种类完全相同** |
+| `btcusdt_5m_2024-09-01` | 357 | 356 | **下标与种类完全相同** |
+| `btcusdt_5m_2025-04-01` | 353 | 348 | **下标与种类完全相同** |
+
+native 多出的 1~5 个分型全在 czsc 因截断而**没覆盖到的窗口边缘**，不是「上游分型
+检测差异」。**两套分型检测在共同窗口内是同一个东西。**
+
+⇒ 下面这句原结论**作废**：「native 的分型集合本身就比 czsc 大 50%~75%…
+上游分型检测（是否做分型级别过滤/包含处理）差异更大」。分型层**不存在**待对齐的差异。
+
+回归钉子见
+[tests/test_audit_r68_czsc_max_bi_num_truncation.py](../tests/test_audit_r68_czsc_max_bi_num_truncation.py)。
+
+⚠️ 该更正**不改变**本文第 3~5 节关于 `bi.py` 的结论：笔端点的 I2/I3 违规仍是真缺陷
+（czsc 按构造满足，见 `utils.rs:370-395` 的 `fx_b` 取最极端同类分型），DP 上界与
+「升 v2 重建 fixture」的代价也不受影响。只是「先修 bi.py 是在错的地基上施工」
+这个**理由**不成立 —— `bi.py` 就是该修的那一层，只是修法仍未找到。
 
 ---
 
@@ -180,7 +225,10 @@ DP 最优解**不是**贪心合并 —— 它是全局选择，会主动**跳过
 理由：
 - 报告建议①②都**不能**归零（3.2），建议①还破坏连续性承诺；
 - 唯一能归零的 DP 路径代价是**砍掉一半以上笔数**，且要改语义 + 升 v2 + 全量重校准；
-- 上游还有更大的**既有**分型集差异（327 vs 202）未解决，先修 `bi.py` 是在错的地基上施工。
+- ~~上游还有更大的**既有**分型集差异（327 vs 202）未解决，先修 `bi.py` 是在错的地基上施工。~~
+  ⚠️ **R68 撤回这条理由**：那个 327 vs 202 是 `max_bi_num=0` 的截断伪影，分型层两套
+  实现在共同窗口内**完全相同**（见 §2 末的更正）。`bi.py` 就是该修的那一层；
+  结论「不改代码」仍然成立，但只由前两条（建议①②都不能归零）支撑。
 
 回归钉子见 [tests/test_audit_p2_12_bi_endpoint.py](../tests/test_audit_p2_12_bi_endpoint.py)，
 把当前状态（违规计数、gate=None 零违规、DP 上界）钉住，将来口径变了会红。

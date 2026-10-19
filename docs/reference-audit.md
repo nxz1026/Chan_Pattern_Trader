@@ -87,6 +87,26 @@ v0.1（2026-09-22，M0-02）的 chanlun-pro / chanlun.py / chanlun_pine / chan.p
 
 两根 3K 分型窗口重叠，定义上不可能成笔。差距是**定义级**的，不是参数级的——因此移除而不是调参。
 
+⚠️ **R68 更正：本表最后一行的「分型 202」是量测伪影，但结论不变。**
+
+该数字取自 `czsc.CZSC(raw, max_bi_num=0, ...)`。实测（czsc 1.0.1）`max_bi_num=0`
+**不代表「不限笔数」** —— 内核 `crates/czsc-core/src/analyze/mod.rs:88`
+`resolve_max_bi_num` 把 0 当「未指定」，回落默认值 **50**（`:65` 的
+`resolve_env_usize` 第一条即 `if explicit > 0 { return explicit; }`）。截断
+（`:229` 的 `bi_list.drain(0..start_idx)`）会连 `bars_raw` 一起从头砍掉，所以
+**分型集合也被截**：1000 根 fixture 下 `bars_raw` 1000 → 593、`fx_list` 322 → 202。
+
+真正放开（`max_bi_num=1e9`）后 fixture1 的 czsc 分型是 **322**，且与 native 在共同
+窗口内的**下标与种类序列完全相同**（三个 fixture 全等：322/322、356/356、348/348）。
+⇒ native 与 czsc 在**分型层没有差异**，「327 vs 202」不是口径差异。
+
+**结论为何不变**：chanlun-pro 那两行量的是**笔端点跨度**（2 根 / 66.9~74.4%），
+与 `max_bi_num` 无关 —— 放开截断后 czsc 笔跨度仍是 min=6、p50=13~14
+（口径 `fx_a.elements[0]` → `fx_b.elements[2]`）。「定义级差距」这个判据依然成立，
+受影响的只是「czsc 分型 202」这个**附带数字**。
+
+回归钉子：`tests/test_audit_r68_czsc_max_bi_num_truncation.py`。
+
 ### 4.2 PyPI `chanlun` 包的历史结论（保留备查）
 
 M0 曾验证「PyPI 上是否存在 MIT 许可的旧版 Python `chanlun` 包」。**结论：不存在**。

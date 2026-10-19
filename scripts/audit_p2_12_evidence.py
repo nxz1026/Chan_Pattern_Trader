@@ -42,6 +42,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 import czsc  # noqa: E402
+from cpt.adapters.czsc_chanlun import MAX_BI_NUM_UNLIMITED  # noqa: E402
 from cpt.domain.bi import _is_more_extreme, build_bis  # noqa: E402
 from cpt.domain.contain import merge_contained_bars  # noqa: E402
 from cpt.domain.fractal import detect_fractals  # noqa: E402
@@ -218,7 +219,10 @@ def main() -> None:
             )
             for i, b in enumerate(bars)
         ]
-        eng = czsc.CZSC(raw, max_bi_num=0, min_bi_len=6)
+        # ⚠️ R68：**不能**写 0 —— 内核把它当「未指定」回落默认 50，会截断
+        # ``bi_list`` 并连带砍掉 ``bars_raw``（分型集合跟着被截，1000 根下
+        # ``fx_list`` 322 → 202，本脚本早先的证据就是这样被量歪的）。
+        eng = czsc.CZSC(raw, max_bi_num=MAX_BI_NUM_UNLIMITED, min_bi_len=6)
         fc = list(eng.fx_list)
         cb = list(eng.bi_list)
         ci = {f.dt: k for k, f in enumerate(fc)}

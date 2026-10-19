@@ -19,6 +19,7 @@ from pathlib import Path
 import pytest
 from cpt.adapters.czsc_chanlun import (
     DEFAULT_MIN_BI_LEN,
+    MAX_BI_NUM_UNLIMITED,
     PINNED_CZSC_VERSION,
     CzscChanlunBackend,
     CzscNotInstalledError,
@@ -67,7 +68,12 @@ def _fixture_paths() -> list[Path]:
 
 
 def _czsc_analyzer(path: Path) -> object:
-    """按与适配器相同的口径构造 czsc 分析器（供交叉验证用）。"""
+    """按与适配器相同的口径构造 czsc 分析器（供交叉验证用）。
+
+    R68：口径就是适配器里的 :data:`MAX_BI_NUM_UNLIMITED`，**不再各自写 0**。
+    0 会被内核当「未指定」回落默认 50（``analyze/mod.rs:88``），把笔数与分型数
+    都截掉一截；交叉验证两侧必须同口径，否则比的是截断伪影。
+    """
     from datetime import UTC, datetime  # noqa: PLC0415
 
     from czsc._native import CZSC, Freq, RawBar  # noqa: PLC0415
@@ -87,7 +93,7 @@ def _czsc_analyzer(path: Path) -> object:
         )
         for i, bar in enumerate(_load_fixture(path))
     ]
-    return CZSC(raw, max_bi_num=0, min_bi_len=DEFAULT_MIN_BI_LEN)
+    return CZSC(raw, max_bi_num=MAX_BI_NUM_UNLIMITED, min_bi_len=DEFAULT_MIN_BI_LEN)
 
 
 # --------------------------------------------------------------------------- #
@@ -355,13 +361,16 @@ def test_cpt_zhongshu_matches_czsc_exactly_on_clean_fixture(czsc_module: object)
 def test_cpt_zhongshu_extension_never_shrinks_the_zone(czsc_module: object) -> None:
     """延伸不收缩：区间宽必须严格为正且不随延伸变小。
 
-    旧收缩口径在 fixture1 上产出过宽度 **4.5** 的畸形中枢；新口径最小宽度
-    是 17.2 / 232.7 / 307.5。
+    旧收缩口径在 fixture1 上产出过宽度 **4.5** 的畸形中枢。R68 换成
+    :data:`MAX_BI_NUM_UNLIMITED` 后，三个 fixture 的实测最小宽度是
+    **17.2 / 167.5 / 24.5** —— 比截断口径（17.2 / 232.7 / 307.5）更小，
+    因为不截断会多出更早的中枢，但**仍远高于 4.5**，即「延伸不收缩」这条
+    不变量本身不受影响。下方 floor 记录的是当前实测下界。
     """
     floors = {
         "btcusdt_5m_2024-02-01.csv": 17.2,
-        "btcusdt_5m_2024-09-01.csv": 232.7,
-        "btcusdt_5m_2025-04-01.csv": 307.5,
+        "btcusdt_5m_2024-09-01.csv": 167.5,
+        "btcusdt_5m_2025-04-01.csv": 24.5,
     }
     for name, floor in floors.items():
         bars = _load_fixture(FIXTURE_DIR / name)
@@ -394,7 +403,7 @@ def test_real_fixture_zhongshu_never_has_negative_width(czsc_module: object) -> 
         )
         for i, bar in enumerate(bars)
     ]
-    analyzer = CZSC(raw, max_bi_num=0, min_bi_len=DEFAULT_MIN_BI_LEN)
+    analyzer = CZSC(raw, max_bi_num=MAX_BI_NUM_UNLIMITED, min_bi_len=DEFAULT_MIN_BI_LEN)
     degenerate = [zs for zs in analyzer.zs_list if len(zs.bis) < 3]
     assert degenerate, "czsc zs_list 预期含 <3 笔的假中枢（本测试记录该事实）"
 
@@ -430,11 +439,18 @@ def test_real_fixture_domain_mapping_roundtrips(czsc_module: object) -> None:
 
 
 def test_real_fixture_fractal_and_bi_counts_are_stable(czsc_module: object) -> None:
-    """锁定当前计数，任何口径漂移都要显式改这个断言。"""
+    """锁定当前计数，任何口径漂移都要显式改这个断言。
+
+    R68：这里的旧值 ``(202, 50) / (203, 49) / (245, 49)`` 是``max_bi_num=0``
+    被内核解释成 50 之后的**截断结果**，不是 czsc 的真实输出。改成
+    :data:`MAX_BI_NUM_UNLIMITED` 后是 ``(322, 88) / (356, 90) / (348, 74)``。
+    两者都记在 ``tests/test_audit_r68_czsc_max_bi_num_truncation.py`` 的
+    ``BASELINE`` 里，互相交叉验证。
+    """
     expected = {
-        "btcusdt_5m_2024-02-01.csv": (202, 50),
-        "btcusdt_5m_2024-09-01.csv": (203, 49),
-        "btcusdt_5m_2025-04-01.csv": (245, 49),
+        "btcusdt_5m_2024-02-01.csv": (322, 88),
+        "btcusdt_5m_2024-09-01.csv": (356, 90),
+        "btcusdt_5m_2025-04-01.csv": (348, 74),
     }
     for name, (fx_count, bi_count) in expected.items():
         bars = _load_fixture(FIXTURE_DIR / name)

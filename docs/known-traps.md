@@ -1934,3 +1934,74 @@ PY
   （**测的是测试文件自己**，不是被测代码；锚法被改回去就会红）。
 - `tests/test_migration_r67_symbol_in_id.py::test_invariant_holds_for_the_live_table_after_migration`
   —— 把 `occurred_at > now()` 是否为零写成不变量断言，迁移后任何漏网的未来行都会暴露。
+
+---
+
+## 59. 「不限」的哨兵值 `0` 被库当成「未指定」，静默回落到默认上限 —— 而它砍掉的是**上游**数据（R68 实测）
+
+**现象**：本仓三处写 `czsc.CZSC(raw, max_bi_num=0, min_bi_len=6)`
+（`cpt/adapters/czsc_chanlun.py` 生产 parity 侧、`scripts/audit_p2_12_evidence.py`、
+两个测试文件），字面语义是「不限笔数」。实测 czsc 1.0.1：
+
+```python
+CZSC(raw, max_bi_num=0).max_bi_num      # -> 50   ← 不是「不限」，是默认上限
+CZSC(raw, max_bi_num=50).max_bi_num     # -> 50   ← 同一条路径
+CZSC(raw, max_bi_num=10**9).max_bi_num  # -> 1000000000
+CZSC(raw, max_bi_num=-1)                # -> OverflowError: can't convert negative int to unsigned
+```
+
+**根因**（`crates/czsc-core/src/analyze/mod.rs`）：
+
+```rust
+// :88 —— 0 落进「未指定」分支
+pub fn resolve_max_bi_num(explicit: usize) -> usize {
+    resolve_env_usize(explicit, "CZSC_MAX_BI_NUM", "czsc_max_bi_num", 50)
+}
+// :65 —— 第一条就是 if explicit > 0
+fn resolve_env_usize(explicit: usize, upper: &str, lower: &str, default: usize) -> usize {
+    if explicit > 0 { return explicit; }
+    ...  default
+}
+```
+
+**为什么贵**：截断在 `:229` `self.bi_list.drain(0..start_idx)` —— 但 `bars_raw`
+**也跟着从头 drain**（`:243` 用 `bi_list.first().fx_a.elements[0].dt` 反推），
+于是**分型集合一起被截**。1000 根 fixture 实测：
+
+| | `max_bi_num=0`（实际 50） | `1e9`（真不限） |
+|---|---|---|
+| `bars_raw` | 593 | 1000 |
+| `fx_list` | 202 | 322 |
+| `bi_list` | 50 | 88 |
+
+⇒ 被砍掉的是**最早那半段历史**，不是「多余的部分」。
+
+**两个被这个哨兵值污染了数月的结论**：
+
+1. `docs/reference-audit.md:86` 的「czsc 分型 **202**」—— 真实值是 **322**；
+2. `docs/audit-p2-12-endpoint-extreme.md:81` 的「native 分型集比 czsc 大
+   **50%~75%**（327 vs 202）」，并被当作「先修 `bi.py` 是在错的地基上施工」的
+   论据。**放开后两套分型在共同窗口内下标与种类完全相同**（322/322、356/356、
+   348/348）—— 分型层根本没有差异，`bi.py` 就是该修的那一层。
+
+**副作用是反的**：中枢 parity 测试原本**因为两侧都被截断而通过**；改成真不限后，
+CPT 中枢与 czsc `zs_list` 从「0/10 逐项相同」变成 **10/10、8/10、9/10**。
+即修对之后，**对齐度大幅提升**，顺带把两条旧基线（`(202, 50)` / `min_width` 232.7
+与 307.5）也一并更正。
+
+**通用判据**：
+- 任何 `max_*` / `limit` / `top_n` 参数，传「不限」之前先验证库对哨兵值的解释 ——
+  0、-1、`None`、空串在不同库里含义相反（`0` = 不限 / `0` = 用默认 /
+  `-1` = 不限 / 负数报错）。**写下来源**（本仓落成常量
+  `cpt/adapters/czsc_chanlun.py:MAX_BI_NUM_UNLIMITED`，带完整根因注释）。
+- 截断类参数的危险不在「少给结果」，而在**它改的是上游中间产物**：笔数被限制，
+  但连带把 `bars_raw` 和分型集合也砍了，于是「基于分型的交叉验证」全部失真，
+  且失真是**静默**的（结果依旧合法、格式正常）。
+- 交叉验证两侧**必须同口径**，且口径要有**单一来源**。原先测试各自写死 `0`，
+  适配器也写死 `0` —— 三份拷贝没有一处是「真不限」，所以谁也没发现。
+- 「哨兵值 + 默认值」的组合要专门测：本仓钉子
+  `tests/test_audit_r68_czsc_max_bi_num_truncation.py` 同时钉住
+  `0 → 50` 的语义、截断前后两套计数、以及**放开后分型集合相同**。
+
+**回归钉子**：`tests/test_audit_r68_czsc_max_bi_num_truncation.py`（9 条）。
+

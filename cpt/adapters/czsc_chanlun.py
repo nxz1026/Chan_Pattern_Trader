@@ -38,6 +38,7 @@ from cpt.domain.types import BarLike
 __all__ = [
     "DEFAULT_MIN_BI_LEN",
     "PINNED_CZSC_VERSION",
+    "MAX_BI_NUM_UNLIMITED",
     "CzscChanlunBackend",
     "CzscNotInstalledError",
     "CzscVersionError",
@@ -45,6 +46,21 @@ __all__ = [
 
 #: 固定的 czsc 版本；与 ``pyproject.toml`` 的 ``chan`` extra 保持一致。
 PINNED_CZSC_VERSION: Final[str] = "1.0.1"
+
+#: czsc ``CZSC(max_bi_num=...)`` 的「真正不限」取值。
+#:
+#: ⚠️ **不要写 0 或负数**。实测 czsc 1.0.1：内核
+#: ``crates/czsc-core/src/analyze/mod.rs:88`` 的 ``resolve_max_bi_num`` 把
+#: ``0`` 当作「未指定」，回落到默认值 **50**（同文件 ``:65`` 的
+#: ``resolve_env_usize`` 第一条即 ``if explicit > 0 { return explicit; }``），
+#: 于是 ``CZSC(raw, max_bi_num=0).max_bi_num == 50`` —— 字面读作「不限」，
+#: 实际是「只留最近 50 笔」。截断（``:229`` 的 ``bi_list.drain(0..start_idx)``）
+#: 会连 ``bars_raw`` 一起从头砍掉，所以**分型集合也被截**：本仓 1000 根
+#: fixture 下 ``bars_raw`` 1000 → 593、``fx_list`` 322 → 202，直接把
+#: parity 对照的分型数从 322 压到 202（``docs/reference-audit.md:86`` 那个
+#: 202 就是这么来的，已在 R68 更正）。负数更差：PyO3 层直接
+#: ``OverflowError: can't convert negative int to unsigned``。
+MAX_BI_NUM_UNLIMITED: Final[int] = 10**9
 
 #: czsc 笔门槛默认值，量纲＝**去包含后**的 K 线根数。
 #: 实测在 4–7 区间笔数几乎不敏感（3 个 fixture 恒 ~50 笔），8 起急降，
@@ -220,7 +236,7 @@ class CzscChanlunBackend:
             )
             for i, bar in enumerate(canonical)
         ]
-        analyzer = czsc.CZSC(raw_bars, max_bi_num=0, min_bi_len=self._min_bi_len)
+        analyzer = czsc.CZSC(raw_bars, max_bi_num=MAX_BI_NUM_UNLIMITED, min_bi_len=self._min_bi_len)
 
         fx_raw = tuple(
             FxRaw(
