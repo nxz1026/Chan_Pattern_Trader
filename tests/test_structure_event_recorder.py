@@ -130,7 +130,7 @@ def test_records_created_events_and_commits() -> None:
     """首次跑 → 全部 created，且**必须 commit**（store 层不提交）。"""
     conn = FakeConn()
     events = rec.record_structure_events(
-        market="crypto", fractals=[_fractal()], bis=[_bi()], conn=conn
+        market="crypto", symbol="BTCUSDT", fractals=[_fractal()], bis=[_bi()], conn=conn
     )
     assert len(events) > 0
     assert {e.event_type for e in events} == {"created"}
@@ -144,7 +144,7 @@ def test_second_run_with_no_change_writes_nothing() -> None:
     查到完全一致的历史行。
     """
     seed = FakeConn()
-    first = rec.record_structure_events(market="crypto", bis=[_bi()], conn=seed)
+    first = rec.record_structure_events(market="crypto", symbol="BTCUSDT", bis=[_bi()], conn=seed)
     assert first
     rows = [
         (
@@ -181,7 +181,7 @@ def test_second_run_with_no_change_writes_nothing() -> None:
 
     conn = SeededConn()
     conn._rows = rows  # noqa: SLF001
-    again = rec.record_structure_events(market="crypto", bis=[_bi()], conn=conn)
+    again = rec.record_structure_events(market="crypto", symbol="BTCUSDT", bis=[_bi()], conn=conn)
     assert again == (), "结构没变却产生了事件"
     assert conn.commits == 0, "无变化时不该 commit"
     assert not any("INSERT" in q for q in conn.queries)
@@ -194,7 +194,7 @@ def test_second_run_with_no_change_writes_nothing() -> None:
 
 def test_no_structures_is_noop() -> None:
     conn = FakeConn()
-    assert rec.record_structure_events(market="crypto", conn=conn) == ()
+    assert rec.record_structure_events(market="crypto", symbol="BTCUSDT", conn=conn) == ()
     assert conn.queries == [] and conn.commits == 0
 
 
@@ -205,7 +205,8 @@ def test_db_failure_never_raises() -> None:
         def cursor(self) -> Any:
             raise RuntimeError("db down")
 
-    assert rec.record_structure_events(market="crypto", bis=[_bi()], conn=Broken()) == ()
+    got = rec.record_structure_events(market="crypto", symbol="BTCUSDT", bis=[_bi()], conn=Broken())
+    assert got == ()
 
 
 def test_insert_failure_still_returns_events() -> None:
@@ -221,7 +222,7 @@ def test_insert_failure_still_returns_events() -> None:
     逐只降级 —— 一次「表没建」炸穿整张快照。
     """
     conn = NoTable()
-    events = rec.record_structure_events(market="crypto", bis=[_bi()], conn=conn)
+    events = rec.record_structure_events(market="crypto", symbol="BTCUSDT", bis=[_bi()], conn=conn)
     assert events, "写库失败不该吞掉已经算出来的事件"
     assert {e.event_type for e in events} == {"created"}
     # 表缺失 ⇒ 写也失败 ⇒ 必须回滚传入的连接，不许留在 aborted 态。
@@ -241,7 +242,7 @@ def test_real_db_failure_does_not_fake_first_run() -> None:
     连不通（08006）= 不知道历史长什么样，不能降级。
     """
     conn = DbDown()
-    events = rec.record_structure_events(market="crypto", bis=[_bi()], conn=conn)
+    events = rec.record_structure_events(market="crypto", symbol="BTCUSDT", bis=[_bi()], conn=conn)
     assert events == (), "真 DB 故障时不应谎报「本次全部结构都是新建」"
     assert conn.rollbacks == 1, "读失败把事务打成 aborted，必须回滚救连接"
     assert conn.events_written == 0, "读失败就不该往下走去写库"
@@ -252,7 +253,10 @@ def test_commit_failure_never_raises() -> None:
         def commit(self) -> None:
             raise RuntimeError("commit failed")
 
-    assert rec.record_structure_events(market="crypto", bis=[_bi()], conn=BadCommit()) == ()
+    got = rec.record_structure_events(
+        market="crypto", symbol="BTCUSDT", bis=[_bi()], conn=BadCommit()
+    )
+    assert got == ()
 
 
 # --------------------------------------------------------------------------- #
@@ -272,13 +276,21 @@ def test_passes_connection_through(monkeypatch: pytest.MonkeyPatch) -> None:
         yield conn
 
     monkeypatch.setattr(rec, "_connection", _spy)
-    rec.record_structure_events(market="crypto", bis=[_bi()], conn=conn)
+    rec.record_structure_events(market="crypto", symbol="BTCUSDT", bis=[_bi()], conn=conn)
     assert conn.commits == 1
     assert opened == [], "给了 conn 就不该走自开分支"
 
 
-def test_opens_own_connection_when_none(monkeypatch: pytest.MonkeyPatch) -> None:
-    """没给 conn（加密路径）→ 走 ``_connection(None)`` 的自开分支。"""
+def test_opens_own_connection_when_none(
+    monkeypatch: pytest.MonkeyPatch, monkeypatch_prod_write: None
+) -> None:
+    """没给 conn（加密路径）→ 走 ``_connection(None)`` 的自开分支。
+
+    ★2026-10-19：自开分支现在带落库闸门（关着就不连，见
+    ``cpt/application/structure_event_recorder`` 的 docstring）。
+    ``conftest`` 的 autouse fixture 默认把开关设成 ``"0"``，所以这里显式打开
+    —— 本用例要验的正是「打开时真会自开连接」。
+    """
     conn = FakeConn()
 
     @rec.contextmanager
@@ -286,6 +298,46 @@ def test_opens_own_connection_when_none(monkeypatch: pytest.MonkeyPatch) -> None
         yield conn
 
     monkeypatch.setattr(rec, "_connection", _self_open)
-    events = rec.record_structure_events(market="crypto", bis=[_bi()], conn=None)
+    events = rec.record_structure_events(market="crypto", symbol="BTCUSDT", bis=[_bi()], conn=None)
     assert events
+    assert conn.commits == 1
+
+
+def test_self_open_branch_is_gated_by_the_persist_switch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """★2026-10-19：开关关着时，自开分支**连一次都不连**。
+
+    这是第三条同类渗漏的钉子（前两条见 ``cpt/application/persist_gate`` 的
+    docstring）。实测经过：``tests/test_ashare_placeholder_rows.py`` 用假 client，
+    其 ``_get_conn()`` 返回 ``None``；``a_share_snapshot`` 把这个 ``None`` 原样
+    透传给本模块，``_connection(None)`` 于是自己开了一条**生产连接**，真写下
+    84 行 ``cn:600519:*`` 结构化事件。
+
+    为什么断言「连都没连」而不是「写了 0 行」：只拦写入的话，测试仍然要连一次
+    生产库 —— 没有 DB 的 CI 会在这一步报错，而它本来只想跑几个纯计算用例。
+    「先判再连」把这件事从「写不写」升级成「连不连」，更结实。
+    """
+    opened: list[Any] = []
+
+    @rec.contextmanager
+    def _spy(c: Any) -> Any:
+        opened.append(c)
+        raise AssertionError("闸门关着时不该走到开连接这一步")
+
+    monkeypatch.setattr(rec, "_connection", _spy)
+    # conftest 的 autouse fixture 已把开关设成 "0"，这里不覆盖它。
+    out = rec.record_structure_events(market="crypto", symbol="BTCUSDT", bis=[_bi()], conn=None)
+    assert out == ()
+    assert opened == [], "闸门关着 ⇒ _connection 不该被调用"
+
+
+def test_explicit_conn_still_works_when_switch_is_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """有调用方递连接时，开关**不拦** —— 递假连接正是测试该做的事。
+
+    闸门只守 ``conn is None`` 那条自开分支。若连调用方递进来的连接也拦，
+    ``tests/test_structure_event_recorder.py`` 整个文件（靠 FakeConn 钉 diff 与
+    降级逻辑）会一起失效，换来的只是「不知道谁会递真连接」这种想象出来的风险。
+    """
+    conn = FakeConn()
+    events = rec.record_structure_events(market="crypto", symbol="BTCUSDT", bis=[_bi()], conn=conn)
+    assert events, "递了连接就照常产出事件"
     assert conn.commits == 1

@@ -24,6 +24,7 @@ from cpt.domain.structure_events import (
 def _state(
     *,
     market: str = "cn",
+    symbol: str = "600000",
     kind: str = "bi",
     level: int = 5,
     start_time: int = 1_700_000_000_000,
@@ -33,7 +34,7 @@ def _state(
     sid: str | None = None,
 ) -> StructureState:
     return StructureState(
-        id=sid or structure_id_of(market, kind, level, start_time),  # type: ignore[arg-type]
+        id=sid or structure_id_of(market, symbol, kind, level, start_time),  # type: ignore[arg-type]
         level=level,
         kind=kind,  # type: ignore[arg-type]
         direction=1,
@@ -55,15 +56,23 @@ def _state(
 
 def test_structure_id_is_deterministic() -> None:
     """幂等重放的全部前提：同输入必同 id。"""
-    assert structure_id_of("cn", "bi", 5, 1000) == structure_id_of("cn", "bi", 5, 1000)
-    assert structure_id_of("cn", "bi", 5, 1000) == "cn:bi:5:1000"
+    assert structure_id_of("cn", "600000", "bi", 5, 1000) == structure_id_of(
+        "cn", "600000", "bi", 5, 1000
+    )
+    assert structure_id_of("cn", "600000", "bi", 5, 1000) == "cn:600000:bi:5:1000"
 
 
 def test_structure_id_distinguishes_kind_and_level_and_start() -> None:
     """不同的 kind / level / 起点 = 不同的结构。"""
-    assert structure_id_of("cn", "bi", 5, 1000) != structure_id_of("cn", "zhongshu", 5, 1000)
-    assert structure_id_of("cn", "bi", 5, 1000) != structure_id_of("cn", "bi", 30, 1000)
-    assert structure_id_of("cn", "bi", 5, 1000) != structure_id_of("cn", "bi", 5, 2000)
+    assert structure_id_of("cn", "600000", "bi", 5, 1000) != structure_id_of(
+        "cn", "600000", "zhongshu", 5, 1000
+    )
+    assert structure_id_of("cn", "600000", "bi", 5, 1000) != structure_id_of(
+        "cn", "600000", "bi", 30, 1000
+    )
+    assert structure_id_of("cn", "600000", "bi", 5, 1000) != structure_id_of(
+        "cn", "600000", "bi", 5, 2000
+    )
 
 
 def test_structure_id_distinguishes_markets() -> None:
@@ -72,8 +81,32 @@ def test_structure_id_distinguishes_markets() -> None:
     没有这一条，两个市场只要在时间轴上撞上就会静默合并 —— 而且不会报错，
     因为 id「确实」同输入同输出，只是这个「同」跨了市场。
     """
-    assert structure_id_of("cn", "bi", 5, 1000) != structure_id_of("crypto", "bi", 5, 1000)
-    assert structure_id_of("crypto", "bi", 5, 1000) == "crypto:bi:5:1000"
+    assert structure_id_of("cn", "600000", "bi", 5, 1000) != structure_id_of(
+        "crypto", "600000", "bi", 5, 1000
+    )
+    assert structure_id_of("crypto", "BTCUSDT", "bi", 5, 1000) == "crypto:BTCUSDT:bi:5:1000"
+
+
+def test_structure_id_distinguishes_symbols() -> None:
+    """★2026-10-19（审计 P0-2）：**同市场 / 同 kind / 同 level / 同起点，
+    不同标的 = 不同结构**。
+
+    这一条此前**不存在**，而 A 股全是日线、``start_time`` 就是 K 线时间 ⇒
+    每只股票的时间轴完全重合。生产库实测：``cn:bi`` 段 15357 行只对应
+    223 个 id（68.87 行/id），``cn:bi:5:1782172800000`` 一个 id 下 368 行，
+    ``end_time`` 在 1782259200000~1784592000000 之间**双向震荡**（单一结构的
+    end 只应单调后移），127 个 id 带着多个 ``direction`` —— 而 direction 由
+    起始分型类型唯一决定，一个 id 两个方向只能来自两个结构。
+
+    没有这条断言，格式再被改回去时不会有测试叫。
+    """
+    assert structure_id_of("cn", "600000", "bi", 5, 1000) != structure_id_of(
+        "cn", "000001", "bi", 5, 1000
+    )
+    # 同一只股票仍然稳定
+    assert structure_id_of("cn", "600000", "bi", 5, 1000) == structure_id_of(
+        "cn", "600000", "bi", 5, 1000
+    )
 
 
 def test_structure_id_rejects_unknown_market() -> None:
@@ -83,7 +116,31 @@ def test_structure_id_rejects_unknown_market() -> None:
     正常，实际状态机从来没推进过 —— 比直接报错难查得多。
     """
     with pytest.raises(ValueError, match="未知 market"):
-        structure_id_of("bond", "bi", 5, 1000)  # type: ignore[arg-type]
+        structure_id_of("bond", "600000", "bi", 5, 1000)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("symbol", ["", "   "])
+def test_structure_id_rejects_blank_symbol(symbol: str) -> None:
+    """空 / 全空白 symbol 必须报错 —— 它是「所有标的合并成一个」的入口。
+
+    不设默认值、也不容忍空串，理由与 market 那条相同：默认值让漏传的调用点
+    静默写出 ``cn::bi:5:...``，每轮都算新结构、每轮都写 ``created``。
+    空白串同理 —— 它会让 id 里出现一段看不见的分隔符边界。
+    """
+    with pytest.raises(ValueError, match="symbol 不能为空"):
+        structure_id_of("cn", symbol, "bi", 5, 1000)
+
+
+def test_structure_id_rejects_symbol_containing_separator() -> None:
+    """标的分隔符必须挡在门外，否则段会被切错（id 是 ``:`` 连接的）。"""
+    with pytest.raises(ValueError, match="不能含"):
+        structure_id_of("cn", "600:000", "bi", 5, 1000)
+
+
+def test_symbol_is_a_required_positional() -> None:
+    """漏传 symbol 必须**当场 TypeError**，不能靠默认值蒙混过去。"""
+    with pytest.raises(TypeError):
+        structure_id_of("cn", "bi", 5, 1000)  # type: ignore[call-arg]
 
 
 # --------------------------------------------------------------------------- #
@@ -108,29 +165,54 @@ def _one_bi() -> Bi:
 
 def test_states_carry_market_prefix() -> None:
     """同一批结构，两个市场必须算出**不同**的 id。"""
-    cn = states_from_structures(market="cn", bis=[_one_bi()])
-    crypto = states_from_structures(market="crypto", bis=[_one_bi()])
-    assert cn[0].id == "cn:bi:5:1700000000000"
-    assert crypto[0].id == "crypto:bi:5:1700000000000"
+    cn = states_from_structures(market="cn", symbol="600000", bis=[_one_bi()])
+    crypto = states_from_structures(market="crypto", symbol="600000", bis=[_one_bi()])
+    assert cn[0].id == "cn:600000:bi:5:1700000000000"
+    assert crypto[0].id == "crypto:600000:bi:5:1700000000000"
     # 除 id 以外内容完全相同 —— 证明前缀只影响身份，不影响结构本身
     assert cn[0].kind == crypto[0].kind
     assert cn[0].start_time == crypto[0].start_time
 
 
-def test_states_market_is_required() -> None:
-    """``market`` 必须**必填**。
+def test_states_carry_symbol() -> None:
+    """★2026-10-19（审计 P0-2）：同一批结构、不同标的必须算出**不同**的 id。
+
+    这是 A 股串号的直接回归钉子。同一批 ``Bi``（同 level、同 start_time）
+    喂给两只股票，此前会算出**同一个 id**。
+    """
+    a = states_from_structures(market="cn", symbol="600000", bis=[_one_bi()])
+    b = states_from_structures(market="cn", symbol="000001", bis=[_one_bi()])
+    assert a[0].id != b[0].id
+    assert a[0].id == "cn:600000:bi:5:1700000000000"
+    assert b[0].id == "cn:000001:bi:5:1700000000000"
+    # 结构本身没差别 —— 只有身份不同
+    assert (a[0].start_time, a[0].end_time, a[0].direction) == (
+        b[0].start_time,
+        b[0].end_time,
+        b[0].direction,
+    )
+
+
+def test_states_symbol_is_required() -> None:
+    """``symbol`` 必须**必填**，理由与 ``market`` 完全相同。
 
     给默认值等于留一个后门给下一个调用方 —— 而这个后门一旦有人踩，症状是
     「每轮都在写新 created」，看板上完全正常，要到事件流涨到离谱才可能被察觉。
     """
     with pytest.raises(TypeError):
-        states_from_structures(bis=[_one_bi()])  # type: ignore[call-arg]
+        states_from_structures(market="cn", bis=[_one_bi()])  # type: ignore[call-arg]
+
+
+def test_states_market_is_required() -> None:
+    """``market`` 必须**必填**（R27-4）。"""
+    with pytest.raises(TypeError):
+        states_from_structures(symbol="600000", bis=[_one_bi()])  # type: ignore[call-arg]
 
 
 def test_states_are_still_deterministic_per_market() -> None:
-    """加了前缀**不能**破坏幂等：同市场同输入必同 id。"""
-    a = states_from_structures(market="crypto", bis=[_one_bi()])
-    b = states_from_structures(market="crypto", bis=[_one_bi()])
+    """加了前缀**不能**破坏幂等：同市场同标的同输入必同 id。"""
+    a = states_from_structures(market="crypto", symbol="BTCUSDT", bis=[_one_bi()])
+    b = states_from_structures(market="crypto", symbol="BTCUSDT", bis=[_one_bi()])
     assert [s.id for s in a] == [s.id for s in b]
 
 

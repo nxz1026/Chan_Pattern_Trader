@@ -26,6 +26,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from typing import Any
 
+from cpt.application.persist_gate import prod_table_write_enabled
 from cpt.domain.models import Bi, Fractal, StructureEvent, TrendType, ZhongShu
 from cpt.domain.structure_events import MarketKey
 
@@ -72,26 +73,30 @@ def _rollback_quietly(conn: Any) -> None:
 def record_structure_events(
     *,
     market: MarketKey,
+    symbol: str,
     fractals: Sequence[Fractal] = (),
     bis: Sequence[Bi] = (),
     zhongshus: Sequence[ZhongShu] = (),
     trend_types: Sequence[TrendType] = (),
     conn: Any | None = None,
-    symbol: str = "",
     fingerprint: dict[str, str] | None = None,
 ) -> tuple[StructureEvent, ...]:
     """diff 出本轮结构变化 → append 到事件流 → 返回事件。
 
     :param market: 写进 ``structure_id`` 的市场前缀（``cn`` / ``crypto``）。**必填**：
         不带市场前缀的 id 会让两个市场在同 level 上撞同一 ``start_time`` 时静默合并。
+    :param symbol: 标的代码，**必填**，进 ``structure_id``（2026-10-19，审计 P0-2）。
+        此前它只用于归因、**不进 id**，后果是 A 股（全是日线、``start_time`` 就是
+        K 线时间）所有股票的时间轴完全重合 ⇒ 结构静默合并。实测 ``cn:bi`` 段
+        15357 行只对应 223 个 id（68.87 行/id），单 id 下 368 行、``end_time``
+        双向震荡、127 个 id 带多个 ``direction``。改成必填而不是「默认空串」：
+        默认值会让漏传的调用点静默写出 ``cn::bi:...``，每轮都算新结构并写 ``created``
+        —— 与 R27-4 那个「永远匹配不上的 id」同一种病。
     :param conn: 复用的连接；``None`` 表示自己开一条（加密路径）。
-    :param symbol: 标的代码。**归因必需**（``cpt_run_metric`` 按 market+symbol 存
-        指纹，而 ``structure_id`` 本身**不含代码** —— 它是
-        ``{market}:{kind}:{level}:{start_time}``）。留空则不归因。
     :param fingerprint: **本轮**的算法指纹四件套（``config_hash`` /
-        ``dataset_hash`` / ``rules_version`` / ``backend``）。给了且 ``symbol``
-        非空就归因「这次结构变化是什么原因」，写进每条事件的 ``payload["cause"]``；
-        否则**不归因**（payload 里没有 ``cause`` 这个键），而不是归一个假原因。
+        ``dataset_hash`` / ``rules_version`` / ``backend``）。给了就归因「这次结构
+        变化是什么原因」，写进每条事件的 ``payload["cause"]``；否则**不归因**
+        （payload 里没有 ``cause`` 这个键），而不是归一个假原因。
     :returns: 本轮产生的事件；无变化 / 计算失败时返回空元组。
 
     **空批次是常态**：每轮快照都 diff，而同一根 K 线上的结构大多不变。
@@ -109,6 +114,18 @@ def record_structure_events(
 
     代价要说清：这些事件**没有**进事件流，跨重启的追溯里查不到。所以
     ``status`` 会出现「快照说有 created、库里没有」的状态。
+
+    ## 落库开关关着时：不自己开连接，直接返回空
+
+    2026-10-19 补（审计）。判据 :func:`cpt.application.persist_gate.prod_table_write_enabled`，
+    **只在 ``conn is None``（即本函数将自开连接）时生效**。
+
+    为什么必须提前返回、不能「只拦写入」：diff 需要 ``previous``，而它只能从库里
+    读。不读就只能当成「无历史」，于是 ``diff_states`` 把每一个结构判成 ``created``
+    —— 那正是 ``test_real_db_failure_does_not_fake_first_run`` 守着的「谎报首次」。
+    **宁可为空，不可撒谎。**
+
+    生产**从不设置**这个变量，故行为与引入它之前完全一致。
 
     ## 共享连接必须被救回来（2026-10-06 修）
 
@@ -137,6 +154,7 @@ def record_structure_events(
     try:
         states = states_from_structures(
             market=market,
+            symbol=symbol,
             fractals=fractals,
             bis=bis,
             zhongshus=zhongshus,
@@ -146,6 +164,21 @@ def record_structure_events(
             return ()
     except Exception as exc:  # noqa: BLE001 — 纯计算失败也不该影响快照
         _LOG.warning("结构状态构造失败（不影响快照）: %s", exc)
+        return ()
+
+    # 闸门：开关关着时**绝不自己开连接**（2026-10-19，审计）。
+    #
+    # 实测踩过：``tests/test_ashare_placeholder_rows.py`` 的假 client 的
+    # ``_get_conn()`` 返回 ``None``，``a_share_snapshot`` 原样透传，于是这里走
+    # 自开分支连上**生产库**并真写了 84 行 ``cn:600519:*`` 结构事件。
+    #
+    # **只守 ``conn is None`` 这条自开分支**，不守调用方递进来的连接。理由：
+    # 递连接是调用方的决定，传假连接正是「不碰生产」的正当写法 —— 本模块
+    # 11 条行为测试全靠假连接钉住 diff 与降级逻辑，闸门架在 ``conn`` 上会把它们
+    # 一起打死，换来的只是「不知道谁会递真连接」这种想象出来的风险。
+    # 真正的出血点就是这里：``conn is None`` 在本模块里等价于「必然连生产」。
+    if conn is None and not prod_table_write_enabled():
+        _LOG.debug("结构事件不落库 %s/%s：落库开关已关且未提供连接", market, symbol)
         return ()
 
     try:
@@ -171,7 +204,7 @@ def record_structure_events(
             events = diff_states(previous, states)
             if not events:
                 return ()  # 热路径常态：不写库
-            if fingerprint is not None and symbol:
+            if fingerprint is not None:
                 events = _with_cause(
                     db, events, market=market, symbol=symbol, fingerprint=fingerprint
                 )

@@ -693,7 +693,7 @@ grep -rnE "(index|idx|col|pos|offset|ix)\w* *= *[a-z_]+\([^)]*\) +or " cpt/
 |---|---|---|
 | `reference_backend:386-390` | `int(f.get("x", 0) or 0)` | 两边都是 0，收敛成默认值本就正确 |
 | `a_share_factor:552` | `getattr(act,"share_ratio",0.0) or 0.0` | 同上（None → 0.0 是有意的） |
-| `app.py:1219` | `find_run(run_id) or _index_row_from_body(...)` | `find_run` 返回 **dict 或 None**；非空 dict 恒为真，None 才回落 ⇒ 正确 |
+| `app.py:1227` | `find_run(run_id) or _index_row_from_body(...)` | `find_run` 返回 **dict 或 None**；非空 dict 恒为真，None 才回落 ⇒ 正确 |
 
 ⇒ **判据不是「用了 `or`」，而是「左边函数的返回值合法地包含 0 / "" / []」**。
 这条 grep 只能**筛出候选**，逐个看清左边是什么才算结论。
@@ -1786,3 +1786,151 @@ json.decoder.JSONDecodeError: Extra data: line 68 column 2 (char 901)
 **通用判据**：凡是「跳过输入、只用手头保留的元素重算」的折叠/降采样逻辑，都要问一句
 **被跳过的东西里有没有更极端的**；如果「修好它」和「保住产量」冲突，先证明冲突有多硬
 （DP/穷举上界），再决定改不改 —— 别让「改了更像对的」变成一笔隐性重校准。
+
+---
+
+## 57. 改了「确定性 id」的**列**，没改 payload 里那份**冗余副本**（R67 实测，潜伏两个版本）
+
+**现象**：`public.cpt_structure_event` 里 `structure_id` 列与 `payload->>'id'` **不一致**，
+727 行（距今两个版本，从 R27-4 起潜伏）：
+
+```bash
+# 判定命令
+.venv/bin/python - <<'PY'
+import psycopg
+from cpt.adapters._dbconfig import connection_kwargs
+with psycopg.connect(**connection_kwargs()) as c, c.cursor() as cur:
+    cur.execute("""select array_length(string_to_array(structure_id,':'),1) seg,
+                          count(*) filter (where payload->>'id' = structure_id) ok,
+                          count(*) tot
+                     from public.cpt_structure_event group by 1 order by 1""")
+    for seg, ok, tot in cur.fetchall():
+        print(f"  {seg} 段：payload.id 一致 {ok}/{tot}")
+PY
+# 迁移前实测 -> 4 段：一致 19396/20123（**727 行不一致**，全是 payload.id 停在 3 段）；5 段：84/84
+```
+
+**根因**：`state_to_payload` 把 `state.id` 也写进 jsonb（`cpt/domain/structure_events.py:371`），
+于是同一个 id 在表里有**两份**：`structure_id` 列 + `payload['id']`。R27-4 那次的迁移
+（`scripts/migrations/2026-10-06_r27_market_prefix.sql`）只 `UPDATE ... SET structure_id`，
+**没同步 payload** —— 于是这 727 行的 payload.id 停在 `bi:5:1788…` 这种 3 段形态，
+连 `crypto:` / `cn:` 前缀都没有。
+
+**为什么两个版本都没人发现**：读路径**没有任何判据读它**。
+
+- `latest_events` / `timeline` / `recent_events` 全部按 **`structure_id` 列**等值匹配
+  （`WHERE structure_id = ANY(%s)` / `= %s`），不解析 payload；
+- `state_from_event` 里 `id=_as_str(payload.get("id"), event.structure_id)` —— payload.id
+  只是**返回值的一个字段**，没有任何 `if` 拿它做分支；
+- HTTP 出口与前端（`dashboard/dash-structure.js:274`）用的都是 `event.structure_id`。
+
+⇒ 这个字段错得**完全安静**：不影响任何判定，只影响「如果你去读它，会读到一个假的 id」。
+这正是它活了两个版本的原因 —— **没有判据的地方，错误不会自己冒出来**。
+
+**发现它的过程本身值得记**：不是靠读代码，而是靠**迁移↔回滚的逐字节往返比对**。
+R67 的回滚脚本第一版用 `jsonb_set(payload, '{id}', structure_id)` **就地重算**，
+跑出来行数完美（20207 → 1990 → 20207）却**480 行对不上** —— 差分只藏在 jsonb 里，
+`count(*)` 永远看不见。改成「备份原始 payload、回滚取原值」后才归零。
+
+**修法（R67）**：迁移顺带把 payload.id 治成完整 id（`SET payload = jsonb_set(...)`），
+回滚靠备份表里存的 `old_payload` **还原成原来那个错的样子** —— 回滚的语义是回到原状，
+**包括原状里那个不一致**；用「重算」代替「还原」会让往返比对永远差那几百行。
+
+**通用判据**：凡是「一份数据在主列和 jsonb/payload 里各存一份」的表，**改格式时必须同时改两处**，
+并且**给它加一条判据**（断言 `payload->>'id' = structure_id`），否则这个副本会永久幽灵化。
+同类必查：任何 `payload['id']` / `payload['version']` / 冗余 `status`（本表就有 `status` 列
+冗余自 payload，R26 迁移文档明确说是「查询目标」—— 那种冗余是**被读的**，所以它不会腐坏；
+**不被读的冗余才会**）。
+
+**验收工具（R67 新增）**：任何一次性数据迁移都应跑
+
+```bash
+.venv/bin/python -m scripts.verify_migration_roundtrip \
+    scripts/migrations/<迁移>.sql scripts/migrations/rollback/<回滚>.sql
+```
+
+它剥掉脚本自带的事务控制、在**单个外层事务**里跑 迁移→快照→回滚→快照，最后只
+`rollback()`（无 commit 路径），逐行逐字段比对并给出 sha256。**只看行数的验收会骗过自己**。
+
+---
+
+## 58. 合成 bar 的时间轴取在**未来**，于是 `occurred_at` 卖掉了整块面板（R67 实测）
+
+**现象**：`public.cpt_structure_event` 里 **53 行 `occurred_at > now()`**，最远
+`2026-12-14`。而 `recent_events(conn, limit=10)` 按 `occurred_at DESC` 取前 10 条 ——
+**面板顶部 10 条全是未来日期**，真事件被压到看不见。用户看到的是「12 月 14 日有个笔」。
+
+**定性过程（先后猜错一次，记下来）**：初判是「A 股快照吃进了未来日期的 bar」，
+依据是这 53 行**全部带 `payload['cause']`**（= 走过 A 股记录路径、当轮有水位行），
+且落在与真实历史批次同时段（`created_at = 2026-10-06 10:29:59.642405` 等）。
+这个推断**错了**。决定性的反证是**把测试的合成序列喂进 `detect_fractals` 复算**：
+
+```bash
+.venv/bin/python - <<'PY'
+from datetime import UTC, datetime, timedelta
+from cpt.domain.fractal import detect_fractals
+from cpt.domain.models import CanonicalBar
+DAY_MS = 24 * 3600 * 1000
+start = datetime(2026, 6, 1, tzinfo=UTC)          # ← tests/test_ashare_placeholder_rows.py 的起点
+bars = []
+for i in range(200):                                # ← 同一个 200 根
+    base = 10.0 + (i % 7) * 0.1
+    ms = int((start + timedelta(days=i)).timestamp() * 1000)
+    bars.append(CanonicalBar(open_time=ms, open=base, high=base + 0.3, low=base - 0.3,
+        close=base + 0.1, volume=1000.0 + i, close_time=ms + DAY_MS - 1,
+        quote_volume=2000.0 + i, trade_count=0, taker_buy_base_volume=0.0,
+        taker_buy_quote_volume=0.0, is_closed=True))
+fut = [f for f in detect_fractals(tuple(bars)) if f.start_time >= 1792886400000]
+print(sorted({datetime.fromtimestamp(f.start_time / 1000, UTC).date() for f in fut}))
+PY
+# 输出与生产里那 16 个未来 start_time **逐日完全一致**（10-25/26、11-01/02、…、12-13/14）
+```
+
+⇒ 那 53 行**全部**是 `tests/test_ashare_placeholder_rows.py::_bars(200)` 的产物：
+`2026-06-01` 起连续 200 个**日历日**，末端到 `2026-12-17`，比今天晚两个月。
+假 client 的 `_get_conn()` 返回 `None`，`record_structure_events` 于是自开生产连接
+（这个渗漏已由 `cpt/application/persist_gate.py` 修掉）。
+
+**两个独立错误，得分开记**：
+
+1. **测试的合成时间轴取在未来**。`_bars(200)` 的注释解释了「用连续日历日」的理由
+   （A 股允许日历缺口，不必造交易日历），但**没解释为什么起点是 6 月 1 日**。
+   200 个日历日跨 6.5 个月，从 6 月起就必然越过「今天」。合成序列应当**锚在
+   `now` 往回推**，而不是锚在一个写死的日期往后数。
+2. **`occurred_at` 被赋予了「数据里的时间」的语义**。`record_structure_events` 用
+   `state.end_time`（bar 时间）当 `occurred_at`，这是**对的**设计 —— 事件发生在
+   行情上，不在写库那一刻。但它意味着**只要喂进来的 bar 在未来，事件就在未来**。
+   于是「时间戳荒谬」这件事没有任何一层会拦：没有 `CHECK`、没有应用层判据、
+   `recent_events` 也不过滤。
+
+**为什么面板受害而不是数据受害**：`recent_events` 是唯一按时间排序的读接口
+（`ORDER BY occurred_at DESC LIMIT %s`），其它读路径都是按 `structure_id` 等值匹配，
+所以这个错误**只在一个地方可见**，而且看起来像「功能正常、只是内容奇怪」。
+
+**通用判据**：
+- 合成/夹具数据的时间轴**必须锚在 `now` 上**（`now - n*interval` 往回推），
+  不能锚在一个写死的历史日期往后数 —— 后者会随时间推移**必然**跨进未来，
+  今天不炸、几个月后炸，且炸的时候没人会联想到那个测试。
+- 一个「时间来自数据、而不是来自写入动作」的列，要问一句**数据有没有上界校验**。
+  没有的话，上游喂什么它记什么，包括 2099 年。
+- 排序型读接口（`ORDER BY <时间> DESC`）是这类错误的**唯一放大器**：
+  它在别处全静默，只在这里把假数据顶到第一页。
+
+**处置（R67）**：三件事一起做，缺一件都会复发。
+
+1. **渗漏本身**由 `cpt/application/persist_gate.py` 关掉（自开连接前就问开关）。
+2. **那 53 行**随 `scripts/migrations/2026-10-19_r67_symbol_in_id.sql` 一并删除
+   （它们全在 cn 段，与「被证明互相污染的 cn 历史」同一批）。
+3. **合成时间轴改成锚在「今天」往回推**：`tests/test_ashare_placeholder_rows.py::_bars()`
+   的 `start = datetime(2026, 6, 1, tzinfo=UTC)` 改为
+   `today = datetime.now(UTC).replace(hour=0, ...); start = today - timedelta(days=n - 1)`
+   —— 仍是连续日历日（该夹具刻意的性质），但**永远不越过今天**。
+   光靠闸门不够：闸门管的是「写哪儿」，锚法管的是「造什么数据」。前者一旦被放开
+   （比如有人为了跑集成测试把开关打开），后者会立刻再造一批未来行。
+
+两条钉子：
+- `tests/test_ashare_placeholder_rows.py::test_synthetic_bars_never_reach_into_the_future`
+  ＋ `test_synthetic_timeline_is_contiguous_calendar_days` —— 直接钉住这个夹具的时间轴
+  （**测的是测试文件自己**，不是被测代码；锚法被改回去就会红）。
+- `tests/test_migration_r67_symbol_in_id.py::test_invariant_holds_for_the_live_table_after_migration`
+  —— 把 `occurred_at > now()` 是否为零写成不变量断言，迁移后任何漏网的未来行都会暴露。

@@ -68,7 +68,22 @@ def _record_run_metric(
     连接照 :mod:`cpt.application.structure_event_recorder` 的做法现开一条
     （加密侧本身不持有 PG 连接），并**自己 commit** —— 这里没有外层事务边界，
     与「store 不 commit、边界归调用方」并不矛盾：调用方就是这里。
+
+    ⚠️ 2026-10-19（审计 P2-bl）：**开头必须过落库开关**。此前这里没有任何闸门，
+    而 ``tests/conftest.py`` 的 autouse fixture 只把它管到 ``cpt_dashboard_run``
+    （R45），漏了 ``cpt_run_metric`` —— 于是测试里那个返回合成 bar
+    （``_synthetic_bar``，``1_700_000_000_000 + i*interval``）的假 client 会把
+    「binance_realtime / 不陈旧 / ok」写进**生产**表。实测污染 **141 行**，
+    巡检据此报出 21 条「笔数 218 → 0」的假故障，把真信号淹了。
     """
+    # 开关与 ``cpt/web/app.py`` 的两处同源（同一个变量、同一个 ``== "0"`` 判据）。
+    # 放在**建连接之前**：测试里连都不该去连生产库。
+    from cpt.application.run_metric import run_store_persist_enabled  # noqa: PLC0415
+
+    if not run_store_persist_enabled():
+        _LOG.debug("运行水位记录跳过 %s/%s：落库开关已关", market, symbol)
+        return
+
     from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
 
     try:
@@ -847,6 +862,10 @@ class _RealtimeProvider:
         # 重复计数。demo 模式无 bars，本来就没有结构可记。
         structure_events = record_structure_events(
             market="crypto",
+            # 2026-10-19（审计 P0-2）：symbol 现在**进 id**，不再只用于归因。
+            # 加密侧此前不传，靠「BTCUSDT 只有一个 symbol」侥幸没爆；
+            # 换成多交易对跑就会和 A 股一样串号。
+            symbol=target_symbol,
             fractals=fractals,
             bis=bis,
             zhongshus=zhongshus,

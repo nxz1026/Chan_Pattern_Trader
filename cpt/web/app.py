@@ -24,6 +24,7 @@ from cpt.application.dashboard_multi_run import align_runs
 from cpt.application.dashboard_runs import find_run, recent_runs, record_run, run_body
 from cpt.application.dashboard_stats import signal_statistics
 from cpt.application.dashboard_watchlist import watchlist_rows
+from cpt.application.run_metric import RUN_STORE_PERSIST_ENV
 from cpt.web.rate_limit import SlidingWindowLimiter, client_ip
 
 _LOG = logging.getLogger("cpt.web.handler")
@@ -255,6 +256,13 @@ class _BoundedThreadingHTTPServer(ThreadingHTTPServer):
 #: ``/api/dashboard/runs`` 面板一次拉多少行。ring 是 50，表侧同量级。
 _RUN_INDEX_LIMIT = 50
 
+#: 「测试别往生产表写」的总开关（R45 立，2026-10-19 扩到水位表）。
+#:
+#: 值定义在 :mod:`cpt.application.run_metric`，这里只做别名 —— web 层可以 import
+#: application 层、反过来不行，但两边必须是**同一个字符串**，否则会出现「关了一张
+#: 表、另一张照写」这种只在一张表上看得见的漏洞。
+_RUN_STORE_PERSIST_ENV = RUN_STORE_PERSIST_ENV
+
 
 @contextmanager
 def _run_store_conn(conn: Any = None) -> Iterator[Any]:
@@ -300,7 +308,7 @@ def _persist_run(row: dict[str, Any], body: dict[str, Any] | None) -> None:
     #   3. **生产默认行为不变**（不设该变量时照旧双写）。
     import os as _os  # noqa: PLC0415
 
-    if _os.environ.get("CPT_RUN_STORE_PERSIST", "1") == "0":
+    if _os.environ.get(RUN_STORE_PERSIST_ENV, "1") == "0":
         return
 
     try:
@@ -404,7 +412,7 @@ def _run_index_rows(limit: int = _RUN_INDEX_LIMIT, conn: Any = None) -> list[dic
 
     rows: list[dict[str, Any]] = []
     seen: set[str] = set()
-    if _os.environ.get("CPT_RUN_STORE_PERSIST", "1") == "0":
+    if _os.environ.get(RUN_STORE_PERSIST_ENV, "1") == "0":
         # 读端也关 ⇒ 纯 ring（R20 行为），完全由本次进程决定，可复现。
         for row in recent_runs(limit):
             rows.append(dict(row))

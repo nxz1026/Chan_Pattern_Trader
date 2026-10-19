@@ -38,7 +38,9 @@ __all__ = [
 #: 导出 schema 版本号，写入每个 JSON 导出的顶层字段。
 EXPORT_SCHEMA_VERSION: str = "v1"
 
-#: 导出 schema 文档 URL。（TODO: 待 M6 写完整文档）
+#: 导出 schema 文档 URL。目标文档已写成并冻结（``docs/export-schema-v1.md``，
+#: 14833 字节，标注「已冻结」）—— 原先挂在这里的「TODO: 待 M6 写完整文档」
+#: 是过期注释，2026-10-19 清掉，免得下一个人去追一件已经做完的事。
 EXPORT_SCHEMA_URL: str = (
     "https://github.com/nxz1026/Chan_Pattern_Trader/blob/main/docs/export-schema-v1.md"
 )

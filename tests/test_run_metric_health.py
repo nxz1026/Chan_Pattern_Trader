@@ -14,6 +14,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from cpt.application.run_metric import (
     HEALTH_DEGRADED,
@@ -97,3 +99,101 @@ def test_health_is_stable_across_bar_counts(bar_count: int) -> None:
     """有 bar 就是 ok/degraded 分界，无 bar 就是 failing —— 与数量无关。"""
     expected = HEALTH_OK if bar_count > 0 else HEALTH_FAILING
     assert _health(_snapshot(bars=bar_count)) == expected
+
+
+# ── 自证不实：末端时间戳（2026-10-19，审计 P2-bl）────────────────────────────
+
+
+def _aged_snapshot(*, bar_time: int = 1_700_000_000_000, as_of: int = 1_700_000_000_000):
+    """造一份「自带时刻」的快照 —— 本判据必须能从快照内部自证，不读时钟。"""
+    snap = _snapshot(bars=30)
+    snap["candles"] = [{"open_time": bar_time}]  # type: ignore[list-item]
+    snap["runtime"]["generated_at"] = as_of  # type: ignore[index]
+    return snap
+
+
+def test_fresh_snapshot_is_ok() -> None:
+    """正常轮次：末根 K 线就是几十分钟前 —— 不能被新判据误伤。"""
+    base = 1_700_000_000_000
+    assert _health(_aged_snapshot(bar_time=base + 29 * 3_600_000, as_of=base + 30 * 3_600_000)) == (
+        HEALTH_OK
+    )
+
+
+def test_synthetic_bar_time_is_failing() -> None:
+    """★本次修复：``_synthetic_bar`` 的 ``1_700_000_000_000`` 落在 2023-11。
+
+    这是测试用假 client 时真实写进生产库的那一行（实测污染 141 行）。它的
+    ``bar_count=30`` 让旧判据算出 ``ok``，而 ``last_bar_time`` 距快照自述时刻
+    有 1053 天 —— 序列自称来自本轮运行，时间戳却在三年前。
+    """
+    assert _health(_aged_snapshot(bar_time=1_700_000_000_000, as_of=1_792_000_000_000)) == (
+        HEALTH_FAILING
+    )
+
+
+def test_future_bar_time_is_failing_too() -> None:
+    """超前与滞后同样不可能是真的（取绝对值）。"""
+    base = 1_700_000_000_000
+    assert _health(_aged_snapshot(bar_time=base + 253 * 86_400_000, as_of=base)) == HEALTH_FAILING
+
+
+def test_no_self_reported_clock_means_no_judgement() -> None:
+    """拿不到自述时刻时**放弃**判定，而不是当成「很旧」。
+
+    这是本判据能纯函数化的关键：``_snapshot()`` 那批老快照没有
+    ``generated_at``/``as_of_ms``，它们必须继续是 ``ok``。
+    """
+    snap = _snapshot(bars=30)
+    assert "generated_at" not in snap["runtime"]  # type: ignore[operator]
+    assert _health(snap) == HEALTH_OK
+
+
+def test_as_of_ms_is_accepted_as_the_clock() -> None:
+    """A 股快照不传 ``generated_at``，只传 ``as_of_ms``（见 dashboard_runs 兜底顺序）。"""
+    snap = _snapshot(bars=30)
+    snap["candles"] = [{"open_time": 1_700_000_000_000}]  # type: ignore[list-item]
+    snap["runtime"]["as_of_ms"] = 1_792_000_000_000  # type: ignore[index]
+    assert _health(snap) == HEALTH_FAILING
+
+
+def test_implausible_bar_time_is_explained_in_detail() -> None:
+    """判成 failing 必须说清是哪条 —— 否则面板上只剩一堆正常的计数字段。"""
+    row = metric_from_snapshot(
+        _aged_snapshot(bar_time=1_700_000_000_000, as_of=1_792_000_000_000),
+        market="crypto",
+        symbol="BTCUSDT",
+        backend="NativeBackend",
+    )
+    detail = json.loads(str(row["detail"]))
+    assert detail["bar_time_implausible"] is True
+    assert detail["bar_lag_ms"] == 1_792_000_000_000 - 1_700_000_000_000
+
+
+def test_hard_failure_wins_over_implausible_time() -> None:
+    """优先级与 stale/gap 同级，但都在「无 bar」之后（无 bar 是更硬的事实）。"""
+    snap = _aged_snapshot(bar_time=1_700_000_000_000, as_of=1_792_000_000_000)
+    snap["candles"] = []
+    snap["runtime"]["buffer_size"] = 0  # type: ignore[index]
+    assert _health(snap) == HEALTH_FAILING
+
+
+def test_implausible_time_does_not_mask_degraded() -> None:
+    """反过来也要成立：时间戳不可信时不该报 degraded（那说轻了）。"""
+    snap = _aged_snapshot(bar_time=1_700_000_000_000, as_of=1_792_000_000_000)
+    snap["runtime"]["degraded"] = True  # type: ignore[index]
+    assert _health(snap) == HEALTH_FAILING
+
+
+def test_documented_threshold_matches_the_gap_in_real_data() -> None:
+    """阈值必须有依据地落在实测空档里（写下这条以免以后被随手改小）。
+
+    实测（2026-10-19，生产 `cpt_run_metric` 48216 行）：
+    A 股最慢的**合法**滞后是 368.01h ≈ 15.3 天（收盘后入库的日频批次），
+    合成样本是 1053.5 ~ 1067.9 天。30 天两侧各留 2 倍以上余量。
+    """
+    from cpt.application.run_metric import MAX_PLAUSIBLE_BAR_LAG_MS
+
+    as_seconds = MAX_PLAUSIBLE_BAR_LAG_MS / 1000
+    assert as_seconds > 15.3 * 86_400, "不能小到把 A 股日频批次判成故障"
+    assert as_seconds < 1053.5 * 86_400, "不能大到放过合成样本"

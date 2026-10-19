@@ -89,21 +89,47 @@ MARKET_CRYPTO: MarketKey = "crypto"
 MARKETS: tuple[MarketKey, ...] = (MARKET_CN, MARKET_CRYPTO)
 
 
-def structure_id_of(market: MarketKey, kind: StructureKind, level: int, start_time: int) -> str:
+def structure_id_of(
+    market: MarketKey, symbol: str, kind: StructureKind, level: int, start_time: int
+) -> str:
     """结构业务主键。**确定性**是幂等重放的全部前提，见模块 docstring。
 
-    ``market`` 是**必填**的，不给默认值 —— 这正是 R27-4 加它的原因。
-    旧格式 ``f"{kind}:{level}:{start_time}"`` 不含市场，两个市场只要在同 level 上
-    撞上同一个 ``start_time`` 就会**静默合并**成一个结构。实测当时 A 股 101 个 id
-    与加密 485 个 id 交集为 0，但那是日线（UTC 0 点）与小时线（整点）时间轴
-    恰好错开 —— 属运气，不是设计。
+    ## ``market`` 与 ``symbol`` 都是**必填**的
 
-    非法 market 直接抛，不做静默兜底：一个拼错的市场键会写出**永远匹配不上**的
-    id（看起来一切正常，实际每轮都在写新 ``created``），比报错难查得多。
+    ``market`` 是 R27-4 加的，``symbol`` 是 2026-10-19 加的（审计 P0-2），
+    两次都是同一个教训：**id 少一段，不同来源的结构就会静默合并成一个**。
+
+    - 少了 ``market``：两个市场在同 level 撞上同一个 ``start_time`` 就并成一个。
+      当时靠「日线 UTC 0 点 vs 小时线整点」恰好错开而没爆 —— 属运气，不是设计。
+    - 少了 ``symbol``：**A 股全是日线，``start_time`` 就是 K 线时间，所以每只
+      股票的时间轴完全重合** —— 这不是「可能撞」，是必然撞。实测生产库
+      ``cn:bi`` 段积到 15357 行只对应 223 个 id（68.87 行/id），
+      ``cn:bi:5:1782172800000`` 一个 id 下 368 行，``end_time`` 在
+      1782259200000~1784592000000 之间双向震荡（单一结构的 end 只应单调后移），
+      而 127 个 id 带着多个 ``direction`` —— 而 direction 由起始分型类型唯一决定
+      （``cpt/domain/bi.py`` 的 ``_direction``），一个 id 两个方向只能来自
+      **两个不同的结构**。
+
+    所以这里不做「给个默认空串」的兜底：默认值会让漏传的调用点静默写出
+    ``cn::bi:5:...``，每轮都算新结构、每轮都写 ``created`` —— 与 R27-4 那个
+    「永远匹配不上的 id」同一种病，且更难查。**宁可当场抛。**
+
+    格式（各段 ``:`` 连接，段内不出现 ``:``）：
+
+        {market}:{symbol}:{kind}:{level}:{start_time}
+
+    形如 ``cn:002437:bi:5:1782172800000``、``crypto:BTCUSDT:bi:5:1782172800000``。
     """
     if market not in MARKETS:
         raise ValueError(f"未知 market: {market!r}，合法值 {MARKETS}")
-    return f"{market}:{kind}:{level}:{start_time}"
+    if not symbol or symbol != symbol.strip():
+        raise ValueError(
+            "symbol 不能为空或含首尾空白 —— 空 symbol 会让所有标的的结构合并成"
+            "同一个 id，每轮都被当成新结构（审计 P0-2）"
+        )
+    if ":" in symbol:
+        raise ValueError(f"symbol 不能含 ':'（它是 id 的分隔符）: {symbol!r}")
+    return f"{market}:{symbol}:{kind}:{level}:{start_time}"
 
 
 #: 状态跃迁 → 事件类型。
@@ -226,6 +252,7 @@ def diff_states(
 def states_from_structures(
     *,
     market: MarketKey,
+    symbol: str,
     fractals: Sequence[Fractal] = (),
     bis: Sequence[Bi] = (),
     zhongshus: Sequence[ZhongShu] = (),
@@ -235,6 +262,10 @@ def states_from_structures(
 
     **这一步此前全仓不存在** —— ``StructureState`` 定义了却没人构造它，
     因为「domain 对象 → 可持久化的状态」这个转换压根没人写。R26 补上。
+
+    ``symbol`` 是 2026-10-19 加的（审计 P0-2），**必填**。它不加进
+    ``StructureState`` 的字段（那需要改 dataclass 与 payload schema），
+    而是只进 ``id`` —— 因为 id 是唯一的合并判据，够了。
 
     ## status 怎么定
 
@@ -255,7 +286,7 @@ def states_from_structures(
     for f in fractals:
         states.append(
             StructureState(
-                id=structure_id_of(market, "fractal", f.level, f.start_time),
+                id=structure_id_of(market, symbol, "fractal", f.level, f.start_time),
                 level=f.level,
                 kind="fractal",
                 direction=1 if f.kind == "top" else -1,
@@ -278,7 +309,7 @@ def states_from_structures(
         forming = index == len(bis) - 1
         states.append(
             StructureState(
-                id=structure_id_of(market, "bi", b.level, b.start_time),
+                id=structure_id_of(market, symbol, "bi", b.level, b.start_time),
                 level=b.level,
                 kind="bi",
                 direction=b.direction,
@@ -297,7 +328,7 @@ def states_from_structures(
         forming = index == len(zhongshus) - 1
         states.append(
             StructureState(
-                id=structure_id_of(market, "zhongshu", z.level, z.start_time),
+                id=structure_id_of(market, symbol, "zhongshu", z.level, z.start_time),
                 level=z.level,
                 kind="zhongshu",
                 # 中枢是**连续三笔的重叠区间**（见 zhongshu.build_zhongshus），
@@ -319,7 +350,7 @@ def states_from_structures(
         forming = t.kind in ("forming", "open_end")
         states.append(
             StructureState(
-                id=structure_id_of(market, "trend_type", t.level, t.start_time),
+                id=structure_id_of(market, symbol, "trend_type", t.level, t.start_time),
                 level=t.level,
                 kind="trend_type",
                 direction=t.direction,

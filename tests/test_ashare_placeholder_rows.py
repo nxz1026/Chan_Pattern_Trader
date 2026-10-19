@@ -50,8 +50,22 @@ def _bars(n: int) -> tuple[CanonicalBar, ...]:
 
     连续日历日是**故意**的：``validate_ashare_bars`` 允许 A 股的日历缺口，
     所以不必构造交易日历；要防的只有「非交易日不出图」被 0 填充破坏这一点。
+
+    **时间轴锚在「今天」往回推**，而不是锚在写死的日期往后数（R67 修）。
+    旧写法是 ``start = datetime(2026, 6, 1)`` + ``range(200)`` —— 那是 200 个
+    **日历日**，末端落在 2026-12-17，比当时晚两个多月。于是这批合成 bar 经过
+    ``record_structure_events`` 之后 ``occurred_at`` 是**未来**的（该字段取
+    ``end_time``，语义是「事件发生在行情上」，不是「写库那一刻」），而
+    ``structure_event_store.recent_events`` 按 ``occurred_at DESC`` 取前 10 条
+    ⇒ 生产事件面板的顶部 10 条**全是未来日期**，真事件被压到看不见。
+    实测 53 行未来时间戳 / 16 个不同日期，与本函数的 ``detect_fractals``
+    输出**逐日完全一致**（过程见 ``docs/known-traps.md`` #58）。
+
+    锚法：末日 = 今天（UTC 零点），首日 = 今天往前 ``n - 1`` 天 ⇒ 仍是一段
+    连续日历日，但**永远不越过今天**。
     """
-    start = datetime(2026, 6, 1, tzinfo=UTC)
+    today = datetime.now(UTC).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = today - timedelta(days=n - 1)
     out = []
     for i in range(n):
         base = 10.0 + (i % 7) * 0.1
@@ -225,3 +239,42 @@ def test_skipped_placeholder_helper_is_duck_type_safe() -> None:
     assert snap._skipped_placeholder(type("R", (), {})()) == ()
     assert snap._skipped_placeholder(type("R", (), {"skipped_placeholder": None})()) == ()
     assert snap._skipped_placeholder(type("R", (), {"skipped_placeholder": ("x",)})()) == ("x",)
+
+
+# ---------------------------------------------------------------------------
+# 合成时间轴不得越过「今天」（R67 新增，钉子对应 known-traps #58）
+# ---------------------------------------------------------------------------
+
+
+def test_synthetic_bars_never_reach_into_the_future() -> None:
+    """★这条不是测被测代码，是测**这个测试文件自己**（known-traps #58）。
+
+    `_bars()` 的时间轴曾经写死从 `2026-06-01` 起、连续 200 个**日历日**，
+    末端落在 `2026-12-17` —— 比当时晚两个多月。假 client 的 `_get_conn()`
+    返回 `None` 时 `record_structure_events` 会自开生产连接，于是这 200 根
+    合成 bar 变成 **53 行 `occurred_at` 在未来**的生产事件行，
+    按 `occurred_at DESC` 把事件面板顶部 10 条全部占满。
+
+    渗漏路径本身已由 `cpt/application/persist_gate.py` 关掉，但**合成数据
+    取在未来是另一个独立错误**：它让「这段测试数据」与「真实行情」在语义上
+    不可区分。所以这里单独钉住时间轴，闸门放开时也不会再写出未来行。
+    """
+    for count in (1, 30, 200):
+        bars = _bars(count)
+        assert len(bars) == count
+        last = bars[-1]
+        close_ms = last.close_time
+        # 允许「今天」这一根 —— 末日就是今天 UTC 零点 + 一天 - 1ms。
+        assert close_ms <= int(datetime.now(UTC).timestamp() * 1000) + DAY_MS, (
+            f"_bars({count}) 的末根 K 线落在未来：close_time={close_ms}"
+        )
+        first = bars[0]
+        if count > 1:  # 单根序列首末同一根，本就相等
+            assert first.open_time < last.open_time, "合成序列必须单调递增"
+
+
+def test_synthetic_timeline_is_contiguous_calendar_days() -> None:
+    """连续性是这个夹具的**刻意**性质（见 `_bars()` docstring），锚法改动不得破坏它。"""
+    bars = _bars(10)
+    deltas = {bars[i + 1].open_time - bars[i].open_time for i in range(len(bars) - 1)}
+    assert deltas == {DAY_MS}, f"相邻两根的间距不是整日：{deltas}"

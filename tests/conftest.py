@@ -350,3 +350,18 @@ def _isolate_run_store(monkeypatch: _pytest.MonkeyPatch) -> None:
     yield
     _dr._RUN_RING.clear()  # noqa: SLF001
     _dr._RUN_BODIES.clear()  # noqa: SLF001
+
+
+@_pytest.fixture
+def monkeypatch_prod_write(monkeypatch: _pytest.MonkeyPatch) -> None:
+    """**显式**打开旁路表落库（覆盖 autouse 的 ``"0"``）。
+
+    2026-10-19 补。用在哪里：要验「开关打开时真会写」的用例 —— 比如
+    ``tests/test_run_metric_persist_gate.py`` 的反向开关用例、
+    ``tests/test_structure_event_recorder.py::test_opens_own_connection_when_none``。
+
+    为什么不直接在用例里 ``monkeypatch.setenv``：那样每个用例都要重复一遍
+    「为什么需要反向打开」的理由，而这个 fixture 把理由写在了一处 ——
+    **不是为了方便，是为了让「这里为什么开」有唯一答案**。
+    """
+    monkeypatch.setenv("CPT_RUN_STORE_PERSIST", "1")
