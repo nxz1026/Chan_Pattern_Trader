@@ -352,3 +352,82 @@ def test_every_reason_code_has_a_blocked_step() -> None:
     from cpt.application.signal_overview import REASON_TO_BLOCKED_AT
 
     assert set(REASON_CODES) == set(REASON_TO_BLOCKED_AT)
+
+
+# --------------------------------------------------------------------------- #
+# R80：关注列表「跑过没有 / 数据多旧」
+# --------------------------------------------------------------------------- #
+
+
+def test_no_watchlist_means_not_watched_not_an_empty_alarm() -> None:
+    """没关注任何票时 ``watched=False``、``counts=None`` —— 前端据此不渲染提醒。"""
+    out = signal_overview([_event("000001")], now_ms=NOW_MS, watched=[])
+    wl = out["watchlist"]
+    assert wl["watched"] is False
+    assert wl["counts"] is None
+    assert wl["items"] == []
+
+
+def test_omitting_watched_is_the_same_as_an_empty_list() -> None:
+    """``watched=None``（老调用方）与 ``[]`` 同义，不许抛。"""
+    out = signal_overview([_event("000001")], now_ms=NOW_MS)
+    assert out["watchlist"]["watched"] is False
+
+
+def test_never_run_is_not_merged_into_stale() -> None:
+    """没跑过 ≠ 跑了但旧：两者分开计数，理由见模块 docstring。
+
+    合并成一句「没数据」会让用户不知道该等自动任务还是该手动跑。
+    """
+    events = [_event("000001", age_days=0)]
+    out = signal_overview(events, now_ms=NOW_MS, watched=["000001", "600000"])
+    wl = out["watchlist"]
+    assert wl["counts"] == {"total": 2, "never_run": 1, "stale": 0, "fresh": 1}
+    by_code = {it["code"]: it for it in wl["items"]}
+    assert by_code["600000"]["never_run"] is True
+    assert by_code["600000"]["age_days"] is None
+    assert by_code["600000"]["status"] is None
+    assert by_code["000001"]["never_run"] is False
+    assert by_code["000001"]["age_days"] == 0
+
+
+def test_stale_watchlist_entry_uses_the_same_threshold_as_the_overview() -> None:
+    """``stale`` 判据必须与全景行一致（≥ STALE_AFTER_DAYS），不能各算一套。"""
+    events = [
+        _event("000001", age_days=STALE_AFTER_DAYS - 1),
+        _event("000002", age_days=STALE_AFTER_DAYS, event_id=2),
+        _event("000003", age_days=STALE_AFTER_DAYS + 30, event_id=3),
+    ]
+    out = signal_overview(events, now_ms=NOW_MS, watched=["000001", "000002", "000003"])
+    assert out["watchlist"]["counts"] == {
+        "total": 3,
+        "never_run": 0,
+        "stale": 2,
+        "fresh": 1,
+    }
+
+
+def test_watchlist_status_reuses_the_latest_event_of_the_overview() -> None:
+    """同一份「最新事件」：关注区与全景不许对同一只票给出两个状态。"""
+    events = [
+        _event("000001", status="structure_ready", age_days=1),
+        _event("000001", status="confirmed", age_days=0, event_id=2),
+    ]
+    out = signal_overview(events, now_ms=NOW_MS, watched=["000001"])
+    row = next(r for r in out["rows"] if r["code"] == "000001")
+    assert row["status"] == "confirmed"
+    assert out["watchlist"]["items"][0]["status"] == "confirmed"
+
+
+def test_watchlist_dedupes_and_keeps_order() -> None:
+    """重复代码不重复计数；顺序保持用户关注顺序（不是字典序）。"""
+    out = signal_overview([], now_ms=NOW_MS, watched=["600519", "000001", "600519"])
+    items = out["watchlist"]["items"]
+    assert [it["code"] for it in items] == ["600519", "000001"]
+    assert out["watchlist"]["counts"]["total"] == 2
+
+
+def test_watch_refresh_hours_is_passed_through_for_the_copy() -> None:
+    """「几小时内跑一次」由调用方给，本模块不读调度器配置。"""
+    out = signal_overview([], now_ms=NOW_MS, watched=["000001"], watch_refresh_hours=6)
+    assert out["watchlist"]["refresh_hours"] == 6

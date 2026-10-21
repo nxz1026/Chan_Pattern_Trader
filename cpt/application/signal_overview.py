@@ -50,6 +50,19 @@ R78 补两个正交的字段：
 反过来，``structure_id`` 里带真实中枢 id 的行（``level5:bi:5:000006``）
 才**有能力**区分「结构已就绪」与「结构不成立」—— 它们是全景视图该看的样本。
 
+## R80：关注列表的「数据跑没跑」—— 用户加票后不至于看一片空白
+
+用户 2026-10-21 的要求：新加的关注要自动跑，**跑不到的时候界面上要提醒**。
+
+「跑过」的判据只有一个：这只票在 ``cpt_signal_event`` 里**有行**。这不是完美
+判据（一只票跑过但状态没变就不会写新行，行是旧的），所以每一行都同时给出
+``age_days`` —— **「没跑过」和「跑过但数据旧」必须分开说**，合成一句「没数据」
+会让人不知道该等还是该跑。``age_days`` 仍只是下界（见上一节）。
+
+``watched`` 由调用方传入（本模块不读 watchlist 文件，那是适配层的事）。
+只输出 A 股的关注项；``watched=False`` 时整块字段为 ``None``，前端据此不渲染
+提醒区 —— 「用户没关注任何票」不该显示成「关注了 0 只、全都缺数据」。
+
 ## 纪律：只做归类，不发明结论
 
 本模块不读行情、不算收益、不预测方向。每一行输出都能指回
@@ -72,6 +85,7 @@ __all__ = [
     "STEP_TITLES",
     "STALE_AFTER_DAYS",
     "signal_overview",
+    "watchlist_status",
 ]
 
 #: 兜底 structure_id 的特征：``level5:empty:<code>``（见模块 docstring）。
@@ -344,7 +358,83 @@ def _step_distribution(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def signal_overview(events: Sequence[dict[str, Any]], *, now_ms: int) -> dict[str, Any]:
+def watchlist_status(
+    codes: Sequence[str],
+    latest: dict[str, dict[str, Any]],
+    now_ms: int,
+    *,
+    hours: int,
+) -> dict[str, Any]:
+    """R80：关注列表里每只票「跑过没有、数据多旧」。
+
+    :param codes: A 股关注代码（调用方已按市场过滤；重复项按首次出现去重保序）。
+    :param latest: :func:`_latest_per_key` 的结果 —— 与全景共用同一份「最新事件」，
+        避免两处各算一次最新导致口径打架。
+    :param hours: 仅用于**文案**（「自动任务每 N 小时跑一次」），不参与判定。
+        本模块不读调度器配置，写死一个数会随部署漂移。
+    :returns: 形如::
+
+            {
+              "watched": True,
+              "counts": {"total": 3, "never_run": 1, "stale": 1, "fresh": 1},
+              "items": [{"code", "status", "age_days", "never_run"}, ...],
+              "refresh_hours": 4,
+            }
+
+        或 ``{"watched": False, "counts": None, "items": [], "refresh_hours": hours}``
+        （用户没关注任何 A 股）。
+    """
+    seen: list[str] = []
+    for code in codes:
+        if isinstance(code, str) and code and code not in seen:
+            seen.append(code)
+    if not seen:
+        return {"watched": False, "counts": None, "items": [], "refresh_hours": hours}
+    items: list[dict[str, Any]] = []
+    never_run = stale = fresh = 0
+    for code in seen:
+        event = latest.get(code)
+        if event is None:
+            never_run += 1
+            items.append(
+                {
+                    "code": code,
+                    "status": None,
+                    "age_days": None,
+                    # 「没跑过」不是「跑了但旧」—— 分开标记，见模块 docstring。
+                    "never_run": True,
+                }
+            )
+            continue
+        age = _age_days(event, now_ms)
+        is_stale = age is not None and age >= STALE_AFTER_DAYS
+        if is_stale:
+            stale += 1
+        else:
+            fresh += 1
+        items.append(
+            {
+                "code": code,
+                "status": str(event.get("status") or "unknown"),
+                "age_days": age,
+                "never_run": False,
+            }
+        )
+    return {
+        "watched": True,
+        "counts": {"total": len(seen), "never_run": never_run, "stale": stale, "fresh": fresh},
+        "items": items,
+        "refresh_hours": hours,
+    }
+
+
+def signal_overview(
+    events: Sequence[dict[str, Any]],
+    *,
+    now_ms: int,
+    watched: Sequence[str] | None = None,
+    watch_refresh_hours: int = 4,
+) -> dict[str, Any]:
     """把信号事件流折成全景视图。
 
     :param events: :func:`cpt.storage.signal_event_store.load_signal_events`
@@ -352,6 +442,8 @@ def signal_overview(events: Sequence[dict[str, Any]], *, now_ms: int) -> dict[st
         ``transition_time`` 毫秒 / ``invalidated_reason``）。
     :param now_ms: 当前时刻（Unix 毫秒）。**必须由调用方传入**：本模块不读
         系统时钟，否则同一份数据在不同时间跑出的「距今天数」不可复现。
+    :param watched: R80：A 股关注代码（``None`` = 不评估关注区，与传空列表同义）。
+    :param watch_refresh_hours: 关注自动任务的间隔小时数，仅用于前端文案。
     :returns: 形如::
 
             {
@@ -363,6 +455,7 @@ def signal_overview(events: Sequence[dict[str, Any]], *, now_ms: int) -> dict[st
               "stale_after_days": 7,
               "age_is_lower_bound": True,         # 恒 True，钉死口径
               "reason_codes": [...],              # 合法原因码，供前端校验
+              "watchlist": {...},                 # R80，见 watchlist_status
               "rows": [{"code", "status", "step", "age_days", "stale", ...}, ...],
             }
 
@@ -384,5 +477,7 @@ def signal_overview(events: Sequence[dict[str, Any]], *, now_ms: int) -> dict[st
         # R78：全市场「走完几步 / 卡在哪步、为什么」的分布。
         "step_distribution": _step_distribution(rows),
         "step_titles": dict(STEP_TITLES),
+        # R80：关注列表「跑过没有、数据多旧」。
+        "watchlist": watchlist_status(watched or (), latest, now_ms, hours=watch_refresh_hours),
         "rows": rows,
     }

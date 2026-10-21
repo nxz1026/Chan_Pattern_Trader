@@ -3239,6 +3239,88 @@
        · 下面一块 = 卡住的票各自因为什么卡住（只有记了原因的行才有）。
      两者相加**不等于** total，差的就是「没记原因」的那批 —— 必须说出来，
      不能凑平。 */
+  // R80：关注列表「跑过没有 / 数据多旧」的提醒。
+  //
+  // 为什么要把「没跑过」和「跑了但旧」分开：两者对用户的下一步动作完全不同 ——
+  // 前者要等自动任务（或手动跑一次），后者说明跑过了但这只票没再变化。
+  // 合成一句「没有数据」会让人不知道该等还是该动手。
+  //
+  // 为什么没有关注时整块不渲染：见过一次空列表的人不会再想看到
+  // 「关注 0 只、全部缺数据」这种吓人的字。
+  function buildWatchlistAlert(ov) {
+    const wrap = document.createElement("div");
+    wrap.dataset.testid = "signal-overview-watchlist";
+    const wl = isObject(ov.watchlist) ? ov.watchlist : null;
+    if (!wl || wl.watched !== true) {
+      wrap.hidden = true;
+      return wrap;
+    }
+    const counts = isObject(wl.counts) ? wl.counts : {};
+    const total = Number(counts.total) || 0;
+    const neverRun = Number(counts.never_run) || 0;
+    const stale = Number(counts.stale) || 0;
+    const items = asArray(wl.items);
+    // ⚠️ 「旧」的判据必须与后端 `stale` 一致：age_days >= stale_after_days。
+    // 第一版只检查 `age_days != null`，实测把刚跑过的 0 天票也列进了「数据旧」名单
+    // （node 桩上复现：`000002、000001 · 最后一次状态跃迁超过 7 天`）。
+    const staleAfter = Number(ov.stale_after_days) || 7;
+    const isOld = (it) =>
+      it.never_run !== true && it.age_days != null && Number(it.age_days) >= staleAfter;
+    const names = (flag) =>
+      items
+        .filter((it) => (flag === "never" ? it.never_run === true : isOld(it)))
+        .map((it) => it.code)
+        .slice(0, 10)
+        .join("、");
+
+    const heading = document.createElement("h4");
+    heading.textContent = `我关注的票（共 ${total} 只）`;
+    wrap.appendChild(heading);
+
+    const dl = document.createElement("dl");
+    dl.className = "kv";
+    const REFRESH = Number(wl.refresh_hours) || 4;
+    const addRow = (label, value, testid) => {
+      const item = document.createElement("div");
+      const term = document.createElement("dt");
+      term.textContent = label;
+      const detail = document.createElement("dd");
+      detail.textContent = value;
+      if (testid) detail.dataset.testid = testid;
+      item.append(term, detail);
+      dl.appendChild(item);
+    };
+    addRow("已在跑（有数据）", `${
+      Number(counts.fresh) || 0
+    } 只`, "signal-overview-watch-fresh");
+    addRow(
+      "还没跑过",
+      neverRun
+        ? `${neverRun} 只（${names("never")}）— 自动任务每 ${REFRESH} 小时内会跑一次，等一会儿再看`
+        : "0 只",
+      "signal-overview-watch-never",
+    );
+    addRow(
+      "跑过但数据旧",
+      stale ? `${stale} 只（${names("stale")}）— 最后一次状态跃迁超过 ${ov.stale_after_days || 7} 天` : "0 只",
+      "signal-overview-watch-stale",
+    );
+    wrap.appendChild(dl);
+
+    // 只有真缺数据时才给红字提醒 —— 全都新鲜就别主动制造焦虑。
+    if (neverRun || stale) {
+      const p = document.createElement("p");
+      p.className = "hint";
+      p.dataset.testid = "signal-overview-watch-warning";
+      p.textContent =
+        (neverRun ? `⚠️ ${neverRun} 只关注的票还没跑过数据。` : "") +
+        (stale ? `⚠️ ${stale} 只关注的数据超过 7 天没更新。` : "") +
+        `自动任务在后台跑；如果超过 ${REFRESH} 小时还是这样，说明后台任务出问题了（日志 /home/ubuntu/logs/watchlist-snapshot.log）。`;
+      wrap.appendChild(p);
+    }
+    return wrap;
+  }
+
   function buildStepDistribution(ov) {
     const wrap = document.createElement("div");
     wrap.dataset.testid = "signal-overview-steps";
@@ -3380,6 +3462,7 @@
       "signal-overview-stale",
     );
     section.appendChild(list);
+    section.appendChild(buildWatchlistAlert(ov));
     section.appendChild(buildStepDistribution(ov));
 
     const standing = asArray(rows).filter((entry) => OVERVIEW_STANDING.includes(entry.status));

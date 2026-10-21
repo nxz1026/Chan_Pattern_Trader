@@ -74,6 +74,13 @@ MAINTENANCE_CONFIRM_HEADER = "X-CPT-Maintenance"
 _MAX_LIMIT = 500
 _MAX_DAYS = 3650
 
+#: R80：关注列表自动跑数据的间隔（小时），**只用于对用户说「多久跑一次」**。
+#: 真正的调度在 ``deploy/cron/watchlist-snapshot.sh``（``*/15 * * * *``，即 0.25 小时）。
+#: 这里取 4 而不是 0.25：一只票跑过但状态没变就不写行，界面上看到的 ``age_days``
+#: 动得比 cron 慢得多 —— 跟用户承诺「每 15 分钟」会变成每天都在问「怎么没更新」。
+#: 所以对外只说「几小时内自动跑一次」，调度细节留在 cron 注释里。
+WATCHLIST_REFRESH_HOURS = 4
+
 #: R59（审计 M5）：``/inspection`` 里 distinct ``(market, symbol)`` 的硬上限。
 #:
 #: 每个 key 一次 ``waterline_trend``（N+1），而 key 数随 run 行数无限增长。
@@ -561,12 +568,24 @@ def _signal_overview_payload(days: int) -> dict[str, Any]:
         import time  # noqa: PLC0415
 
         from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+        from cpt.adapters.a_share_pool import WatchlistStore  # noqa: PLC0415
         from cpt.application.signal_overview import signal_overview  # noqa: PLC0415
         from cpt.storage.signal_event_store import load_signal_events  # noqa: PLC0415
+        from cpt.web.a_share_routes import watchlist_path_for  # noqa: PLC0415
 
         client = AShareLocalClient()
         try:
-            events = load_signal_events(client._get_conn(), days=days)  # noqa: SLF001
+            conn = client._get_conn()  # noqa: SLF001
+            events = load_signal_events(conn, days=days)
+            # R80：关注列表也要一并报「跑过没有」。取不到（文件缺失/损坏）就
+            # 传空 —— 关注区不是主视图，不该因为它让整块 overview 降级。
+            try:
+                watched = [
+                    e.code for e in WatchlistStore(watchlist_path_for()).list() if e.market == "A"
+                ]
+            except Exception as exc:  # noqa: BLE001 — 自选是旁路
+                _LOG.warning("watchlist unreadable for overview: %s", exc)
+                watched = []
         finally:
             client.close()
     except Exception as exc:  # noqa: BLE001 — 只读旁路，DB 抖动不该让主视图 500
@@ -575,7 +594,12 @@ def _signal_overview_payload(days: int) -> dict[str, Any]:
         payload["reason"] = "signal_history_unavailable"
         return payload
     payload["available"] = True
-    payload["overview"] = signal_overview(events, now_ms=int(time.time() * 1000))
+    payload["overview"] = signal_overview(
+        events,
+        now_ms=int(time.time() * 1000),
+        watched=watched,
+        watch_refresh_hours=WATCHLIST_REFRESH_HOURS,
+    )
     return payload
 
 

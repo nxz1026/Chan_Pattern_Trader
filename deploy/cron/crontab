@@ -43,6 +43,7 @@
 # | 07:30 | `track-maintenance-daily.sh` | 兜底清理「我的追踪」过期快照 30 天 / 回收站 90 天（调 loopback 维护端点，`?apply=1`） |
 # | 10:10 | `watchlist-daily-summary.sh` | 关注列表收盘汇总发飞书（R4/C2 ④；**每个交易日都推**；必须先于 11:00 日报，好让失败当天可见） |
 # | 11:00 | `cron-daily-report.sh` | 扫上面 6 条作业日志 + 共享表新鲜度，异常发飞书（R57 第 5 条） |
+# | **每 15 分钟** | `watchlist-snapshot.sh` | R80：只跑关注列表的快照批次，新关注的票 15 分钟内进全景 |
 #
 # 六个时间**刻意错开**：巡检 03:40 跑在因子重算 02:20 之后、两条清理 04:10/04:30 之前 ——
 # 这样巡检读到的是「刚重算完」的因子状态，而清理不会与它抢同一批行；
@@ -169,3 +170,21 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # ✅ 已同步 `scripts/cron_daily_report.py` 的 `JOBS`（本行与那条一一对应，
 #    由 `tests/test_cron_daily_report.py` 双向断言守着）。
 10 10 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/watchlist-daily-summary.sh >> /home/ubuntu/logs/watchlist-daily-summary.log 2>&1
+
+# ## 八、关注列表快照批次（R80）—— 每 15 分钟
+#
+# 为什么需要：用户新加一只关注，此前要等**第二天**那次 `cpt-dashboard-ashare.timer`
+# 才进 `cpt_signal_event`（点开看板虽然会算一次，但 GET 只读、结果不落库）
+# ⇒ 全景里看不见它。R80 让关注列表自己高频跑。
+#
+# 为什么另起一条而不是把主批次调频：主批次含热池 97 只，× 每 15 分钟
+# = 一天近万次缠论计算。关注列表通常个位数，一次一两秒。
+#
+# 为什么**不进** `cron_daily_report.py` 的 `JOBS`：那条日报是「每天一次」的
+# 口径（扫的是昨日日志），把 15 分钟一次的作业塞进去会重复报/口径混淆。
+# 本作业的失败由**界面**呈现：`/api/dashboard/signal-overview` 的 `watchlist`
+# 字段会显示「没跑过 / 数据旧」的票（见 `cpt/application/signal_overview.py`）。
+# 日志在 `/home/ubuntu/logs/watchlist-snapshot.log`，排障时直接看。
+#
+# 时刻不做整点对齐：`*/15` 落在 :00/:15/:30/:45，与其它作业（02:20 等）都错开。
+*/15 * * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/watchlist-snapshot.sh

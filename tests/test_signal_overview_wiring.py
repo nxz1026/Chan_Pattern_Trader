@@ -58,7 +58,10 @@ def test_payload_degrades_instead_of_raising() -> None:
     """DB 抖动降级成 available=false，不 500。"""
     source = _read(APP)
     start = source.index("def _signal_overview_payload")
-    block = source[start : start + 1800]
+    # R80 给这段加了关注列表读取，1800 字符已不够长 —— 改成切到下一个函数，
+    # 别再靠魔数（这段一长就会「断言还在、切不到」而假红）。
+    end = source.index("def _structure_events_payload")
+    block = source[start:end]
     assert "except Exception" in block
     assert '"available"] = False' in block
     assert "signal_history_unavailable" in block
@@ -216,3 +219,120 @@ def test_backend_ships_step_distribution_and_titles() -> None:
     module = _read(MODULE)
     assert '"step_distribution": _step_distribution(rows)' in module
     assert '"step_titles": dict(STEP_TITLES)' in module
+
+
+# --------------------------------------------------------------------------- #
+# R80：关注列表提醒 + --only watchlist 批次 + crontab 条目
+# --------------------------------------------------------------------------- #
+
+BATCH = ROOT / "scripts/snapshot_a_share_batch.py"
+CRONTAB = ROOT / "deploy/cron/crontab"
+WATCH_CRON = ROOT / "deploy/cron/watchlist-snapshot.sh"
+
+
+def test_route_passes_the_watchlist_into_the_overview() -> None:
+    """路由必须把关注列表交给 ``signal_overview``，否则提醒区永远是「没关注」。"""
+    source = _read(APP)
+    assert "watched=watched" in source
+    assert "WatchlistStore(" in source
+
+
+def test_watchlist_read_failure_does_not_degrade_the_whole_overview() -> None:
+    """自选文件坏了只该让关注区空着，不该拖垮整块全景。
+
+    钉法：取关注列表那段在自己的 ``try/except`` 里，且异常分支返回 ``[]``。
+    """
+    source = _read(APP)
+    start = source.index("def _signal_overview_payload")
+    end = source.index("def _structure_events_payload")
+    body = source[start:end]
+    assert "except Exception as exc:" in body
+    assert "watched = []" in body
+    # 外层那个降级分支还在（关注区不该把整块吞掉，整块也不该因 DB 抖动 500）。
+    assert '"available"] = False' in body
+
+
+def test_frontend_renders_the_watchlist_block() -> None:
+    """``buildWatchlistAlert`` 存在且真的被 ``renderSignalOverview`` 调用。"""
+    source = _read(SIGNAL_JS)
+    assert "function buildWatchlistAlert(" in source
+    assert "section.appendChild(buildWatchlistAlert(ov));" in source
+
+
+def test_frontend_separates_never_run_from_stale() -> None:
+    """两条模板串必须分别提「还没跑过」与「数据旧」—— 不许合并成一句。"""
+    source = _read(SIGNAL_JS)
+    assert "还没跑过" in source
+    assert "跑过但数据旧" in source
+
+
+def test_frontend_stale_filter_uses_the_shared_threshold() -> None:
+    """前端判「旧」必须用 ``stale_after_days``，不能只判 ``age_days != null``。
+
+    第一版就是这么写的，实测把刚跑过的 0 天票也列进了「数据旧」名单。
+    """
+    source = _read(SIGNAL_JS)
+    assert "stale_after_days" in source
+    assert ">= staleAfter" in source
+
+
+def test_watchlist_block_is_hidden_when_nothing_is_watched() -> None:
+    """``watched !== true`` → ``hidden``，不许显示「关注 0 只、全缺数据」。"""
+    source = _read(SIGNAL_JS)
+    start = source.index("function buildWatchlistAlert(")
+    end = source.index("function buildStepDistribution(")
+    body = source[start:end]
+    assert "wrap.hidden = true;" in body
+    assert "wl.watched !== true" in body
+
+
+def test_batch_script_has_a_watchlist_only_mode() -> None:
+    """``--only watchlist`` 必须存在，且**不取热池**（否则等于把主批次调成 15 分钟一次）。"""
+    source = _read(BATCH)
+    assert 'choices=("watchlist",)' in source
+    assert 'if only == "watchlist":' in source
+    assert "hot: list[str] = []" in source
+
+
+def test_batch_watchlist_mode_does_not_touch_the_hot_pool() -> None:
+    """``only == "watchlist"`` 时不取热池 —— 热池只留给每天一次的主批次。
+
+    ⚠️ 第一版断言「这个分支的切片里不出现 fetch_hot_pool」，但那个分支的
+    ``else:`` 正体就在切片范围内，属自相矛盾。改成钉**语义**：热池结果被写死成空表。
+    """
+    source = _read(BATCH)
+    start = source.index('if only == "watchlist":')
+    end = source.index("watch = [e.code for e in WatchlistStore")
+    block = source[start:end]
+    assert "hot: list[str] = []" in block
+    # fetch_hot_pool 只允许出现在 else 分支里。
+    else_at = block.index("else:")
+    assert "fetch_hot_pool" not in block[:else_at]
+
+
+def test_crontab_template_has_the_watchlist_batch() -> None:
+    """仓内 crontab 模板（真相源）必须有这条 15 分钟作业。"""
+    source = _read(CRONTAB)
+    assert "watchlist-snapshot.sh" in source
+    line = next(
+        ln
+        for ln in source.splitlines()
+        if "watchlist-snapshot.sh" in ln and not ln.lstrip().startswith("#")
+    )
+    assert line.startswith("*/15 * * * *")
+
+
+def test_watchlist_cron_script_is_executable_and_calls_only_mode() -> None:
+    """cron 脚本要带执行位（cron 不经 shell），且必须传 ``--only watchlist``。"""
+    assert WATCH_CRON.exists()
+    assert WATCH_CRON.stat().st_mode & 0o111
+    body = _read(WATCH_CRON)
+    assert "snapshot_a_share_batch.py --only watchlist" in body
+    # R74 的教训：cron 直接跑脚本时不带 PYTHONPATH，靠 editable 安装指到本仓。
+    # 注释里提「不带 PYTHONPATH」是说明文字，这里只禁真正的赋值/导出。
+    assert not re.search(r"(?m)^\s*(export\s+)?PYTHONPATH=", body)
+
+
+def test_bundle_carries_the_watchlist_alert() -> None:
+    """部署的是 bundle，源文件改了却没重建 = 线上永远看不到提醒。"""
+    assert "signal-overview-watchlist" in _read(BUNDLE)

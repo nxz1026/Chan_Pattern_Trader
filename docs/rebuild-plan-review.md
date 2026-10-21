@@ -372,6 +372,47 @@ m01562 补充：横幅要**有数字、也要有建议**（自用项目，不写
   `tests/test_signal_overview.py::test_missing_reason_yields_none_step_index_not_a_guess`
   钉住。
 
+#### R80（2026-10-21）：新加的关注要多久才出现在全景里
+
+用户问：「如果我有新的关注，会自动跑数据吗？」答案是**会，但要等一天** —— 这不够。
+
+**改前的三条路径**（实测）：
+
+| 路径 | 频率 | 结果落库？ |
+|---|---|---|
+| `cpt-dashboard-ashare.timer` | 每天 08:00 UTC（北京 16:00） | ✅ |
+| 点开看板某只票 | 打开后 60 秒内 | ❌ `GET` 只读（R59 审计 M1） |
+| （无） | — | — |
+
+⇒ 新加一只关注，要等**第二天**那次 timer 才进 `cpt_signal_event`；点开看板虽然会算一次，
+但结果不落库，全景里仍然看不见它。用户 m04507 选了方案 B：单独起一条只跑关注列表的高频作业。
+
+**为什么不直接把主批次调频**：主批次含热池 97 只，× 每 15 分钟 = 一天近万次缠论计算
+（单只 0.5~2.6 秒）。关注列表通常个位数，一次一两秒。**分开**才对。
+
+**落地**：
+
+| 层 | 改动 |
+|---|---|
+| 脚本 | `scripts/snapshot_a_share_batch.py` 加 `--only watchlist`（不查热池），跑完原子写 `~/.cache/cpt/watchlist_batch_status.json` |
+| 调度 | `deploy/cron/watchlist-snapshot.sh`（新建）+ crontab `*/15 * * * *`；`flock` 防重入、`timeout 10m` |
+| 后端 | `signal_overview.py::watchlist_status()` → `overview.watchlist = {watched, counts{total/never_run/stale/fresh}, items[], refresh_hours}` |
+| 前端 | `dash-signal.js::buildWatchlistAlert()` → 「我关注的票」三行 + 缺数据时给日志路径 |
+
+**三条设计约束**：
+
+1. **「没跑过」和「跑过但旧」必须分开说**。合成一句「没数据」会让用户不知道该等还是该跑
+   （等的意思是自动任务会来，跑的意思是得去查日志）。`never_run` 与 `stale` 是两个桶，
+   前端也分两行显示。
+2. **界面的判据是事件表，不是状态文件**。`watchlist_batch_status.json` 只是调度侧的自述，
+   给排障看；`watchlist_status()` 只读 `cpt_signal_event` 里有没有这只票的行。文件丢了或写坏了，
+   界面也不会骗人 —— 顶多是把「刚跑过」显示成「还没跑过」，方向是**保守**的。
+3. **没关注任何票 ≠ 关注了 0 只全都缺数据**。`watched=False` 时整块 `hidden`，
+   不能给一个空列表渲染出「0 只 / 全都缺数据」的红字。
+
+**对外只说「几小时内」不说「每 15 分钟」**：`WATCHLIST_REFRESH_HOURS = 4`。因为一只票跑过
+但状态没变就不写行，`age_days` 动得比 cron 慢得多 —— 承诺 15 分钟会变成每天都在问「怎么没更新」。
+
 #### R79（2026-10-21）：一卖的失效归因一直缺着，补数据补不出来
 
 「补数据能降低 unknown 比例」这个假设被实测推翻，换来的是一处代码缺口的定位。
