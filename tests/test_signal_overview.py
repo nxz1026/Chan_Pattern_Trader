@@ -219,3 +219,136 @@ def test_step_label_only_for_standing_states() -> None:
     assert "反向笔" in steps["000001"]
     assert "三步全过" in steps["000002"]
     assert steps["000003"] == ""
+
+
+# ── R78：走完几步 / 卡在哪步、为什么 ───────────────────────────────
+
+
+def test_step_index_is_three_for_confirmed_and_two_for_ready() -> None:
+    """confirmed = 三步全过；structure_ready = 前两步过了、等反向笔。"""
+    events = [
+        _event("000001", status="confirmed"),
+        _event("000002", status="structure_ready"),
+    ]
+    overview = signal_overview(events, now_ms=NOW_MS)
+    by_code = {row["code"]: row["step_index"] for row in overview["rows"]}
+    assert by_code == {"000001": 3, "000002": 2}
+
+
+def test_step_index_is_located_by_reason_for_invalidated() -> None:
+    """失效票靠原因码定位卡在第几步 —— 这是 R78 的核心增量。"""
+    events = [
+        _event("000001", invalidated_reason="not_enough_centers"),
+        _event("000002", invalidated_reason="no_divergence_leg"),
+        _event("000003", invalidated_reason="not_in_downtrend"),
+        _event("000004", invalidated_reason="previous_invalidated"),
+    ]
+    overview = signal_overview(events, now_ms=NOW_MS)
+    by_code = {row["code"]: (row["step_index"], row["blocked_at"]) for row in overview["rows"]}
+    assert by_code == {
+        "000001": (0, "two_centers"),
+        "000002": (1, "divergence_leg"),
+        "000003": (0, "two_centers"),  # 方向不对：三步一步都没开始
+        "000004": (2, "reversal_bi"),  # 三步都过了却仍是终态
+    }
+
+
+def test_missing_reason_yields_none_step_index_not_a_guess() -> None:
+    """**R78 踩过的坑**：没原因时不许「保守取 2」。
+
+    第一版把没原因的 invalidated 一律取 2（上界推断），生产实测 117 只全部
+    落进「第 2 步」，与 55 只真正的 structure_ready 混成一桶，分布读起来
+    像「市场普遍就差临门一脚」。上界一旦被当成分布读就会造出反向结论。
+    """
+    overview = signal_overview([_event("000001", invalidated_reason=None)], now_ms=NOW_MS)
+    row = overview["rows"][0]
+    assert row["step_index"] is None
+    assert row["blocked_at"] is None
+
+
+def test_step_distribution_buckets_unknown_separately() -> None:
+    """分布里「哪一步不确定」必须单列一桶，不能并进任何一个具体步号。"""
+    events = [
+        _event("000001", status="confirmed"),
+        _event("000002", status="structure_ready"),
+        _event("000003", invalidated_reason="no_divergence_leg"),
+        _event("000004", invalidated_reason=None),
+        _event("000005", invalidated_reason=None),
+    ]
+    overview = signal_overview(events, now_ms=NOW_MS)
+    dist = overview["step_distribution"]
+    assert dist["step_index_counts"] == {"0": 0, "1": 1, "2": 1, "3": 1, "unknown": 2}
+    assert dist["no_reason_but_blocked"] == 2
+
+
+def test_step_distribution_unknown_matches_the_standalone_counter() -> None:
+    """``unknown`` 桶与 ``no_reason_but_blocked`` 必须相等 —— 同一件事的两种说法。"""
+    events = [
+        _event("000001", invalidated_reason=None),
+        _event("000002", invalidated_reason=None),
+        _event("000003", invalidated_reason="no_divergence_leg"),
+    ]
+    dist = signal_overview(events, now_ms=NOW_MS)["step_distribution"]
+    assert dist["step_index_counts"]["unknown"] == dist["no_reason_but_blocked"] == 2
+
+
+def test_step_distribution_accounts_for_every_non_blind_row() -> None:
+    """不重不漏：非盲区行全部有归属（>= 真步号桶 或 unknown 桶）。"""
+    events = [
+        _event("000001", status="confirmed"),
+        _event("000002", status="structure_ready"),
+        _event("000003", invalidated_reason="not_enough_centers"),
+        _event("000004", invalidated_reason=None),
+        _event("000005", structure_id="level5:empty:000005"),  # 盲区，不进分布
+    ]
+    overview = signal_overview(events, now_ms=NOW_MS)
+    dist = overview["step_distribution"]
+    accounted = sum(dist["step_index_counts"].values())
+    non_blind = overview["total"] - sum(overview["blind_spots"].values())
+    assert accounted == non_blind == 4
+
+
+def test_step_distribution_breaks_down_each_blocked_step_by_reason() -> None:
+    """卡住的票要能分解到「第几步 + 哪条原因」，两个维度都得有。"""
+    events = [
+        _event("000001", invalidated_reason="no_divergence_leg"),
+        _event("000002", invalidated_reason="no_divergence_leg"),
+        _event("000003", invalidated_reason="not_enough_centers"),
+    ]
+    dist = signal_overview(events, now_ms=NOW_MS)["step_distribution"]
+    assert dist["blocked_reason_counts"] == {
+        "two_centers": {"not_enough_centers": 1},
+        "divergence_leg": {"no_divergence_leg": 2},
+    }
+    assert dist["blocked_at_order"] == ["two_centers", "divergence_leg", "reversal_bi"]
+
+
+def test_blind_spots_never_enter_the_step_distribution() -> None:
+    """兜底结构连第一步都没开始，混进分布会让「第 0 步」虚高（实测 25 只）。"""
+    events = [
+        _event("000001", structure_id="level5:empty:000001"),
+        _event("000002", structure_id="level5:empty:000002"),
+        _event("000003", status="structure_ready"),
+    ]
+    overview = signal_overview(events, now_ms=NOW_MS)
+    dist = overview["step_distribution"]
+    assert dist["step_index_counts"]["0"] == 0
+    assert sum(dist["step_index_counts"].values()) == 1
+
+
+def test_step_titles_are_shipped_so_frontend_does_not_hardcode() -> None:
+    """步号 → 人话的标题由后端下发，前端只做拼装，不各自维护一份。"""
+    overview = signal_overview([], now_ms=NOW_MS)
+    assert overview["step_titles"] == {
+        "two_centers": "第一步：两个同级中枢",
+        "divergence_leg": "第二步：中枢二之后还在跌",
+        "reversal_bi": "第三步：跌势里冒出一笔反弹",
+    }
+
+
+def test_every_reason_code_has_a_blocked_step() -> None:
+    """每个合法原因码都必须能映射到某一步，否则它的失效票永远定位不了。"""
+    from cpt.application.signal_invalidation import REASON_CODES
+    from cpt.application.signal_overview import REASON_TO_BLOCKED_AT
+
+    assert set(REASON_CODES) == set(REASON_TO_BLOCKED_AT)

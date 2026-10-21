@@ -333,6 +333,7 @@ m01562 补充：横幅要**有数字、也要有建议**（自用项目，不写
 | 失效归因 | 失效时给**具体原因码**（不是「以前失效过」）：`not_in_downtrend` / `not_enough_centers` / `no_divergence_leg` / `previous_invalidated`；历史行补原因，同原因不刷屏 | `cpt/application/signal_invalidation.py` |
 | 失效呈现 | 信号历史行下加 `[data-testid=signal-history-reason]`；统计面板加失效原因分布，`unknown` 单列「原因未记录（R71 之前的行）」 | `dashboard/dash-signal.js`、`cpt/application/dashboard_stats.py` |
 | 全景视图（R73） | `/api/dashboard/signal-overview`：每只票取**最新一条**跃迁，出「覆盖票数 / 站在位置上 / 已作废 / 结构不足 / 距最后跃迁 ≥ N 天」+ 站住的票明细；正文只列 `structure_ready`/`confirmed`，其余走汇总 | `cpt/application/signal_overview.py`、`cpt/web/app.py`、`dashboard/dash-signal.js` |
+| 步骤分布（R78） | 每行加 `step_index`（0~3 或 **None**）+ `blocked_at`；全景出「走完 0/1/2/3 步各多少只」与「卡住的票卡在哪一步、因为什么」两块；`unknown` 桶单独成句 | `cpt/application/signal_overview.py`、`dashboard/dash-signal.js` |
 
 **设计约束（必须保留）**：
 
@@ -362,6 +363,14 @@ m01562 补充：横幅要**有数字、也要有建议**（自用项目，不写
 - **兜底 `structure_id` 是盲区，必须单列**：`level5:empty:<code>` 表示结构不足两个
   中枢，连第一步都没走到。它 `status` 恒为 `invalidated`，混进「已作废」会虚高该数
   （实测 202 只里有 21 只）。`blind_spots` 单独计。
+- **上界推断不许当分布读（R78）**：失效行没记原因时，`step_index` 返回 `None`，不是
+  「保守取 2」。第一版取 2 的语义是「最多走到第二步」—— 这是上界；但分布一旦把上界
+  当实际值加总，生产实测 117 只无原因作废票全挤进第 2 步，与 55 只真 `structure_ready`
+  混成一桶，页面读成「173 只走到第二步、市场普遍就差临门一脚」，而真相是 117 只**根本
+  不知道走到哪**。教训：凡是「不确定」的量，宁可单列一个 `unknown` 桶，也不要塞进
+  最接近的已知桶 —— 前者读者看得见不确定，后者会被读成事实。
+  `tests/test_signal_overview.py::test_missing_reason_yields_none_step_index_not_a_guess`
+  钉住。
 
 #### Phase 1.5 续（R76，2026-10-21）：买点语气从「后端所有出口」删净
 

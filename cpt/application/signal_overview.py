@@ -1,5 +1,31 @@
 """把信号**历史事件表**折成「每只票现在走到哪一步」的全景视图（R73 方案 A1）。
 
+## R78：从「走到哪一步」细化到「**卡在第几步、为什么**」
+
+R73 只给站住的票一个步骤名（``structure_ready`` / ``confirmed``），失效票的
+``step`` 是空串 —— 而失效票才是绝大多数（实测 174/228）。于是「全局视图」
+实际上看不见「市场普遍卡在哪一步」。
+
+R78 补两个正交的字段：
+
+* ``step_index``：**走完了几步**（0~3）。``2`` 表示前两步过了、卡在第三步。
+* ``blocked_at``：**卡在第几步、因为哪条原因**（从 ``invalidated_reason`` 映射）。
+
+``step_index`` 恒**不因缺原因而丢失**：``invalidated`` 一定有 0~2 的确定值，
+这是状态机的事实（作废 = 三步没全过）。``blocked_at`` 才需要原因码，缺原因
+就是 ``None``，如实说「不知道卡在哪一条」。
+
+## ``blocked_at`` 只对**已记录原因**的失效行有值
+
+实测 2026-10-21 生产库 228 只票里 135 只（59%）失效行没有原因码：R71 之前的
+老行没落库，且**向上走势的作废由判定器设计上就不产原因**（``classify_invalidation``
+对 ``trend_direction != -1`` 返回 ``not_in_downtrend``，但 ``invalidation_payload``
+在 ``facts is None`` 且非下跌时返回 ``None``）。这类行重跑也补不出来。
+
+所以 ``blocked_at`` 为 ``None`` 时前端必须显示「原因没记录」，**不许猜**。
+``no_reason_still_blocked`` 计数专门统计这批 —— 它们**卡在第几步是确定的**
+（``step_index`` 有值），只是不知道是哪条原因。
+
 ## 这一层能回答什么、不能回答什么
 
 数据源是 ``public.cpt_signal_event`` —— **状态跃迁事件**，只在状态变化时追加一行。
@@ -42,6 +68,8 @@ from cpt.application.signal_invalidation import REASON_CODES
 
 __all__ = [
     "BLIND_SPOT_EMPTY_STRUCTURE",
+    "REASON_TO_BLOCKED_AT",
+    "STEP_TITLES",
     "STALE_AFTER_DAYS",
     "signal_overview",
 ]
@@ -63,6 +91,38 @@ _STEP_NAMES: dict[str, str] = {
     "structure_ready": "位置已就绪、等反向笔",
     "confirmed": "三步全过（反抽已确认）",
 }
+
+#: R78：``blocked_at`` 的合法取值 —— 就是「卡在第几步」的步号。
+#: 直接用 :data:`STEP_TITLES` 的键，避免再造一套枚举。
+STEP_TITLES: dict[str, str] = {
+    "two_centers": "第一步：两个同级中枢",
+    "divergence_leg": "第二步：中枢二之后还在跌",
+    "reversal_bi": "第三步：跌势里冒出一笔反弹",
+}
+
+#: R78：原因码 → 卡在哪一步。**顺序即语义**：
+#:
+#: * ``not_enough_centers`` → 第一步没过；
+#: * ``no_divergence_leg`` → 第一步过了、第二步没过（中枢已有，但没再往下走）；
+#: * ``not_in_downtrend`` → 方向不对，三步**一步都没开始**，映射到第一步
+#:   （「卡在第 0 步」会让用户以为有第 0 步这种怪东西）；
+#: * ``previous_invalidated`` → 三步都过了却仍作废，只能归到第三步
+#:   （终态不回退，见 :func:`cpt.application.signal_invalidation.classify_invalidation`）。
+#:
+#: 这张表是**纯函数映射**，不新增任何事实 —— 每个值都能由
+#: ``(status, invalidated_reason)`` 唯一还原。
+REASON_TO_BLOCKED_AT: dict[str, str] = {
+    "not_enough_centers": "two_centers",
+    "no_divergence_leg": "divergence_leg",
+    "not_in_downtrend": "two_centers",
+    "previous_invalidated": "reversal_bi",
+}
+
+#: ``step_index`` 的语义边界：0 = 一步都没过，3 = 三步全过。
+_STEP_INDEX_FULL = 3
+
+#: R78：``blocked_at`` 的稳定顺序，供前端按序渲染（不猜字典顺序）。
+BLOCKED_AT_ORDER: tuple[str, ...] = ("two_centers", "divergence_leg", "reversal_bi")
 
 
 def _is_empty_structure(structure_id: Any) -> bool:
@@ -116,6 +176,49 @@ def _age_days(event: dict[str, Any], now_ms: int) -> int | None:
     return max(0, (now_ms - transition) // _MS_PER_DAY)
 
 
+def _step_index(status: str, reason: str | None) -> int | None:
+    """走完了几步（0~3）；**不确定就返回 None**，不硬凑一个数。
+
+    * ``confirmed`` → 3（三步全过，含反抽确认）；
+    * ``structure_ready`` → 2（前两步过了、等第三步的反向笔）；
+    * ``invalidated`` → 由原因码定位；**没有原因码返回 None**。
+
+    ## 为什么缺原因时是 None 而不是「保守取 2」
+
+    R78 第一版把没原因的 ``invalidated`` 一律取 2，理由是「作废必然三步没全过，
+    所以**最多**走到第二步」。生产实测立刻暴露问题：117 只无原因作废票全部落进
+    「第 2 步」，与 55 只真正的 ``structure_ready`` 混在同一桶里 —— 分布显示
+    「173 只走到第二步」，读起来像「市场普遍就差临门一脚」，但真相是
+    **117 只根本不知道走到哪**。
+
+    上界推断一旦被当成分布读，就会造出与事实相反的结论。故改为 ``None``，
+    分布里单列一桶「哪一步不确定」。
+    """
+    if status == "confirmed":
+        return _STEP_INDEX_FULL
+    if status == "structure_ready":
+        return 2
+    if status == "invalidated":
+        blocked = _blocked_at(reason)
+        if blocked == "two_centers":
+            return 0
+        if blocked == "divergence_leg":
+            return 1
+        if blocked == "reversal_bi":
+            return 2
+        # 原因没记录 ⇒ 卡在第几步**不确定**。
+        return None
+    # alert / candidate / none 等：三步没全过，保守按 2（等反向笔那一步）。
+    return 2
+
+
+def _blocked_at(reason: str | None) -> str | None:
+    """原因码 → 卡在哪一步；**没有原因就返回 None，绝不猜**。"""
+    if not reason:
+        return None
+    return REASON_TO_BLOCKED_AT.get(str(reason))
+
+
 def _bucket_rows(
     latest: dict[str, dict[str, Any]], now_ms: int
 ) -> tuple[list[dict[str, Any]], dict[str, int]]:
@@ -144,6 +247,9 @@ def _bucket_rows(
                 "age_days": age,
                 "stale": stale,
                 "invalidated_reason": reason,
+                # R78：走完了几步（0~3）与卡在哪一步（缺原因时 None）。
+                "step_index": _step_index(status, reason),
+                "blocked_at": _blocked_at(reason),
                 # 兜底结构的失效原因只有「结构不足」一种，标记出来避免误读。
                 "is_blind_spot": blind,
             }
@@ -170,6 +276,72 @@ def _reason_summary(rows: Sequence[dict[str, Any]]) -> dict[str, int]:
             continue
         counts[row["invalidated_reason"] or "unknown"] += 1
     return dict(counts)
+
+
+def _step_distribution(rows: Sequence[dict[str, Any]]) -> dict[str, Any]:
+    """R78：全市场「走完几步」的分布 + 「卡在哪一步」的原因分解。
+
+    ## 为什么这两张表要分开
+
+    ``step_index_counts`` 回答「多少只票走完了 0/1/2/3 步」—— **恒有值**。
+    ``blocked_reason_counts`` 回答「卡住的票里，各自卡在哪一步、因为什么」——
+    只有**记了原因**的行才有值。
+
+    两者相加**不等于** ``total``，差的就是「没记原因」的那批。这不是缺陷，
+    是数据现状；硬凑平会逼出一句编造的原因。
+
+    :returns: 形如::
+
+            {
+              "step_index_counts": {"0": 0, "1": 19, "2": 65, "3": 10, "unknown": 117},
+              "blocked_reason_counts": {          # 只含记了原因的行
+                "divergence_leg": {"no_divergence_leg": 19},
+                "reversal_bi": {"previous_invalidated": 1},
+              },
+              "no_reason_but_blocked": 117,       # step_index 为 None
+              "standing": 65,                     # structure_ready + confirmed
+            }
+
+    盲区行（兜底结构）**不进**这里 —— 它们连第一步都没开始，混进来会让
+    「第 0 步」虚高（实测 25 只）。
+
+    ⚠️ ``unknown`` 桶与 ``no_reason_but_blocked`` 是同一个数，刻意重复一次：
+    前者是分布的一行，后者是给人读的一句话。两者必须相等，测试钉住。
+    """
+    step_counts: Counter[str] = Counter()
+    blocked: dict[str, Counter[str]] = {}
+    no_reason_blocked = 0
+    standing = 0
+    for row in rows:
+        if row["is_blind_spot"]:
+            continue
+        index = row["step_index"]
+        if index is None:
+            # 原因没记录 ⇒ 哪一步不确定，单列 unknown 桶（不硬凑成 2）。
+            step_counts["unknown"] += 1
+            no_reason_blocked += 1
+        else:
+            step_counts[str(int(index))] += 1
+        if row["blocked_at"] is not None:
+            blocked.setdefault(str(row["blocked_at"]), Counter())[
+                str(row["invalidated_reason"])
+            ] += 1
+        if row["status"] in ("structure_ready", "confirmed"):
+            standing += 1
+    return {
+        # 0~3 全部给键，缺的补 0 —— 前端不用自己补，也不会因缺键显示 undefined。
+        "step_index_counts": {
+            **{str(i): step_counts.get(str(i), 0) for i in range(_STEP_INDEX_FULL + 1)},
+            "unknown": step_counts.get("unknown", 0),
+        },
+        # 按 BLOCKED_AT_ORDER 给稳定顺序（不猜字典序）。
+        "blocked_reason_counts": {
+            step: dict(blocked[step]) for step in BLOCKED_AT_ORDER if step in blocked
+        },
+        "blocked_at_order": list(BLOCKED_AT_ORDER),
+        "no_reason_but_blocked": no_reason_blocked,
+        "standing": standing,
+    }
 
 
 def signal_overview(events: Sequence[dict[str, Any]], *, now_ms: int) -> dict[str, Any]:
@@ -209,5 +381,8 @@ def signal_overview(events: Sequence[dict[str, Any]], *, now_ms: int) -> dict[st
         # 口径钉死：age_days 永远只是下界。前端不得改写成「卡了 N 天」。
         "age_is_lower_bound": True,
         "reason_codes": list(REASON_CODES),
+        # R78：全市场「走完几步 / 卡在哪步、为什么」的分布。
+        "step_distribution": _step_distribution(rows),
+        "step_titles": dict(STEP_TITLES),
         "rows": rows,
     }

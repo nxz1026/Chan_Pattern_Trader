@@ -27,6 +27,13 @@ def _read(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
 
+def _extract_object(source: str, name: str) -> str:
+    """从 JS 源码里抠出 ``const NAME = { ... };`` 的块（够用即可，不做真解析）。"""
+    match = re.search(rf"const {name} = \{{(.*?)\n  \}};", source, re.S)
+    assert match, f"找不到 {name} 定义"
+    return match.group(1)
+
+
 def test_route_is_registered() -> None:
     """``/api/dashboard/signal-overview`` 必须在路由表里。"""
     assert '"/api/dashboard/signal-overview"' in _read(APP)
@@ -151,3 +158,61 @@ def test_testid_names_are_present_in_source() -> None:
         direct = re.search(rf'dataset\.testid\s*=\s*"{testid}"', js)
         via_arg = re.search(rf'"{testid}"', js)
         assert direct or via_arg, f"缺 {testid}"
+
+
+# --- R78：全市场分布（走完几步 / 卡在哪步为什么）的接线 ---------------------
+
+
+def test_bundle_carries_the_step_distribution_renderer() -> None:
+    """分布渲染器与步号标签都进了 bundle（构建脚本 --check 之外再钉一次）。"""
+    bundle = _read(BUNDLE)
+    assert "buildStepDistribution" in bundle
+    assert "STEP_INDEX_LABELS" in bundle
+
+
+def test_step_index_labels_cover_every_step_the_backend_can_emit() -> None:
+    """后端能吐的每个步号键，前端都得有人话标签，否则页面会显示裸数字。
+
+    键从后端源码里读，不在这里抄一份 —— 后端加一档、前端忘了加，测试就红。
+    """
+    module = _read(MODULE)
+    keys = {"0", "1", "2", "3", "unknown"}
+    # 后端源码里 ``_STEP_INDEX_FULL = 3`` 决定了真步号上界。
+    match = re.search(r"_STEP_INDEX_FULL\s*=\s*(\d+)", module)
+    assert match, "找不到 _STEP_INDEX_FULL 定义"
+    assert int(match.group(1)) == 3
+
+    js = _read(SIGNAL_JS)
+    block = _extract_object(js, "STEP_INDEX_LABELS")
+    for key in keys:
+        assert key in block, f"STEP_INDEX_LABELS 缺键 {key}"
+
+
+def test_frontend_never_treats_unknown_as_a_step_number() -> None:
+    """``unknown`` 是「不知道走到哪」，不是第 4 步 —— 标签里必须说清这点。"""
+    js = _read(SIGNAL_JS)
+    block = _extract_object(js, "STEP_INDEX_LABELS")
+    unknown_line = next(line for line in block.splitlines() if "unknown:" in line)
+    assert "不确定" in unknown_line
+
+
+def test_no_reason_hint_is_rendered_and_never_rounded_into_a_step() -> None:
+    """没记原因的票必须单独成句说明，不能被并进某个步号凑成一个好看的分布。"""
+    js = _read(SIGNAL_JS)
+    assert 'p.dataset.testid = "signal-overview-no-reason"' in js
+    assert "no_reason_but_blocked" in js
+    # 不允许出现「把 unknown 加到 2 上」这类凑数写法
+    assert "counts.unknown +" not in js
+
+
+def test_distribution_block_is_appended_to_the_overview_section() -> None:
+    """分布块确实被挂进全景面板，不是定义了没人调用。"""
+    js = _read(SIGNAL_JS)
+    assert "section.appendChild(buildStepDistribution(ov));" in js
+
+
+def test_backend_ships_step_distribution_and_titles() -> None:
+    """分布与步号标题都由后端下发，前端不硬编码中文步名。"""
+    module = _read(MODULE)
+    assert '"step_distribution": _step_distribution(rows)' in module
+    assert '"step_titles": dict(STEP_TITLES)' in module

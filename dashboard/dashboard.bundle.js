@@ -2798,6 +2798,17 @@
     previous_invalidated: "此前已作废（终态不回退）",
   };
 
+  /* R78：全市场分布要用的人话。步号 0~3 与「不确定」桶。
+     ⚠️ 键 "unknown" **不是**一个步号——它表示「这只票走到第几步不确定」，
+     因为失效行没记原因。把它当成第 4 步读就错了。 */
+  const STEP_INDEX_LABELS = {
+    "0": "一步都没走完（中枢不到两个）",
+    "1": "走完第一步、卡在第二步（中枢有了，但没再往下走）",
+    "2": "走完前两步、卡在第三步（跌到位了，等反弹确认）",
+    "3": "三步全走完",
+    unknown: "走到第几步不确定（失效行没记原因）",
+  };
+
   function renderSignalProgress(progress) {
     const node = q("[data-testid=signal-progress]");
     if (!node) return;
@@ -3222,6 +3233,83 @@
     return item;
   }
 
+  /* R78：全市场「走完几步 / 卡在哪步、为什么」的人话分解。
+     两块分开渲染，因为它们回答的是不同问题：
+       · 上面一块 = 多少只票走完了 0/1/2/3 步（每只票都有一个格子）；
+       · 下面一块 = 卡住的票各自因为什么卡住（只有记了原因的行才有）。
+     两者相加**不等于** total，差的就是「没记原因」的那批 —— 必须说出来，
+     不能凑平。 */
+  function buildStepDistribution(ov) {
+    const wrap = document.createElement("div");
+    wrap.dataset.testid = "signal-overview-steps";
+    const dist = isObject(ov.step_distribution) ? ov.step_distribution : null;
+    if (!dist) return wrap;
+
+    const heading = document.createElement("h4");
+    heading.textContent = "全市场：走到哪一步";
+    wrap.appendChild(heading);
+
+    const counts = isObject(dist.step_index_counts) ? dist.step_index_counts : {};
+    // 顺序固定 0→3→unknown：按对象键序会随后端插入顺序漂移。
+    const order = ["0", "1", "2", "3", "unknown"];
+    const total = order.reduce(( acc, k) => acc + (Number(counts[k]) || 0), 0);
+    const list = document.createElement("dl");
+    list.className = "kv";
+    order.forEach((key) => {
+      const value = Number(counts[key]) || 0;
+      if (!value && key !== "unknown") return; // 0 真步号不占位；unknown 恒显示
+      const item = document.createElement("div");
+      const term = document.createElement("dt");
+      term.textContent = STEP_INDEX_LABELS[key] || key;
+      const detail = document.createElement("dd");
+      const pct = total ? Math.round((value / total) * 100) : 0;
+      detail.textContent = `${value} 只（${pct}%）`;
+      detail.dataset.testid = `signal-overview-step-${key}`;
+      item.append(term, detail);
+      list.appendChild(item);
+    });
+    wrap.appendChild(list);
+
+    // 卡住的原因分解：第几步 → 哪条原因 → 多少只。
+    const blocked = isObject(dist.blocked_reason_counts) ? dist.blocked_reason_counts : {};
+    const blockedSteps = asArray(dist.blocked_at_order).filter((s) => isObject(blocked[s]));
+    if (blockedSteps.length) {
+      const h2 = document.createElement("h4");
+      h2.textContent = "卡住的票：卡在哪一步、为什么";
+      wrap.appendChild(h2);
+      const dl = document.createElement("dl");
+      dl.className = "kv";
+      blockedSteps.forEach((step) => {
+        const stepLabel = STEP_INDEX_LABELS[String(step === "two_centers" ? 0 : step === "divergence_leg" ? 1 : 2)] || step;
+        Object.keys(blocked[step]).forEach((reason) => {
+          const item = document.createElement("div");
+          const term = document.createElement("dt");
+          const reasonLabel = INVALIDATION_REASON_LABELS[reason] || reason;
+          term.textContent = `${stepLabel} · ${reasonLabel}`;
+          const detail = document.createElement("dd");
+          detail.textContent = `${blocked[step][reason]} 只`;
+          item.append(term, detail);
+          dl.appendChild(item);
+        });
+      });
+      wrap.appendChild(dl);
+    }
+
+    const unknown = Number(dist.no_reason_but_blocked) || 0;
+    if (unknown) {
+      const p = document.createElement("p");
+      p.className = "hint";
+      p.dataset.testid = "signal-overview-no-reason";
+      p.textContent =
+        `另有 ${unknown} 只失效票没记录原因：它们确定还没走完三步，但卡在哪一步查不出来。` +
+        "R71 之前的行没落库原因，向上走势的作废按判定器设计也不产原因 —— 重跑补不出来，" +
+        "如实留空，不猜。";
+      wrap.appendChild(p);
+    }
+    return wrap;
+  }
+
+
   function renderSignalOverview() {
     const panel = q("[data-testid=event-panel]");
     if (!panel) return;
@@ -3292,6 +3380,7 @@
       "signal-overview-stale",
     );
     section.appendChild(list);
+    section.appendChild(buildStepDistribution(ov));
 
     const standing = asArray(rows).filter((entry) => OVERVIEW_STANDING.includes(entry.status));
     if (!standing.length) {
