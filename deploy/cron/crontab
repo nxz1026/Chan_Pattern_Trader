@@ -188,3 +188,11 @@ PATH=/usr/local/bin:/usr/bin:/bin
 #
 # 时刻不做整点对齐：`*/15` 落在 :00/:15/:30/:45，与其它作业（02:20 等）都错开。
 */15 * * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/watchlist-snapshot.sh
+
+## 九、观察期巡检（R83）—— 每 2 小时
+#
+# 服务 / 序列 / 批次 / 盘口，四样 run-inspection-daily.sh 都不看的东西。
+# 只在**状态变了**时发飞书，所以 2 小时一次的频率不会变成噪音。
+#
+# 为什么不进 cron-daily-report.sh 的 JOBS：那是「每天一次」的口径。
+0 */2 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/watch-period-check.sh

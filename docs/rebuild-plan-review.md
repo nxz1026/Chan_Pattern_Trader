@@ -372,6 +372,48 @@ m01562 补充：横幅要**有数字、也要有建议**（自用项目，不写
   `tests/test_signal_overview.py::test_missing_reason_yields_none_step_index_not_a_guess`
   钉住。
 
+#### R83（2026-10-21）：观察期不是状态，是「要有东西在看」
+
+R82 之后 CPT 被安排进观察期。但**观察期本身有前提**：得先有人能告诉你「它坏了」。
+`run_inspection.py` 只回答「K 线/因子/结构算得对不对」，它对下面四样**全都不看**，
+而这四样恰好是 CPT 历史上真实出事的地方：
+
+| 出事过什么 | run_inspection.py | 现在 |
+|---|---|---|
+| `cpt-dashboard.service` 停 55 小时无人知（`Restart=on-failure` 不覆盖 SIGTERM） | ✗ | ✅ R83 |
+| bigserial 序列落后四次，只留一行 warning 没人看 | ✗ | ✅ R83 |
+| `watchlist-daily-summary` 连两天 `ModuleNotFoundError`（editable 指向已删目录） | ✗ | ✅ R83（批次行龄） |
+
+`scripts/watch_period_check.py` + `deploy/cron/watch-period-check.sh`（**每 2 小时**），
+四道判据：**服务**（unit active **且** health `ok:true`，两个都要）、**序列**
+（`last_value >= max(id)`，**超前不是病**，nextval 跳号是正常的）、**批次**
+（`cpt_run_metric` 最近一轮行龄，工作日 30h / 周末 78h）、**盘口**
+（新浪五档拿得到 ≥1 档，ADR 0003 整条路线吊在这上面）。
+
+告警策略复刻 `run_inspection.py`：**只在状态变了时发**，首次建基线不发、
+但首次就有问题要发、恢复也发。
+
+### 四条踩出来的约束
+
+1. **别用 `ss` 判端口** —— 容器里 `ss -ltn` 输出**全空**（无权限），会把人骗成
+   「服务没监听」。判端口一律走 `curl`。R83 实测：`ss` 空、`curl` 200。
+2. **`cpt_run_metric.market` 的 A 股取值是 `'cn'`，不是 `'ashare'`**。第一版写
+   `'ashare'`，一行都查不到 ⇒ 脚本报「批次从没跑成」—— **一个错的口径造出一条
+   假停产告警**。这条现在有测试读真库钉住。
+3. **日历是判据的一部分**：只用一个 30h 阈值会在**每个周末**误报两次；
+   只用一个 78h 会在工作日停摆两天才响。
+4. **盘口探活必须异常隔离**：它要出网、最不可靠。崩了整个巡检就收不到消息，
+   而「新浪抖了一下」与「服务挂了」在告警上长得一模一样。
+
+### 验收
+
+- `tests/test_watch_period_check.py` 21 passed。
+- **五次反向注入全部验红**：批次阈值改 0.1h / 序列判据反写 / 盘口探针指向
+  不存在的票 / unit 名不存在 / health 指向死端口。
+- 生产实跑：**全绿**（服务 active + `ok:true`、序列 910682/910570 与 898/892、
+  批次 0.7h 前、盘口 600519 10/10 档）；`--force` 实测飞书**送达**。
+- 线上 crontab 已装 `0 */2 * * *`，与仓内模板 **9 条作业逐条一致**。
+
 #### R82（2026-10-21）：补齐新浪批量 + 五档，把「谁采盘中」变成口径题
 
 emotion-core 的 ADR 0003（盘中触发）在风险栏里点名了「与 CPT 冲突，本仓再做
