@@ -50,14 +50,37 @@ __all__ = [
     "AShareAdjustUnsupportedError",
     "ASharePublicError",
     "DAILY_INTERVAL_MS",
+    "SINA_BATCH_LIMIT",
     "SINA_QUOTE_URL",
     "TENCENT_KLINE_URL",
     "SinaQuoteClient",
     "TencentKlineClient",
     "normalize_code",
+    "parse_sina_quotes",
 ]
 
 DAILY_INTERVAL_MS: Final[int] = 86_400_000
+
+#: 新浪一次 ``list=`` 最多带多少只（R82）。实测 3 只、30 只都正常返回；
+#: 定 50 是为了「一次请求覆盖一个概念板块或一个自定义池」，同时留出余量：
+#: URL 长度 = 前缀 + 8×n，50 只约 430 字符，离各家网关的 2K~8K 上限很远。
+#: 超过这个数由 ``fetch_quotes`` 自己切块，**不会**让调用方拿到半截结果。
+SINA_BATCH_LIMIT: Final[int] = 50
+
+#: 新浪快照 ``hq_str_<symbol>="..."`` 一行一只；用 ``finditer`` 而不是
+#: ``re.search`` 是为了批量响应里能逐行取出（单只响应只有一行，行为不变）。
+_SINA_LINE_RE: Final[re.Pattern[str]] = re.compile(
+    r'var\s+hq_str_(?P<symbol>[a-z]{2}\d{6})="(?P<body>[^"]*)"'
+)
+
+#: 五档在 34 字段里的下标（R82 实测 2026-10-21）：
+#: ``[10]=买一量 [11]=买一价 ... [18]=买五量 [19]=买五价``、
+#: ``[20]=卖一量 [21]=卖一价 ... [28]=卖五量 [29]=卖五价``。
+#: **量与价的先后是反直觉的**（先量后价），照 ``[10]=价`` 解析会得到
+#: 「买一价 200 元、买一量 1309.590 手」这种自洽但错误的数 —— 所以下面
+#: 按 ``(量, 价)`` 成对取值，并把两档都写进 docstring。
+_SINA_BID_LEVELS: Final[int] = 5
+_SINA_ASK_LEVELS: Final[int] = 5
 TENCENT_KLINE_URL: Final[str] = "https://web.ifzq.gtimg.cn/appstock/app/fqkline/get"
 SINA_QUOTE_URL: Final[str] = "https://hq.sinajs.cn/list="
 DEFAULT_HTTP_TIMEOUT_SECONDS: Final[float] = 12.0
@@ -272,7 +295,23 @@ class SinaQuoteClient:
     """新浪 ``hq.sinajs.cn`` 快照客户端 —— 只用于探活与"最新报价"级别的兜底。
 
     **不提供 K 线**：新浪的 K 线接口是另一个域名，本轮实测未纳入兜底范围；
-    拿快照伪造日线会污染结构计算，所以本类刻意只暴露 ``fetch_quote``。
+    拿快照伪造日线会污染结构计算，所以本类刻意只暴露快照接口。
+
+    ## R82：为什么加 ``fetch_quotes``（批量 + 五档）
+
+    ADR 0003（emotion-core 盘中触发）最贵的一块是「盘中封板检测要五档」，
+    而它原先准备自采。实测发现**同一个响应里五档一直都在**（34 字段），
+    只是 ``fetch_quote`` 只解析前 9 个。所以这里补齐解析，让「谁采」这件事
+    变成一道口径题而不是一道新建题。
+
+    两条硬约束：
+
+    1. **``fetch_quote`` 的返回字典一个键都不许变** —— 生产路径
+       ``a_share_snapshot._attach_dual_compare`` 在读它，改名/加键都会被
+       ``check_value_plumbing`` 与快照对账用例抓到。批量版走**另一个方法**。
+    2. **缺字段给 ``None``，不给 ``0``** —— 停牌时五档全 0、集合竞价时
+       卖一量可能为 0。把「没有这一档」记成 0 手，下游会读成
+       「买一挂着 0 手」＝「买盘消失」，方向完全相反。价格 0 同理不认。
     """
 
     def __init__(
@@ -319,3 +358,175 @@ class SinaQuoteClient:
             "date": fields[30],
             "time": fields[31],
         }
+
+    def fetch_quotes(self, codes: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """批量快照，**含五档**。返回 ``{code: quote}``（**键是 6 位纯代码**）。
+
+        键用 ``000002`` 而不是 ``sz000002``：调用方手上是 ``daily_bar.code`` /
+        关注列表里的 6 位代码，让它每次自己 ``normalize_code`` 一遍等于把
+        一处可错的转换复制到每个调用点（R82 实跑第一版就返回了 ``sh600519``
+        这类前缀键，按 6 位 code 取全是 KeyError）。quote 里仍保留
+        ``"code": "sz000002"`` 全限定符号，与 ``fetch_quote`` 一致。
+
+        每只的 ``quote`` = ``fetch_quote`` 的全部键 + 下列键（见 ``parse_sina_quotes``）::
+
+            amount        成交额（元，字段 [9]）
+            bid1_vol      买一量（股，字段 [10]）  bid1_price  买一价（元，字段 [11]）
+            ...           bid5_vol / bid5_price
+            ask1_vol      卖一量（股，字段 [20]）  ask1_price  卖一价（元，字段 [21]）
+            ...           ask5_vol / ask5_price
+            bids / asks   上面十档的成对视图：[{"price": x, "volume": y}, ...]
+
+        **缺的档位是 ``None``，不是 0**（见类 docstring 第 2 条）。价格 <= 0
+        的档位整对置 ``None``：新浪在停牌/未开盘时把价格和量一起填 0。
+
+        Args:
+            codes: 任意 ``normalize_code`` 能接受的形式；超过 ``SINA_BATCH_LIMIT``
+                自动切块，块间不共享请求。
+
+        Raises:
+            ASharePublicError: 任一请求 HTTP 失败 / 响应体为空 / 字段不足。
+                这里**不吞**：批量采样本就要么全拿到要么报警，静默返回部分结果
+                会让「这只票今天没触发」与「这只票没采到」变成同一件事。
+        """
+        wanted: list[str] = []
+        seen: set[str] = set()
+        for code in codes:
+            symbol = normalize_code(code)
+            if symbol not in seen:
+                seen.add(symbol)
+                wanted.append(symbol)
+        if not wanted:
+            return {}
+        out: dict[str, dict[str, Any]] = {}
+        for start in range(0, len(wanted), SINA_BATCH_LIMIT):
+            chunk = wanted[start : start + SINA_BATCH_LIMIT]
+            out.update(self._fetch_chunk(chunk))
+        return {symbol[2:]: quote for symbol, quote in out.items()}
+
+    def _fetch_chunk(self, symbols: Sequence[str]) -> dict[str, dict[str, Any]]:
+        """取一块（<= ``SINA_BATCH_LIMIT`` 只），返回本块解析结果。"""
+        headers = {"Referer": "https://finance.sina.com.cn", "User-Agent": "Mozilla/5.0"}
+        url = f"{SINA_QUOTE_URL}{','.join(symbols)}"
+        try:
+            raw = self._opener(url, self._timeout, headers)
+        except urllib.error.HTTPError as exc:
+            raise ASharePublicError(f"新浪批量快照 HTTP {exc.code}：{len(symbols)} 只") from exc
+        except urllib.error.URLError as exc:
+            raise ASharePublicError(
+                f"新浪批量快照不可达：{len(symbols)} 只（{exc.reason}）"
+            ) from exc
+        text = raw.decode("gbk", "replace") if isinstance(raw, bytes) else raw
+        return parse_sina_quotes(text, expected=symbols)
+
+
+def parse_sina_quotes(
+    text: str, *, expected: Sequence[str] = ()
+) -> dict[str, dict[str, Any]]:
+    """把新浪批量快照响应解析成 ``{symbol: quote}``（R82）。
+
+    从 ``fetch_quote`` 里拆出来是为了**能单测每一种脏数据形态**，不必为每种
+    情况去构造一个 opener。
+
+    ## 三条真实形态（2026-10-21 实测）
+
+    1. **停牌 / 未上市**：整行是 ``var hq_str_sz000000="";`` —— 空 body。
+       **跳过并留在缺失集合里**，不返回 ``{"last": 0}``。
+    2. **未知代码**：新浪对不认识的 symbol 直接**不回这一行**（响应里没有它）。
+       所以「请求 3 只、返回 2 行」是正常情况，不是解析失败。
+    3. **五档全 0**：停牌股的价格与量一起填 0。价格 <= 0 的档位置 ``None``。
+
+    Args:
+        text: 已解码的响应正文（GBK 由调用方负责解码）。
+        expected: 本次请求的 symbol 列表。给了就在结尾校验「有没有少」——
+            少一只意味着上游没认这个代码，属于要报的异常；不给则只解析出现的行。
+
+    Raises:
+        ASharePublicError: ``expected`` 非空但响应里一只都没匹配上；或某行
+            字段数 < 32（说明响应格式变了，不该静默降级）。
+    """
+    out: dict[str, dict[str, Any]] = {}
+    matched: set[str] = set()
+    for match in _SINA_LINE_RE.finditer(text):
+        symbol = match.group("symbol").lower()
+        body = match.group("body")
+        if not body:
+            # 空 body = 停牌/未知；记进 matched 但不出现在结果里，见 docstring 第 1 条。
+            matched.add(symbol)
+            continue
+        fields = body.split(",")
+        if len(fields) < 32:
+            raise ASharePublicError(f"新浪快照字段不足（{len(fields)}）：{symbol}")
+        out[symbol] = _parse_sina_row(symbol, fields)
+        matched.add(symbol)
+    if expected and not (set(expected) & matched):
+        raise ASharePublicError(
+            f"新浪批量快照一只都没匹配上（请求 {len(expected)} 只，响应 {len(text)} 字符）"
+        )
+    return out
+
+
+def _parse_sina_row(symbol: str, fields: Sequence[str]) -> dict[str, Any]:
+    """把一行 34 字段解析成 quote 字典（含五档）。"""
+    quote: dict[str, Any] = {
+        "code": symbol,
+        "name": fields[0],
+        "open": _as_float(fields[1], field="open", row=fields[:6]),
+        "prev_close": _as_float(fields[2], field="prev_close", row=fields[:6]),
+        "last": _as_float(fields[3], field="last", row=fields[:6]),
+        "high": _as_float(fields[4], field="high", row=fields[:6]),
+        "low": _as_float(fields[5], field="low", row=fields[:6]),
+        "volume": _as_float(fields[8], field="volume", row=fields[:9]),
+        "amount": _as_float(fields[9], field="amount", row=fields[:10]),
+        "date": fields[30],
+        "time": fields[31],
+    }
+    bids: list[dict[str, float] | None] = []
+    asks: list[dict[str, float] | None] = []
+    for level in range(_SINA_BID_LEVELS):
+        # 买档：先量后价，[10]=买一量 [11]=买一价
+        vol_raw, price_raw = fields[10 + level * 2], fields[11 + level * 2]
+        quote[f"bid{level + 1}_vol"] = _sina_vol(vol_raw)
+        quote[f"bid{level + 1}_price"] = _sina_price(price_raw)
+        bids.append(_sina_level(price_raw, vol_raw))
+    for level in range(_SINA_ASK_LEVELS):
+        # 卖档：同样先量后价，[20]=卖一量 [21]=卖一价
+        vol_raw, price_raw = fields[20 + level * 2], fields[21 + level * 2]
+        quote[f"ask{level + 1}_vol"] = _sina_vol(vol_raw)
+        quote[f"ask{level + 1}_price"] = _sina_price(price_raw)
+        asks.append(_sina_level(price_raw, vol_raw))
+    quote["bids"] = bids
+    quote["asks"] = asks
+    return quote
+
+
+def _sina_price(raw: object) -> float | None:
+    """价格字段：<= 0 或解析不了 → ``None``（不认 0 元这个价）。"""
+    try:
+        value = float(str(raw))
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _sina_vol(raw: object) -> float | None:
+    """量字段：负数或解析不了 → ``None``；**0 保留为 0.0**。
+
+    0 和 None 的区别在这里是关键：集合竞价时买一量可以是货真价实的 0
+    （挂着但没量），这与「这一档不存在」是两件事，下游的封单量判据
+    要按 ``> 阈值`` 比大小，两者都会落榜，但**记录**必须诚实。
+    """
+    try:
+        value = float(str(raw))
+    except (TypeError, ValueError):
+        return None
+    return value if value >= 0 else None
+
+
+def _sina_level(price_raw: object, vol_raw: object) -> dict[str, float] | None:
+    """一档 = 价 + 量；价格缺失则整档为 ``None``。"""
+    price = _sina_price(price_raw)
+    if price is None:
+        return None
+    volume = _sina_vol(vol_raw)
+    return {"price": price, "volume": volume if volume is not None else 0.0}

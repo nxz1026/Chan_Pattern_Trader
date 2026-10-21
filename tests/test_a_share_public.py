@@ -13,10 +13,12 @@ from datetime import UTC, datetime
 import pytest
 from cpt.adapters.a_share_public import (
     DAILY_INTERVAL_MS,
+    SINA_BATCH_LIMIT,
     ASharePublicError,
     SinaQuoteClient,
     TencentKlineClient,
     normalize_code,
+    parse_sina_quotes,
     parse_tencent_kline,
 )
 
@@ -172,3 +174,182 @@ def test_sina_quote_empty_body_raises() -> None:
 
     with pytest.raises(ASharePublicError, match="为空或格式不符"):
         SinaQuoteClient(opener=opener).fetch_quote("600519")
+
+
+# ───────────────────────────── R82：批量 + 五档 ─────────────────────────────
+#
+# 真实响应形状取自 2026-10-21 实测（`hq.sinajs.cn/list=sh600519,sz000002,sz000001`）：
+# 34 字段，`[10]=买一量 [11]=买一价 ... [20]=卖一量 [21]=卖一价`。
+# **量与价的先后是反直觉的**，照 `[10]=价` 解析会得到自洽但错误的数。
+
+
+def _sina_row(
+    name: str,
+    *,
+    last: str = "10.00",
+    bids: list[tuple[str, str]] | None = None,
+    asks: list[tuple[str, str]] | None = None,
+) -> str:
+    """造一行新浪 34 字段 body。``bids``/``asks`` 是 ``[(价, 量), ...]``，从买一往买五排。"""
+    bids = bids if bids is not None else [("9.99", "100")] * 5
+    asks = asks if asks is not None else [("10.01", "200")] * 5
+    # 下标对齐 2026-10-21 实测：0=名 1=开 2=昨收 3=现价 4=高 5=低 6=买一价 7=卖一价
+    # 8=成交量 9=成交额 10..19=买五档(先量后价) 20..29=卖五档(先量后价)
+    # 30=日期 31=时间 32=状态 33=附加字段
+    head = [name, "9.90", "9.80", last, "10.20", "9.70", bids[0][0], asks[0][0]]
+    body = [str(1000000), "12345678.0"]
+    for price, vol in bids:  # 先量后价
+        body.extend([vol, price])
+    for price, vol in asks:  # 先量后价
+        body.extend([vol, price])
+    body.extend(["2026-10-21", "14:30:00", "00", "D|4300|5631667.00"])
+    return ",".join(head + body)
+
+
+def _sina_response(rows: dict[str, str]) -> bytes:
+    body = "".join(f'var hq_str_{sym}="{row}";\n' for sym, row in rows.items())
+    return body.encode("gbk")
+
+
+def test_sina_batch_parses_five_levels_with_volume_before_price() -> None:
+    """量与价的顺序：`[10]=买一量 [11]=买一价`。反了就会得到「买一价 200 元」。"""
+    payload = _sina_response(
+        {
+            "sh600519": _sina_row(
+                "贵州茅台",
+                last="1309.69",
+                bids=[("1309.59", "200"), ("1309.35", "100")] + [("1300.00", "50")] * 3,
+                asks=[("1309.69", "4568"), ("1309.80", "1000")] + [("1310.00", "70")] * 3,
+            )
+        }
+    )
+    quotes = SinaQuoteClient(opener=lambda u, t, h: payload).fetch_quotes(["600519"])
+    q = quotes["600519"]
+    assert q["bid1_price"] == pytest.approx(1309.59)
+    assert q["bid1_vol"] == pytest.approx(200.0)
+    assert q["ask1_price"] == pytest.approx(1309.69)
+    assert q["ask1_vol"] == pytest.approx(4568.0)
+    # 反过来的读法会得到这两组数；钉死它们防止有人「顺手调换」
+    assert q["bid1_price"] != pytest.approx(200.0)
+    assert q["bid1_vol"] != pytest.approx(1309.59)
+    assert q["bids"][0] == {"price": 1309.59, "volume": 200.0}
+    assert q["asks"][0] == {"price": 1309.69, "volume": 4568.0}
+    assert len(q["bids"]) == 5 and len(q["asks"]) == 5
+
+
+def test_sina_batch_keys_are_bare_codes_not_prefixed_symbols() -> None:
+    """返回值按 6 位 code 索引 —— 调用方手上就是 daily_bar.code。
+
+    R82 实跑第一版返回 `sh600519` 这类前缀键，按 6 位 code 取全是 KeyError。
+    """
+    payload = _sina_response({"sz000002": _sina_row("万 科Ａ"), "sh600519": _sina_row("贵州茅台")})
+    quotes = SinaQuoteClient(opener=lambda u, t, h: payload).fetch_quotes(["000002", "600519"])
+    assert set(quotes) == {"000002", "600519"}
+    # quote 里仍保留全限定符号（与 fetch_quote 一致）
+    assert quotes["000002"]["code"] == "sz000002"
+    assert quotes["600519"]["code"] == "sh600519"
+
+
+def test_sina_batch_accepts_mixed_code_spellings_and_dedupes() -> None:
+    payload = _sina_response({"sh600519": _sina_row("贵州茅台")})
+    quotes = SinaQuoteClient(opener=lambda u, t, h: payload).fetch_quotes(
+        ["600519", "600519.SH", "sh600519"]
+    )
+    assert list(quotes) == ["600519"]
+
+
+def test_sina_suspended_stock_yields_no_levels_not_zeros() -> None:
+    """停牌：整行 body 全 0。价格 <= 0 的档位整对置 None，不记成「挂 0 手」。"""
+    row = _sina_row("停牌股", last="0.00", bids=[("0.00", "0")] * 5, asks=[("0.00", "0")] * 5)
+    payload = _sina_response({"sz000016": row})
+    q = SinaQuoteClient(opener=lambda u, t, h: payload).fetch_quotes(["000016"])["000016"]
+    assert q["bids"] == [None] * 5
+    assert q["asks"] == [None] * 5
+    assert q["bid1_price"] is None
+    assert q["bid1_vol"] == pytest.approx(0.0)  # 量本身是 0，保留
+
+
+def test_sina_limit_up_has_bids_but_no_asks() -> None:
+    """封涨停的真实形态（000518 四环生物 2026-10-21 实测）：买盘有量、卖盘为 0。"""
+    row = _sina_row(
+        "四环生物",
+        last="3.99",
+        bids=[("3.99", "5000000")] + [("3.98", "1000")] * 4,
+        asks=[("0.00", "0")] * 5,
+    )
+    payload = _sina_response({"sz000518": row})
+    q = SinaQuoteClient(opener=lambda u, t, h: payload).fetch_quotes(["000518"])["000518"]
+    assert q["bids"][0] == {"price": 3.99, "volume": 5000000.0}
+    assert q["asks"] == [None] * 5
+
+
+def test_sina_empty_body_row_is_skipped_not_zeroed() -> None:
+    """`var hq_str_sz000000="";` —— 空 body 整只不出现，不返回 0 元报价。"""
+    text = 'var hq_str_sz000002=""";\n' + f'var hq_str_sh600519="{_sina_row("贵州茅台")}";\n'
+    quotes = parse_sina_quotes(text)
+    assert set(quotes) == {"sh600519"}
+
+
+def test_sina_batch_chunks_beyond_the_limit() -> None:
+    """超过 SINA_BATCH_LIMIT 自动切块，每块一次请求，结果合并。"""
+    codes = [f"{600000 + i}" for i in range(SINA_BATCH_LIMIT + 20)]
+    urls: list[str] = []
+
+    def opener(url: str, timeout: float, headers: Mapping[str, str] | None) -> bytes:
+        urls.append(url)
+        syms = url.split("list=")[1].split(",")
+        return _sina_response({s: _sina_row(f"票{s[-3:]}") for s in syms})
+
+    quotes = SinaQuoteClient(opener=opener).fetch_quotes(codes)
+    assert len(quotes) == len(codes)
+    assert len(urls) == 2
+    assert urls[0].split("list=")[1].count(",") + 1 == SINA_BATCH_LIMIT
+    assert urls[1].split("list=")[1].count(",") + 1 == 20
+
+
+def test_sina_batch_empty_input_makes_no_request() -> None:
+    def opener(url: str, timeout: float, headers: Mapping[str, str] | None) -> bytes:
+        raise AssertionError("不该发请求")
+
+    assert SinaQuoteClient(opener=opener).fetch_quotes([]) == {}
+
+
+def test_sina_batch_raises_when_nothing_matches() -> None:
+    """响应里一只都没匹配上 = 上游格式变了，必须报，不能返回空字典当成功。"""
+    with pytest.raises(ASharePublicError, match="一只都没匹配上"):
+        SinaQuoteClient(opener=lambda u, t, h: b"<html>502</html>").fetch_quotes(["600519"])
+
+
+def test_sina_batch_raises_on_short_row() -> None:
+    """字段不足说明响应格式变了，静默降级会让下游拿到半截数据。"""
+    text = 'var hq_str_sh600519="贵州茅台,1,2,3";\n'
+    with pytest.raises(ASharePublicError, match="字段不足"):
+        parse_sina_quotes(text)
+
+
+def test_sina_batch_http_error_is_not_swallowed() -> None:
+    import urllib.error
+
+    def opener(url: str, timeout: float, headers: Mapping[str, str] | None) -> bytes:
+        raise urllib.error.HTTPError(url, 403, "Forbidden", None, None)  # type: ignore[arg-type]
+
+    with pytest.raises(ASharePublicError, match="HTTP 403"):
+        SinaQuoteClient(opener=opener).fetch_quotes(["600519"])
+
+
+def test_sina_fetch_quote_return_contract_is_unchanged() -> None:
+    """`fetch_quote` 的键集合一个字都不能变 —— 生产路径在读它。"""
+    payload = _sina_response({"sh600519": _sina_row("贵州茅台")})
+    quote = SinaQuoteClient(opener=lambda u, t, h: payload).fetch_quote("600519")
+    assert set(quote) == {
+        "code",
+        "name",
+        "open",
+        "prev_close",
+        "last",
+        "high",
+        "low",
+        "volume",
+        "date",
+        "time",
+    }
