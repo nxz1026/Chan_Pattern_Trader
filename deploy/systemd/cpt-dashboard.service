@@ -12,7 +12,20 @@ Group=ubuntu
 WorkingDirectory=/home/ubuntu/DSH/Chan_Pattern_Trader
 EnvironmentFile=/home/ubuntu/DSH/Chan_Pattern_Trader/deploy/env/cpt-dashboard.env
 ExecStart=/home/ubuntu/DSH/Chan_Pattern_Trader/.venv/bin/python -m cpt.web --host ${CPT_HOST} --port ${CPT_PORT} --mode ${CPT_MODE} --poll-seconds ${CPT_POLL_SECONDS} --symbol ${CPT_SYMBOL} --interval ${CPT_INTERVAL}
-Restart=on-failure
+# ── 重启策略（R84）────────────────────────────────────────────────────────
+# 原为 on-failure：它**不覆盖 SIGTERM 正常退出**。2026-10-19 03:05 服务被停，
+# 之后 55 小时无人知 —— 巡检当时也不看服务（R83 才补上），两条一起说才完整。
+#
+# 为什么是 always 而不是补一个 RestartForceExitStatus=SIGTERM：
+#   · on-failure + RestartForceExitStatus=SIGTERM 表达的是「只把 SIGTERM 当失败」，
+#     仍是白名单思路 —— 下次被别的方式停掉（exit 0、SIGINT）又会静默死。
+#   · CPT 是自用常驻服务，**没有一种「正常停一会儿」的场景**：
+#     要停就是维护，维护要 stop 而不是 kill。always 与这个事实一致。
+#
+# ⚠️ 代价（明说）：`kill <pid>` 现在会被 10 秒后拉起。真停服务必须
+#   `systemctl stop cpt-dashboard`（stop 的作业不会触发 Restart）。
+#   `RestartSec=10` 保证即使有外部脚本反复 kill，也不会打满一整个启动风暴。
+Restart=always
 RestartSec=10s
 
 # ── 沙箱加固（R58，审计 L1）────────────────────────────────────────────────

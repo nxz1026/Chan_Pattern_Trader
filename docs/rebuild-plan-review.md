@@ -372,6 +372,56 @@ m01562 补充：横幅要**有数字、也要有建议**（自用项目，不写
   `tests/test_signal_overview.py::test_missing_reason_yields_none_step_index_not_a_guess`
   钉住。
 
+#### R84（2026-10-21）：`Restart=on-failure` 不覆盖 SIGTERM
+
+R83 让巡检能在 2 小时内知道「服务停了」。但**通知不等于自愈** ——
+凌晨 3 点收到飞书，还是得有人手动 `systemctl start`。所以补上真正的那一环。
+
+### 洞在哪
+
+`cpt-dashboard.service` 原本是 `Restart=on-failure`。这个名字听起来够用，
+实际上 **on-failure 不覆盖 SIGTERM 正常退出** —— 而系统里所有正常的
+shutdown / kill / 断电前的停止**都是 SIGTERM**。2026-10-19 03:05 那 55 小时
+停机就是这个形状：进程「正常退出」了，systemd 认为这是预期行为，不拉起。
+
+### 为什么是 always，而不是补一个 `RestartForceExitStatus=SIGTERM`
+
+后者表达的是「**只把** SIGTERM 当失败」，仍是白名单思路 —— 下次被别的方式
+停掉（`exit 0`、SIGINT）又会静默死。CPT 是自用常驻服务，**没有一种「正常停
+一会儿」的场景**：要停就是维护，维护该 `stop` 而不是 `kill`。`always` 与这个
+事实一致，白名单与它不一致。
+
+代价明说：`kill <pid>` 现在会被 10 秒后拉起。**真停服务必须
+`systemctl stop cpt-dashboard`**（stop 的作业不触发 Restart）。
+`RestartSec=10s` 保证即使有外部脚本反复 kill 也不会打满启动风暴（默认 100ms 会）。
+
+### 实测（两个方向都要验，只验一个等于没验）
+
+| 动作 | 结果 | 说明 |
+|---|---|---|
+| `kill -TERM 667030` | `MainPID 667030 → 667417`，`NRestarts 0 → 1`，仍 `active` | **洞堵上了** |
+| `systemctl stop` 后等 15s | `inactive`，`NRestarts` 不变 | 不空转，stop 仍然是真的停 |
+| 再 `systemctl start` | `active`，`health=200` | 恢复正常 |
+
+### 回归钉子
+
+新建 `tests/test_systemd_unit_policy.py`（**6 passed**），最核心的一条：
+
+```python
+assert _directives().get("Restart") == "always"
+```
+
+反向注入实测：把 `Restart=always` 改回 `on-failure` → 该条**红**；还原后绿。
+另外五条钉住 `RestartSec` 有限（防启动风暴）、以及 R58 的沙箱加固
+（`ProtectSystem=strict` / `ProtectHome=read-only` / `ReadWritePaths` 不含
+`/home/ubuntu`）没有在改 restart 时被顺手删掉。
+
+### 这条为什么值得写进文档
+
+这类 bug 的特征是**配置看起来是对的**。「有 Restart 啊」—— 光读文件确认不了，
+必须用一条能失败的断言钉住。R83 的巡检只能缩短**发现**时间，
+R84 才是消除**故障本身**。
+
 #### R83（2026-10-21）：观察期不是状态，是「要有东西在看」
 
 R82 之后 CPT 被安排进观察期。但**观察期本身有前提**：得先有人能告诉你「它坏了」。
