@@ -87,5 +87,7 @@ graphflow-out/
 .git/git-proxy-ca.crt
 
 # 审计期间的临时产物（ruff 报告 / pytest 输出 / 片段文件）；绝不入库
+# `.tmp_audit/` 是 R70/R71 的回放探针目录（probe1..probe10 + 前端渲染实测脚本），
+# 同为一次性产物，结论已写进 docs/rebuild-plan-review.md §5.0.1，不入库。
 .tmp/
-.tmp/
+.tmp_audit/

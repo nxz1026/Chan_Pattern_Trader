@@ -636,6 +636,45 @@ button {
   font-style: italic;
 }
 
+/* R71：信号面板的实测横幅。措辞是「这是测量结果」，不是「风险提示」，
+   所以用中性的边框强调而非警告色。数字用等宽字体，方便一眼比较。 */
+.signal-evidence {
+  margin: var(--space-2) 0 var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-left: 3px solid var(--color-border-strong);
+  background: var(--color-surface-alt, transparent);
+  font-size: var(--font-size-xs);
+  line-height: 1.6;
+}
+
+.signal-evidence p {
+  margin: 0 0 var(--space-1);
+}
+
+.signal-evidence-title {
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.signal-evidence b {
+  font-family: var(--font-mono, monospace);
+  font-weight: 600;
+}
+
+/* R71：三步进度。步骤那行用等宽字体，让 ✓ / ✗ / · 能竖直对齐。 */
+.signal-progress {
+  margin: var(--space-2) 0 var(--space-3);
+}
+
+.signal-progress[hidden] {
+  display: none;
+}
+
+.signal-progress [data-testid="signal-progress-steps"] {
+  font-family: var(--font-mono, monospace);
+  white-space: pre;
+}
+
 /* 信号雷达 */
 .signal-radar {
   margin-top: var(--space-3);

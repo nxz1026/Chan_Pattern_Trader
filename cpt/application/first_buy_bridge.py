@@ -144,7 +144,7 @@ def derive_first_buy_facts(
             has_divergence_leg = True
             # 反向笔：背驰段之后的第一笔反向笔（保守口径第 3 条，出现即算）。
             has_reversal_bi = any(bi.direction != _DOWN for bi in level_bis[leg_index + 1 :])
-        divergence_status = _divergence_status(centers[-2], level_bis)
+        divergence_status = _divergence_status(level_bis)
 
     return FirstBuyFacts(
         has_two_centers=has_two_centers,
@@ -156,9 +156,72 @@ def derive_first_buy_facts(
     )
 
 
-def _divergence_status(first_center: ZhongShu, level_bis: Sequence[Bi]) -> str:
-    """背驰三态：``detected`` / ``not_detected`` / ``not_checked``（力度未填充）。"""
-    segment = [bi for bi in level_bis if bi.end_time > first_center.start_time]
+#: 段落切片长度上限（笔数）：与 czsc ``cxt_first_{buy,sell}_V221126`` 模板的
+#: ``n`` 序列上界同值（``tests/test_first_buy.py:_NS`` 的 ``21``）。
+_MAX_SEGMENT_LEN: int = 21
+
+
+def _divergence_segment(level_bis: Sequence[Bi], *, direction: int) -> list[Bi]:
+    """从``末笔``向前锚定出一段可用于 ``check_first_buy/sell`` 的笔段。
+
+    **为什么必须重新锚定**（R69）：``check_first_buy`` 的口径是
+    「**一整段**创新低的下跌」，要求首笔 high 为段内最高、末笔 low 为段内最低。
+    原实现把「首个中枢开始之后的**全部**笔」整段传进去 —— 段内前面必然出现过
+    反弹高点，``max(high) == bis[0].high`` 恒不成立。400 只 A 股实测：
+    ``is_high_at_first`` 命中 **0/45**，即该判定在生产上**从未触发过**。
+    而 czsc 官方模板的口径是从末尾切片（``bis[-n:]``，n 从 21 递减到 5，
+    见 ``tests/test_first_buy.py:260 _our_hit_n``）——本函数与之一致。
+
+    锚定规则：
+
+    1. 末笔方向必须是 ``direction``，否则不是该方向的衰竭段 ⇒ 空段；
+    2. 末笔 ``low``（买）/ ``high``（卖）必须是**整个序列**的极值 —— 即
+       「这一跌/涨创了全段新低/新高」。不是极值 ⇒ 空段（还在半途，谈不上衰竭）；
+    3. 从序列末尾向前，取**最长**的、笔数为奇数、且首笔为段内反向极值的段；
+       长度上限 :data:`_MAX_SEGMENT_LEN`，与 czsc 模板同量纲；
+    4. 找不到 ⇒ 空段（``not_detected``），不臆造段落。
+
+    不改变判定器本身：``check_first_buy/sell`` 一行未动，czsc 逐段对照仍成立。
+    """
+    if not level_bis or level_bis[-1].direction != direction:
+        return []
+    last = level_bis[-1]
+    if direction == _DOWN:
+        if last.low != min(bi.low for bi in level_bis):
+            return []
+    elif last.high != max(bi.high for bi in level_bis):
+        return []
+
+    # 从最近处向前扩，取最长的合格段：首笔必须是当前段的反向极值。
+    best: list[Bi] = []
+    for length in range(3, min(len(level_bis), _MAX_SEGMENT_LEN) + 1, 2):
+        segment = list(level_bis[-length:])
+        if segment[0].direction != direction:
+            continue
+        if direction == _DOWN:
+            if max(bi.high for bi in segment) != segment[0].high:
+                continue
+        elif min(bi.low for bi in segment) != segment[0].low:
+            continue
+        best = segment
+    return best
+
+
+def _divergence_status(level_bis: Sequence[Bi]) -> str:
+    """背驰三态：``detected`` / ``not_detected`` / ``not_checked``（力度未填充）。
+
+    ``level_bis`` 应传**本级别的全部笔**（按时间升序）；段落锚定由
+    :func:`_divergence_segment` 负责，调用方不必自己切段。
+
+    **判定顺序：先查数据缺，再判段落**。``length <= 0`` 是整段序列的全局
+    事实，不该因为「恰好凑不出合格段落」就退化成 ``not_detected`` ——
+    那会把「数据缺」谎报成「算过了，不背驰」。
+    """
+    if any(bi.length <= 0 for bi in level_bis):
+        return "not_checked"
+    segment = _divergence_segment(level_bis, direction=_DOWN)
+    if not segment:
+        return "not_detected"
     try:
         return "detected" if check_first_buy(segment) else "not_detected"
     except ValueError:
@@ -218,7 +281,7 @@ def derive_first_sell_facts(
             has_divergence_leg = True
             # 反向笔：背驰段之后的第一笔反向笔（向下）。
             has_reversal_bi = any(bi.direction != _UP for bi in level_bis[leg_index + 1 :])
-        divergence_status = _divergence_status_sell(centers[-2], level_bis)
+        divergence_status = _divergence_status_sell(level_bis)
 
     return FirstBuyFacts(
         has_two_centers=has_two_centers,
@@ -230,9 +293,18 @@ def derive_first_sell_facts(
     )
 
 
-def _divergence_status_sell(first_center: ZhongShu, level_bis: Sequence[Bi]) -> str:
-    """一卖背驰三态：``detected`` / ``not_detected`` / ``not_checked``。"""
-    segment = [bi for bi in level_bis if bi.end_time > first_center.start_time]
+def _divergence_status_sell(level_bis: Sequence[Bi]) -> str:
+    """一卖背驰三态：``detected`` / ``not_detected`` / ``not_checked``。
+
+    段落锚定走 :func:`_divergence_segment`，与一买**同一套规则**的镜像
+    （末笔向上、末笔 high 为全段最高、首笔 low 为段内最低）；
+    改前同样传「首个中枢之后的全部笔」，同属 R69 修掉的调用错位。
+    """
+    if any(bi.length <= 0 for bi in level_bis):
+        return "not_checked"
+    segment = _divergence_segment(level_bis, direction=_UP)
+    if not segment:
+        return "not_detected"
     try:
         return "detected" if check_first_sell(segment) else "not_detected"
     except ValueError:

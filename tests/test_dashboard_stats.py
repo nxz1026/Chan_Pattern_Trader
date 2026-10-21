@@ -44,3 +44,57 @@ def test_frontend_reads_confirmed_rate_with_matching_label() -> None:
     assert "确认占比" in source
     # 旧标签不得再作为行标签出现（注释里回顾历史名称不算）
     assert 'row("预警→确认率"' not in source
+
+
+# ---------------------------------------------------------------- R71 失效归因
+
+
+def test_invalidation_reasons_counted_per_code() -> None:
+    """失效原因按码计数，只统计 ``invalidated`` 行。"""
+    result = signal_statistics(
+        [
+            {"status": "invalidated", "invalidated_reason": "not_enough_centers"},
+            {"status": "invalidated", "invalidated_reason": "not_enough_centers"},
+            {"status": "invalidated", "invalidated_reason": "no_divergence_leg"},
+            {"status": "confirmed", "invalidated_reason": "no_divergence_leg"},
+        ]
+    )
+    assert result["invalidation_reasons"] == {"not_enough_centers": 2, "no_divergence_leg": 1}
+
+
+def test_rows_without_recorded_reason_are_unknown_not_guessed() -> None:
+    """R71 之前落库的失效行没有原因 —— 必须单列 ``unknown``，不得并入任何具体原因。"""
+    result = signal_statistics(
+        [
+            {"status": "invalidated", "invalidated_reason": None},
+            {"status": "invalidated", "invalidated_reason": "not_in_downtrend"},
+        ]
+    )
+    assert result["invalidation_reasons"] == {"unknown": 1, "not_in_downtrend": 1}
+    assert sum(result["invalidation_reasons"].values()) == result["invalidated_count"]
+
+
+def test_no_invalidated_rows_yields_empty_reason_map() -> None:
+    assert signal_statistics([{"status": "confirmed"}])["invalidation_reasons"] == {}
+
+
+def test_empty_signal_history_yields_empty_reason_map() -> None:
+    assert signal_statistics([])["invalidation_reasons"] == {}
+
+
+def test_loader_surfaces_reason_from_center_ids_tail() -> None:
+    """读侧：``load_signal_events`` 的投影必须把尾项还原成 ``invalidated_reason``。"""
+    from cpt.storage.signal_event_store import _history_row_to_dict, _HISTORY_COLUMNS
+
+    values = []
+    for name in _HISTORY_COLUMNS:
+        if name == "center_ids":
+            values.append(["cn:zhongshu:5:1", "reason:no_divergence_leg"])
+        elif name in {"transition_time", "created_at"}:
+            values.append(None)
+        else:
+            values.append(None)
+    row = _history_row_to_dict(tuple(values))
+    assert row["invalidated_reason"] == "no_divergence_leg"
+    # center_ids 原样保留，前端画中枢不受影响
+    assert row["center_ids"] == ["cn:zhongshu:5:1", "reason:no_divergence_leg"]

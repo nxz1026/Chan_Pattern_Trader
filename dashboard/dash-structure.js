@@ -42,22 +42,23 @@
   const DEFAULT_VISIBLE_BARS = 180;
 
   /* ---- Phase N0：信号「说人话」—— 状态中文映射 ---- */
+  /* R71：与 dash-core.js 同步（死副本，按构建脚本纪律保持逐字一致）。 */
   const STATUS_LABELS = {
-    structure_ready: "结构已就绪（尚未触发）",
-    alert: "⚠️ 预警：反向K线盘中出现，随时可能消失",
-    candidate: "候选：反向K线已收盘，仍成立",
-    confirmed: "已确认：后续反向新笔成立",
-    invalidated: "已失效：结构被破坏（终态）",
+    structure_ready: "位置已到（不是买点）",
+    alert: "⚠️ 盘中冒了一根反抽K线，未收盘",
+    candidate: "反抽K线已收盘，还站得住",
+    confirmed: "反抽确认了一笔（不是买点）",
+    invalidated: "结构已作废：跌势没走完或方向不对",
     none: "暂无信号",
   };
 
   const STATUS_EDUCATION = {
-    structure_ready: "结构条件已满足，等待反向K线触发预警。",
-    alert: "盘中出现反向K线，但尚未收盘确认——信号可能随时消失，不得当作已确认。",
-    candidate: "反向K线已收盘且结构仍成立，等待后续反向新笔确认。",
-    confirmed: "后续反向新笔已成立，信号由「候选」升级为「已确认」。",
-    invalidated: "后续结构被结构破坏，信号已失效（终态），不再跟踪。",
-    none: "当前无信号。",
+    structure_ready: "两个中枢、下跌背驰段都齐了，走势跌到了该止跌的位置。但「位置到了」不等于「该买」——实测这类位置之后 20 日平均只涨 0.02%、胜率 46%，比随便挑一天的基线（20 日 +0.48%）还低。它的用处是提醒你：这段下跌可能接近尾声，别在恐慌低点割肉。",
+    alert: "盘中冒出一根反向K线，但还没收盘。这根K线随时可能被抹掉，别当成已经反转。",
+    candidate: "反向K线已收盘、结构还站得住，说明跌势确实卡住了。这一步距反抽起点平均 7.9 个交易日，此时再进场的收益已基本走完。",
+    confirmed: "后面真的走出了一笔反向。听着像「确认」，但它天然滞后——实测从结构就位到确认平均 7.9 个交易日，确认之后 20 日平均收益 +0.21%（基线 +0.48%）、胜率 40%。它只能证明前面那段跌完了，不能证明接下来会涨。",
+    invalidated: "结构不成立：要么不是下跌走势，要么中枢不够两个，要么没有背驰段。这不是「信号失败」，是这个结构从一开始就没成形。",
+    none: "当前没有可报的结构状态。",
   };
 
   const DIVERGENCE_LABELS = {
@@ -118,11 +119,15 @@
   function renderStructureDefaults(snapshot) {
     const overlays = normalizeOverlays(snapshot && snapshot.overlays);
     const signal = isObject(snapshot) && isObject(snapshot.signal) ? snapshot.signal : null;
+    /* R71：人话进度挂在 summary 上（不进 Signal dataclass，见后端注释）。
+       summary 缺失时传 null，让渲染层把整块隐藏。 */
+    const summary = isObject(snapshot) && isObject(snapshot.summary) ? snapshot.summary : null;
+    const progress = summary && isObject(summary.signal_progress) ? summary.signal_progress : null;
     const lastOf = (list) => (list.length ? list[list.length - 1] : null);
     renderTrendSection(lastOf(overlays.trend_types));
     renderBiSection(lastOf(overlays.bis));
     renderZhongshuSection(lastOf(overlays.zhongshus), overlays.zhongshus.length);
-    renderSignalSection(signal);
+    renderSignalSection(signal, progress);
   }
 
   /* ------------------------------------------------------------- 选中联动 */
@@ -710,7 +715,11 @@
       renderZhongshuSection(payload.raw, normalizeOverlays(state.snapshot && state.snapshot.overlays).zhongshus.length);
     }
     if (payload.kind === "trend_type") renderTrendSection(payload.raw);
-    if (payload.kind === "signal") renderSignalSection(payload.raw);
+    if (payload.kind === "signal") {
+      /* R71：选中信号时也要带上进度，否则进度条会停在上一只票的内容上。 */
+      const snapSummary = isObject(state.snapshot) && isObject(state.snapshot.summary) ? state.snapshot.summary : null;
+      renderSignalSection(payload.raw, snapSummary && isObject(snapSummary.signal_progress) ? snapSummary.signal_progress : null);
+    }
   }
 
 

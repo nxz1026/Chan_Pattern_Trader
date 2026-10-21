@@ -358,12 +358,14 @@ def test_derive_signal_with_client_invokes_load(monkeypatch) -> None:
         load_calls.append(signal_id)
         return None  # 首次评估
 
-    def fake_record(conn, signal, prev_status, code, event_time):
+    def fake_record(conn, signal, prev_status, code, event_time, invalidated_reason=None):
         record_calls.append(
             {
                 "signal_id": signal.signal_id,
                 "prev_status": prev_status,
                 "status": signal.status,
+                # R71：失效归因也一并记下，供断言检查口径是否接上
+                "invalidated_reason": invalidated_reason,
             }
         )
         return True

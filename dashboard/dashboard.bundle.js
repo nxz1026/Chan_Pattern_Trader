@@ -51,23 +51,27 @@
   /* 默认只渲染最后 180 根：600 根平铺进约 670px 会把蜡烛压成 1px 发丝线，无法判读。 */
   const DEFAULT_VISIBLE_BARS = 180;
 
-  /* ---- Phase N0：信号「说人话」—— 状态中文映射 ---- */
+  /* ---- Phase N0：信号「说人话」—— 状态中文映射 ----
+     R71（2026-10-21）：**不再用买点语气**。R70 实测 5,131 只 A 股 /
+     688,496 次回放，一买信号 5/10/20 日收益 +0.11%/+0.18%/+0.02%、
+     胜率 46%，无 alpha（docs/R70-ab-verification.md）。下面这些状态只
+     描述「跌到什么位置、走了哪一步」，不描述「该不该买」。 */
   const STATUS_LABELS = {
-    structure_ready: "结构已就绪（尚未触发）",
-    alert: "⚠️ 预警：反向K线盘中出现，随时可能消失",
-    candidate: "候选：反向K线已收盘，仍成立",
-    confirmed: "已确认：后续反向新笔成立",
-    invalidated: "已失效：结构被破坏（终态）",
+    structure_ready: "位置已到（不是买点）",
+    alert: "⚠️ 盘中冒了一根反抽K线，未收盘",
+    candidate: "反抽K线已收盘，还站得住",
+    confirmed: "反抽确认了一笔（不是买点）",
+    invalidated: "结构已作废：跌势没走完或方向不对",
     none: "暂无信号",
   };
 
   const STATUS_EDUCATION = {
-    structure_ready: "结构条件已满足，等待反向K线触发预警。",
-    alert: "盘中出现反向K线，但尚未收盘确认——信号可能随时消失，不得当作已确认。",
-    candidate: "反向K线已收盘且结构仍成立，等待后续反向新笔确认。",
-    confirmed: "后续反向新笔已成立，信号由「候选」升级为「已确认」。",
-    invalidated: "后续结构被结构破坏，信号已失效（终态），不再跟踪。",
-    none: "当前无信号。",
+    structure_ready: "两个中枢、下跌背驰段都齐了，走势跌到了该止跌的位置。但「位置到了」不等于「该买」——实测这类位置之后 20 日平均只涨 0.02%、胜率 46%，比随便挑一天的基线（20 日 +0.48%）还低。它的用处是提醒你：这段下跌可能接近尾声，别在恐慌低点割肉。",
+    alert: "盘中冒出一根反向K线，但还没收盘。这根K线随时可能被抹掉，别当成已经反转。",
+    candidate: "反向K线已收盘、结构还站得住，说明跌势确实卡住了。这一步距反抽起点平均 7.9 个交易日，此时再进场的收益已基本走完。",
+    confirmed: "后面真的走出了一笔反向。听着像「确认」，但它天然滞后——实测从结构就位到确认平均 7.9 个交易日，确认之后 20 日平均收益 +0.21%（基线 +0.48%）、胜率 40%。它只能证明前面那段跌完了，不能证明接下来会涨。",
+    invalidated: "结构不成立：要么不是下跌走势，要么中枢不够两个，要么没有背驰段。这不是「信号失败」，是这个结构从一开始就没成形。",
+    none: "当前没有可报的结构状态。",
   };
 
   const DIVERGENCE_LABELS = {
@@ -76,9 +80,10 @@
     detected: "检测到背驰",
   };
 
+  /* R71：标题不再叫「一买信号」——那是买点语气的根源。 */
   const SIGNAL_TYPE_LABELS = {
-    first_buy: "一买信号",
-    first_sell: "一卖信号",
+    first_buy: "下跌位置提示（原一买）",
+    first_sell: "上涨位置提示（原一卖）",
   };
 
   /* ---- Phase A1：range.reason 中文映射（历史区间查询失败原因） ---- */
@@ -2043,11 +2048,15 @@
   function renderStructureDefaults(snapshot) {
     const overlays = normalizeOverlays(snapshot && snapshot.overlays);
     const signal = isObject(snapshot) && isObject(snapshot.signal) ? snapshot.signal : null;
+    /* R71：人话进度挂在 summary 上（不进 Signal dataclass，见后端注释）。
+       summary 缺失时传 null，让渲染层把整块隐藏。 */
+    const summary = isObject(snapshot) && isObject(snapshot.summary) ? snapshot.summary : null;
+    const progress = summary && isObject(summary.signal_progress) ? summary.signal_progress : null;
     const lastOf = (list) => (list.length ? list[list.length - 1] : null);
     renderTrendSection(lastOf(overlays.trend_types));
     renderBiSection(lastOf(overlays.bis));
     renderZhongshuSection(lastOf(overlays.zhongshus), overlays.zhongshus.length);
-    renderSignalSection(signal);
+    renderSignalSection(signal, progress);
   }
 
   /* ------------------------------------------------------------- 选中联动 */
@@ -2635,7 +2644,11 @@
       renderZhongshuSection(payload.raw, normalizeOverlays(state.snapshot && state.snapshot.overlays).zhongshus.length);
     }
     if (payload.kind === "trend_type") renderTrendSection(payload.raw);
-    if (payload.kind === "signal") renderSignalSection(payload.raw);
+    if (payload.kind === "signal") {
+      /* R71：选中信号时也要带上进度，否则进度条会停在上一只票的内容上。 */
+      const snapSummary = isObject(state.snapshot) && isObject(state.snapshot.summary) ? state.snapshot.summary : null;
+      renderSignalSection(payload.raw, snapSummary && isObject(snapSummary.signal_progress) ? snapSummary.signal_progress : null);
+    }
   }
 
 
@@ -2746,7 +2759,48 @@
   }
 
 
-  function renderSignalSection(signal) {
+  /* R71：三步进度条。数据来自 snapshot.summary.signal_progress（后端
+     cpt/application/signal_progress.py 产出）。**没有数据就整块隐藏**，
+     不拿占位文字糊弄——「没算」和「算了没走到」必须能区分。 */
+  const PROGRESS_STATE_LABELS = {
+    done: "✓",
+    failed: "✗",
+    pending: "·",
+  };
+
+  /* R71 Step3：失效原因码 → 中文标签。码是稳定标识，定义在
+     cpt/application/signal_invalidation.py::REASON_CODES，前端只按码查文案，
+     **不按顺序猜**——后端加一个新码，这里查不到就退回显示原始码，不会错位。
+     文案只写「为什么作废」，措辞不含买卖建议（那是 signal_progress 的活）。 */
+  const INVALIDATION_REASON_LABELS = {
+    not_in_downtrend: "方向不对（不是下跌走势）",
+    not_enough_centers: "中枢不到两个",
+    no_divergence_leg: "中枢二之后没再往下走",
+    previous_invalidated: "此前已作废（终态不回退）",
+  };
+
+  function renderSignalProgress(progress) {
+    const node = q("[data-testid=signal-progress]");
+    if (!node) return;
+    const item = isObject(progress) ? progress : null;
+    const steps = item && Array.isArray(item.steps) ? item.steps : null;
+    if (!steps || !steps.length) {
+      node.hidden = true;
+      return;
+    }
+    node.hidden = false;
+    setText("[data-testid=signal-progress-steps]", steps.map((step) => {
+      const state = step && step.state ? step.state : "pending";
+      const mark = PROGRESS_STATE_LABELS[state] || PROGRESS_STATE_LABELS.pending;
+      const title = step && step.title ? step.title : "";
+      return `${mark} ${title}`;
+    }).join("   "));
+    setText("[data-testid=signal-progress-explain]", item.explain ? String(item.explain) : "—");
+    setText("[data-testid=signal-progress-action]", item.action ? String(item.action) : "—");
+  }
+
+
+  function renderSignalSection(signal, progress) {
     const item = isObject(signal) ? signal : null;
     const status = item && typeof item.status === "string" ? item.status : "none";
     const statusNode = setText("[data-testid=signal-status]", statusLabel(status));
@@ -2769,6 +2823,8 @@
     }
     /* Phase N0-4：一卖信号并列展示 */
     renderSignalFirstSellSection(signal);
+    /* R71：三步进度（「走到哪一步 / 卡在哪 / 该做什么」） */
+    renderSignalProgress(progress);
   }
 
 
@@ -3033,6 +3089,15 @@
     const rate = num(stats.confirmed_rate);
     row("确认占比", rate === null ? "—" : `${(rate * 100).toFixed(1)}%`);
     row("失效数", stats.invalidated_count == null ? "—" : String(stats.invalidated_count));
+    // R71 Step3：失效原因分布。后端 key = stats.invalidation_reasons
+    // （cpt/application/dashboard_stats.py::signal_statistics）。
+    // ``unknown`` 是 R71 之前落库的行——那时没记原因，如实单列，
+    // 绝不能并进某个具体原因，否则统计出来的比例是编的。
+    const reasonCounts = isObject(stats.invalidation_reasons) ? stats.invalidation_reasons : {};
+    Object.keys(reasonCounts).forEach((key) => {
+      const label = key === "unknown" ? "原因未记录（R71 之前的行）" : INVALIDATION_REASON_LABELS[key] || key;
+      row(`失效 · ${label}`, String(reasonCounts[key]));
+    });
     wrap.appendChild(list);
     return wrap;
   }
@@ -3266,6 +3331,19 @@
     const row = document.createElement("p");
     row.textContent = `${signal.signal_id || "signal"} · ${statusLabel(signal.status)} · ${divergenceLabel(signal.divergence_status)}`;
     section.appendChild(row);
+    // R71 Step3：失效的票必须当场说清原因。数据来自事件流最新一行的
+    // invalidated_reason（由 center_ids 尾项还原）。拿不到就明说「未记录」，
+    // 不要留空让人以为忘了渲染。
+    if (signal.status === "invalidated") {
+      const reasonCode = signal.invalidated_reason;
+      const reason = document.createElement("p");
+      reason.dataset.testid = "signal-history-reason";
+      reason.className = "signal-invalidation-reason";
+      reason.textContent = reasonCode
+        ? `失效原因：${INVALIDATION_REASON_LABELS[reasonCode] || reasonCode}`
+        : "失效原因：未记录（R71 之前的行不存原因，无法反推）";
+      section.appendChild(reason);
+    }
     // 信号变化提醒（R21 Phase 4 P1）
     const changeType = snapshot && snapshot.summary && snapshot.summary.signal_change_type;
     if (snapshot && snapshot.summary && snapshot.summary.signal_changed && changeType) {

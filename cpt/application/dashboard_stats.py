@@ -14,18 +14,32 @@ from typing import Any
 
 
 def signal_statistics(signals: Sequence[dict[str, Any]]) -> dict[str, Any]:
-    """Summarize signal status and invalidation reasons without changing inputs."""
+    """Summarize signal status, divergence and invalidation reasons without changing inputs.
+
+    R71 新增 ``invalidation_reasons``：失效原因自 R71 起才逐条落库（``center_ids``
+    尾项，见 :func:`cpt.storage.signal_event_store.record_signal_event`），所以更早的
+    失效行 ``invalidated_reason`` 为 ``None``。这些**单独计入** ``"unknown"`` 一档并
+    如实展示，不并进任何具体原因 —— 把「没记」算成「中枢不足」就是在编数据。
+    """
     statuses: dict[str, int] = {}
     divergences: dict[str, int] = {}
+    invalidation_reasons: dict[str, int] = {}
     for signal in signals:
         status = str(signal.get("status", "unknown"))
         statuses[status] = statuses.get(status, 0) + 1
         divergence = str(signal.get("divergence_status", "unknown"))
         divergences[divergence] = divergences.get(divergence, 0) + 1
+        if status == "invalidated":
+            reason = signal.get("invalidated_reason")
+            key = str(reason) if reason else "unknown"
+            invalidation_reasons[key] = invalidation_reasons.get(key, 0) + 1
     total = len(signals)
     confirmed = statuses.get("confirmed", 0)
     return {
         "total": total,
+        #: 失效原因计数；键为 :data:`cpt.application.signal_invalidation.REASON_CODES`
+        #: 之一或 ``"unknown"``（R71 之前落库的行没记原因，如实单列）。
+        "invalidation_reasons": invalidation_reasons,
         "status_counts": statuses,
         "divergence_counts": divergences,
         # R59（审计 M27）：原名 ``alert_to_confirmed_rate`` 名实不符 —— 分子是

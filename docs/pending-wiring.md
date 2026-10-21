@@ -193,7 +193,7 @@ R22 的 9 个接线点（路由与调用方均已 grep 复核）：
 
 > **R20 处置：新增 `cpt/application/first_buy_bridge.py`（翻译层），接进 A 股主看板。**
 > - 桥输出 `FirstBuyFacts`（三事实 + `center_ids` + `structure_id` + `divergence_status`），
->   再由 `a_share_snapshot.py:568 _derive_first_buy_signal` 调 `assess_first_buy` 出
+>   再由 `a_share_snapshot.py:644 _derive_first_buy_signal` 调 `assess_first_buy` 出
 >   `Signal`，经 `build_dashboard_snapshot_v2(..., signal=signal)` 落到
 >   `v2["signal"]`。接线点干净：v2 早有该形参，只是没人传。
 > - **保守口径四条**（全选「宁可判否」一侧）：①取本级别**最后两个**中枢，不是任意两个；
@@ -232,7 +232,7 @@ R22 的 9 个接线点（路由与调用方均已 grep 复核）：
 >   导入、`:235` 调用（`return "detected" if check_first_sell(segment) else "not_detected"`），
 >   活路径 `cpt/application/a_share_snapshot.py:707-708`（局部导入 `derive_first_sell_facts` /
 >   `assess_first_sell`）→ `:715` → `:747` → `:764`（`transition_first_sell`）；
->   `first_buy_bridge.py:168 derive_first_sell_facts` 是其事实来源。这句「仍未接」是 R22 之后
+>   `first_buy_bridge.py:233 derive_first_sell_facts` 是其事实来源。这句「仍未接」是 R22 之后
 >   的残留，已过时至少一个轮次。
 >  ② **T+1 读取点**：R66 判定「**CPT 层接不了**」（依赖消失），owner 随即拍板**删除** ——
 >  见本文件开头 R66 复核段。本簇至此无任何在册项。

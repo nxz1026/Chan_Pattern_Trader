@@ -28,13 +28,33 @@ __all__ = [
     "load_previous_signal",
     "load_signal_events",
     "load_trade_decisions",
+    "reason_from_center_ids",
     "record_signal_event",
     "SignalEventError",
 ]
 
+#: 失效原因在 ``center_ids`` 里的前缀记号（R71，见 :func:`record_signal_event`）。
+_REASON_MARKER = "reason:"
+
 
 class SignalEventError(RuntimeError):
     """信号事件持久化失败。"""
+
+
+def reason_from_center_ids(center_ids: Any) -> str | None:
+    """从 ``center_ids`` 尾项还原失效原因码；没有记号返回 ``None``。
+
+    只认**尾项**且**前缀完全匹配**：早期行（R71 之前）没有记号 → ``None``
+    =「这条失效没有归因」，这是事实，不补猜。中枢 id 形如
+    ``cn:zhongshu:5:...``，不会以 ``reason:`` 开头，故不会误判。
+    """
+    if not center_ids:
+        return None
+    last = center_ids[-1]
+    if not isinstance(last, str) or not last.startswith(_REASON_MARKER):
+        return None
+    code = last[len(_REASON_MARKER) :]
+    return code or None
 
 
 def _ms_to_timestamptz(ms: int | None) -> datetime | None:
@@ -168,6 +188,7 @@ def record_signal_event(
     prev_status: str | None,
     code: str,
     event_time: int,
+    invalidated_reason: dict[str, Any] | None = None,
 ) -> bool:
     """记录信号事件。只在 ``status`` 变化时 append，返回 ``True`` 表示已写入。
 
@@ -176,7 +197,27 @@ def record_signal_event(
     :param prev_status: 上一状态（``None`` = 首次评估）。
     :param code: A 股 6 位代码。
     :param event_time: 本次评估的事件时间（Unix 毫秒）。
+    :param invalidated_reason: R71 失效归因（
+        :func:`cpt.application.signal_invalidation.invalidation_payload` 的返回），
+        ``None`` = 本轮未失效。**落库位置**：``payload`` 不在本表，所以写进
+        ``center_ids`` 的**尾项** —— 见下面「失效原因的存储」。
     :returns: ``True`` 表示写了一条新事件；``False`` 表示 status 未变、跳过。
+
+    **失效原因的存储（R71）**：``public.cpt_signal_event`` 不存三条件的值，
+    266 条历史失效行里 265 条 ``prev_status`` 为 ``NULL``（首次即失效），
+    因此**历史无法反推原因** —— 只能从现在起在失效发生的那一刻记下来。
+    按用户「反对为方便查询冗余列」的要求**不加列**，改为把归因写进
+    ``center_ids`` 尾项，格式 ``"reason:<码>"``：
+
+    * 该列本就是 ``text[]``，加一个带前缀的记号不影响原有消费方按 id 匹配
+      （它们读的是 ``center_ids`` 里的中枢 id，形如 ``cn:zhongshu:...``）；
+    * 只在**失效**行上追加，非失效行该列保持原样；
+    * 读侧用 :func:`reason_from_center_ids` 还原，格式不认识就返回 ``None``
+      —— 宁可说「不知道」，也不把误会的记号当成原因。
+
+    代价必须写明：这是**借用列**，不是规范化设计。若日后要按原因做 SQL 聚合
+    （``GROUP BY reason``），这个格式会很别扭，那时再单开列并迁移 —— 现在没有
+    那个需求，先不为它付代价。
 
     **并发安全（审计 M17）**：原来只用 ``signal.status == prev_status`` 做纯
     应用层去重，**先读后写不是原子的**。``ThreadingHTTPServer`` + 「每请求一连」
@@ -187,12 +228,27 @@ def record_signal_event(
     **在锁内重读最新事件**，已是本次目标状态就跳过。锁随本事务 commit/rollback
     自动释放，不泄漏、不需要显式解锁。
     """
-    if signal.status == prev_status:
+    # R71：失效是**终态**，同一结构一旦 invalidation 落库，之后每轮都会
+    # ``status == prev_status``；若沿用「同状态就跳过」，失效原因将**永远写不进去**
+    # —— 实测 000006 正是如此（历史行 prev_status=None → invalidated，本轮再算
+    # 仍是 invalidated，直接 return False）。故仅对「invalidated 且带归因」放行，
+    # 让它一定落一笔带原因的重复 invalidated 行；去重靠下面②的**原因**比较，
+    # 同原因不重复写，避免每轮刷屏。
+    always_record_reason = signal.status == "invalidated" and bool(
+        (invalidated_reason or {}).get("reason")
+    )
+    if signal.status == prev_status and not always_record_reason:
         return False
 
     transition_time = _ms_to_timestamptz(event_time)
     if transition_time is None:
         transition_time = datetime.now(UTC)
+
+    # R71：失效原因以 "reason:<码>" 追加在 center_ids 尾项（理由见 docstring）。
+    center_ids = list(signal.center_ids)
+    reason_code = (invalidated_reason or {}).get("reason")
+    if signal.status == "invalidated" and reason_code:
+        center_ids.append(f"{_REASON_MARKER}{reason_code}")
 
     try:
         with conn.cursor() as cur:
@@ -205,15 +261,19 @@ def record_signal_event(
             # ② 必须在**锁内**重读再决定，否则串行化毫无意义：第二个事务拿到锁
             #    时，对方可能已经提交了同一跃迁。
             cur.execute(
-                "SELECT status FROM public.cpt_signal_event "
+                "SELECT status, center_ids FROM public.cpt_signal_event "
                 " WHERE signal_id = %s ORDER BY id DESC LIMIT 1",
                 (signal.signal_id,),
             )
             row = cur.fetchone()
             current_status = row[0] if row else None
+            current_reason = reason_from_center_ids(row[1]) if row else None
             if current_status == signal.status:
-                # 本次跃迁已经是最新事件（并发事务写入 / 此前已落库）—— 不重复 append
-                return False
+                # 本次跃迁已经是最新事件（并发事务写入 / 此前已落库）—— 不重复 append。
+                # R71 例外：失效行若**原因不同**（含历史行原因未知）仍要补一笔，
+                # 否则「已知原因」永远不会覆盖「原因未知」。
+                if not always_record_reason or current_reason == reason_code:
+                    return False
             cur.execute(
                 """INSERT INTO public.cpt_signal_event
                      (signal_id, code, signal_type, level, structure_id,
@@ -232,7 +292,7 @@ def record_signal_event(
                     transition_time,
                     signal.price,
                     signal.source_revision,
-                    list(signal.center_ids),
+                    center_ids,
                     signal.divergence_status,
                     _ms_to_timestamptz(signal.alert_time),
                     _ms_to_timestamptz(signal.candidate_time),
@@ -287,6 +347,10 @@ def _history_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
 
     取 5 个必需字段之外的完整列，是因为历史面板要展示跃迁前后状态与价格；
     时间列统一用 ``_timestamptz_to_ms`` 转毫秒，与前端其余时间轴口径一致。
+
+    R71：额外产出 ``invalidated_reason``（由 ``center_ids`` 尾项还原，见
+    :func:`reason_from_center_ids`），``center_ids`` 本身**原样保留**——前端
+    若要把中枢 id 画出来，多一个 ``reason:`` 尾项不该让它出岔子，故两者都给。
     """
     out: dict[str, Any] = {}
     for name, value in zip(_HISTORY_COLUMNS, row, strict=False):
@@ -296,6 +360,7 @@ def _history_row_to_dict(row: tuple[Any, ...]) -> dict[str, Any]:
             out[name] = list(value) if value else []
         else:
             out[name] = value
+    out["invalidated_reason"] = reason_from_center_ids(out.get("center_ids"))
     return out
 
 

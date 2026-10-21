@@ -23,6 +23,7 @@ from cpt.application.first_buy_bridge import (
     derive_first_sell_facts,
     detect_structural_break,
 )
+from cpt.domain.first_buy import round_to_2_digit
 from cpt.domain.models import Bi, ZhongShu
 
 from tests.test_web_a_share import _FakeClient, _make_canonical, _zigzag_bars
@@ -471,3 +472,130 @@ def test_empty_structure_id_without_code_keeps_legacy_key() -> None:
     signal, _ = _derive_first_buy_signal([_bi(-1, 0, 10, level=level)], [], bars)
     assert signal is not None
     assert signal.signal_id == f"first_buy:{level}:level{level}:empty"
+
+
+# --------------------------------------------------------------------------- #
+# R69：背驰段落锚定（修「传首个中枢之后的全部笔」的调用错位）
+# --------------------------------------------------------------------------- #
+
+
+def _div_bi(
+    direction: int,
+    start: int,
+    *,
+    high: float,
+    low: float,
+    power_volume: float = 1000.0,
+    length: int = 10,
+) -> Bi:
+    """带完整力度度量的笔，用于段落锚定用例。"""
+    return Bi(
+        level=5,
+        direction=direction,
+        start_time=start,
+        end_time=start + 1,
+        high=high,
+        low=low,
+        source_ids=(f"fx:{start + 1}",),
+        power_price=round_to_2_digit(high - low),
+        power_volume=power_volume,
+        length=length,
+    )
+
+
+def test_divergence_segment_anchors_from_the_tail_not_the_first_center() -> None:
+    """R69 核心回归：段落必须从**末笔**向前锚定，而不是「首个中枢之后的全部笔」。
+
+    构造一段史前上涨（含一个远高于后期的反弹高点），再接标准一买 5 笔。
+    旧实现把「首个中枢之后的全部笔」传进去，``max(high) == bis[0].high``
+    被史前高点打掉 ⇒ 恒判 ``not_detected``（400 只 A 股实测 0/45 通过）。
+    """
+    from cpt.application.first_buy_bridge import _divergence_segment
+
+    history = [
+        _div_bi(1, 0, high=200.0, low=100.0),
+        _div_bi(-1, 2, high=120.0, low=90.0),
+        _div_bi(1, 4, high=130.0, low=100.0),
+    ]
+    # 标准一买 5 笔：首笔 high=100 为段内最高、末笔 low=60 为段内最低
+    tail = [
+        _div_bi(-1, 6, high=110.0, low=80.0, power_volume=1000.0),
+        _div_bi(1, 8, high=95.0, low=75.0, power_volume=1000.0),
+        _div_bi(-1, 10, high=90.0, low=70.0, power_volume=1000.0),
+        _div_bi(1, 12, high=85.0, low=65.0, power_volume=1000.0),
+        _div_bi(-1, 14, high=84.0, low=64.0, power_volume=200.0, length=4),
+    ]
+    level_bis = history + tail
+
+    segment = _divergence_segment(level_bis, direction=-1)
+    assert segment == tail, "锚定结果必须恰好是末尾那段一买，不能把史前高点带进来"
+    assert max(bi.high for bi in segment) == segment[0].high
+    assert min(bi.low for bi in segment) == segment[-1].low
+
+
+def test_divergence_segment_is_empty_when_last_bi_is_not_the_extreme() -> None:
+    """末笔没创全段新低 ⇒ 空段（还在下跌半途，谈不上衰竭）。"""
+    from cpt.application.first_buy_bridge import _divergence_segment
+
+    level_bis = [
+        _div_bi(-1, 0, high=100.0, low=50.0),
+        _div_bi(1, 2, high=90.0, low=70.0),
+        _div_bi(-1, 4, high=80.0, low=60.0),  # low=60 > 前面的 50
+    ]
+    assert _divergence_segment(level_bis, direction=-1) == []
+
+
+def test_divergence_segment_is_empty_when_last_bi_points_the_other_way() -> None:
+    """末笔向上 ⇒ 不是向下衰竭段。"""
+    from cpt.application.first_buy_bridge import _divergence_segment
+
+    level_bis = [
+        _div_bi(-1, 0, high=100.0, low=50.0),
+        _div_bi(1, 2, high=70.0, low=45.0),  # 末笔向上，且创出新低
+    ]
+    assert _divergence_segment(level_bis, direction=-1) == []
+
+
+def test_divergence_status_detected_with_history_prefix() -> None:
+    """端到端：带史前高点的序列，改动后 ``divergence_status`` 必须为 ``detected``。
+
+    这是「改动前恒 ``not_detected``」的直接反例 —— 用例红了就说明锚定又退回旧行为。
+    """
+    from cpt.application.first_buy_bridge import _divergence_status
+
+    history = [
+        _div_bi(1, 0, high=200.0, low=100.0),
+        _div_bi(-1, 2, high=120.0, low=90.0),
+        _div_bi(1, 4, high=130.0, low=100.0),
+    ]
+    tail = [
+        _div_bi(-1, 6, high=110.0, low=80.0, power_volume=1000.0),
+        _div_bi(1, 8, high=95.0, low=75.0, power_volume=1000.0),
+        _div_bi(-1, 10, high=90.0, low=70.0, power_volume=1000.0),
+        _div_bi(1, 12, high=85.0, low=65.0, power_volume=1000.0),
+        _div_bi(-1, 14, high=84.0, low=64.0, power_volume=200.0, length=4),
+    ]
+    assert _divergence_status(history + tail) == "detected"
+
+
+def test_divergence_status_sell_is_the_mirror() -> None:
+    """一卖镜像：末笔向上、末笔 high 为全段最高，段落同样从尾部锚定。"""
+    from cpt.application.first_buy_bridge import _divergence_status_sell
+
+    history = [
+        _div_bi(-1, 0, high=100.0, low=20.0),
+        _div_bi(1, 2, high=120.0, low=90.0),
+        _div_bi(-1, 3, high=115.0, low=95.0),
+    ]
+    # 标准一卖 5 笔：首笔 low=100 为段内最低、末笔 high=165 为段内（也是全景）
+    # 最高，且末笔价差 25 < 关键笔的 40，量/长度同时收缩 ⇒ 背驰成立。
+    tail = [
+        _div_bi(1, 4, high=160.0, low=100.0, power_volume=1000.0),
+        _div_bi(-1, 6, high=150.0, low=110.0, power_volume=1000.0),
+        _div_bi(1, 8, high=155.0, low=115.0, power_volume=1000.0),
+        _div_bi(-1, 10, high=140.0, low=120.0, power_volume=1000.0),
+        _div_bi(1, 12, high=165.0, low=140.0, power_volume=200.0, length=4),
+    ]
+    level_bis = history + tail
+    assert level_bis[-1].high == max(bi.high for bi in level_bis)
+    assert _divergence_status_sell(level_bis) == "detected"

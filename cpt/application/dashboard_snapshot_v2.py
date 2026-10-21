@@ -65,6 +65,7 @@ def build_dashboard_snapshot_v2(
     trend_types: Sequence[TrendType] = (),
     signal: Signal | None = None,
     signal_first_sell: Signal | None = None,
+    signal_progress: dict[str, Any] | None = None,
     events: Sequence[StructureEvent] = (),
     mode: str = "research",
     status: str = "confirmed",
@@ -127,5 +128,9 @@ def build_dashboard_snapshot_v2(
         },
         "signal": asdict(signal) if signal else None,
         "signal_first_sell": asdict(signal_first_sell) if signal_first_sell else None,
+        # R71：一买「走到哪一步」的人话进度。**独立键**，不进 ``Signal``
+        # dataclass —— Signal 是受契约测试钉住的领域对象，加字段会动
+        # ``config_hash`` / 信号历史行；翻译层属于展示，挂在快照上即可。
+        "signal_progress": signal_progress,
     }
     return v2

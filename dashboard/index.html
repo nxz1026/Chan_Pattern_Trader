@@ -402,7 +402,22 @@
         </section>
 
         <section data-testid="structure-signal" aria-labelledby="structure-signal-title">
-          <h3 id="structure-signal-title">一买信号</h3>
+          <h3 id="structure-signal-title">下跌位置提示（原一买）</h3>
+          <!-- R71 实测横幅：静态事实，数据源 docs/R70-ab-verification.md。 -->
+          <div class="signal-evidence" data-testid="signal-evidence">
+            <p class="signal-evidence-title">这个面板告诉你什么、不告诉你什么</p>
+            <p data-testid="signal-evidence-numbers">
+              实测 5,131 只 A 股、688,496 次历史回放：信号之后 5 / 10 / 20 日平均收益
+              <b>+0.11% / +0.18% / +0.02%</b>，胜率 <b>46%</b>；同一批票随便挑一天买入的基线是
+              +0.01% / +0.09% / +0.32%，胜率 45%。<b>它不预测涨跌。</b>
+            </p>
+            <p data-testid="signal-advice">
+              <b>怎么用：</b>把它当「跌到哪一步」的进度条。看到「位置已到」时，
+              该做的是<b>别在恐慌低点割肉</b>、检查自己有没有在这个位置追空；
+              该做的<b>不是</b>加仓——真要在低位买，实测更有效的是
+              「20 日新低后收阳」（20 日 +0.81%，胜率 48%），比等这个信号强。
+            </p>
+          </div>
           <dl class="kv">
             <div>
               <dt>状态</dt>
@@ -414,7 +429,15 @@
             <div><dt>revision</dt><dd data-testid="signal-source-revision">—</dd></div>
             <div><dt>关联结构</dt><dd data-testid="signal-structure-id">—</dd></div>
           </dl>
-          <p class="hint">⚠️ 预警/候选信号尚未确认，可能随时重构或消失；未收盘的 alert 不得当作 confirmed。</p>
+          <!-- R71：三步进度。后端没给数据时整块 hidden，不显示占位文字。 -->
+          <div class="signal-progress" data-testid="signal-progress" hidden>
+            <dl class="kv">
+              <div><dt>走到哪一步</dt><dd data-testid="signal-progress-steps">—</dd></div>
+              <div><dt>卡在哪</dt><dd data-testid="signal-progress-explain" class="signal-education">—</dd></div>
+              <div><dt>该做什么</dt><dd data-testid="signal-progress-action" class="signal-education">—</dd></div>
+            </dl>
+          </div>
+          <p class="hint">⚠️ 预警/候选状态未确认，可能随时重构或消失。</p>
         </section>
          <section class="term-glossary" data-testid="term-glossary">
            <h4 class="term-glossary-title">术语速查 <small>点击展开解释</small></h4>

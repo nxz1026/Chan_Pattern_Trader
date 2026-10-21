@@ -46,6 +46,8 @@ from cpt.adapters.validators import validate_ashare_bars
 from cpt.application import signal_notify
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
 from cpt.application.first_buy_bridge import derive_first_buy_facts, detect_structural_break
+from cpt.application.signal_progress import first_buy_progress
+from cpt.application.signal_invalidation import invalidation_payload
 from cpt.application.multi_level import build_multi_level, format_multi_level
 from cpt.application.parity_reference import build_parity_snapshot_for
 from cpt.application.replay import compute_domain_structures
@@ -329,6 +331,12 @@ def build_ashare_snapshot(
         client=active_client,
         code=code,
     )
+    # R71：一买「走到哪一步」的人话进度。**独立于信号状态机**——这里重算一次
+    # ``derive_first_buy_facts`` 是纯函数（不触库、不写事件），换来的是不碰
+    # ``_derive_first_buy_signal`` 的二元组返回契约（它被 6 处 return 钉住）。
+    signal_progress = _first_buy_progress_payload(
+        bis, zhongshus, validated, trend_direction=_trend_direction_of(bis)
+    )
     signal_first_sell, _sell_prev_status = _derive_first_sell_signal(
         bis,
         zhongshus,
@@ -354,6 +362,7 @@ def build_ashare_snapshot(
         trend_types=(),
         signal=signal,
         signal_first_sell=signal_first_sell,
+        signal_progress=signal_progress,
         events=(),  # R39：事件在建快照**之后**才算（为了拿指纹归因），下面回填
         multi_level=multi_level_data,
         mode="watch",
@@ -565,6 +574,74 @@ def _points_for_push(
     return points
 
 
+def _trend_direction_of(bis: Sequence[Bi]) -> int:
+    """本级别**最后一笔**的方向即当前走势方向（与 ``_derive_first_buy_signal`` 同口径）。
+
+    空序列返回 ``0`` —— 那是「不知道」，不是「向上」也不是「向下」；
+    调用方据此让翻译层说「数据不足」，而不是硬套一个方向。
+    """
+    if not bis:
+        return 0
+    config = RulesConfig()
+    level = config.levels[0] if config.levels else 0
+    level_bis = [bi for bi in bis if bi.level == level]
+    return int(level_bis[-1].direction) if level_bis else 0
+
+
+def _first_buy_progress_payload(
+    bis: Sequence[Bi],
+    zhongshus: Sequence[ZhongShu],
+    bars: Sequence[CanonicalBar],
+    *,
+    trend_direction: int,
+) -> dict[str, Any]:
+    """算「走到哪一步」的人话进度。**只读**：不触库、不写事件、不推送。
+
+    与信号状态机解耦的理由见调用点注释。``trend_direction == 0``（无笔）时
+    直接按 ``unknown`` 出进度，不假装能判断。
+    """
+    if trend_direction == 0:
+        return first_buy_progress(None, segment_status="unknown")
+    config = RulesConfig()
+    level = config.levels[0] if config.levels else 0
+    facts = derive_first_buy_facts(
+        level=level,
+        trend_direction=trend_direction,
+        bis=bis,
+        zhongshus=zhongshus,
+        code="",  # 展示层不需要 structure_id 带 code
+    )
+    segment_status = "down" if trend_direction < 0 else "up"
+    if facts is None and trend_direction > 0:
+        return first_buy_progress(None, segment_status=segment_status)
+    # 当前价 ÷ 本轮下跌起点价：起点取**本级别倒数第二笔的终点**（即最后一笔的
+    # 起点），用来回答「跌了多少」。指标本身不参与判定，算不出就留 None。
+    position = _segment_position(bars, bis, trend_direction)
+    return first_buy_progress(facts, segment_status=segment_status, segment_position=position)
+
+
+def _segment_position(
+    bars: Sequence[CanonicalBar], bis: Sequence[Bi], trend_direction: int
+) -> float | None:
+    """当前价 ÷ 最后一笔起点价；``None`` = 算不出（不猜、不补 0）。
+
+    只在**下跌**走势下有意义：跌幅 = 1 − position。价格用快照的复权价口径
+    （``bars[-1].close``），笔端点的 ``high``/``low`` 同口径，故比值可比。
+    """
+    if trend_direction >= 0 or not bars:
+        return None
+    config = RulesConfig()
+    level = config.levels[0] if config.levels else 0
+    level_bis = [bi for bi in bis if bi.level == level]
+    if not level_bis:
+        return None
+    last = level_bis[-1]
+    origin = float(last.high if last.direction == -1 else last.low)
+    if origin <= 0:
+        return None
+    return round(float(bars[-1].close) / origin, 4)
+
+
 def _derive_first_buy_signal(
     bis: Sequence[Bi],
     zhongshus: Sequence[ZhongShu],
@@ -696,7 +773,18 @@ def _derive_first_buy_signal(
     prev_status: str | None = previous.status if previous is not None else None
     if conn is not None and signal is not None:
         try:
-            record_signal_event(conn, signal, prev_status, code, event_time)
+            # R71：失效原因必须在**失效发生的那一刻**算出来并落库 —— 历史表
+            # 不存三条件的值，事后再也反推不出原因（266 条失效行里 265 条
+            # prev_status 为 NULL，无从比较）。口径与 assess_first_buy 的分支
+            # 顺序逐条对齐，见 signal_invalidation.classify_invalidation。
+            reason = invalidation_payload(
+                trend_direction=level_bis[-1].direction,
+                facts=facts,
+                previous_status=prev_status,
+            )
+            record_signal_event(
+                conn, signal, prev_status, code, event_time, invalidated_reason=reason
+            )
             conn.commit()  # ← store 层不 commit，边界在这里
         except Exception as exc:
             _LOG.warning("提交信号事件失败 %s: %s", code, exc)
