@@ -61,6 +61,7 @@ from collections.abc import Callable
 from typing import Any, Final
 
 from cpt.adapters.feishu import notify
+from cpt.application.recommendation import action_text, status_text
 from cpt.domain.models import Signal
 from cpt.storage.track_store import TrackStoreError, is_tracked, parse_notify_users
 
@@ -192,16 +193,33 @@ def _points_lines(points: dict[str, Any]) -> list[str]:
     action = points.get("action")
     status = points.get("status")
     if action:
-        suffix = f"（{status}）" if status else ""
-        out.append(f"动作: {action}{suffix}")
+        # R76：原来直接推 ``动作: sell（structure_ready）`` —— 纯码值 + 英文枚举。
+        # 推送是用户**唯一不会主动打开、却一定会看**的出口，这里是买点语气
+        # 最容易生效的地方，所以码值必须翻成人话再出去。
+        #
+        # ⚠️ 状态**不再拼进动作后面**：``action_text('sell')`` = 「上涨位置已到」、
+        # ``status_text('structure_ready')`` = 「位置已到（还没确认）」，拼起来会成
+        # 「上涨位置已到（位置已到（还没确认））」。位置已经由动作词说清，
+        # 这里只补「确认到哪一步」这一条新信息。
+        line = f"结构位置: {action_text(action)}"
+        if status == "structure_ready":
+            line += " · 还没确认"
+        elif status == "confirmed":
+            line += " · 已冒出一笔反弹（不是买点）"
+        elif status:
+            line += f" · {status_text(status)}"
+        out.append(line)
+    # R76：「参考买点 / 参考卖点」改成「下沿 / 上沿」。这两个价是**结构区间**
+    # 的上下边（中枢 / 笔的 low、high 加缓冲），不是可挂单的买卖点；
+    # 叫「买点」等于在推送里直接发交易指令。
     buy = (points.get("buy") or {}).get("reference") or {}
     buy_text = _fmt_num(buy.get("price_level"), _PRICE_DIGITS)
     if buy_text is not None:
-        out.append(f"参考买点: {buy_text}")
+        out.append(f"结构区间下沿: {buy_text}")
     sell = (points.get("sell") or {}).get("reference") or {}
     sell_text = _fmt_num(sell.get("price_level"), _PRICE_DIGITS)
     if sell_text is not None:
-        out.append(f"参考卖点: {sell_text}")
+        out.append(f"结构区间上沿: {sell_text}")
     stop_text = _fmt_num(points.get("stop_loss_reference"), _PRICE_DIGITS)
     if stop_text is not None:
         out.append(f"止损参考: {stop_text}")
@@ -251,16 +269,20 @@ def build_watchlist_summary(
         code = str(row.get("code") or payload.get("code") or "")
         if not code:
             continue
-        label = current.get("action_label") or current.get("action") or "—"
+        # R76：``action_label`` 已经是「下跌位置已到」这类描述句，直接用；
+        # 只有老快照（R76 之前写的 payload）才会落到码值分支。
+        raw_label = current.get("action_label")
+        label = raw_label if raw_label else action_text(str(current.get("action") or "—"))
         parts = [f"{code} {label}"]
         points = payload.get("suggested_points")
         if isinstance(points, dict):
             buy = _level(points, "buy")
             sell = _level(points, "sell")
+            # R76：「买点 / 卖点」→「下沿 / 上沿」，理由见 _points_lines。
             if buy is not None:
-                parts.append(f"买点 {buy:.{_PRICE_DIGITS}f}")
+                parts.append(f"下沿 {buy:.{_PRICE_DIGITS}f}")
             if sell is not None:
-                parts.append(f"卖点 {sell:.{_PRICE_DIGITS}f}")
+                parts.append(f"上沿 {sell:.{_PRICE_DIGITS}f}")
             stop = points.get("stop_loss_reference")
             if isinstance(stop, (int, float)) and not isinstance(stop, bool):
                 parts.append(f"止损 {float(stop):.{_PRICE_DIGITS}f}")

@@ -435,7 +435,7 @@ def test_human_cache_failure_does_not_block_push(
 def _summary_row(
     code: str,
     *,
-    label: str = "观望",
+    label: str = "没有位置提示",
     buy: float | None = 3.56,
     sell: float | None = 3.92,
     stop: float | None = None,
@@ -472,8 +472,8 @@ def test_watchlist_summary_names_every_tracked_code() -> None:
     assert title.startswith("[CPT 追踪] ")
     assert "2 只" in title
     assert len(lines) == 2
-    assert lines[0] == "000002 观望 · 买点 3.56 · 卖点 3.92 · 现价 3.73"
-    assert "买点 1374.11" in lines[1]
+    assert lines[0] == "000002 没有位置提示 · 下沿 3.56 · 上沿 3.92 · 现价 3.73"
+    assert "下沿 1374.11" in lines[1]
 
 
 def test_watchlist_summary_skips_rows_without_a_payload() -> None:
@@ -481,16 +481,18 @@ def test_watchlist_summary_skips_rows_without_a_payload() -> None:
         [{"code": "000002", "payload": "not-a-dict"}, _summary_row("600519")]
     )
     assert "1 只" in title
-    assert lines == ["600519 观望 · 买点 3.56 · 卖点 3.92 · 现价 3.73"]
+    assert lines == ["600519 没有位置提示 · 下沿 3.56 · 上沿 3.92 · 现价 3.73"]
 
 
 def test_watchlist_summary_keeps_a_row_without_points() -> None:
     """只有 ``current``、没有 ``suggested_points`` ⇒ 仍要出现这一只。"""
     row = _summary_row("000002")
-    row["payload"] = {"current": {"action": "hold", "action_label": "观望", "raw_close": 3.73}}
+    row["payload"] = {
+        "current": {"action": "hold", "action_label": "没有位置提示", "raw_close": 3.73}
+    }
     title, lines = signal_notify.build_watchlist_summary([row])
     assert "1 只" in title
-    assert lines == ["000002 观望 · 现价 3.73"]
+    assert lines == ["000002 没有位置提示 · 现价 3.73"]
 
 
 def test_watchlist_summary_falls_back_to_action_and_skips_bad_numbers() -> None:
@@ -505,7 +507,7 @@ def test_watchlist_summary_falls_back_to_action_and_skips_bad_numbers() -> None:
     }
     title, lines = signal_notify.build_watchlist_summary([row])
     assert "1 只" in title
-    assert lines == ["000002 watch · 止损 3.30"]
+    assert lines == ["000002 位置已到，还没确认 · 止损 3.30"]
 
 
 def test_watchlist_summary_keeps_two_decimals_on_round_numbers() -> None:
@@ -517,7 +519,7 @@ def test_watchlist_summary_keeps_two_decimals_on_round_numbers() -> None:
         [_summary_row("000002", buy=3.5, sell=3.9, raw_close=3.7)]
     )
     assert "1 只" in title
-    assert lines == ["000002 观望 · 买点 3.50 · 卖点 3.90 · 现价 3.70"]
+    assert lines == ["000002 没有位置提示 · 下沿 3.50 · 上沿 3.90 · 现价 3.70"]
 
 
 def test_points_lines_rounds_prices_but_keeps_four_ratio_digits() -> None:
@@ -535,9 +537,9 @@ def test_points_lines_rounds_prices_but_keeps_four_ratio_digits() -> None:
         }
     )
     assert lines == [
-        "动作: sell（structure_ready）",
-        "参考买点: 1245.73",
-        "参考卖点: 1274.97",
+        "结构位置: 上涨位置已到 · 还没确认",
+        "结构区间下沿: 1245.73",
+        "结构区间上沿: 1274.97",
         "止损参考: 1183.44",
         "现价: 1312.97",
         "后复权倍率: 6.3942",
@@ -566,3 +568,69 @@ def test_notify_message_price_is_two_decimals() -> None:
     assert _notify(sig, prev_status=None, event_time=1, conn=_CONN) is True
     _, lines = rec.calls[0]
     assert "price: 8395.33" in lines
+
+
+# ── R76：推送文案不许带买点语气 ────────────────────────────────
+#
+# 推送是用户**唯一不会主动打开、却一定会看**的出口。R70 实测这类信号没有
+# 预测力之后，「参考买点 3.56」这种行就变成了一条毫无依据的交易指令。
+
+
+def test_points_lines_has_no_buy_language() -> None:
+    """跃迁推送的每一行都不许出现「买点 / 卖点 / 动作」这类词。"""
+    lines = signal_notify._points_lines(
+        {
+            "action": "buy",
+            "status": "structure_ready",
+            "buy": {"reference": {"price_level": 1245.73}},
+            "sell": {"reference": {"price_level": 1274.97}},
+            "stop_loss_reference": 1183.44,
+            "raw_close": 1312.97,
+        }
+    )
+    body = " ".join(lines)
+    for word in ("买点", "卖点", "买入", "卖出", "动作:"):
+        assert word not in body, f"推送正文含买点语气 {word!r}：{body!r}"
+
+
+def test_points_lines_status_is_chinese_not_raw_code() -> None:
+    """原来推的是 ``动作: sell（structure_ready）`` —— 码值 + 英文枚举。"""
+    lines = signal_notify._points_lines({"action": "sell", "status": "structure_ready"})
+    assert "structure_ready" not in lines[0]
+    assert "上涨位置已到" in lines[0]
+    assert "还没确认" in lines[0]
+
+
+def test_points_lines_uses_upper_and_lower_bounds() -> None:
+    """参考价叫「结构区间下沿 / 上沿」，不叫「买点 / 卖点」。"""
+    lines = signal_notify._points_lines(
+        {
+            "buy": {"reference": {"price_level": 3.56}},
+            "sell": {"reference": {"price_level": 3.92}},
+        }
+    )
+    assert "结构区间下沿: 3.56" in lines
+    assert "结构区间上沿: 3.92" in lines
+
+
+def test_watchlist_summary_rows_have_no_buy_language() -> None:
+    """收盘汇总同样：整条消息里不许出现买点词。"""
+    _, lines = signal_notify.build_watchlist_summary(
+        [_summary_row("000002"), _summary_row("600519", buy=1374.11, sell=1429.25)]
+    )
+    body = " ".join(lines)
+    for word in ("买点", "卖点", "买入", "卖出"):
+        assert word not in body, f"汇总含买点语气 {word!r}：{body!r}"
+
+
+def test_watchlist_summary_translates_legacy_action_code() -> None:
+    """R76 之前写的老快照只有 ``action`` 码值、没有 ``action_label``。
+
+    那时直接推出「watch」这种英文码值 —— 现在必须翻成人话。
+    """
+    row = _summary_row("000002", buy=None, sell=None)
+    payload = row["payload"]
+    assert isinstance(payload, dict)
+    payload["current"] = {"action": "watch"}
+    _, lines = signal_notify.build_watchlist_summary([row])
+    assert lines == ["000002 位置已到，还没确认"]

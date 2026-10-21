@@ -82,8 +82,8 @@
 
   /* R71：标题不再叫「一买信号」——那是买点语气的根源。 */
   const SIGNAL_TYPE_LABELS = {
-    first_buy: "下跌位置提示（原一买）",
-    first_sell: "上涨位置提示（原一卖）",
+    first_buy: "下跌位置提示",
+    first_sell: "上涨位置提示",
   };
 
   /* ---- Phase A1：range.reason 中文映射（历史区间查询失败原因） ---- */
@@ -2145,7 +2145,9 @@
       return `已选中走势类型 ${payload.trendKind || "—"} · ${at} → ${until}`;
     }
     if (payload.kind === "signal") {
-      return `已选中一买信号 · status=${payload.status || "none"} · ${formatPrice(payload.price)}`;
+      // R76：原来印「一买信号 · status=structure_ready」（术语 + 英文枚举）。
+      const st = STATUS_LABELS[payload.status] || "暂无信号";
+      return `已选中下跌位置提示 · ${st} · ${formatPrice(payload.price)}`;
     }
     return `已选中 ${payload.kind}`;
   }
@@ -2858,7 +2860,9 @@
       panel.appendChild(firstSellNode);
     }
     if (hasFirstSell) {
-      firstSellNode.textContent = "当前展示：一卖信号（结构卖点，非交易指令）";
+      // R76：「一卖信号（结构卖点…）」仍然带「卖点」二字。
+      // 这条讲的是**上涨位置提示**这另一段结构，不是卖出指令。
+      firstSellNode.textContent = "当前展示：上涨位置提示（另一段结构，不是卖出指令）";
       firstSellNode.hidden = false;
     } else {
       firstSellNode.hidden = true;
@@ -3356,7 +3360,8 @@
       entries.push({ ...sig, _code: code, _market: "crypto" });
     }
     if (sigSell && sigSell.status && sigSell.status !== "none") {
-      entries.push({ ...sigSell, _code: code, _market: "a_share", _source_label: "一卖" });
+      // R76：类型名交给 signalTypeLabel() 渲染，这里只标出「它不是上面那条」。
+      entries.push({ ...sigSell, _code: code, _market: "a_share", _source_label: "另一段结构" });
     }
 
     /* 排序：confirmed > candidate > alert > structure_ready，同级按新鲜度 */
@@ -3378,7 +3383,7 @@
     const disclaimer = document.createElement("p");
     disclaimer.className = "signal-radar-disclaimer";
     disclaimer.textContent =
-      "⚠️ 所有「信号/状态」均为缠论结构术语，不构成投资建议。市场有风险，投资须谨慎。";
+      "⚠️ 每条「信号」说的都是价格处在什么位置 —— 它不预测涨跌，也不是买卖指令。";
     panel.appendChild(disclaimer);
 
     if (!entries.length) {
@@ -3429,7 +3434,7 @@
       if (typeof entry.price === "number") {
         const priceDiv = document.createElement("div");
         priceDiv.className = "signal-radar-price";
-        priceDiv.textContent = `收盘价 ${formatPrice(entry.price)}（非买入价）`;
+        priceDiv.textContent = `收盘价 ${formatPrice(entry.price)}（不是买点）`;
         li.appendChild(priceDiv);
       }
 

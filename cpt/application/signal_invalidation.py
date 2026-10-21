@@ -61,10 +61,21 @@ REASON_TEXT: dict[str, str] = {
 class _Facts(Protocol):
     """同 :class:`cpt.application.signal_progress._Facts`：只要四个字段。"""
 
-    has_two_centers: bool
-    has_divergence_leg: bool
-    has_reversal_bi: bool
-    divergence_status: str
+    #: 全部用 ``@property`` 而不是裸字段：``FirstBuyFacts`` 是 **frozen dataclass**，
+    #: 它的属性是只读的。裸字段声明意味着「可读写」，mypy 会判
+    #: ``FirstBuyFacts | None`` 不满足 ``_Facts | None``（R76 实测 2 处报错）。
+    #: 本模块只读这些字段，声明成只读正好、也没多写一行实现。
+    @property
+    def has_two_centers(self) -> bool: ...
+
+    @property
+    def has_divergence_leg(self) -> bool: ...
+
+    @property
+    def has_reversal_bi(self) -> bool: ...
+
+    @property
+    def divergence_status(self) -> str: ...
 
 
 def classify_invalidation(

@@ -14,11 +14,28 @@
 :func:`cpt.application.llm_cases.summarize_recommendation` 里
 **给这段结果配一段人话**，且失败时前端照常显示确定性结果。
 
-## 措辞纪律：这是**结构判断的翻译**，不是投资建议
+## 措辞纪律：只描述**结构状态**，不给祈使动作（R76）
 
-看板全程标注「只读 · 不构成投资建议」。所以这里的动作词是
-``买入关注`` / ``卖出关注`` 这类**结构状态**，不是「建议买卖」。
-``action_label`` 刻意用「结构」二字收尾，避免被当成荐股。
+看板全程标注「只读 · 不构成投资建议」。R45 时的做法是给动作词加「结构」后缀
+（``买入结构`` / ``卖出结构``），想把「建议买卖」和「结构状态」分开。
+
+**实测这样分不开**：推荐卡上那个 26px 加粗字、飞书推送的第一行都是
+``action_label``，用户看到「买入结构」就会当成「买入」。
+而 R70 已经实测出这个信号**没有预测力**（见 ``docs/rebuild-plan-review.md``
+§5.0.1：5,131 只票 / 688,496 次回放，confirmed 组 20 日平均收益 +0.02%、
+胜率 46%，低于随便挑一天买入的基线）。
+
+⇒ R76 起 ``ACTIONS`` 只描述**价格处在什么位置**（「下跌位置已到」），
+``headline`` 自带「不是买点」，``reason`` 里的状态词走 :data:`STATUS_TEXT`。
+``用户可见的每一句都不能是祈使句`` —— 这是本模块现在的措辞红线，
+由 ``tests/test_recommendation.py::test_no_buy_language_anywhere`` 钉住。
+
+## 码值不动，只动文案
+
+``action``（``buy``/``sell``/…）进了 ``cpt_track_snapshot`` 的 payload、
+``/api/trade/*`` 的决策批次、``a_share_routes._RECOMMENDATION_KEYS``，
+前端着色也读 ``data-action``。改码值会动历史数据与下游契约，
+所以 R76 **只换** ``action_label`` / ``headline`` / ``reason`` 的文案。
 """
 
 from __future__ import annotations
@@ -35,6 +52,12 @@ __all__ = [
     "ACTION_HOLD",
     "build_recommendation",
     "ACTIONS",
+    "STATUS_TEXT",
+    "SIGNAL_TYPE_TEXT",
+    "DIVERGENCE_TEXT",
+    "status_text",
+    "action_text",
+    "divergence_text",
 ]
 
 
@@ -49,11 +72,58 @@ ACTION_SELL: Final[str] = "sell"
 ACTION_WATCH: Final[str] = "watch"  # 有候选/预警，但未确认
 ACTION_HOLD: Final[str] = "hold"  # 无信号 / 已失效
 
+#: R76：动作词**去掉买点语气**。
+#:
+#: 改前是「买入结构 / 卖出结构 / 关注 / 观望」。问题不在「建议」二字被写出了没有，
+#: 而在**动作词本身就是祈使句**：推荐卡上那个 26px 加粗字是整页最大的字，
+#: PUSH 推送第一行也是它 —— 用户一眼看到「买入结构」就会照着做，
+#: 而 R70 已经实测过它没有预测力（见 ``docs/rebuild-plan-review.md`` §5.0.1）。
+#:
+#: 现在的词只描述**结构状态**，不描述该做什么：
+#:
+#: ========= =========================================================
+#: buy       下跌位置已到（原「买入结构」）
+#: sell      上涨位置已到（原「卖出结构」）
+#: watch     位置已到，还没确认（原「关注」）
+#: hold      没有位置提示 / 已作废（原「观望」）
+#: ========= =========================================================
+#:
+#: ⚠️ ``action`` 的**码值**（``buy``/``sell``/...）一个都没改 —— 它进了
+#: ``cpt_track_snapshot`` 的 payload、``/api/trade/*`` 的决策批次与
+#: ``a_share_routes._RECOMMENDATION_KEYS``，改码值会动历史数据与下游契约。
+#: 前端着色也仍读 ``data-action="buy"``，只换文案不换键。
 ACTIONS: Final[dict[str, str]] = {
-    ACTION_BUY: "买入结构",
-    ACTION_SELL: "卖出结构",
-    ACTION_WATCH: "关注",
-    ACTION_HOLD: "观望",
+    ACTION_BUY: "下跌位置已到",
+    ACTION_SELL: "上涨位置已到",
+    ACTION_WATCH: "位置已到，还没确认",
+    ACTION_HOLD: "没有位置提示",
+}
+
+#: 信号状态 → 人话（R76）。
+#:
+#: 改前 ``reason`` 里是 ``f"信号状态：{status}"`` —— 直接把 ``structure_ready``
+#: 这种英文枚举值甩给用户。R71 已经在前端 ``STATUS_LABELS`` 里翻了同一批词，
+#: 这里是**后端**的同一张表：推送、追踪卡、LLM 提示词都读后端，前端翻译够不着。
+STATUS_TEXT: Final[dict[str, str]] = {
+    "confirmed": "反抽确认了一笔（不是买点）",
+    "structure_ready": "位置已到（还没确认）",
+    "candidate": "反抽 K 线已收盘，还站得住",
+    "alert": "盘中冒了一根反抽 K 线，还没收盘",
+    "invalidated": "结构已作废",
+}
+
+#: 信号类型 → 人话（R76）。``一买``/``一卖`` 是缠论术语，用户看不懂。
+SIGNAL_TYPE_TEXT: Final[dict[str, str]] = {
+    "first_buy": "下跌位置提示",
+    "first_sell": "上涨位置提示",
+}
+
+#: 背驰三态 → 人话（R76）。前端 ``DIVERGENCE_LABELS`` 是同一张表的前端副本，
+#: 后端出口（追踪卡 / 推送）读这一份。
+DIVERGENCE_TEXT: Final[dict[str, str]] = {
+    "detected": "两段力度在衰减（背驰）",
+    "not_detected": "两段力度没有明显衰减",
+    "not_checked": "还没算出来（数据不够）",
 }
 
 #: 信号状态 → 该状态有多「硬」。确认 > 结构具备/候选 > 预警 > 失效。
@@ -140,10 +210,16 @@ def build_recommendation(snapshot: dict[str, Any]) -> dict[str, Any]:
         never_ready = isinstance(center_ids, (list, tuple)) and len(center_ids) < 2
         if never_ready:
             headline = "结构条件不成立"
-            reason = f"{_label(sig_type)}条件不成立（未形成两个同级中枢）—— 结构尚不足以判定。"
+            reason = (
+                f"{_label(sig_type)}条件不成立（没形成两段重合的价格区间）"
+                "—— 「不知道」和「没有」是两回事：这里是真的没有。"
+            )
         else:
-            headline = "信号已失效"
-            reason = f"{_label(sig_type)}已失效（不取反方向）—— 之前的结构判断不再成立。"
+            headline = "结构已作废"
+            reason = (
+                f"{_label(sig_type)}已作废（不是反向信号，也不该反着做）"
+                "—— 之前那个判断不成立了。"
+            )
         out = _build(
             ACTION_HOLD,
             headline,
@@ -159,25 +235,34 @@ def build_recommendation(snapshot: dict[str, Any]) -> dict[str, Any]:
     action = _TYPE_TO_ACTION[sig_type]
     rank = _STATUS_RANK[status]
     if rank >= _STATUS_RANK["confirmed"]:
-        headline = f"{_label(sig_type)}**已确认**"
+        # R76：「已确认」单独出现等于在说「这下可以买了」。带上 R70 的实测数字，
+        # 让这句话自己否掉这个理解 —— 后端所有出口（推送 / 追踪卡 / LLM 提示词）
+        # 都读这一个字符串，改这里一处即全链路生效。
+        headline = (
+            f"{_label(sig_type)}：跌势里已经冒出一笔反弹"
+            "（不是买点 —— R70 实测这类信号之后 20 日平均 +0.02%、胜率 46%，等于瞎猜）"
+        )
     elif status == "structure_ready":
         # 结构与方向都成立，只差反向笔确认。与「候选 / 预警」不是一回事，
         # 给一句能自解释的文案（此前这条状态会直接掉进「未知状态」降级）。
-        action, headline = ACTION_WATCH, f"{_label(sig_type)}结构已具备（待反向笔确认）"
+        action, headline = ACTION_WATCH, f"{_label(sig_type)}：位置到了，还差一笔反弹确认"
     elif status == "candidate":
-        action, headline = ACTION_WATCH, f"{_label(sig_type)}候选（未确认）"
+        action, headline = ACTION_WATCH, f"{_label(sig_type)}：反抽 K 线收盘了，还站得住"
     else:
-        action, headline = ACTION_WATCH, f"{_label(sig_type)}预警"
+        action, headline = ACTION_WATCH, f"{_label(sig_type)}：盘中冒了一笔反弹，还没收盘"
 
     price = _num(signal.get("price"))
     if price is None:
         price = _last_close(snapshot)
 
-    reasons: list[str] = [f"信号状态：{status}"]
+    # R76：原来第一段是 ``f"信号状态：{status}"``（英文枚举直出）。
+    reasons: list[str] = [f"现在这一步：{status_text(status)}"]
     if divergence == "detected":
-        reasons.append("已检测到背驰")
+        reasons.append("两段下跌的力度确实在衰减（背驰）")
+    elif divergence == "not_detected":
+        reasons.append("两段下跌的力度没有明显衰减 —— 更像下跌中继里的停顿")
     if price is not None:
-        reasons.append(f"参考价 {price:.2f}")
+        reasons.append(f"时点收盘价 {price:.2f}（你真正挂得出去的那个价）")
 
     out = _build(
         action,
@@ -212,7 +297,23 @@ def _last_close(snapshot: dict[str, Any]) -> float | None:
 
 
 def _label(sig_type: str) -> str:
-    return {"first_buy": "一买", "first_sell": "一卖"}.get(sig_type, sig_type)
+    """信号类型 → 中文人话（R76：不再叫「一买 / 一卖」）。"""
+    return SIGNAL_TYPE_TEXT.get(sig_type, sig_type)
+
+
+def status_text(status: str) -> str:
+    """信号状态 → 中文人话。未知状态原样返回 —— **不猜**。"""
+    return STATUS_TEXT.get(status, status)
+
+
+def action_text(action: str) -> str:
+    """动作码 → 中文人话。未知码原样返回。"""
+    return ACTIONS.get(action, action)
+
+
+def divergence_text(divergence: str) -> str:
+    """背驰三态 → 中文人话。空串/未知值原样返回（**不猜**）。"""
+    return DIVERGENCE_TEXT.get(divergence, divergence)
 
 
 def _join(items: list[str]) -> str:

@@ -72,8 +72,8 @@
 
   /* R71：标题不再叫「一买信号」——那是买点语气的根源。 */
   const SIGNAL_TYPE_LABELS = {
-    first_buy: "下跌位置提示（原一买）",
-    first_sell: "上涨位置提示（原一卖）",
+    first_buy: "下跌位置提示",
+    first_sell: "上涨位置提示",
   };
 
   /* ---- Phase A1：range.reason 中文映射（历史区间查询失败原因） ---- */

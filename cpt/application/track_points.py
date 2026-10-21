@@ -261,7 +261,7 @@ def _buy_reference(
     final = round(raw_price * BUY_BUFFER, 2)
     return {
         "price_level": final,
-        "condition": "若价格回到此区间且 structure_ready 形成",
+        "condition": "价格回到这个下沿、并且结构位置成立时，才有参考意义",
         "rationale": (
             f"取最保守下沿：{label}（adjusted）× {BUY_BUFFER} 缓冲 ÷ {price_ratio:.4f} 倍率"
         ),
@@ -302,7 +302,7 @@ def _sell_reference(
     final = round(raw_price * SELL_BUFFER, 2)
     return {
         "price_level": final,
-        "condition": "若价格上行至此区间或出现一卖信号",
+        "condition": "价格上行到这个上沿、并且出现上涨位置提示时，才有参考意义",
         "rationale": (
             f"取最保守上沿：{label}（adjusted）× {SELL_BUFFER} 缓冲 ÷ {price_ratio:.4f} 倍率"
         ),
@@ -328,7 +328,7 @@ def _confirmed_point(
             return None
         return {
             "price_level": round(raw, 2),
-            "condition": "信号已确凿 + 价格处于此区间",
+            "condition": "信号已经走到确认这一步，且价格仍在区间内",
             "rationale": f"取最新结构的下沿 {adj:.2f}（adjusted）÷ {price_ratio:.4f}",
         }
     if side == "sell":
@@ -340,7 +340,7 @@ def _confirmed_point(
             return None
         return {
             "price_level": round(raw, 2),
-            "condition": "信号已确凿 + 价格处于此区间",
+            "condition": "信号已经走到确认这一步，且价格仍在区间内",
             "rationale": f"取最新结构的上沿 {adj:.2f}（adjusted）÷ {price_ratio:.4f}",
         }
     return None

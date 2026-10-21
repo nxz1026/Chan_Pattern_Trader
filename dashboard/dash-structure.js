@@ -67,9 +67,12 @@
     detected: "检测到背驰",
   };
 
+  /* R76：与 dash-core.js 的 SIGNAL_TYPE_LABELS 逐字一致。
+     原来这里是「一买信号 / 一卖信号」—— R71 只改了 dash-core 的权威表，
+     这 6 份死副本漏改，实际渲染用的是副本，所以页面上一直还叫一买。 */
   const SIGNAL_TYPE_LABELS = {
-    first_buy: "一买信号",
-    first_sell: "一卖信号",
+    first_buy: "下跌位置提示",
+    first_sell: "上涨位置提示",
   };
 
   /* ---- Phase A1：range.reason 中文映射（历史区间查询失败原因） ---- */
@@ -211,7 +214,9 @@
       return `已选中走势类型 ${payload.trendKind || "—"} · ${at} → ${until}`;
     }
     if (payload.kind === "signal") {
-      return `已选中一买信号 · status=${payload.status || "none"} · ${formatPrice(payload.price)}`;
+      // R76：原来印「一买信号 · status=structure_ready」（术语 + 英文枚举）。
+      const st = STATUS_LABELS[payload.status] || "暂无信号";
+      return `已选中下跌位置提示 · ${st} · ${formatPrice(payload.price)}`;
     }
     return `已选中 ${payload.kind}`;
   }

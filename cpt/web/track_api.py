@@ -34,6 +34,11 @@ from typing import Any, Final
 from urllib.parse import urlsplit
 
 from cpt.adapters.a_share_local import AShareLocalClient
+from cpt.application.recommendation import (
+    SIGNAL_TYPE_TEXT,
+    divergence_text,
+    status_text,
+)
 from cpt.storage import track_store
 
 _LOG = logging.getLogger(__name__)
@@ -381,15 +386,19 @@ def handle_track_advice(user_id: str, code: str) -> tuple[dict[str, Any], int]:
             "reason": rec.get("reason"),
         },
         "explain_algorithm": {
-            "rule": "一买"
-            if rec.get("signal_type") == "first_buy"
-            else ("一卖" if rec.get("signal_type") == "first_sell" else "无"),
-            "status": rec.get("status"),
+            # R76：「一买 / 一卖」→ 位置提示；``status`` 由 raw 码值改成人话
+            # （前端原来直接把它渲染出来，用户看到的是 ``structure_ready``）。
+            "rule": SIGNAL_TYPE_TEXT.get(str(rec.get("signal_type") or ""), "无"),
+            "status": status_text(str(rec.get("status") or "")),
+            # 保留 raw 码值给程序用：前端的状态色块、轮询去重都靠它，不能只有人话。
+            "status_code": rec.get("status"),
             "facts": {
                 "has_reversal_bi": _safe_bool(snapshot, "signal", "has_reversal_bi"),
-                "divergence_status": rec.get("divergence_status"),
+                "divergence_status": divergence_text(
+                    str(rec.get("divergence_status") or "")
+                ),
             },
-            "triggers_to_confirm": ["反向笔收盘确认"]
+            "triggers_to_confirm": ["再冒出一笔收盘的反向笔（叫「反抽」或「回调」都行）"]
             if rec.get("status") == "structure_ready"
             else [],
             "what_would_invalidate": _invalidation_triggers(snapshot, rec),
@@ -397,7 +406,7 @@ def handle_track_advice(user_id: str, code: str) -> tuple[dict[str, Any], int]:
         "suggested_points": points,
         # 人话不是本端点算的，是读上一次成功结果的缓存（读不到就是 None）
         "human": _latest_human(user_id, bare),
-        "disclaimer": "结构状态翻译与参考位，不构成投资建议。T+1 持仓层由交易机负责。",
+        "disclaimer": "结构位置的翻译与参考区间，不是买卖指令。T+1 持仓层由交易机负责。",
     }
 
     # 4. 写快照（与 last_current_json 同步）
@@ -484,7 +493,7 @@ def handle_track_speak(user_id: str, code: str) -> tuple[dict[str, Any], int]:
     from cpt.application import llm_cases  # noqa: PLC0415
 
     note_segment = f"用户偏好：{user_note}。" if user_note else ""
-    disclaimer = f"{note_segment}结构状态翻译与参考位，不构成投资建议。T+1 持仓层由交易机负责。"
+    disclaimer = f"{note_segment}结构位置的翻译与参考区间，不是买卖指令。T+1 持仓层由交易机负责。"
     subject_id = _subject_id(user_id, bare)
     bucket = _speak_bucket()
 
@@ -646,9 +655,10 @@ def _invalidation_triggers(snapshot: dict[str, Any], rec: dict[str, Any]) -> lis
         last = zhongshus[-1]
         low = last.get("low") if isinstance(last, dict) else getattr(last, "low", None)
         if isinstance(low, (int, float)):
-            triggers.append(f"价格跌破最近中枢下沿 {float(low):.2f}（后复权）")
+            triggers.append(f"价格跌破最近这段重叠区间的下沿 {float(low):.2f}（后复权）")
     if rec.get("status") == "invalidated":
-        triggers.append("信号已 invalidated（结构已不成立）")
+        # R76：原来括号里直接印英文 ``invalidated``。
+        triggers.append(f"结构已经作废（{status_text('invalidated')}）—— 之前那个判断不成立了")
     return triggers
 
 

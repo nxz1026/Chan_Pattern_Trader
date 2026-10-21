@@ -11,6 +11,20 @@
   const LS_KEY = "cpt_track_user";
   const API = "/cpt/api/dashboard/track";
   const FETCH_OPTS = { credentials: "same-origin" };
+  /* R76：追踪页历史上**没有**状态中文映射 —— 后端把 raw 码值
+     （``structure_ready``）原样塞进 ``current.status``，页面直接渲染，
+     于是这一页是整个看板里唯一还在显示英文枚举的主要出口。
+     这张表与 ``dash-core.js`` 的 ``STATUS_LABELS`` 语义必须一致（有测试钉住），
+     但本文件刻意不依赖 ``window.CPTDashboard``（见文件头），所以是副本。 */
+  const STATUS_LABELS = {
+    structure_ready: "位置已到（还没确认）",
+    alert: "盘中冒了一根反抽 K 线，还没收盘",
+    candidate: "反抽 K 线已收盘，还站得住",
+    confirmed: "反抽确认了一笔（不是买点）",
+    invalidated: "结构已作废",
+    none: "暂无信号",
+  };
+
   //: 历史快照表最多渲染多少行（R66）—— 后端按 as_of 倒序，取头部即最近。
   const MAX_HISTORY_ROWS = 30;
   //: ``/history`` 的查询窗口天数。必须 ≤ 后端 ``SNAPSHOT_RETENTION_DAYS``(30)：
@@ -295,12 +309,14 @@
     const stop = points && points.stop_loss_reference;
     const tbl = el("table", { class: "points" });
     const head = el("tr");
-    head.appendChild(el("th", { text: "动作" }));
-    head.appendChild(el("th", { text: "reference" }));
-    head.appendChild(el("th", { text: "confirmed" }));
+    head.appendChild(el("th", { text: "结构位置" }));
+    head.appendChild(el("th", { text: "参考价" }));
+    head.appendChild(el("th", { text: "已确认的那一笔" }));
     tbl.appendChild(head);
-    tbl.appendChild(renderPointsRow("BUY", buy));
-    tbl.appendChild(renderPointsRow("SELL", sell));
+    // R76：表头原来直接印 BUY / SELL —— 前端唯一的英文祈使词，
+    // 而这两行是「结构区间的下沿 / 上沿」，不是买卖指令。
+    tbl.appendChild(renderPointsRow("下沿（结构区间）", buy));
+    tbl.appendChild(renderPointsRow("上沿（结构区间）", sell));
     const tr = el("tr");
     tr.appendChild(el("td", { text: "止损参考" }));
     tr.appendChild(
@@ -331,10 +347,12 @@
     if (c && c.action_label) {
       const badge = el("span", { class: "badge warn", text: c.action_label });
       const line2 = el("div", { class: "status-line" });
-      line2.appendChild(el("span", { text: "建议动作：" }));
+      line2.appendChild(el("span", { text: "结构位置：" }));
       line2.appendChild(badge);
+      // R76：原来直接拼 raw 码值（``· 状态 structure_ready``）。
       if (c.status) {
-        line2.appendChild(el("span", { text: `  · 状态 ${c.status}` }));
+        const st = STATUS_LABELS[c.status] || c.status;
+        line2.appendChild(el("span", { text: `  · ${st}` }));
       }
       wrap.appendChild(line2);
     }
@@ -347,22 +365,25 @@
     const wrap = el("div");
     const line = el("div", { class: "status-line" });
     line.appendChild(el("span", { text: `规则：${a && a.rule ? a.rule : "—"}` }));
-    if (a && a.status) line.appendChild(el("span", { text: ` · 状态 ${a.status}` }));
+    // R76：后端已把 ``status`` 翻成人话（``status_code`` 才是 raw 码值），
+    // 这里直接显示，不要再套一层。
+    if (a && a.status) line.appendChild(el("span", { text: ` · ${a.status}` }));
     wrap.appendChild(line);
     const f = a && a.facts;
     if (f) {
       const fline = el("div", { class: "status-line" });
       fline.appendChild(el("span", { text: "事实：" }));
-      fline.appendChild(el("span", { text: `反向笔=${f.has_reversal_bi ? "yes" : "no"}` }));
+      fline.appendChild(el("span", { text: `跌势里冒出过反弹=${f.has_reversal_bi ? "是" : "否"}` }));
       if (f.divergence_status) {
-        fline.appendChild(el("span", { text: ` · 背离=${f.divergence_status}` }));
+        // R76：后端已翻成「两段力度在衰减（背驰）」这类人话。
+        fline.appendChild(el("span", { text: ` · 背驰：${f.divergence_status}` }));
       }
       wrap.appendChild(fline);
     }
     const trig = (a && a.triggers_to_confirm) || [];
     if (trig.length) {
       const tline = el("div", { class: "status-line" });
-      tline.appendChild(el("span", { text: "何时跃迁到 confirmed：反向笔收盘确认。" }));
+      tline.appendChild(el("span", { text: "什么时候算确认：再冒出一笔收盘的反向笔。" }));
       wrap.appendChild(tline);
     }
     const inv = (a && a.what_would_invalidate) || [];
@@ -451,7 +472,7 @@
     const head = el("tr");
     head.appendChild(el("th", { text: "时间" }));
     head.appendChild(el("th", { text: "现价" }));
-    head.appendChild(el("th", { text: "动作" }));
+    head.appendChild(el("th", { text: "结构位置" }));
     head.appendChild(el("th", { text: "状态" }));
     tbl.appendChild(head);
     for (const snap of shown) {
@@ -512,7 +533,7 @@
     }
     if (payload.suggested_points) {
       const fold = el("details", { class: "fold", open: "open" });
-      fold.appendChild(el("summary", { text: "BUY / SELL 建议点（points）" }));
+      fold.appendChild(el("summary", { text: "结构区间上下沿（points）" }));
       fold.appendChild(renderPointsTable(payload.suggested_points));
       if (payload.suggested_points.reason) {
         fold.appendChild(el("div", { class: "hint", text: payload.suggested_points.reason }));

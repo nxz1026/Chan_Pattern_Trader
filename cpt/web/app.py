@@ -1150,7 +1150,15 @@ def make_handler(
                     else None
                 )
                 if sig_sell:
-                    entry = _radar_entry(sig_sell, market_label, market_name, market_type, "一卖")
+                    # R76：原来传「一卖」，前端直接渲染出来。这里是**另一段**信号
+                    # （上涨位置提示），用一句话说清它和上面那条不是同一件事。
+                    entry = _radar_entry(
+                        sig_sell,
+                        market_label,
+                        market_name,
+                        market_type,
+                        "另一段结构",
+                    )
                     if entry:
                         entries.append(entry)
 
@@ -1158,8 +1166,8 @@ def make_handler(
                     "available": True,
                     "signals": entries,
                     "disclaimer": (
-                        "本页面为只读结构分析与学习工具，所有「信号/状态」均为缠论结构术语，"
-                        "不构成投资建议、要约或任何买卖/持仓建议。市场有风险，投资须谨慎。"
+                        "本页面是只读的结构分析工具。每条「信号」说的都是**价格处在什么位置**，"
+                        "不是买点或卖点，也不是任何形式的买卖/持仓指令。"
                     ),
                 }
             elif path.path == "/api/dashboard/export":

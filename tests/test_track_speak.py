@@ -160,7 +160,7 @@ def test_speak_without_note_omits_preference_segment(
 
     last = cases.summarize_recommendation.last_kwargs  # type: ignore[attr-defined]
     assert "用户偏好" not in last["disclaimer"]
-    assert "结构状态翻译" in last["disclaimer"]
+    assert "不是买卖指令" in last["disclaimer"]
 
 
 def test_speak_503_when_llm_raises(

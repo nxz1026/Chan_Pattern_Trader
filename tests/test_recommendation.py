@@ -7,11 +7,14 @@
 
 这批测试钉住三件最容易出错的事：
 
-1. **失效不取反** —— 「一买失效」不是「卖出」。取反会把失效信号说反，
+1. **失效不取反** —— 「下跌位置作废」不是「卖出信号」。取反会把失效信号说反，
    而这是最容易被忽略、后果又最直接的一条。
-2. **价格回退链** —— ``signal.price`` 缺失时退回最新收盘价，
+2. **R76 起全链路不许出现买点语气** —— 见文件末尾 ``test_no_buy_language_*``。
+   R70 实测这个信号没有预测力（688,496 次回放，confirmed 组 20 日 +0.02%），
+   任何祈使动作都会被用户照着做，所以文案本身是**功能**，不是装饰。
+3. **价格回退链** —— ``signal.price`` 缺失时退回最新收盘价，
    两者都缺就 ``None``（前端显示「—」），**不能编一个 0**。
-3. **结构缺失一律降级、不抛** —— 推荐块挂在看板主路径上，
+4. **结构缺失一律降级、不抛** —— 推荐块挂在看板主路径上，
    抛了会带崩整页。
 """
 
@@ -51,11 +54,11 @@ def snap(signal: dict | None, candles: list | None = None) -> dict:
 @pytest.mark.parametrize(
     ("status", "expect", "label"),
     [
-        ("confirmed", ACTION_BUY, "买入结构"),
-        ("structure_ready", ACTION_WATCH, "关注"),
-        ("candidate", ACTION_WATCH, "关注"),
-        ("alert", ACTION_WATCH, "关注"),
-        ("invalidated", ACTION_HOLD, "观望"),
+        ("confirmed", ACTION_BUY, "下跌位置已到"),
+        ("structure_ready", ACTION_WATCH, "位置已到，还没确认"),
+        ("candidate", ACTION_WATCH, "位置已到，还没确认"),
+        ("alert", ACTION_WATCH, "位置已到，还没确认"),
+        ("invalidated", ACTION_HOLD, "没有位置提示"),
     ],
 )
 def test_first_buy_states(status: str, expect: str, label: str) -> None:
@@ -71,7 +74,7 @@ def test_first_sell_confirmed_is_sell() -> None:
         snap({"status": "confirmed", "signal_type": "first_sell", "price": 10.0})
     )
     assert out["action"] == ACTION_SELL
-    assert out["action_label"] == "卖出结构"
+    assert out["action_label"] == "上涨位置已到"
 
 
 def test_invalidated_buy_is_NOT_sell() -> None:
@@ -85,7 +88,7 @@ def test_invalidated_buy_is_NOT_sell() -> None:
     )
     assert out["action"] == ACTION_HOLD
     assert out["action"] != ACTION_SELL
-    assert "不取反" in out["reason"]
+    assert "不是反向信号" in out["reason"]
 
 
 # ── invalidated 的两种含义必须分开说 ──────────────────────────
@@ -108,7 +111,7 @@ def test_invalidated_without_two_centers_says_condition_not_met() -> None:
     )
     assert out["headline"] == "结构条件不成立"
     assert out["action"] == ACTION_HOLD
-    assert "两个同级中枢" in out["reason"]
+    assert "两段重合的价格区间" in out["reason"]
 
 
 def test_invalidated_with_two_centers_says_expired() -> None:
@@ -123,8 +126,8 @@ def test_invalidated_with_two_centers_says_expired() -> None:
             }
         )
     )
-    assert out["headline"] == "信号已失效"
-    assert "不取反" in out["reason"]
+    assert out["headline"] == "结构已作废"
+    assert "不是反向信号" in out["reason"]
 
 
 def test_invalidated_without_center_ids_keeps_old_wording() -> None:
@@ -132,7 +135,7 @@ def test_invalidated_without_center_ids_keeps_old_wording() -> None:
     out = build_recommendation(
         snap({"status": "invalidated", "signal_type": "first_buy", "price": 1.0})
     )
-    assert out["headline"] == "信号已失效"
+    assert out["headline"] == "结构已作废"
 
 
 def test_structure_ready_is_watch_not_unknown_status() -> None:
@@ -154,7 +157,7 @@ def test_structure_ready_is_watch_not_unknown_status() -> None:
     assert out["available"] is True
     assert out["action"] == ACTION_WATCH
     assert out["status"] == "structure_ready"
-    assert "结构已具备" in out["headline"]
+    assert "位置到了" in out["headline"]
 
 
 def test_divergence_is_surfaced() -> None:
@@ -169,6 +172,7 @@ def test_divergence_is_surfaced() -> None:
         )
     )
     assert "背驰" in out["reason"]
+    assert "力度确实在衰减" in out["reason"]
 
 
 # ── 价格回退链 ────────────────────────────────────────────────
@@ -276,3 +280,161 @@ def test_exactly_min_bars_is_enough() -> None:
     out = build_recommendation(snap(None, candles=[{"close": 1.0}] * 30))
     assert out["data_quality"]["sufficient"] is True
     assert out["headline"] == "暂无明确结构信号"
+
+
+# ── R76：全链路不许出现买点语气 ────────────────────────────────
+#
+# 为什么把文案当**契约**来测：R70 实测这个信号没有预测力（5,131 只票 /
+# 688,496 次回放，confirmed 组 5/10/20 日 +0.11%/+0.18%/+0.02%，胜率 46%，
+# 低于随便挑一天买入的基线）。在这种前提下，「买入」「卖出」「加仓」这类
+# 祈使词不是措辞问题，是**在输出一个没有依据的指令**。
+#
+# 这几条测试钉的是**所有出口**：推荐块（看板主卡 + 追踪页 + 飞书推送都读它）、
+# 飞书推送正文、追踪页 explain_algorithm、LLM 提示词。
+
+#: 一出现就算犯规的词。``买点`` / ``卖点`` 也算 —— 用户对这两个词的反应
+#: 和「买入」没有区别（R71 之前页面上就是「参考买点 xx.xx」）。
+_BUY_WORDS = (
+    "买入",
+    "卖出",
+    "买点",
+    "卖点",
+    "加仓",
+    "减仓",
+    "抄底",
+    "清仓",
+    "建仓",
+    "一买",
+    "一卖",
+)
+
+#: 否定式豁免：``不是买点`` / ``非买卖指令`` 这类是**明确的否认**，恰恰是要保留的
+#: 那种写法。检查前先把它们摘掉，剩下的才视为犯规。
+#: ⚠️ 「不推荐买入」这种**不**在豁免里 —— 它仍然把「买入」当成了一个选项。
+_NEGATIONS = (
+    "不是买点",
+    "不是卖点",
+    "不是买入价",
+    "不是卖出价",
+    "不是买卖指令",
+    "非买卖指令",
+    "不是买入信号",
+)
+
+
+def _all_text(out: dict) -> str:
+    """推荐块里**用户能看到**的全部文本（不含码值字段）。"""
+    return " ".join(
+        str(out.get(k) or "")
+        for k in ("action_label", "headline", "reason", "disclaimer")
+    )
+
+
+def _forbidden_hits(text: str) -> list[str]:
+    """摘掉合法否定式之后，还剩下的所有犯规词。"""
+    probe = text
+    for ok in _NEGATIONS:
+        probe = probe.replace(ok, "")
+    return [w for w in _BUY_WORDS if w in probe]
+
+
+@pytest.mark.parametrize(
+    ("status", "sig_type", "center_ids", "divergence"),
+    [
+        ("confirmed", "first_buy", ["bi:4", "bi:8"], "detected"),
+        ("confirmed", "first_sell", ["bi:4", "bi:8"], "not_detected"),
+        ("confirmed", "first_buy", None, "not_checked"),
+        ("structure_ready", "first_buy", ["bi:4", "bi:8"], "detected"),
+        ("structure_ready", "first_sell", ["bi:4", "bi:8"], "not_detected"),
+        ("candidate", "first_buy", ["bi:4", "bi:8"], ""),
+        ("alert", "first_buy", ["bi:4", "bi:8"], "detected"),
+        ("invalidated", "first_buy", [], "detected"),
+        ("invalidated", "first_sell", ["bi:4", "bi:8"], "detected"),
+        ("invalidated", "first_buy", None, ""),
+    ],
+)
+def test_no_buy_language_in_recommendation(
+    status: str, sig_type: str, center_ids: list | None, divergence: str
+) -> None:
+    """全状态 × 全方向里，用户可见文本**一个买点词都不许有**。"""
+    signal: dict = {"status": status, "signal_type": sig_type, "price": 28.5}
+    if center_ids is not None:
+        signal["center_ids"] = center_ids
+    if divergence:
+        signal["divergence_status"] = divergence
+    out = build_recommendation(snap(signal))
+    text = _all_text(out)
+    hits = _forbidden_hits(text)
+    assert not hits, f"{status}/{sig_type} 的输出里出现了买点语气：{hits} —— {text!r}"
+
+
+def test_no_buy_language_in_degraded_paths() -> None:
+    """降级路径（没数据 / 没信号 / 未知状态）同样不许出现买点词。"""
+    cases = [
+        build_recommendation({"candles": []}),
+        build_recommendation(snap(None)),
+        build_recommendation(snap({"status": "weird_status", "signal_type": "first_buy"})),
+        build_recommendation(snap({"status": "confirmed", "signal_type": "weird_type"})),
+        build_recommendation("not-a-dict"),  # type: ignore[arg-type]
+    ]
+    for out in cases:
+        text = _all_text(out)
+        hits = _forbidden_hits(text)
+        assert not hits, f"降级路径出现买点语气：{hits} —— {text!r}"
+
+
+def test_confirmed_headline_states_it_is_not_a_buy_point() -> None:
+    """``confirmed`` 是最容易被当成「可以买了」的状态 —— 必须**自己否掉**。"""
+    out = build_recommendation(
+        snap({"status": "confirmed", "signal_type": "first_buy", "price": 10.0})
+    )
+    assert "不是买点" in out["headline"]
+    # R70 的实测数字要跟着出去：只说「不是买点」而不说为什么，用户会当成免责话术。
+    assert "0.02%" in out["headline"] and "46%" in out["headline"]
+
+
+def test_action_label_is_descriptive_not_imperative() -> None:
+    """动作词只描述**价格处在什么位置**，不带动词。"""
+    for status, sig_type in (
+        ("confirmed", "first_buy"),
+        ("confirmed", "first_sell"),
+        ("structure_ready", "first_buy"),
+        ("invalidated", "first_buy"),
+    ):
+        label = build_recommendation(
+            snap({"status": status, "signal_type": sig_type, "price": 1.0})
+        )["action_label"]
+        assert "位置" in label or "没有" in label, label
+
+
+def test_status_and_divergence_are_translated_to_chinese() -> None:
+    """``reason`` 里原来直出英文枚举（``信号状态：structure_ready``）。"""
+    out = build_recommendation(
+        snap(
+            {
+                "status": "structure_ready",
+                "signal_type": "first_buy",
+                "price": 10.0,
+                "divergence_status": "detected",
+            }
+        )
+    )
+    assert "structure_ready" not in out["reason"]
+    assert "位置已到" in out["reason"]
+    # 「背驰」保留（术语表里有解释），但必须带一句人话。
+    assert "力度确实在衰减" in out["reason"]
+
+
+def test_not_detected_divergence_is_explained_not_omitted() -> None:
+    """``not_detected`` 原来**完全不提** —— 用户不知道背驰查了没有。"""
+    out = build_recommendation(
+        snap(
+            {
+                "status": "structure_ready",
+                "signal_type": "first_buy",
+                "price": 10.0,
+                "divergence_status": "not_detected",
+            }
+        )
+    )
+    assert "没有明显衰减" in out["reason"]

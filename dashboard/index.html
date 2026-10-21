@@ -33,7 +33,7 @@
           data-testid="topbar-track-link"
           class="badge badge-track"
           href="/cpt/track/"
-          title="个人追踪列表：长期持仓的 BUY / SELL 参考位 + 讲人话"
+          title="个人追踪列表：长期持仓的结构区间上下沿 + 讲人话"
         >我的追踪</a>
         <div data-testid="mode-switch" class="mode-switch" role="group" aria-label="Dashboard 模式">
           <button type="button" data-mode="watch" data-mode-action="watch" title="快速看价格与信号">盯盘<small>快速看价格与信号</small></button>
@@ -403,11 +403,11 @@
             </div>
             <ol class="cpt-rec-history-list" data-testid="rec-history-list"></ol>
           </div>
-          <p class="cpt-rec-disc">结构状态翻译，非投资建议</p>
+          <p class="cpt-rec-disc">结构位置描述，不是买卖指令</p>
         </section>
 
         <section data-testid="structure-signal" aria-labelledby="structure-signal-title">
-          <h3 id="structure-signal-title">下跌位置提示（原一买）</h3>
+          <h3 id="structure-signal-title">下跌位置提示</h3>
           <!-- R71 实测横幅：静态事实，数据源 docs/R70-ab-verification.md。 -->
           <div class="signal-evidence" data-testid="signal-evidence">
             <p class="signal-evidence-title">这个面板告诉你什么、不告诉你什么</p>
@@ -486,7 +486,7 @@
                <dt data-term="firstbuy">一买（下跌位置提示）</dt>
                <dd><b>下跌走势 + 出现背驰</b>时给出的位置提示。相当于一条
                  <b>状态机</b>依次走过三步条件：① 中枢满两个 → ② 中枢二之后还在跌 →
-                 ③ 跌势里冒出一笔反弹。三步全过才叫「一买」。
+                 ③ 跌势里冒出一笔反弹。三步全过才算走到这一步。
                  本页已把它改名叫「下跌位置提示」—— 它提示的是位置，不是买入信号。</dd>
              </div>
              <div class="term-item">
@@ -661,7 +661,7 @@
 
     <footer data-testid="dashboard-footer" class="dashboard-footer">
       <p data-testid="footer-readonly-notice">
-        本页面为只读结构分析与学习工具，所有「信号/状态」均为缠论结构术语，<strong>不构成投资建议、要约或任何买卖/持仓建议</strong>。市场有风险，投资须谨慎，决策与后果由用户自行承担。
+        本页面是只读的结构分析工具。每条「信号」说的都是<strong>价格处在什么位置</strong>，不是买点或卖点，也不构成任何买卖、持仓或要约。它<strong>不预测涨跌</strong> —— 依据见「下跌位置提示」面板顶部的实测横幅。
       </p>
       <p data-testid="footer-schema-version">schema dashboard.v2 · 静态骨架（D2）</p>
     </footer>

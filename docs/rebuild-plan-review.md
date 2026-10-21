@@ -363,6 +363,70 @@ m01562 补充：横幅要**有数字、也要有建议**（自用项目，不写
   中枢，连第一步都没走到。它 `status` 恒为 `invalidated`，混进「已作废」会虚高该数
   （实测 202 只里有 21 只）。`blind_spots` 单独计。
 
+#### Phase 1.5 续（R76，2026-10-21）：买点语气从「后端所有出口」删净
+
+R71 只改了 `dash-core.js` 里的 `STATUS_LABELS`，页面确实显示了「位置已到（不是买点）」。
+**R76 盘点发现真正会被看到的地方根本没改到**，因为它们读的不是那张表：
+
+| 出口 | 真正读的地方 | R76 之前用户看到的 |
+|---|---|---|
+| 看板推荐卡（26px 加粗大字） | `cpt/application/recommendation.py` 的 `ACTIONS` | 「买入结构」「卖出结构」 |
+| 追踪页徽章 + 历史表 | 同一份 `ACTIONS`（经 `track_api`） | 「买入结构」、表头 `BUY` / `SELL` |
+| 飞书跃迁推送（第一行） | `cpt/application/signal_notify.py::_points_lines` | 「动作: sell（structure_ready）」 |
+| 飞书收盘汇总 | `signal_notify.build_watchlist_summary` | 「000002 观望 · 买点 3.56 · 卖点 3.92」 |
+| 信号雷达 | `cpt/web/app.py` 的 `source_label` | 「一卖」 |
+| LLM 旁白 | `cpt/llm/prompts.py` 的禁用词表 | 只禁「建议」，没禁「买入」 |
+| 追踪页 `explain_algorithm` | `cpt/web/track_api.py` | `"status": "structure_ready"`（英文枚举） |
+
+改动后的对外文案：
+
+| 码值（**未改**） | 人话 |
+|---|---|
+| `buy` | 下跌位置已到 |
+| `sell` | 上涨位置已到 |
+| `watch` | 位置已到，还没确认 |
+| `hold` | 没有位置提示 |
+| `confirmed` 的 headline | 「跌势里已经冒出一笔反弹（不是买点 —— R70 实测这类信号之后 20 日平均 +0.02%、胜率 46%，等于瞎猜）」 |
+| 参考位 | 「结构区间下沿 / 上沿」（原「参考买点 / 卖点」） |
+| 信号类型 | 「下跌位置提示 / 上涨位置提示」（删掉「原一买」后缀） |
+
+**两条容易踩的决策**：
+
+- **码值一个都不许改**。`action`（`buy`/`sell`/`watch`/`hold`）进了
+  `cpt_track_snapshot` 的 payload、`/api/trade/*` 的决策批次、
+  `a_share_routes._RECOMMENDATION_KEYS`，前端着色读 `data-action`。
+  只换 `action_label` / `headline` / `reason` / 推送正文。
+  `tests/test_no_buy_language_wiring.py::test_action_codes_are_unchanged` 钉死。
+  同理 `cpt/web/trade_api.py` 的 `("BUY", "OPEN_POS")` 是**交易机契约**，留英文是对的。
+- **「不是买点」这种否定式必须豁免**。守卫测试先摘掉否定式再查违规词，
+  否则「（不是买点）」自己会被判成违规。但「不推荐买入」**不**豁免 ——
+  它仍然把「买入」当成了一个选项。
+
+**覆盖的守卫**（`tests/test_recommendation.py` 7 条 + `tests/test_no_buy_language_wiring.py` 17 条）：
+
+- `test_no_buy_language_in_recommendation`：10 组「状态 × 方向 × 中枢数 × 背驰态」，
+  用户可见文本（`action_label`/`headline`/`reason`/`disclaimer`）里一个买点词都不许有。
+- `test_no_buy_language_in_degraded_paths`：降级路径（没数据 / 没信号 / 未知状态）同样查。
+- `test_no_buy_language_in_dashboard_sources`：7 个 `dash-*.js` 剥掉注释后逐个查。
+- `test_dashboard_html_has_no_buy_language`：`index.html` 查（术语表条目本身豁免）。
+- `test_track_page_status_labels_match_backend`：`dash-track.js` 的副本必须与
+  后端 `STATUS_TEXT` 逐条一致（该文件刻意不依赖 `window.CPTDashboard`，所以只能是副本）。
+- `test_footer_is_fact_not_disclaimer_boilerplate`：页脚不许出现「不构成投资建议 /
+  投资须谨慎」（owner m01562：「自用项目，不用说仅供参考的废话」），必须讲清「不预测涨跌」。
+- `test_llm_prompt_forbids_imperative_verbs`：旁白提示词必须显式列「买入 / 卖出 / 加仓」。
+
+**生产实跑**（2026-10-21，四个分支都有真实输出）：
+
+| 票 | 状态 | 输出 |
+|---|---|---|
+| 001216 | `structure_ready` | 位置已到，还没确认 /「两段下跌的力度没有明显衰减 —— 更像下跌中继里的停顿」 |
+| 300115 | `structure_ready` + 背驰 | 位置已到，还没确认 /「两段下跌的力度确实在衰减（背驰）」 |
+| 603236 | `confirmed` | 下跌位置已到 /「不是买点 —— R70 实测…+0.02%、胜率 46%」 |
+| 000014 | 结构不足 | 结构条件不成立 /「没形成两段重合的价格区间…这里是真的没有」 |
+
+推送正文实跑：`结构位置: 下跌位置已到 · 还没确认` / `结构区间下沿: 248.66` /
+`结构区间上沿: 291.94` / `止损参考: 232.00` / `现价: 264.66`。
+
 ### Phase 2 —— 低风险增量
 
 | 序 | 项 | 理由 |
