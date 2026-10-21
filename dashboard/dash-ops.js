@@ -101,6 +101,19 @@
     renderSignalStats(state.snapshot);
   }
 
+  /* ---------------- R73 方案 A1：信号全景（按票） ---------------- */
+
+  // 与 loadSignalStats **不是同一个视角**：
+  //   signal-stats    数的是**事件条数**（同票跃迁 5 次就算 5 条）
+  //   signal-overview 数的是**票**（每票只取最新一条）
+  // 两者数值必然不同，故口径行分开写（见 renderSignalOverview）。
+  async function loadSignalOverview() {
+    const params = new URLSearchParams({ days: remoteOps.days });
+    const { body } = await requestJson(`${DASHBOARD_BASE()}/signal-overview?${params.toString()}`);
+    remoteOps.signalOverview = isObject(body) ? body : null;
+    renderSignalOverview(state.snapshot);
+  }
+
   /* ---------------- R27 结构事件流 ---------------- */
 
   // 与上面 snapshot.events 是**两个不同的东西**，标题必须分开写：
@@ -630,6 +643,7 @@
     }
     loadWatchlist();
     loadSignalStats();
+    loadSignalOverview();
     // R27：结构事件流。同样**不进 30s 轮询** —— 这张表只在结构真变了才追加，
     // 30s 轮一次几乎永远是同一批数据，纯浪费。
     loadStructureEvents();

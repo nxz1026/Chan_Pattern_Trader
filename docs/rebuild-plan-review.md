@@ -332,6 +332,7 @@ m01562 补充：横幅要**有数字、也要有建议**（自用项目，不写
 | 进度接线 | 生产路径算出并挂 `snapshot.summary.signal_progress`，前端 `[data-testid=signal-progress]` 渲染；无数据整块 `hidden` | `a_share_snapshot.py`、`dashboard_snapshot_v2.py`、`dashboard/dash-signal.js`、`dashboard/dash-structure.js` |
 | 失效归因 | 失效时给**具体原因码**（不是「以前失效过」）：`not_in_downtrend` / `not_enough_centers` / `no_divergence_leg` / `previous_invalidated`；历史行补原因，同原因不刷屏 | `cpt/application/signal_invalidation.py` |
 | 失效呈现 | 信号历史行下加 `[data-testid=signal-history-reason]`；统计面板加失效原因分布，`unknown` 单列「原因未记录（R71 之前的行）」 | `dashboard/dash-signal.js`、`cpt/application/dashboard_stats.py` |
+| 全景视图（R73） | `/api/dashboard/signal-overview`：每只票取**最新一条**跃迁，出「覆盖票数 / 站在位置上 / 已作废 / 结构不足 / 距最后跃迁 ≥ N 天」+ 站住的票明细；正文只列 `structure_ready`/`confirmed`，其余走汇总 | `cpt/application/signal_overview.py`、`cpt/web/app.py`、`dashboard/dash-signal.js` |
 
 **设计约束（必须保留）**：
 
@@ -350,6 +351,17 @@ m01562 补充：横幅要**有数字、也要有建议**（自用项目，不写
 - **「没记录」不许猜成「中枢不足」**：统计层把无原因的历史行单独计入 `unknown`，
   归因层在 `facts is None` 时返回 `None` 而不是默认码。`evidence` 里 facts 缺失填
   `None` 不填 `False` —— 「没数据」和「算出来是否」是两个事实。
+- **`age_days` 是下界，不是「卡了几天」（R73）**：`cpt_signal_event` 是状态跃迁表，
+  状态不变就不写行，所以「距最后一次跃迁 1 天」的票可能已经卡了 180 天。响应里
+  `age_is_lower_bound` 恒 `True`，前端文案写「距最后跃迁」，不写「卡了 N 天」
+  （`tests/test_signal_overview_wiring.py::test_frontend_never_claims_stuck_days` 钉住）。
+  要回答真实停滞时长需要每轮落一份步骤快照（方案 A2，需新建表，本轮未做）。
+- **全景与统计是两个统计单元，不许混讲（R73）**：`signal_statistics` 数**事件条数**
+  （同票跃迁 5 次算 5 条），`signal_overview` 数**票**（每票只取最新一条）。二者数值
+  必然不同，故各开一条路由、`basis` 各自自报，前端标签分开写。
+- **兜底 `structure_id` 是盲区，必须单列**：`level5:empty:<code>` 表示结构不足两个
+  中枢，连第一步都没走到。它 `status` 恒为 `invalidated`，混进「已作废」会虚高该数
+  （实测 202 只里有 21 只）。`blind_spots` 单独计。
 
 ### Phase 2 —— 低风险增量
 

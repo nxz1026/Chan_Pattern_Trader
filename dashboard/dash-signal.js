@@ -510,6 +510,119 @@
   }
 
 
+  /* ---------------- R73 方案 A1：信号全景（按票） ---------------- */
+
+  // 数据源 = /api/dashboard/signal-overview（cpt/application/signal_overview.py）。
+  // 与上面「信号统计」的区别必须写死在文案里：那个数事件条数，这个数票。
+
+  // 全景里只显示「还站在位置上」的状态；invalidated 是绝大多数（实测 127/202），
+  // 全列出来会把真正该看的 54 只票埋掉。所以正文只列 standing，其余走一行汇总。
+  const OVERVIEW_STANDING = ["structure_ready", "confirmed"];
+
+  function buildOverviewRow(entry) {
+    const item = document.createElement("li");
+    item.dataset.testid = "signal-overview-row";
+    const code = String(entry.code || "—");
+    const status = STATUS_LABELS[entry.status] || entry.status || "—";
+    const age = entry.age_days == null ? "未知" : `距最后跃迁 ${entry.age_days} 天`;
+    // ⚠️ age_days 只是**下界**（状态没变就不写行，见 signal_overview 模块
+    // docstring），所以这里写「距最后跃迁」而不是「卡了 N 天」。
+    const stale = entry.stale === true ? " · ⚠️ 窗口内没再动过，这是最后已知状态" : "";
+    item.textContent = `${code} · ${status} · ${age}${stale}`;
+    return item;
+  }
+
+  function renderSignalOverview() {
+    const panel = q("[data-testid=event-panel]");
+    if (!panel) return;
+    let section = q("[data-testid=signal-overview]");
+    if (!section) {
+      section = document.createElement("section");
+      section.dataset.testid = "signal-overview";
+      const heading = document.createElement("h3");
+      heading.textContent = "信号全景（按票：现在走到哪一步）";
+      section.appendChild(heading);
+      panel.appendChild(section);
+    }
+    while (section.children.length > 1) section.removeChild(section.lastChild);
+
+    const payload = remoteOps.signalOverview;
+    const hint = (text) => {
+      const p = document.createElement("p");
+      p.className = "hint";
+      p.dataset.testid = "signal-overview-basis";
+      p.textContent = text;
+      section.appendChild(p);
+    };
+
+    if (!isObject(payload)) {
+      hint("口径：每只票取最新一条状态跃迁（尚未拉取）。");
+      return;
+    }
+    if (payload.available !== true || !isObject(payload.overview)) {
+      const p = document.createElement("p");
+      p.textContent = `全景不可用：${reasonText(SIGNAL_STATS_REASON_LABELS, payload.reason, NETWORK_FALLBACK)}`;
+      section.appendChild(p);
+      return;
+    }
+    const ov = payload.overview;
+    const { rows } = ov;
+    hint(
+      `口径：每只票**只取最新一条**状态跃迁（近 ${payload.days || remoteOps.days} 天）。` +
+        "与上面「信号统计」不同——那个数的是事件条数，同一只票跃迁 5 次就算 5 条。" +
+        "「距最后跃迁」只是下界：状态没变就不写行，它不等于「卡了这么久」。",
+    );
+
+    const stats = isObject(ov.status_counts) ? ov.status_counts : {};
+    const list = document.createElement("dl");
+    list.className = "kv";
+    const row = (key, value, testid) => {
+      const item = document.createElement("div");
+      const term = document.createElement("dt");
+      term.textContent = key;
+      const detail = document.createElement("dd");
+      detail.textContent = value;
+      if (testid) detail.dataset.testid = testid;
+      item.append(term, detail);
+      list.appendChild(item);
+    };
+    row("覆盖票数", String(ov.total == null ? "—" : ov.total), "signal-overview-total");
+    OVERVIEW_STANDING.forEach((key) => {
+      row(`站在位置上 · ${STATUS_LABELS[key] || key}`, String(stats[key] || 0));
+    });
+    const invalidated = stats.invalidated || 0;
+    row("已作废（不再评估）", String(invalidated));
+    const blind = isObject(ov.blind_spots) ? ov.blind_spots.empty_structure || 0 : 0;
+    if (blind) {
+      row("结构不足两个中枢（连第一步都没到）", String(blind));
+    }
+    row(
+      `距最后跃迁 ≥ ${ov.stale_after_days || 7} 天`,
+      String(ov.stale_count == null ? "—" : ov.stale_count),
+      "signal-overview-stale",
+    );
+    section.appendChild(list);
+
+    const standing = asArray(rows).filter((entry) => OVERVIEW_STANDING.includes(entry.status));
+    if (!standing.length) {
+      const p = document.createElement("p");
+      p.textContent = "当前没有票站在位置上（结构就绪或已确认）。";
+      section.appendChild(p);
+      return;
+    }
+    const ul = document.createElement("ul");
+    ul.dataset.testid = "signal-overview-rows";
+    standing.slice(0, 20).forEach((entry) => ul.appendChild(buildOverviewRow(entry)));
+    section.appendChild(ul);
+    if (standing.length > 20) {
+      const p = document.createElement("p");
+      p.className = "hint";
+      p.textContent = `另有 ${standing.length - 20} 只未列出。`;
+      section.appendChild(p);
+    }
+  }
+
+
   function renderSignalStats(snapshot) {
     const panel = q("[data-testid=event-panel]");
     if (!panel) return;

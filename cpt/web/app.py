@@ -539,6 +539,46 @@ def _signal_stats_payload(days: int, code: str | None) -> dict[str, Any]:
     return payload
 
 
+def _signal_overview_payload(days: int) -> dict[str, Any]:
+    """R73 方案 A1：每只票「现在走到哪一步」的全景视图。**降级不抛**。
+
+    与 :func:`_signal_stats_payload` 的区别是**统计单元**：
+    stats 数的是**事件条数**（同一只票跃迁 5 次就算 5 条），overview 数的是
+    **票**（每只票只取最新一条）。同一批数据两者数值不同，故 ``basis``
+    各自自报，前端不得混着讲。
+
+    ``age_is_lower_bound`` 恒为 ``True``：``age_days`` 是「距最后一次跃迁」，
+    不是「卡了几天」—— 状态没变就不会写行，所以它只是下界
+    （见 :mod:`cpt.application.signal_overview` 模块 docstring）。
+    """
+    payload: dict[str, Any] = {
+        "schema_version": "dashboard_signal_overview.v1",
+        "basis": "latest_signal_event_per_code",
+        "days": days,
+    }
+    try:
+        # CI 只跑 ``pip install -e .``（不带 [db]），故连接层必须惰性导入。
+        import time  # noqa: PLC0415
+
+        from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+        from cpt.application.signal_overview import signal_overview  # noqa: PLC0415
+        from cpt.storage.signal_event_store import load_signal_events  # noqa: PLC0415
+
+        client = AShareLocalClient()
+        try:
+            events = load_signal_events(client._get_conn(), days=days)  # noqa: SLF001
+        finally:
+            client.close()
+    except Exception as exc:  # noqa: BLE001 — 只读旁路，DB 抖动不该让主视图 500
+        _LOG.warning("signal overview unavailable: %s", exc)
+        payload["available"] = False
+        payload["reason"] = "signal_history_unavailable"
+        return payload
+    payload["available"] = True
+    payload["overview"] = signal_overview(events, now_ms=int(time.time() * 1000))
+    return payload
+
+
 def _structure_events_payload(
     *,
     limit: int,
@@ -1413,6 +1453,20 @@ def make_handler(
                 days = max(1, min(days, _MAX_DAYS))
                 code_filter = (query.get("code") or [""])[0].strip() or None
                 payload = _signal_stats_payload(days, code_filter)
+            elif path.path == "/api/dashboard/signal-overview":
+                # R73 方案 A1：按**票**的视角看「走到哪一步」，与 signal-stats
+                # 的按**事件**视角是两种统计单元，故单开一条路由而不是给 stats
+                # 塞字段 —— 混在一个响应里前端迟早会拿 A 的口径讲 B 的数。
+                days_raw = (query.get("days") or ["30"])[0]
+                try:
+                    days = int(days_raw)
+                except ValueError:
+                    self._write_json_error(
+                        HTTPStatus.BAD_REQUEST, "invalid_days", "days 必须是整数"
+                    )
+                    return
+                days = max(1, min(days, _MAX_DAYS))
+                payload = _signal_overview_payload(days)
             elif path.path == "/api/dashboard/watchlist":
                 # 只读旁路，纪律与同组的 /inspection 一致：DB 抖动不 500，
                 # 降级成 available=false + reason。原先这里**裸调**
