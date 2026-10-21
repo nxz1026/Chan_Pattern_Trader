@@ -183,11 +183,14 @@ jobs:
       # 夹具必须指向真实存在的脚本；磁盘上的 check_*.py 必须都在 CI 里跑。
       - name: No gate escapes the self-test
         run: python scripts/check_gate_coverage.py
-      # 门禁⑯（R72 新增）：**bigserial 序列必须与表对齐**。
-      # 生产上真实撞了三次 `UniqueViolation: Key (id)=(900008) already exists`：
-      # 有代码带 id 显式写入（迁移的 INSERT...SELECT id、测试的 setval 回滚），
-      # 一旦超过序列当前值，后续每次 nextval 都撞主键，**不会自愈**、每次跑批都炸。
-      # 修法是写批之前把序列推到 max(id)；这道门禁防止自愈被删、被挪到写入之后。
+      # 门禁⑯（R72 新增，R81 加 R5）：**bigserial 序列必须与表对齐**。
+      # 生产上真实撞了**四次** `UniqueViolation: Key (id)=(900008) already exists`：
+      # 一旦有显式 id 超过序列当前值，后续每次 nextval 都撞主键，**不会自愈**、
+      # 每次跑批都炸。修法是写批之前把序列推到 max(id)（R1–R4 防止自愈被删/被挪）。
+      # R81 查清了真源头：**不是生产代码带 id 写**，而是
+      # `tests/test_migration_r67_symbol_in_id.py` 的夹具 `setval` 到 900009 ——
+      # `setval` **不受事务回滚**（实测 910570 → setval(900009) → rollback → 900009），
+      # 所以每跑一次测试就把序列永久拉回去。R5 禁止 `tests/` 里出现 setval。
       - name: bigserial sequences stay aligned
         run: python scripts/check_bigserial_sequence.py
       # 门禁⑰（R74 新增）：**解释器要从任意目录都能导入本仓**。

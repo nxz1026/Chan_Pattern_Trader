@@ -2133,3 +2133,86 @@ grep。自检夹具 `fx_editable_import` 在临时仓库里造「有 `cpt/`、�
 **同类隐患**：`scripts/factor_backfill.py` 也缺 `sys.path` 引导（当前无调度器
 引用它，接上必炸）。凡是要被 cron / systemd 直接执行的脚本，都不该依赖
 `PYTHONPATH` 或 CWD。
+
+## 62. `setval` 不受事务回滚：测试看起来干净，序列已被永久污染（R81 实测）
+
+**现象**：`#60` 的 `UniqueViolation` 修了四次都复发。每次都是同一条
+`Key (id)=(900008) already exists`，每次 `setval` 之后能好一阵，跑几次测试又坏。
+R72 的自愈机制上线后**仍然复发**（第四次：`last_value=900007 < max(id)=910525`）。
+
+**排查走错的路**（记下来，下次别重走）：
+
+| 假设 | 怎么排除的 |
+|---|---|
+| 生产代码在带 id 写 | `grep "INSERT INTO public.cpt_structure_event"` → 两个 store 的列清单里**都没有 `id`** |
+| 迁移脚本在带 id 写 | 那几处 `INSERT ... SELECT id` 只在**已执行过**的一次性迁移里，不会每轮跑 |
+| 有别的服务在写 | `cpt_signal_event` 的序列始终对齐，只有结构事件表落后 |
+
+**真根因**：`tests/test_migration_r67_symbol_in_id.py` 的夹具。它为了给合成行
+（id 900001~900007）让路，在事务里执行：
+
+```python
+cur.execute("SELECT setval('public.cpt_structure_event_id_seq', max(id), true)")
+```
+
+紧邻的注释写着「**随回滚消失**」。**那条注释是错的。**
+
+PostgreSQL 文档明确：`setval` 的变更**不会被 `ROLLBACK` 撤销**。实测（R81）：
+
+```
+序列 = 910570 → setval(900009) → rollback() → 序列 = 900009
+```
+
+于是每跑一次那个测试文件，序列就从 91 万被拉回 900009，而表里真实行在 91 万级
+⇒ 下一次 `append_events` 的 `nextval` 落在**已占用**区间 ⇒ 必炸。
+
+**为什么这么难查**：pytest 的 `rollback` 让这个测试在**字面上**是干净的 ——
+表里没有残留行、序列之外的一切都复原了。污染只体现在一个**不被事务保护**的
+全局对象上，而且爆炸点在**离真凶几百行之外**的生产跑批里。
+
+**正确的夹具写法**（`tests/test_migration_r67_symbol_in_id.py::_install_fake_pre_migration`）：
+
+```python
+cur.execute(
+    "SELECT COALESCE((SELECT max(id) FROM public.cpt_structure_event), 0), "
+    "(SELECT last_value FROM pg_sequences "
+    " WHERE schemaname = 'public' AND sequencename = %s)",
+    (_SEQ_NAME,),
+)
+max_id, seq_value = cur.fetchone()
+base = int(max(max_id or 0, seq_value or 0))
+rows = [(base + i, *row[1:]) for i, row in enumerate(_FAKE_ROWS, start=1)]
+```
+
+合成行放到 `max(max(id), last_value)` **之后**，**完全不动序列**。
+万一算出的起点仍低于序列（环境不干净），`pytest.skip` 并给出原因，
+而不是硬插一个必然撞主键的行。
+
+**判定命令**（任何时刻可跑）：
+
+```bash
+# 序列是否落后 / 是否被污染
+psql -c "SELECT max(id), (SELECT last_value FROM pg_sequences
+         WHERE sequencename='cpt_structure_event_id_seq')
+         FROM public.cpt_structure_event"
+```
+
+判据不是「相等」——`nextval` 会跳过一些号，`last_value > max(id)` 是**正常**的。
+只有 `last_value < max(id)` 才是病。
+
+**门禁⑯ R5**（`scripts/check_bigserial_sequence.py`）：`tests/` 里不许出现
+`setval` 调用。判据必须**两样都查**：
+
+1. **SQL 字符串字面量**里出现 `SELECT ... setval(` —— psycopg 的常态，
+   `setval` 在字符串里，AST 里根本没有调用节点；
+2. **裸调用** `setval(...)`。
+
+⚠️ R5 第一版只查 AST 调用点，被反向注入实测打脸：真实形态是
+`cur.execute("SELECT setval(...)")`，门禁**静默放行**。第二版只查行文本，
+又被**自己的 docstring** 骗（里面写着「原实现有一行 `setval(...)`」）。
+最终判据 = 字符串字面量 + AST 调用点。
+
+**教训（通用）**：**测试的 `rollback` 不能证明它没留下副作用**。凡是操作
+事务外全局对象（序列、 advisory lock、文件、外部服务）的测试，都要单独问一句
+「这个副作用回滚了吗」—— `setval` / `nextval` / `pg_advisory_lock`（会话级）
+都不在事务保护范围内。

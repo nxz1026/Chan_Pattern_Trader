@@ -451,6 +451,27 @@ def fx_bigserial_sequence(root: Path) -> tuple[str, str]:
     return "check_bigserial_sequence.py", "晚于 executemany"
 
 
+def fx_bigserial_sequence_r5(root: Path) -> tuple[str, str]:
+    """⑯b 序列自愈 R5：造一个「测试里 setval」的错例（R81）。
+
+    R81 实测 ``setval`` 不受事务回滚：测试里 setval 会把共享序列永久拉回去，
+    pytest 的 rollback 看起来已收拾干净 —— **证据自证清白**，所以必须门禁。
+
+    错误写法用**SQL 字符串**形态（``cur.execute("SELECT setval(...)")``）——
+    这是 psycopg 的常态，也是 R5 第一版判据（只查 AST 调用点）漏掉的那一种。
+    """
+    _write(
+        root / "tests/test_polluter.py",
+        "def test_x(cur):\n    cur.execute(\"SELECT setval('seq', 900009, true)\")\n",
+    )
+    # 门禁在 main() 里会先读这两个文件（R1-R4 的底稿），缺了就会在
+    # STORE.read_text 上崩 —— 那是「自检本身崩了」，不是「抓到了」。
+    # R5 只查 tests/，所以这两个给最小占位即可。
+    _write(root / "cpt/storage/structure_event_store.py", "def append_events():\n    pass\n")
+    _write(root / "cpt/storage/signal_event_store.py", "ensure_sequence_at\n")
+    return "check_bigserial_sequence.py", "SQL 字符串里调了 setval"
+
+
 def fx_editable_import(root: Path) -> tuple[str, str]:
     """⑰ 导入可用性：造一个「.venv 装了 cpt 但导不进去」的仓。
 
@@ -499,6 +520,10 @@ FIXTURES = {
     "check_value_plumbing.py": fx_value_plumbing,
     "check_value_plumbing.py#R4": fx_value_plumbing_null_guard,
     "check_bigserial_sequence.py": fx_bigserial_sequence,
+    # R81：同一个门禁的第二条错例（R5）。用 ``#`` 分类后缀复用同一个脚本 ——
+    # 直接写 ``check_bigserial_sequence_r5.py`` 会让 run_one 去找一个不存在的
+    # 文件（第一版就这么崩了：FileNotFoundError）。
+    "check_bigserial_sequence.py#R5": fx_bigserial_sequence_r5,
     "check_editable_import.py": fx_editable_import,
 }
 

@@ -42,6 +42,27 @@
 反向证据：没有序列的表（``id`` 由外部提供）不该出现 ``ensure_id_sequence``，
 否则是抄错了地方。这条只对**已知的 bigserial 表**做白名单核对。
 
+**R5 · ``tests/`` 里不许出现 ``setval``（R81 新增）。**
+
+R72 的判据漏了真正的那条污染路径。实测（2026-10-21 R81）：:
+
+    序列 = 910570 → setval(900009) → rollback() → 序列 = 900009
+
+PostgreSQL 文档明确 ``setval`` **不受事务回滚**。而
+``tests/test_migration_r67_symbol_in_id.py`` 的夹具为了给合成行让路，
+在事务里 ``setval`` 把序列推到 900009，注释还写着「随回滚消失」—— 那条注释是错的。
+于是**每跑一次那个测试文件**，序列就被拉回 900009，而表里真实行已在 91 万级
+⇒ 下一次 ``append_events`` 必撞 ``Key (id)=(900008) already exists``。
+
+这就是序列反复落后的真源头：**不是生产代码在带 id 写**（两个 store 的 INSERT
+列清单里都没有 ``id``），是这个测试在污染共享序列。
+
+正确做法：合成行插到 ``max(id) + 1`` 起，**完全不动序列**（见该文件夹具的 docstring）。
+
+⚠️ 为什么不能靠「反正有 R1 的运行时自愈兜着」：自愈是**保险带**，不是主修手段。
+每跑一次测试就要让下一批跑批多付一次 ``setval``，而且一旦自愈被删/被挪，
+爆炸点会出现在**离真凶几百行之外**的生产跑批里 —— 那种故障查起来是以天计的。
+
 ## 为什么用 AST 而不是 grep
 
 同门禁⑥：``ensure_id_sequence`` 这个名字会出现在 ``__all__``、docstring、
@@ -58,6 +79,7 @@
 from __future__ import annotations
 
 import ast
+import re
 import sys
 from pathlib import Path
 
@@ -220,6 +242,65 @@ def check_r4() -> list[str]:
     return problems
 
 
+def check_r5() -> list[str]:
+    """R5：``tests/`` 里不许出现 ``setval``。
+
+    ``setval`` 不受事务回滚（见模块 docstring R5 段），测试里用它会永久污染
+    共享序列，而 pytest 的 ``rollback`` 看起来像已经收拾干净了 —— 这是最坏的一类
+    污染：**证据自证清白**。
+
+    唯一豁免：本门禁自己的测试（``tests/test_bigserial_sequence_gate.py``），
+    它必须能构造出「有 setval」的错例，否则守不住这条规则本身。
+    """
+    tests_dir = ROOT / "tests"
+    if not tests_dir.is_dir():
+        return []
+    allowed = {ROOT / "tests" / "test_bigserial_sequence_gate.py"}
+    problems: list[str] = []
+    for path in sorted(tests_dir.rglob("*.py")):
+        if path in allowed:
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            continue
+        # ## 判据：字符串字面量 + AST 调用点，两样都要查
+        #
+        # 第一版用**行文本**匹配，立刻被自己的 docstring 骗了 —— 里面写着
+        # 「原实现末尾有一行 ``setval(...)``」，那是**说明**不是调用。
+        # 第二版改成只查 AST 调用点，又被真实场景骗了（反向注入实测）：
+        # 实际写的是 ``cur.execute("SELECT setval(...)")`` —— ``setval`` 在
+        # **字符串里**，AST 里根本没有这个调用节点。
+        #
+        # 所以最终判据是：**字符串字面量**里出现 ``setval(``（SQL 把函数调用
+        # 写在字符串里，这是 psycopg 的常态），或者代码里真的裸调 ``setval(...)``。
+        # docstring 也算字符串字面量，因此仍需额外排除「纯说明」——
+        # 判据收紧为：含 ``setval(`` 的字面量必须是 SQL 形态，即同时含
+        # ``SELECT`` 或 ``setval(`` 紧跟引号/序列名。
+        try:
+            tree = ast.parse(text)
+        except SyntaxError:
+            continue
+        rel = path.relative_to(ROOT)
+        for node in ast.walk(tree):
+            # ① SQL 字符串：``"SELECT setval('seq', N, true)"``
+            if isinstance(node, ast.Constant) and isinstance(node.value, str):
+                value = node.value
+                if "setval(" in value and re.search(r"\bSELECT\b[\s\S]{0,200}setval\(", value):
+                    problems.append(
+                        f"{rel}:{node.lineno} SQL 字符串里调了 setval（不受回滚，会永久污染序列）"
+                    )
+            # ② 裸调用：``setval('seq', N, true)``
+            elif isinstance(node, ast.Call):
+                fn = node.func
+                name = fn.id if isinstance(fn, ast.Name) else getattr(fn, "attr", None)
+                if name == "setval":
+                    problems.append(
+                        f"{rel}:{node.lineno} 测试里调了 setval（不受回滚，会永久污染序列）"
+                    )
+    return problems
+
+
 def main() -> int:
     source = STORE.read_text(encoding="utf-8")
     tree = ast.parse(source)
@@ -244,6 +325,14 @@ def main() -> int:
             print(f"  ❌ R4 {problem}")
     else:
         print(f"  ✅ R4 白名单 {len(BIGSERIAL_TABLES)} 张表都已接自愈")
+
+    r5 = check_r5()
+    ok &= not r5
+    if r5:
+        for problem in r5:
+            print(f"  ❌ R5 {problem}")
+    else:
+        print("  ✅ R5 tests/ 里没有 setval")
 
     print("-" * 60)
     print("✅ 全绿" if ok else "❌ 有违规")

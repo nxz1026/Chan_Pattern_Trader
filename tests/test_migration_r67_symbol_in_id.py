@@ -142,6 +142,7 @@ _SQL_MIGRATION = _strip_transaction_control(_MIGRATION.read_text(encoding="utf-8
 _SQL_ROLLBACK = _strip_transaction_control(_ROLLBACK.read_text(encoding="utf-8"))
 
 _TABLE = "public.cpt_structure_event"
+_SEQ_NAME = "cpt_structure_event_id_seq"
 
 
 def _snapshot(cur: Any) -> dict[int, tuple[Any, ...]]:
@@ -272,32 +273,56 @@ _BACKUP_TABLES = (
 
 
 def _install_fake_pre_migration(cur: Any) -> None:
-    """把表换成合成的「迁移前」状态（全部在调用方的事务内，随回滚消失）。
+    """把表换成合成的「迁移前」状态。
 
-    三件必须做的事，缺一件都会让迁移在真实库上跑不通：
-      1. 删掉真实备份表 —— 它们在上线后**有数据**（2409 / 17800 / 417 行），
-         而迁移脚本用 `CREATE TABLE IF NOT EXISTS`，会跳过建表，
-         于是第 3 步校验「备份数 ≠ 待改数」直接抛错。
-      2. 删掉真实唯一索引 —— 合成数据里那组**刻意的重复**否则插不进去。
-      3. 清空事件表 —— 否则合成行与真实 1992 行混在一起。
+    ## ⚠️ R81：这里**不再动序列**，因为 `setval` 不受事务回滚
+
+    原实现末尾有一行 ``setval(...)`` 把序列推到合成 id（900001~900007）之后，
+    注释写的是「随回滚消失」—— **那是错的**。PostgreSQL 文档明确：
+    `setval` 的变更不会被 `ROLLBACK` 撤销。实测（R81，2026-10-21）::
+
+        序列 = 910570 → setval(900009) → rollback() → 序列 = 900009
+
+    后果：每跑一次本文件，序列就被拉回 900009，而表里真实行早已到 91 万级
+    ⇒ 下一次 `append_events` 的 `nextval` 落在**已被占用**的区间 ⇒
+    `UniqueViolation: duplicate key ... Key (id)=(900008) already exists`。
+    这就是 R72 上线前后序列**反复落后四次**的真源头 —— 不是生产代码在带 id 写，
+    而是**测试在污染序列**。
+
+    现在改为：
+      1. 合成行只插到工作表的**末尾**（`max(id) + 1` 起），不碰已被占用的 id；
+      2. **完全不动序列** —— 它本来就该指向表尾之后，那边正是我们要插的位置。
+
+    万一（例如有人手工造过很高的 id）算出来的起点仍小于序列当前值，就跳过夹具
+    并给出明确原因，而不是硬插一个必然撞主键的行。
+
+    :raises pytest.skip: 合成 id 区间与序列当前值重叠 —— 环境不干净，别硬来。
     """
     for table in _BACKUP_TABLES:
         cur.execute(f"DROP TABLE IF EXISTS public.{table}")
     cur.execute("DROP INDEX IF EXISTS public.uq_cpt_structure_event_sid_rev")
     cur.execute(f"DELETE FROM {_TABLE}")
 
-    for row in _FAKE_ROWS:
+    cur.execute(
+        "SELECT COALESCE((SELECT max(id) FROM public.cpt_structure_event), 0), "
+        "(SELECT last_value FROM pg_sequences "
+        " WHERE schemaname = 'public' AND sequencename = %s)",
+        (_SEQ_NAME,),
+    )
+    max_id, seq_value = cur.fetchone()
+    base = int(max(max_id or 0, seq_value or 0))
+    rows = [(base + i, *row[1:]) for i, row in enumerate(_FAKE_ROWS, start=1)]
+    if any(r[0] < (seq_value or 0) for r in rows):
+        pytest.skip(f"合成 id 起点 {base} 低于序列 {seq_value}，环境不干净")
+
+    for row in rows:
         cur.execute(
             f"""INSERT INTO {_TABLE}
                     (id, structure_id, event_type, status, revision, payload,
                      occurred_at, created_at)
                 VALUES (%s, %s, %s, %s, %s, jsonb_build_object('id', %s::text), %s, %s)""",
-            (row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7]),
+            row,
         )
-    # 序列推到合成 id 之外，免得迁移里任何 `nextval` 撞上合成主键
-    cur.execute(
-        f"SELECT setval('public.cpt_structure_event_id_seq', (SELECT max(id) FROM {_TABLE}), true)"
-    )
 
 
 @pytest.fixture
