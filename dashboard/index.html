@@ -294,14 +294,14 @@
         aria-labelledby="chart-panel-title"
       >
         <header class="panel-header">
-          <h2 id="chart-panel-title" class="panel-title">K 线与缠论结构</h2>
+          <h2 id="chart-panel-title" class="panel-title">K 线与走势结构</h2>
           <ul data-testid="chart-legend" class="chart-legend" aria-label="图形图例">
-            <li data-testid="legend-fractal">分型</li>
-            <li data-testid="legend-bi">笔</li>
-            <li data-testid="legend-zhongshu">笔中枢</li>
-            <li data-testid="legend-trend-type">走势类型</li>
-            <li data-testid="legend-alert" data-state="alert">alert 未收盘</li>
-            <li data-testid="legend-confirmed" data-state="confirmed">confirmed 已确认</li>
+            <li data-testid="legend-fractal">拐点（分型）</li>
+            <li data-testid="legend-bi">拐点连线（笔）</li>
+            <li data-testid="legend-zhongshu">重叠区间（中枢）</li>
+            <li data-testid="legend-trend-type" hidden>走势类型（本页未接入）</li>
+            <li data-testid="legend-alert" data-state="alert">预警：K 线未收盘</li>
+            <li data-testid="legend-confirmed" data-state="confirmed">已确认</li>
           </ul>
         </header>
 
@@ -350,13 +350,18 @@
       >
         <h2 id="structure-panel-title" class="panel-title">结构详情</h2>
 
-        <section data-testid="structure-trend-type" aria-labelledby="structure-trend-type-title">
+        <section data-testid="structure-trend-type" aria-labelledby="structure-trend-type-title" hidden>
           <h3 id="structure-trend-type-title">走势类型</h3>
-          <dl class="kv">
-            <div><dt>kind</dt><dd data-testid="trend-type-kind" data-field="overlays.trend_types[-1].kind">—</dd></div>
+          <p class="section-unavailable" data-testid="trend-type-unavailable">
+            ⚠ 这一块暂时不显示：A 股这条路径还没有接入走势类型计算
+            （后端 <code>cpt/application/a_share_snapshot.py</code> 里传的是空列表），
+            所以它过去一直显示「—」。等接入后再放出来，免得看到一个永远是空的面板。
+          </p>
+          <dl class="kv" hidden>
+            <div><dt>形态</dt><dd data-testid="trend-type-kind" data-field="overlays.trend_types[-1].kind">—</dd></div>
             <div><dt>方向</dt><dd data-testid="trend-type-direction">—</dd></div>
-            <div><dt>level</dt><dd data-testid="trend-type-level">—</dd></div>
-            <div><dt>revision</dt><dd data-testid="trend-type-revision">—</dd></div>
+            <div><dt>级别</dt><dd data-testid="trend-type-level">—</dd></div>
+            <div><dt>修订号</dt><dd data-testid="trend-type-revision">—</dd></div>
           </dl>
         </section>
 
@@ -375,7 +380,7 @@
           <dl class="kv">
             <div><dt>数量</dt><dd data-testid="zhongshu-count">0</dd></div>
             <div><dt>区间</dt><dd data-testid="zhongshu-range">—</dd></div>
-            <div><dt>level</dt><dd data-testid="zhongshu-level">—</dd></div>
+            <div><dt>级别</dt><dd data-testid="zhongshu-level" title="结构级别编号：数字越小级别越大，本页 A 股用 0">—</dd></div>
           </dl>
         </section>
 
@@ -426,7 +431,7 @@
             <div><dt>状态说明</dt><dd data-testid="signal-status-education" class="signal-education">—</dd></div>
              <div><dt>背驰</dt><dd data-testid="signal-divergence-status">—</dd></div>
              <div><dt>信号时点收盘价</dt><dd data-testid="signal-price" title="这是信号出现那一刻的收盘价，不是买入价，也不是建议价位">—</dd></div>
-            <div><dt>revision</dt><dd data-testid="signal-source-revision">—</dd></div>
+            <div><dt>结构修订号</dt><dd data-testid="signal-source-revision" title="结构每次重建都会 +1；修订号变了说明这段结构后来被重算过">—</dd></div>
             <div><dt>关联结构</dt><dd data-testid="signal-structure-id">—</dd></div>
           </dl>
           <!-- R71：三步进度。后端没给数据时整块 hidden，不显示占位文字。 -->
@@ -441,14 +446,53 @@
         </section>
          <section class="term-glossary" data-testid="term-glossary">
            <h4 class="term-glossary-title">术语速查 <small>点击展开解释</small></h4>
+           <p class="term-glossary-intro">
+             这些是本页所有面板都在用的词。右边一列是它在代码里到底对应什么 ——
+             按程序员熟悉的数据结构来理解，不必懂金融。
+           </p>
            <dl class="term-list">
-             <div class="term-item"><dt data-term="fractal">分型</dt><dd>缠论基本单位：顶分型（三根K线中间最高）和底分型（三根K线中间最低）。</dd></div>
-             <div class="term-item"><dt data-term="bi">笔</dt><dd>相邻顶底分型之间的价格段落，是缠论结构的最小走势单元。</dd></div>
-             <div class="term-item"><dt data-term="zhongshu">中枢</dt><dd>三段重叠笔构成的价格密集区，是多空力量平衡的区间。</dd></div>
-             <div class="term-item"><dt data-term="trend">走势类型</dt><dd>含至少一个中枢的笔组合，分为上涨/下跌/盘整三种。</dd></div>
-             <div class="term-item"><dt data-term="divergence">背驰</dt><dd>价格创新高/新低但力度减弱，预示趋势可能反转——这是结构信号的核心判据。</dd></div>
-             <div class="term-item"><dt data-term="firstbuy">一买</dt><dd>下跌趋势背驰后出现的第一个买点信号，预警下跌可能结束。</dd></div>
-             <div class="term-item"><dt data-term="firstsell">一卖</dt><dd>上涨趋势背驰后出现的第一个卖点信号，预警上涨可能结束。</dd></div>
+             <div class="term-item">
+               <dt data-term="fractal">分型</dt>
+               <dd><b>拐点</b>。连续三根 K 线里，中间那根最高就是「顶分型」、最低就是「底分型」。
+                 相当于在一个时间序列上做 <b>局部极值检测</b>（local extremum），
+                 找到股票走势掉头的那几根 K 线。</dd>
+             </div>
+             <div class="term-item">
+               <dt data-term="bi">笔</dt>
+               <dd><b>一条从拐点到拐点的连线</b>。把相邻的顶分型和底分型连起来，就是「笔」。
+                 相当于把价格曲线 <b>抽稀（simplify / 降采样）</b>成折线图：
+                 原始 K 线有几百根，笔只有十几条，走势轮廓一眼能看清。</dd>
+             </div>
+             <div class="term-item">
+               <dt data-term="zhongshu">中枢</dt>
+               <dd><b>几笔互相重叠出的那段区间</b>。连续三笔（或更多）的价格区间有交集，这个交集就是「中枢」。
+                 相当于在一串区间上做 <b>求交集</b>：交出来的那段说明多空双方在这里反复拉扯、没有方向。
+                 代码里它就是一个 <code>[最低, 最高]</code> 的区间对象。</dd>
+             </div>
+             <div class="term-item">
+               <dt data-term="trend">走势类型</dt>
+               <dd><b>对走势的分类标签</b>。按中枢的个数和排列方式，把走势分成盘整 / 上涨 / 下跌。
+                 相当于给一段数据打 <b>枚举 tag</b>（<code>consolidation</code> / <code>trend</code> 等）。
+                 ⚠ 本页 A 股这条路径<b>还没接入这项计算</b>，所以该面板已隐藏。</dd>
+             </div>
+             <div class="term-item">
+               <dt data-term="divergence">背驰</dt>
+               <dd><b>「又创新低，但跌得更慢了」</b>。价格比上一段更低，但下跌的力度（价格跨度、成交量）反而更小 ——
+                 相当于对两段数据做 <b>比较</b>：<code>后一段的力度 &lt; 前一段的力度</code> 且价格更极端。
+                 缠论认为这说明下跌的「动能」在衰减。⚠ 本项目实测它<b>没有预测能力</b>，
+                 只当「位置提示」用，不是买点（依据见下方实测横幅）。</dd>
+             </div>
+             <div class="term-item">
+               <dt data-term="firstbuy">一买（下跌位置提示）</dt>
+               <dd><b>下跌走势 + 出现背驰</b>时给出的位置提示。相当于一条
+                 <b>状态机</b>依次走过三步条件：① 中枢满两个 → ② 中枢二之后还在跌 →
+                 ③ 跌势里冒出一笔反弹。三步全过才叫「一买」。
+                 本页已把它改名叫「下跌位置提示」—— 它提示的是位置，不是买入信号。</dd>
+             </div>
+             <div class="term-item">
+               <dt data-term="firstsell">一卖（上涨位置提示）</dt>
+               <dd>上面那条状态机的镜像：上涨走势 + 背驰，提示高位位置。同样<b>不是卖出信号</b>。</dd>
+             </div>
            </dl>
          </section>
       </aside>
@@ -609,7 +653,7 @@
               <dt>截断</dt>
               <dd data-testid="replay-truncated" data-state="false">false</dd>
             </div>
-            <div><dt>schema</dt><dd data-testid="replay-schema-version">dashboard.v2</dd></div>
+            <div><dt>数据格式版本</dt><dd data-testid="replay-schema-version" title="前后端约定的数据结构版本号，不是你的数据版本">dashboard.v2</dd></div>
           </dl>
         </section>
       </div>

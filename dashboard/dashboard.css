@@ -792,6 +792,43 @@ button {
   opacity: 0.7;
 }
 
+/* R75：术语表顶部的一句说明 + 表内 <b>/<code> 的轻量强调。
+   刻意克制：只加粗细和等宽字体，不加背景色块，免得整块看起来像警告。 */
+.term-glossary-intro {
+  margin: var(--space-1) 0 0;
+  font-size: var(--font-size-xs);
+  line-height: 1.6;
+  color: var(--color-text-faint);
+}
+
+.term-item dd b {
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.term-item dd code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  padding: 0 2px;
+}
+
+/* R75：面板里「这块暂时不显示」的说明（走势类型未接入时用）。
+   与 .term-glossary-intro 的区别：这条是解释为什么少了东西，需要被看见，
+   所以用正文色 + 左边框，而不是灰色小字。 */
+.section-unavailable {
+  margin: var(--space-1) 0 var(--space-2);
+  padding: var(--space-2);
+  border-left: 3px solid var(--color-border-strong);
+  background: var(--color-surface-alt);
+  font-size: var(--font-size-sm);
+  line-height: 1.6;
+}
+
+.section-unavailable code {
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+}
+
 .term-list {
   display: flex;
   flex-direction: column;

@@ -82,6 +82,18 @@
     upstream_range_unavailable: "上游区间数据不可用",
   };
 
+  /* ---- R75：走势类型 kind 中文映射（原来直接把 raw 值渲染出去） ----
+     这四个值来自 cpt/domain/trend_type.py:60-64 的 _KIND_* 常量。
+     注意：A 股这条路径目前**不产出** trend_types（a_share_snapshot.py 传空元组），
+     所以面板已隐藏；这个映射是给以后接入时用的，不影响任何现有显示。 */
+  const TREND_KIND_LABELS = {
+    consolidation: "盘整（几笔来回拉扯，没有方向）",
+    trend: "趋势（有明确方向）",
+    forming: "还在成形（样本不够，暂时下不了结论）",
+    open_end: "没有收尾（数据还没走完）",
+  };
+
+
   /* ---- Phase B1/B2：数据源探活面板文案 ---- */
   // probe.status 中文映射（数据源探活）
   const PROBE_STATUS_LABELS = {
