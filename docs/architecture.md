@@ -62,7 +62,7 @@
 | `application/` | 38 | 7,872 | ✅ **已做**（R45：全层勘察 + 3 个真 bug —— DB 故障被报成「缺因子」两处 + CDN 护栏后门；R51 删 `canvas_wbt.py`；R52 占位行 WARNING + `placeholder_rows` reason。R59 审计：M22–M29 + L17/L18（历史信号 fail-closed、覆盖率不再恒 1.0、`rules.vN`、空样本 `match_rate=None`、节流表有界）。R62：A 股陈旧诊断 `stale_reason`/`stale_lag_days` 随水位行落库，`factor_missing` 接进巡检告警。R65：`signal_notify` 推送价格统一两位小数（后复权倍率保持四位，两位会把 6.3941/6.3950 抹平）、非数值不占行；「推送未送达」由 INFO 提到 WARNING。R66：推送闸门改走白名单 `_notify_users()`，测试行不再能左右全局推送范围。**R73**：加 `signal_overview`（按**票**归并最新状态跃迁的全景视图，与 `signal_statistics` 按**事件**计数是两个统计单元）。**R76**：`recommendation.py` 的 `ACTIONS` 去祈使语气（「买入结构」→「下跌位置已到」）、加 `STATUS_TEXT`/`SIGNAL_TYPE_TEXT`/`DIVERGENCE_TEXT` 三张翻译表；`signal_notify.py` 推送正文改「结构位置 / 结构区间下沿 · 上沿」；`track_points.py` 的 condition 改人话） |
 | `domain/` | 17 | 3,334 | ✅ **已做**（R30 语义契约门禁；R45 重扫 16 文件，**未发现需修问题** —— 递归/中枢/级别标签不变量实测通过。R57 更正 `min_bi_len` 量纲注释：门槛判的是去包含后根数，旧的「p80」分位取自原始根数。R59 审计：H9 修 `build_bis` 伪笔、新增 `market_time.py`（时区唯一口径，H10/L11）。**R66**：删掉 R22 起一直没接线的 `a_share_rules.t_plus_one_purchase_allowed`（恒返 `True`、零生产调用方），−11 行）**R67**：`market_time.py` 新增 `market_day_bounds()`（市场时区日界，交易决策取数复用）） |
 | `web/` | 8 | 5,631 | ✅ **已做**（R29 门禁仍成立；R45 重扫，**未发现需修问题** —— 4 处候选经真机实证均为假阳性；R51 删 `/api/canvas/wbt` 路由分支。2026-10-07 加 `trade_api.py`（对 LKL-Trade 交易机的决策投喂，与 emotion-core 同协议、**独立状态目录**），GET/POST 路由都排在加密 provider 分发之前。R59 审计：H1–H4/M1–M5（限流、符号白名单、access log、并发上限、写库副作用显式）+ M18 维护端点分发 + M5 收尾（inspection 趋势改走 `waterline_trends_bulk` 单条 SQL））**R67**：`app.py` 三个读分发补 `_handle_unexpected("GET")` 兜底、`history_days` 不再用裸 `isdigit()`；`trade_api.py` 改为 flock 串行化。**R73**：加 `/api/dashboard/signal-overview`（独立路由，不与 signal-stats 合并——两者统计单元不同）。**R76**：`track_api.py` 的 `explain_algorithm` 拆成 `status`（人话）+ `status_code`（码值）；雷达 `source_label` 改「另一段结构」；/api 免责文案去废话 |
-| `dashboard/`（前端） | 19 | 17,159 | ⚠️ R45 勘察时只被画布 D 与几个面板碰过；**R51 画布 D 已下线**。⚠️ 本行**只算顶层 js/css/html，排除 `dashboard/vendor/`**（第三方库，不是本仓产物）；体积另见下方脚注。R59：L2 去掉 `innerHTML` 逃生口、L4 入口指向 bundle、轮询并入 `CPTJob.poll`（门禁⑦）。R66：`dash-track.js` 补「历史」按钮 + `renderHistory`（`apiHistory` 此前定义后零调用），`track.html` 版本号 → `r66-track-history`，并加门禁「`async function apiXxx(` 定义了就必须有调用方」。R75：术语表改用计算机语言解释、英文键名标签（`kind`/`level`/`revision`/`schema`）全部中文化、走势类型死面板隐藏并说明原因。**R76**：追踪页表头 `BUY`/`SELL`→「下沿/上沿（结构区间）」、补 `STATUS_LABELS` 副本；`SIGNAL_TYPE_LABELS` 6 份死副本终于与 dash-core 同步（R71 漏改，页面一直还叫「一买信号」）；页脚免责套话换成事实陈述 |
+| `dashboard/`（前端） | 19 | 16,616 | ⚠️ R45 勘察时只被画布 D 与几个面板碰过；**R51 画布 D 已下线**。⚠️ 本行**只算顶层 js/css/html，排除 `dashboard/vendor/`**（第三方库，不是本仓产物）；体积另见下方脚注。R59：L2 去掉 `innerHTML` 逃生口、L4 入口指向 bundle、轮询并入 `CPTJob.poll`（门禁⑦）。R66：`dash-track.js` 补「历史」按钮 + `renderHistory`（`apiHistory` 此前定义后零调用），`track.html` 版本号 → `r66-track-history`，并加门禁「`async function apiXxx(` 定义了就必须有调用方」。R75：术语表改用计算机语言解释、英文键名标签（`kind`/`level`/`revision`/`schema`）全部中文化、走势类型死面板隐藏并说明原因。**R76**：追踪页表头 `BUY`/`SELL`→「下沿/上沿（结构区间）」、补 `STATUS_LABELS` 副本；`SIGNAL_TYPE_LABELS` 6 份死副本终于与 dash-core 同步（R71 漏改，页面一直还叫「一买信号」）；页脚免责套话换成事实陈述。**R77**：6 份共享头死副本删除，`check_quarantined_head()` 非空即失败；7 个 bundle 源文件不再部署到 web 根 |
 | `engine/` | — | — | 🚫 2026-09-25 整层删除（四个孤儿文件，R24 未恢复） |
 
 > **关于 `dashboard/` 的体积口径（2026-10-09 实测，R59 复核）**
@@ -348,6 +348,13 @@ dashboard/          前端静态产物（Nginx 从 /var/www/cpt-dashboard 提供
                         为什么不发 7 个请求：跨模块调用有 **88 处**，
                         拆成 7 个独立 IIFE 会**全部断掉**（实测
                         `startPolling is not defined`）。
+                      ※ **R77 起不再部署到 web 根**：这 7 个是源码，浏览器从不
+                        单独请求；线上只留 dashboard.bundle.js（见 deploy/README
+                        的 web 根白名单）。
+                      ※ **R77：共享头只有 dash-core.js 一份**。另外 6 个模块的
+                        `// <<<HEAD` 段是空的 —— 往里加声明会被构建脚本
+                        `SystemExit`。R45 时的 6 份副本会静默漂移（R61/R71 两次
+                        踩到，known-traps #44）。
 tests/              扁平布局：120 个 test_*.py 直接放 tests/ 下，仅一个 fixtures/
                     人工构造案例；**没有** unit/ oracle/ e2e 子目录（见 §12）
 docs/               11 份 .md（**不含** archive/；rules.md / architecture.md /

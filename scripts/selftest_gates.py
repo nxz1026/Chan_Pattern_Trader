@@ -207,6 +207,14 @@ def fx_bundle_sync(root: Path) -> tuple[str, str]:
     真 builder 的前提（照抄它的契约，不简化）：7 个 ``ORDER`` 文件**全部**要有
     ``// <<<HEAD`` / ``// <<<FUNCS`` 哨兵，且**至少一个**要有 ``// <<<TAIL``
     （缺了它直接 ``SystemExit('没有模块带 <<<TAIL')``）。
+
+    ⚠️ R77 起还有一条：**只有第一个文件的 ``<<<HEAD`` 能含声明**，其余 6 个
+    必须是空的（``check_quarantined_head`` —— 非空即 ``SystemExit``）。夹具原来
+    给每个文件都写 ``const A = 1;``，于是**第一步生成就失败**、bundle 根本没
+    产出，后面的 ``--check`` 报的是「bundle 不存在」而不是「不同步」⇒ 自检
+    把一条**真的能抓到的**门禁误判成「漏报」。夹具必须跟上线后的契约一起改。
+
+    ⚠️ 但**改源文件时仍要往 HEAD 里加声明**才是有效的探针吗？不是 —— 见下。
     """
     import re as _re
 
@@ -217,33 +225,36 @@ def fx_bundle_sync(root: Path) -> tuple[str, str]:
     )
     names = _re.findall(r'"([^"]+)"', ords[0]) if ords else []
     assert names, "读不到 builder 的 ORDER —— 夹具不能瞎猜文件清单"
-    for i, n in enumerate(names):
-        _write(
-            root / "dashboard" / n,
-            f"// <<<HEAD\nconst A = 1;\n// >>>HEAD\n"
-            f"// <<<FUNCS\nfunction fn_{i}() {{ return A; }}\n// >>>FUNCS\n"
-            # TAIL 放最后一个：builder 取「最后一个带 TAIL 的文件」。
-            + ("// <<<TAIL\nwindow.__boot = true;\n// >>>TAIL\n" if i == len(names) - 1 else ""),
+
+    def _src(i: int, *, head: str, fn_body: str) -> str:
+        # 只有 i == 0 带声明；其余文件的 HEAD 只放注释（R77 契约）。
+        head_body = head if i == 0 else "// 共享头只在 ORDER[0] 里（R77）\n"
+        tail = "// <<<TAIL\nwindow.__boot = true;\n// >>>TAIL\n" if i == len(names) - 1 else ""
+        return (
+            f"// <<<HEAD\n{head_body}// >>>HEAD\n"
+            f"// <<<FUNCS\nfunction fn_{i}() {{ {fn_body} }}\n// >>>FUNCS\n" + tail
         )
+
+    for i, n in enumerate(names):
+        _write(root / "dashboard" / n, _src(i, head="const A = 1;\n", fn_body="return A;"))
     import subprocess as _sp
 
     # 先用**真** builder 生成一份，再改源文件
-    _sp.run(
+    gen = _sp.run(
         [sys.executable, str(root / "scripts/build_dashboard_bundle.py")],
         capture_output=True,
         text=True,
     )
+    if gen.returncode != 0:
+        # 生成都失败 ⇒ 后面测的就不是这条门禁了。把原因带进期望串，
+        # 让「漏报」的报错直接指向真正的失败（而不是让排查者去猜）。
+        return "build_dashboard_bundle.py", f"夹具生成失败(rc={gen.returncode})"
     # 现在**改源文件**而不重建 ⇒ --check 必须报不同步。
     # ⚠️ 改的必须是 **FUNCS**，不能改 HEAD ——
     # builder 的 head 只取**第一个**文件（``if i == 0: h = mh.group(1)``），
     # 改第二个文件的 HEAD **不进输出** ⇒ bundle 仍然同步 ⇒ 报 OK。
     # 第一版就这么写错了，夹具自己是个假阴性。
-    _write(
-        root / "dashboard" / names[0],
-        "// <<<HEAD\nconst A = 1;\n// >>>HEAD\n"
-        "// <<<FUNCS\nfunction fn_0() { return A + 1; }\n// >>>FUNCS\n"
-        + ("// <<<TAIL\nwindow.__boot = true;\n// >>>TAIL\n" if len(names) == 1 else ""),
-    )
+    _write(root / "dashboard" / names[0], _src(0, head="const A = 1;\n", fn_body="return A + 1;"))
     return "build_dashboard_bundle.py", "不同步"
 
 

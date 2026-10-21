@@ -158,6 +158,12 @@ sudo chmod -R u=rwX,go=rX /var/www/cpt-dashboard   # X = 只给目录加执行�
 | `vendor/` 目录 | 本仓 `dashboard/vendor/`，脚本同步 |
 | `_pkg/` 目录 | **外部项目**（league/collector-cn）的发布通道，不归本仓管，见下节 |
 
+⚠️ **R77 起不再允许 `dash-core.js` / `dash-chrome.js` / `dash-structure.js` /
+`dash-signal.js` / `dash-chart.js` / `dash-alert.js` / `dash-ops.js` 这 7 个文件出现在
+web 根**。它们是 `dashboard.bundle.js` 的源文件，浏览器从不单独请求；留在公开
+目录里只会让人以为「改线上那个文件就能生效」。`FILES` 已移除，`RETIRED` 列表
+会在每次 `sync` 时把它们备份到 `/tmp/cpt-retired-dash-<时间戳>/` 再删掉。
+
 其它一切顶层条目都是**残留**，需要清理 —— 实测曾出现
 `market_a_share.js.bak-*`、根目录的 `run*.sh`、`collector-cn-*.tgz`，其中 `.tgz` 是
 采集机**整包**（含内部拓扑），放在公开 web 根等于可被遍历下载。

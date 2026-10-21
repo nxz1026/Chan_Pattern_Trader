@@ -1394,13 +1394,20 @@ A，代码做的是 B，而**没有任何门禁会红**。
 - 定位手法（值得复用）：往 bundle 里插 `window.__M.push("pre-dual")` 这类
   路标 + `window.__RC_CALLS++`，看到「只跑了 1 次、过 `pre-dual` 就没了」
   才敢断定异常被吞 —— 光看 `ERRS=[]` 会得出「没问题」的反向结论。
-- 防：共享声明一律加在 `dash-core.js` 的头；`check_head_declarations()` 在
+- 防：共享声明一律加在 `dash-core.js` 的头；`check_quarantined_head()` 在
   构建期 `SystemExit` 硬失败；`tests/test_build_dashboard_bundle.py` 钉住
   该不变量；`tests/test_dashboard_ashare_r61_render.py` 用**真 DOM** 断言
   最终文本。
 - ⚠️ 关键教训：单测读的是**源文件拼接**（`tests/conftest.py` 的
   `dashboard_js()`），它看得见那个声明 ⇒ **只跑它永远发现不了这一类**。
   丢失发生在构建，只有产物（或真浏览器）才看得见。
+- ✅ **R77 已从结构上消除**：6 个非权威模块的 `<<<HEAD` 段全部清空，只留
+  `dash-core.js` 一份。宽容版的 `check_head_declarations()`（只在「多出声明」
+  时才失败）换成 `check_quarantined_head()`（**非空即失败**，剥注释后判空）。
+  R77 删副本时 `dashboard.bundle.js` **逐字节未变** —— 反证那 6 份副本
+  从未进过产物。同族事故还发生过两次：R71 改 `SIGNAL_TYPE_LABELS` 只改了
+  权威表、R76 才补齐副本，期间页面一直显示「一买信号」—— 因为渲染走的是
+  **副本里的那个绑定**。
 
 ## 45. 只守分母、不守分子：盘前 `last=0.0` ⇒ 涨跌幅 −100%（R61 实测）
 

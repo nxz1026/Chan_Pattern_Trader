@@ -67,17 +67,22 @@ for arg in "$@"; do
   esac
 done
 
-# R59（审计 M14）更正：R45 拆分后 **index.html 只加载 dashboard.bundle.js**；
-# dash-track.js 由独立页 track.html 单独 `<script src>`。下面列表里的
-# dash-core/chrome/structure/signal/chart/alert/ops 是 bundle 的**源文件**，
-# 线上浏览器不单独加载它们，同步它们只是为了对照/调试。
+# R59（审计 M14）：R45 拆分后 **index.html 只加载 dashboard.bundle.js**。
+# R77：`dash-core/chrome/structure/signal/chart/alert/ops` 这 7 个是 bundle 的
+# **源文件**，浏览器从不单独请求它们 —— 之前也推上去「只是为了对照/调试」，
+# 结果 web 根里常驻 7 份永不被执行的 JS（其中 6 份还各带一份共享头副本，
+# 是 known-traps #44 那类静默失效的载体）。**已停止推送**，并见下方「清理」段。
 # ⚠️ 改了任何 dash-*.js 都必须重建 bundle（见下方「源与 bundle 一致性」检查）。
 FILES=(index.html track.html dashboard.css url_safety.js cpt_job.js
        canvas_registry.js canvas_b.js canvas_c.js
        market_a_share.js inspection_panel.js
-       dash-core.js dash-chrome.js dash-structure.js dash-signal.js
-       dash-chart.js dash-alert.js dash-ops.js dash-track.js
+       dash-track.js
        dashboard.bundle.js)
+
+#: R77：历史上被推到 web 根、但**浏览器从不加载**的 bundle 源文件。
+#: 留在公网目录里只会让人以为改它能生效。同步时发现即删（先备份到 /tmp）。
+RETIRED=(dash-core.js dash-chrome.js dash-structure.js dash-signal.js
+         dash-chart.js dash-alert.js dash-ops.js)
 
 [ -d "$SRC" ] || { echo "仓库里没有 $SRC" >&2; exit 1; }
 [ -d "$DEST" ] || { echo "部署目录不存在: $DEST" >&2; exit 1; }
@@ -97,6 +102,17 @@ if [ "$MODE" = "sync" ]; then
     cp -r "$SRC/vendor/." "$DEST/vendor/"
     echo "  ✓ vendor/"
   fi
+  # R77：清掉历史上推上去的 bundle 源文件（浏览器从不加载它们）。
+  # 先整份备份到 /tmp 再删 —— 可回滚，且备份路径会打出来。
+  RETIRED_BAK="/tmp/cpt-retired-dash-$(date +%Y%m%d-%H%M%S)"
+  retired_hit=0
+  for f in "${RETIRED[@]}"; do
+    [ -f "$DEST/$f" ] || continue
+    [ "$retired_hit" -eq 0 ] && { mkdir -p "$RETIRED_BAK"; retired_hit=1; }
+    cp -p "$DEST/$f" "$RETIRED_BAK/$f"
+    rm -f "$DEST/$f"
+    echo "  ✓ 已删除 $f（备份在 $RETIRED_BAK/）"
+  done
   sudo -n chown -R ubuntu:ubuntu "$DEST" 2>/dev/null || true
 fi
 

@@ -124,23 +124,21 @@ def test_trend_kind_labels_cover_every_domain_constant() -> None:
     assert not missing, f"TREND_KIND_LABELS 漏了这些形态：{sorted(missing)}"
 
 
-# ── 5. 六份副本逐字一致（构建脚本的前提） ──────────────────────────
-def test_trend_kind_labels_are_identical_in_all_copies() -> None:
-    """``dash-core.js`` 是权威定义，其余 6 份是逐字死副本。
+# ── 5. 共享表只有一份（R77 收敛后） ────────────────────────────────
+def test_trend_kind_labels_live_in_exactly_one_module() -> None:
+    """``TREND_KIND_LABELS`` 只许有**一份**定义，在 ``dash-core.js`` 里。
 
-    副本漂移的后果是打包结果取决于**文件拼接顺序**，同一个页面在不同构建下
-    显示不同文案 —— 这种 bug 极难复现，所以必须在源头钉死。
+    R77 之前这里钉的是「6 份副本逐字一致」—— 那是在**管理一个错误结构**：
+    同一张表有 7 个绑定，渲染走哪个取决于谁先声明。R71 就是改了权威表、
+    副本没跟，页面一直显示旧文案。
+
+    R77 把副本删干净，判据从「6 份一致」翻成「只有 1 份」—— 结构上不可能
+    再漂移，也就不需要维护同步纪律。
     """
-    pattern = re.compile(r"  const TREND_KIND_LABELS = \{.*?\n  \};", re.S)
-    bodies = {}
-    for name, src in _dash_scripts().items():
-        m = pattern.search(src)
-        if m:
-            bodies[name] = m.group(0)
-    assert "dash-core.js" in bodies, "权威文件 dash-core.js 里没有 TREND_KIND_LABELS"
-    assert len(bodies) >= 6, f"副本数量不对，只有 {sorted(bodies)}"
-    distinct = set(bodies.values())
-    assert len(distinct) == 1, f"副本漂移了：{sorted(bodies)}"
+    owners = [
+        name for name, src in _dash_scripts().items() if "const TREND_KIND_LABELS = {" in src
+    ]
+    assert owners == ["dash-core.js"], f"TREND_KIND_LABELS 不是恰好一份：{owners}"
 
 
 # ── 6. 面板标题不再出现缠论专有名词 ────────────────────────────────

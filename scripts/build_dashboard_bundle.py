@@ -26,6 +26,20 @@ owner 要「按功能拆分」，考虑的是**运行效率**与**维护成本**
 把 body 首尾相接。**不重排、不改写、不「顺手优化」任何一行** ——
 diff 里出现任何非搬家的改动，都是 bug。
 
+## 共享头只拼 ``ORDER[0]`` 的那份（R77 起是**唯一**一份）
+
+``dash-core.js`` 之外的 6 个模块，``// <<<HEAD`` 段必须是**空的**（只许放指路注释）。
+R45 拆分时每个模块各存了一份共享头副本，但 ``build()`` 只取 ``ORDER[0]`` 的头 ——
+另外 6 份从来没进过 bundle，是纯死代码，而且会漂移：
+
+- R61：声明只加进 ``dash-chrome.js`` 的头 ⇒ bundle 里没有 ⇒ ``ReferenceError``
+  被 ``catch`` 吞掉 ⇒ 页面无报错、后续 DOM 写入全不执行（known-traps #44）；
+- R71/R76：改了 ``dash-core.js`` 的 ``SIGNAL_TYPE_LABELS``、6 份副本没跟 ⇒
+  **渲染走的是副本里的绑定**，页面一直显示旧文案。两次都是靠人工同步才消掉。
+
+⇒ 副本全部删除，:func:`check_quarantined_head` 把「又在某个模块头里加了一句」
+钉成**构建期硬失败**。
+
 ## 用法
 
     python scripts/build_dashboard_bundle.py          # 生成
@@ -75,15 +89,8 @@ BANNER = """// dashboard.bundle.js — **自动生成，请勿手改**
 """
 
 
-_DECL = re.compile(r"^\s*(?:const|let|var|function)\s+([A-Za-z_$][\w$]*)", re.M)
-
-
-def _declared_names(head: str) -> set[str]:
-    """头段里声明的顶层名字（const/let/var/function）。
-
-    只用于比对"这个声明有没有进 bundle"，不做作用域分析。
-    """
-    return set(_DECL.findall(head))
+#: 只在 :func:`check_quarantined_head` 里用：剥掉注释再判「空」。
+_COMMENT_RE = re.compile(r"/\*.*?\*/|//[^\n]*", re.S)
 
 
 def _parts(name: str) -> tuple[str, str, str]:
@@ -95,26 +102,28 @@ def _parts(name: str) -> tuple[str, str, str]:
     return mh.group(1), mf.group(1), (mt.group(1) if mt else "")
 
 
-def check_head_declarations(name: str, head: str, authoritative_head: str) -> None:
-    """非权威模块的 ``<<<HEAD`` 不许声明权威头里没有的名字。
+def check_quarantined_head(name: str, head: str) -> None:
+    """非权威模块的 ``<<<HEAD`` 必须是**空的**（R77）。
 
-    允许其它模块的共享头与权威头有差异（拆分器复制的副本可能暂时落后），
-    但**不允许它声明权威头里没有的名字**：bundle 只拼 ORDER[0] 的
-    ``<<<HEAD``，其余模块头里的声明会被**静默丢弃**。
+    R45 拆分时，共享头（工具函数、状态文案表、常量）在每个模块里各存了一份
+    副本，bundle 只拼 :data:`ORDER` ``[0]`` 的那份 —— 其余 6 份是死代码。
+    R61 已经证明这个结构会静默吞掉声明（known-traps #44），R71/R76 又证明
+    副本会漂移（改了权威表、副本没改，页面显示的还是旧文案，因为
+    **渲染用的是副本里的那个绑定**）。
 
-    R61 实测的后果：把 SOURCE_LABELS 只加进 dash-chrome.js 的头 →
-    bundle 里没有这个声明 → renderChrome 跑到用它的那一行抛
-    ReferenceError → 被上层 ``catch`` 吞掉 → 其后所有 DOM
-    写入都不执行。页面**没有任何报错**，只是那几行永远停在初始值。
-    静默不一致是这类 bug 的唯一入口，所以这里直接失败。
+    R77 起副本全部删除，只留 ``dash-core.js`` 一份。这条检查把
+    「以后有人又在某个模块头里加了一句」变成**构建期硬失败**，
+    而不是等他上线后去猜为什么页面没变。
+
+    注释不算内容：空哨兵段只放指路注释是合法的。
     """
-    dropped = _declared_names(head) - _declared_names(authoritative_head)
-    if dropped:
+    body = _COMMENT_RE.sub("", head).strip()
+    if body:
         raise SystemExit(
-            f"{name} 的 <<<HEAD 声明了 {ORDER[0]} 权威头里没有的名字："
-            f"{sorted(dropped)} —— 这些声明会被**静默丢弃**（bundle 只拼 "
-            f"{ORDER[0]} 的头）。共享变量请加在 {ORDER[0]}，"
-            "并把各模块的头同步成一致。"
+            f"{name} 的 <<<HEAD 不是空的：{body[:120]!r}\n"
+            f"  共享声明只许加在 {ORDER[0]} 的 <<<HEAD —— 其它模块的头"
+            f"会被**静默丢弃**（bundle 只拼 {ORDER[0]} 的头）。\n"
+            f"  R77 起这里应当只剩指路注释。"
         )
 
 
@@ -124,8 +133,8 @@ def build() -> str:
         h, f, t = _parts(name)
         if i == 0:
             head = h
-        elif h.strip() != head.strip():
-            check_head_declarations(name, h, head)
+        else:
+            check_quarantined_head(name, h)
         funcs += ("\n\n" if funcs else "") + f
         if t:
             tail = t
