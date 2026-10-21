@@ -37,6 +37,10 @@
     const { body } = await requestJson(`${DASHBOARD_BASE()}/signal-overview?${params.toString()}`);
     remoteOps.signalOverview = isObject(body) ? body : null;
     renderSignalOverview(state.snapshot);
+    // R85（B）：同一份数据，第一屏只放一句话；不放表格（表格在 event-panel）。
+    buildMarketStepBanner(isObject(remoteOps.signalOverview) && isObject(remoteOps.signalOverview.overview)
+      ? remoteOps.signalOverview.overview
+      : null);
   }
 
   /* ---------------- R27 结构事件流 ---------------- */

@@ -156,6 +156,11 @@ def test_domain_still_has_no_third_party_imports() -> None:
         # A 股时区（审计 H10/L11）。``zoneinfo`` 自 3.9 起就是标准库，
         # 原先这份"手抄白名单"只是没收进来。
         "zoneinfo",
+        # R86：``cpt/domain/intraday_rules.py`` 用 ``Decimal`` + ``ROUND_HALF_UP``
+        # 算涨停价 —— 必须精确到分，浮点会把 ``10.0 * 1.1`` 算成
+        # ``11.000000000000002``，再和现价 ``>=`` 比就会漏判涨停。
+        # ``decimal`` 同样是标准库。
+        "decimal",
     }
     bad: list[str] = []
     for path in sorted(DOMAIN.glob("*.py")):

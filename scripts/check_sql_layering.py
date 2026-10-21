@@ -55,7 +55,11 @@ import tokenize
 from pathlib import Path
 
 ALLOWED_DIRS = frozenset({"adapters", "storage"})
-FORBIDDEN_DIRS = ("domain", "application", "web", "llm")
+#: 不允许写 SQL 的层。R86：加了 ``backtest`` —— 回测层是 R70 之后新建的，
+#: 它一出生就带着一条 SQL（``cpt/backtest/panel.py`` 的批量面板加载），而
+#: 旧门禁只扫这四层，于是它**不受检查**。新层不进门禁就是新漏洞：下一个
+#: 往 ``backtest`` 里塞 SQL 的人不会知道自己越了界。
+FORBIDDEN_DIRS = ("domain", "application", "web", "llm", "backtest")
 
 #: execute / executemany 的调用点
 #:
@@ -78,6 +82,17 @@ _SQL_START = re.compile(
 _SQL_LOOKAHEAD = 300
 
 
+#: 变量形式的 SQL（``cur.execute(sql)``）。R86 实测 ``panel.py`` 用三引号
+#: 拼好再传变量，``_EXEC_CALL`` 后 300 字符里没有 SQL 关键字 ⇒ **完全漏报**。
+#: 判据：整个文件里既有 execute( 调用、又有 SQL 关键字字面量，就算是越层。
+#: 这会误伤「文件里恰好有个不相关的 execute 与一处示例 SQL」，但代价只是
+#: 让作者把 SQL 挪走 —— 与漏报相比这是正确的方向。
+_FILE_SQL_LITERAL = re.compile(
+    r"(?:SELECT\s[\w*,\s.()]+FROM\s|INSERT\s+INTO\s|DELETE\s+FROM\s|UPDATE\s+\w+\s+SET\s)",
+    re.IGNORECASE,
+)
+
+
 def _scan_file(path: Path) -> list[tuple[int, str]]:
     """返回该文件里「execute 的参数含 SQL 字面量」的 (行号, 原文片段)。"""
     try:
@@ -95,6 +110,15 @@ def _scan_file(path: Path) -> list[tuple[int, str]]:
         line_no = cleaned.count("\n", 0, call.start()) + 1
         original = raw_lines[line_no - 1].strip() if line_no - 1 < len(raw_lines) else ""
         hits.append((line_no, original[:100]))
+
+    # 兜底：变量形式的 SQL。整份文件里既有 execute( 又有 SQL 关键字 ⇒ 越层，
+    # 报在第一个 execute 调用上（那是写 SQL 的人真正要去改的地方）。
+    if not hits and _EXEC_CALL.search(cleaned) and _FILE_SQL_LITERAL.search(cleaned):
+        first = _EXEC_CALL.search(cleaned)
+        assert first is not None
+        line_no = cleaned.count("\n", 0, first.start()) + 1
+        original = raw_lines[line_no - 1].strip() if line_no - 1 < len(raw_lines) else ""
+        hits.append((line_no, f"{original[:80]}  ← 变量形式的 SQL，同文件另有 SQL 字面量"))
     return hits
 
 
@@ -175,7 +199,7 @@ def main(argv: list[str]) -> int:
         allowed = "/".join(sorted(ALLOWED_DIRS))
         print(f"\n✗ SQL 越层：SQL 只允许出现在 cpt/{allowed}", file=sys.stderr)
         print(
-            "  （cpt/domain、cpt/application、cpt/web、cpt/llm 都不该直接写 SQL）\n",
+            "  （cpt/domain、cpt/application、cpt/web、cpt/llm、cpt/backtest 都不该直接写 SQL）\n",
             file=sys.stderr,
         )
         for rel, line_no, text in violations:

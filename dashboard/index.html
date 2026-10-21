@@ -175,6 +175,21 @@
       </div>
     </section>
 
+    <!-- R85（B）：第一屏第一件事 —— 全市场走到哪一步。
+         放在 dashboard-body 之前，因为用户打开页面第一个问题不是「这只票多少价」，
+         而是「今天有没有该看的票」。数据来自 /api/dashboard/signal-overview。 -->
+    <section
+      data-testid="market-step-banner"
+      class="panel market-step-banner"
+      aria-labelledby="market-step-title"
+      hidden
+    >
+      <h2 id="market-step-title" class="panel-title">今天该不该看盘</h2>
+      <p data-testid="market-step-headline" class="market-step-headline">—</p>
+      <p data-testid="market-step-numbers" class="market-step-numbers">—</p>
+      <p data-testid="market-step-action" class="hint">—</p>
+    </section>
+
     <div data-testid="dashboard-body" class="dashboard-body">
       <aside
         data-testid="market-overview"

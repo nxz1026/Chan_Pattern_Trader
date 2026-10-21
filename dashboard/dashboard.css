@@ -2175,3 +2175,26 @@ noscript p {
 .cpt-rec-history-list li[data-legacy="1"] .st { color: var(--color-degraded); }
 .cpt-rec-history-list .tag { font-size: 10px; border: 1px solid currentColor; border-radius: 3px; padding: 0 3px; opacity: .8; }
 .cpt-rec-history-list li[data-legacy="1"] .tag { color: var(--color-degraded); }
+
+/* R85（B）：第一屏「今天该不该看盘」横幅。
+   放在 dashboard-body 之前，所以样式上要独立成块、左右铺满，
+   不能沿用 aside 里的窄栏宽度。 */
+.market-step-banner {
+  margin: 0 0 var(--space-4, 16px);
+  border-left: 4px solid var(--color-accent, #4a90d9);
+  background: var(--color-surface-alt);
+}
+.market-step-banner[hidden] {
+  display: none;
+}
+.market-step-headline {
+  margin: 0 0 6px;
+  font-size: 1.05rem;
+  font-weight: 600;
+}
+.market-step-numbers {
+  margin: 0 0 8px;
+  font-family: var(--font-mono);
+  font-size: 0.9rem;
+  color: var(--color-text-muted, #8a8f98);
+}

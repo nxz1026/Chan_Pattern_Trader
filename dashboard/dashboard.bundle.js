@@ -3392,6 +3392,45 @@
   }
 
 
+  /* R85（B）：第一屏横幅 —— 「全市场现在走到哪一步」。
+     与下面 event-panel 里的 signal-overview 面板**读同一份数据**
+     （remoteOps.signalOverview），但只回答一个问题：**现在能不能动手，为什么不能**。
+     第一屏不放表格：表格在 event-panel，这里只放一句话 + 一行数字 + 一句该做什么。 */
+  function buildMarketStepBanner(ov) {
+    const wrap = q("[data-testid=market-step-banner]");
+    if (!wrap) return;
+    const dist = isObject(ov) && isObject(ov.step_distribution) ? ov.step_distribution : null;
+    if (!dist) {
+      wrap.hidden = true;
+      return;
+    }
+    const counts = isObject(dist.step_index_counts) ? dist.step_index_counts : {};
+    const n = (k) => Number(counts[k]) || 0;
+    const total = ["0", "1", "2", "3", "unknown"].reduce((a, k) => a + n(k), 0);
+    const standing = Number(dist.standing) || 0;
+    const unknown = Number(dist.no_reason_but_blocked) || 0;
+    const done3 = n("3");
+
+    wrap.hidden = false;
+    setText("[data-testid=market-step-headline]", standing
+      ? `全市场 ${total} 只里，${standing} 只站在位置上（三步走完或差最后一步）`
+      : `全市场 ${total} 只，没有一只站在位置上`);
+    setText("[data-testid=market-step-numbers]",
+      `三步全走完 ${done3} 只 · 差最后一步 ${n("2")} 只 · 卡在第二步 ${n("1")} 只` +
+      (unknown ? ` · 不确定走到哪 ${unknown} 只` : ""));
+
+    // 该做什么：**只描述观察动作**，不给买卖指令（R76 红线）。
+    let action;
+    if (standing === 0) {
+      action = "现在什么都不用做：没有一只票走到位置。等有票进入「差最后一步」再来看。";
+    } else {
+      action = `可以在下面「信号全景」里看这 ${standing} 只具体是哪几只、卡在哪。` +
+        "记住 R70 的实测：这类位置之后 20 日平均收益 +0.02%、胜率 46% —— 它是位置提示，不是买点。";
+    }
+    setText("[data-testid=market-step-action]", action);
+  }
+
+
   function renderSignalOverview() {
     const panel = q("[data-testid=event-panel]");
     if (!panel) return;
@@ -5074,6 +5113,10 @@
     const { body } = await requestJson(`${DASHBOARD_BASE()}/signal-overview?${params.toString()}`);
     remoteOps.signalOverview = isObject(body) ? body : null;
     renderSignalOverview(state.snapshot);
+    // R85（B）：同一份数据，第一屏只放一句话；不放表格（表格在 event-panel）。
+    buildMarketStepBanner(isObject(remoteOps.signalOverview) && isObject(remoteOps.signalOverview.overview)
+      ? remoteOps.signalOverview.overview
+      : null);
   }
 
   /* ---------------- R27 结构事件流 ---------------- */
