@@ -190,6 +190,17 @@ jobs:
       # 修法是写批之前把序列推到 max(id)；这道门禁防止自愈被删、被挪到写入之后。
       - name: bigserial sequences stay aligned
         run: python scripts/check_bigserial_sequence.py
+      # 门禁⑰（R74 新增）：**解释器要从任意目录都能导入本仓**。
+      # 2026-10-20 起 cpt-dashboard-ashare.service 与 watchlist 汇总 cron
+      # 连续两天每天炸在同一句 `ModuleNotFoundError: No module named 'cpt'` ——
+      # 根因是 .venv 的 editable finder 指向了已删除的
+      # /home/ubuntu/work/.morning/Chan_Pattern_Trader/cpt。
+      # 它之所以两周没被发现：开发和测试一律带 PYTHONPATH=.，服务用
+      # `python -m`（CWD 进 sys.path），只有 cron/systemd 直接跑脚本路径
+      # 时才暴露。所以这道门禁必须在**仓外 + 无 PYTHONPATH** 下实测 import，
+      # 不能用 grep 文件路径 —— 那种检查改一行字符串就能骗过。
+      - name: interpreter can import the repo from anywhere
+        run: python scripts/check_editable_import.py
       # 门禁⑬（R55 新增）：测试的结论**不许是本机环境的函数**。
       # R49 的两个失败（沙箱没注入 url_safety.js / 把「本机没装 Wind」当前提）
       # 是**第二类**静默失效：断言依赖本机环境 —— 本机绿、CI 红，或反之，

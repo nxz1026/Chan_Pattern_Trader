@@ -2067,3 +2067,62 @@ cur.execute(f"SELECT setval('{sequence}', %s, true)", (max_id,))
 
 **回归钉子**：`tests/test_structure_event_store.py`（`ensure_id_sequence` 7 条）
 + `scripts/check_bigserial_sequence.py` + 自检夹具。
+
+
+## 61. editable 安装指向已删除的路径：**只有 cron / systemd 会炸**（R74 实测，连续两天）
+
+**现象**：两个作业每天按时触发、每天失败在同一句：
+
+```
+ModuleNotFoundError: No module named 'cpt'
+```
+
+- `cpt-dashboard-ashare.service`（timer 每天 08:00 UTC）失败 2 天，最后一次成功 10-19；
+- `watchlist-daily-summary` cron（10:10）失败 2 天；
+- 而同一台机器上 `pytest`、`python -m cpt.web`、所有手工跑批**全部正常**。
+
+**根因**：`.venv` 的 editable 安装指向了一个已经不存在的目录。
+
+```
+.venv/lib/python3.14/site-packages/__editable___cpt_0_0_0_finder.py:9
+MAPPING: dict[str, str] = {'cpt': '/home/ubuntu/work/.morning/Chan_Pattern_Trader/cpt'}
+                                          ^^^^^^^^^^^^^^^^^^^^^ 该目录不存在
+```
+
+finder 文件 mtime 2026-10-14；`/home/ubuntu/work/.morning/` 早已删除，
+唯一活着的仓库副本是 `/home/ubuntu/DSH/Chan_Pattern_Trader`。
+
+**为什么两周没被发现**（三层遮蔽，缺一层都不会漏）：
+
+| # | 遮蔽物 | 为什么绕过故障 |
+|---|---|---|
+| 1 | 测试与跑批一律写 `PYTHONPATH=.` | 显式把仓根塞进 `sys.path`，editable 安装根本不参与 |
+| 2 | 服务用 `python -m cpt.web` | `-m` 会把 **CWD** 放进 `sys.path[0]`，而 CWD 恰好是仓根 |
+| 3 | cron / systemd 用 `python /abs/path/scripts/x.py` | `sys.path[0]` 是**脚本所在目录**（`scripts/`），CWD 不参与 —— 只有它们炸 |
+
+**一分钟复现**（这条命令要成为习惯）：
+
+```
+cd /tmp && env -u PYTHONPATH /home/ubuntu/DSH/Chan_Pattern_Trader/.venv/bin/python -c "import cpt"
+```
+
+**修法**（在仓根执行，`--no-deps` 避免动依赖）：
+
+```
+.venv/bin/python -m pip install -e . --no-deps
+```
+
+**教训（通用）**：**带 `PYTHONPATH=` 的验证都绕开了真实故障路径**。
+凡是「服务能跑但定时任务跑不了」的分歧，第一件事是**从仓外的目录、不带任何
+环境变量**再 import 一次 —— 而不是去看脚本日志里那句被反复刷屏的报错。
+
+**门禁⑰**（`scripts/check_editable_import.py`）：在**仓外临时目录 + 清空
+`PYTHONPATH`** 的条件下，用仓内解释器跑 `find_spec('cpt')`，要求成功**且落点
+在本仓内**（防止导进了另一份旧 clone —— 那正是本 bug 的形态：import 不报错，
+只是导错地方）。判据用子进程实测，**不用 grep 路径**，因为改一行字符串就能骗过
+grep。自检夹具 `fx_editable_import` 在临时仓库里造「有 `cpt/`、有解释器、
+但这解释器不认识它」的局面 —— 证明门禁**能红**。
+
+**同类隐患**：`scripts/factor_backfill.py` 也缺 `sys.path` 引导（当前无调度器
+引用它，接上必炸）。凡是要被 cron / systemd 直接执行的脚本，都不该依赖
+`PYTHONPATH` 或 CWD。

@@ -440,6 +440,36 @@ def fx_bigserial_sequence(root: Path) -> tuple[str, str]:
     return "check_bigserial_sequence.py", "晚于 executemany"
 
 
+def fx_editable_import(root: Path) -> tuple[str, str]:
+    """⑰ 导入可用性：造一个「.venv 装了 cpt 但导不进去」的仓。
+
+    本 bug 的真实形态是**报错和结果都没有**——`cpt` 目录就在仓根躺着、
+    `pip list` 里也写着 `cpt 0.0.0`，但 editable finder 指向了一个已删除的
+    路径，于是 ``import cpt`` 只有从仓外才失败。所以夹具要造的正是这个局面：
+
+    - 仓里有 `cpt/`（看起来装好了）；
+    - 仓里有 `.venv/bin/python`（解释器在位）；
+    - 但这个解释器**没被配置过**去认识这里的 `cpt/`。
+
+    满足这三条时，门禁必须报「仓外目录、无 PYTHONPATH 时 import cpt 失败」。
+    任何一条不满足（比如门禁悄悄用了仓内 CWD）都会漏报。
+    """
+    # 解释器：把真解释器的**二进制**复制一份并命名成 python。
+    # ⚠️ 不能软链整个 bin 目录：本机 /usr/bin 下只有 python3.14，
+    # 没有 python 这个名字，链过去就是个断链，门禁只会报「解释器不存在」。
+    base = Path(getattr(sys, "_base_executable", sys.executable)).resolve()
+    bin_dir = root / ".venv" / "bin"
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    py = bin_dir / "python"
+    py.write_bytes(base.read_bytes())
+    py.chmod(0o755)
+    # 仓里有 cpt/，但没任何东西把它挂进 sys.path
+    pkg = root / "cpt"
+    pkg.mkdir()
+    _write(pkg / "__init__.py", "")
+    return "check_editable_import.py", "仓外目录、无 PYTHONPATH 时 import cpt 失败"
+
+
 FIXTURES = {
     "check_doc_drift.py": fx_doc_drift,
     "check_all_claims.py": fx_all_claims,
@@ -458,6 +488,7 @@ FIXTURES = {
     "check_value_plumbing.py": fx_value_plumbing,
     "check_value_plumbing.py#R4": fx_value_plumbing_null_guard,
     "check_bigserial_sequence.py": fx_bigserial_sequence,
+    "check_editable_import.py": fx_editable_import,
 }
 
 #: 这些门禁的夹具必须在**真实仓库**里跑，而不是临时目录。
