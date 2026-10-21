@@ -164,7 +164,9 @@ def first_buy_progress(
         "evidence": {...}}`` 的只读字典。``steps`` 恒为三步、顺序固定。
     """
     if facts is None:
-        steps = [{"id": sid, "title": _STEP_TITLES[sid], "state": STEP_PENDING} for sid in _STEP_IDS]
+        steps = [
+            {"id": sid, "title": _STEP_TITLES[sid], "state": STEP_PENDING} for sid in _STEP_IDS
+        ]
         return {
             "steps": steps,
             "explain": "向上走势：一买只对下跌走势有意义，这里不评估。",

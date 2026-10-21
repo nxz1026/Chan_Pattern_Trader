@@ -20,6 +20,7 @@ from typing import Any
 
 from cpt.domain.market_time import market_day_bounds
 from cpt.domain.models import Signal
+from cpt.storage.structure_event_store import ensure_sequence_at
 
 _LOG = logging.getLogger(__name__)
 
@@ -35,6 +36,11 @@ __all__ = [
 
 #: 失效原因在 ``center_ids`` 里的前缀记号（R71，见 :func:`record_signal_event`）。
 _REASON_MARKER = "reason:"
+
+#: ``id`` 是 ``bigserial``（迁移 ``2026-10-01_r21_signal_event.sql:36``），
+#: 序列落后于 ``max(id)`` 时的自愈参数（见 ``ensure_sequence_at``）。
+_ID_TABLE = "public.cpt_signal_event"
+_ID_SEQUENCE = "public.cpt_signal_event_id_seq"
 
 
 class SignalEventError(RuntimeError):
@@ -274,6 +280,10 @@ def record_signal_event(
                 # 否则「已知原因」永远不会覆盖「原因未知」。
                 if not always_record_reason or current_reason == reason_code:
                     return False
+            # 序列自愈：与 cpt_structure_event 同一个病（R72）。
+            # 放在 INSERT 之前意味着「确实要写」才付出这两条查询 —— 上面已早退的
+            # 重复跃迁不花这个钱。放锁内是为了不和并发写入者抢同一把序列。
+            ensure_sequence_at(conn, table=_ID_TABLE, sequence=_ID_SEQUENCE)
             cur.execute(
                 """INSERT INTO public.cpt_signal_event
                      (signal_id, code, signal_type, level, structure_id,

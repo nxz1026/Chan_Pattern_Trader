@@ -43,7 +43,11 @@ def test_progress_does_not_enter_the_signal_dataclass() -> None:
     progress = first_buy_progress(_F(), segment_status="down")
     snapshot = build_dashboard_snapshot_v2(RulesConfig(), [], signal_progress=progress)
     assert snapshot["signal"] is None
-    assert "signal_progress" not in snapshot["summary"]["signal"] if snapshot["summary"]["signal"] else True
+    assert (
+        "signal_progress" not in snapshot["summary"]["signal"]
+        if snapshot["summary"]["signal"]
+        else True
+    )
 
 
 def test_frontend_reads_progress_from_summary_path() -> None:

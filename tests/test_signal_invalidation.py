@@ -11,7 +11,6 @@
 from __future__ import annotations
 
 import pytest
-
 from cpt.application.signal_invalidation import (
     REASON_CODES,
     REASON_TEXT,
@@ -64,9 +63,7 @@ def test_structural_reason_beats_previous_invalidated() -> None:
 def test_previous_invalidated_only_when_structure_is_fine() -> None:
     """三条件都满足却仍作废 —— 此时才轮到「终态不回退」这个解释。"""
     assert (
-        classify_invalidation(
-            trend_direction=-1, facts=_Facts(), previous_status="invalidated"
-        )
+        classify_invalidation(trend_direction=-1, facts=_Facts(), previous_status="invalidated")
         == "previous_invalidated"
     )
 
@@ -106,9 +103,7 @@ def test_payload_shape_and_none_on_no_invalidation() -> None:
 
 def test_payload_evidence_says_null_when_facts_missing() -> None:
     """事实缺失时证据字段必须是 ``None``（不知道），不能填 ``False``（当成没满足）。"""
-    payload = invalidation_payload(
-        trend_direction=1, facts=None, previous_status=None
-    )
+    payload = invalidation_payload(trend_direction=1, facts=None, previous_status=None)
     assert payload is not None
     assert payload["reason"] == "not_in_downtrend"
     assert payload["evidence"]["has_two_centers"] is None
@@ -140,7 +135,9 @@ class _StubCursor:
         return None
 
     def inserts(self) -> list[tuple[str, object]]:
-        return [(sql, p) for sql, p in self.statements if "INSERT INTO public.cpt_signal_event" in sql]
+        return [
+            (sql, p) for sql, p in self.statements if "INSERT INTO public.cpt_signal_event" in sql
+        ]
 
 
 class _StubConn:
@@ -203,9 +200,7 @@ def test_same_reason_is_not_written_twice() -> None:
     """同原因重复评估不该每轮刷一行。"""
     from cpt.storage.signal_event_store import record_signal_event
 
-    conn = _StubConn(
-        latest=("invalidated", ["cn:zhongshu:5:1", "reason:not_enough_centers"])
-    )
+    conn = _StubConn(latest=("invalidated", ["cn:zhongshu:5:1", "reason:not_enough_centers"]))
     wrote = record_signal_event(
         conn,
         _signal("invalidated"),
@@ -239,14 +234,19 @@ def test_non_invalidated_transition_unchanged() -> None:
     from cpt.storage.signal_event_store import record_signal_event
 
     conn = _StubConn(latest=("confirmed", []))
-    wrote = record_signal_event(conn, _signal("confirmed"), "confirmed", "000006", 1_700_000_000_000)
+    wrote = record_signal_event(
+        conn, _signal("confirmed"), "confirmed", "000006", 1_700_000_000_000
+    )
     assert wrote is False
 
 
 def test_reason_from_center_ids_roundtrip() -> None:
     from cpt.storage.signal_event_store import reason_from_center_ids
 
-    assert reason_from_center_ids(["cn:zhongshu:5:1", "reason:no_divergence_leg"]) == "no_divergence_leg"
+    assert (
+        reason_from_center_ids(["cn:zhongshu:5:1", "reason:no_divergence_leg"])
+        == "no_divergence_leg"
+    )
     assert reason_from_center_ids(["cn:zhongshu:5:1"]) is None
     assert reason_from_center_ids([]) is None
     assert reason_from_center_ids(None) is None

@@ -25,6 +25,7 @@ class FakeCursor:
     def __init__(self, conn: FakeConn) -> None:
         self._conn = conn
         self.rowcount = 0
+        self._fetched: list[tuple] = []
 
     def __enter__(self) -> FakeCursor:
         return self
@@ -35,11 +36,15 @@ class FakeCursor:
     def execute(self, sql: str, params: tuple = ()) -> None:
         self._conn.executed.append((sql, params))
         self._conn.rows = list(self._conn.next_rows)
+        self._fetched = list(self._conn.next_rows)
 
     def executemany(self, sql: str, rows: list[tuple]) -> None:
         self._conn.executed.append((sql, rows))
         self.rowcount = len(rows)
         self._conn.written.extend(rows)
+
+    def fetchone(self) -> tuple | None:
+        return self._fetched[0] if self._fetched else None
 
     def fetchall(self) -> list[tuple]:
         return list(self._conn.rows)
@@ -126,13 +131,22 @@ def test_empty_batch_never_touches_storage() -> None:
 # --------------------------------------------------------------------------- #
 
 
+def _insert_call(conn: FakeConn) -> tuple[str, list[tuple]]:
+    """取出 ``executemany`` 那次调用（前面还有序列自愈的探测查询）。"""
+    for sql, payload in conn.executed:
+        if "INSERT INTO public.cpt_structure_event" in sql:
+            assert isinstance(payload, list)
+            return sql, payload
+    raise AssertionError("没有发出 INSERT：append_events 可能在序列探测处提前返回了")
+
+
 def test_append_writes_all_columns() -> None:
     conn = FakeConn()
     state = _state()
     events = diff_states({}, [state])
     assert store.append_events(conn, events) == 1
 
-    sql, rows = conn.executed[0]
+    sql, rows = _insert_call(conn)
     columns = sql[sql.index("(") + 1 : sql.index(")")]
     assert len(columns.split(",")) == 6
     assert len(rows[0]) == 6
@@ -147,9 +161,9 @@ def test_append_converts_epoch_ms_to_timestamp() -> None:
         conn,
         [StructureEvent("created", "bi:5:1", 1, {}, 1_700_000_000_000)],
     )
-    _sql, rows = conn.executed[0]
+    sql, rows = _insert_call(conn)
     assert rows[0][5] == 1_700_000_000_000
-    assert "to_timestamp(" in conn.executed[0][0]
+    assert "to_timestamp(" in sql
 
 
 def test_append_swallows_db_error() -> None:
@@ -325,3 +339,122 @@ def test_timeline_clamps_limit(limit: int) -> None:
     conn = FakeConn()
     store.timeline(conn, "bi:5:1", limit=limit)
     assert 1 <= conn.executed[0][1][1] <= 500
+
+
+# --------------------------------------------------------------------------- #
+# ensure_id_sequence：序列落后于 max(id) 的自愈
+# --------------------------------------------------------------------------- #
+# 生产上真实撞过两次（2026-10-20 / 10-21）：
+#   psycopg.errors.UniqueViolation: duplicate key value violates unique
+#   constraint "cpt_structure_event_pkey" / DETAIL: Key (id)=(900008) already exists
+# 根因是有代码带 id 显式写入（迁移 INSERT...SELECT id、测试 setval 回滚），
+# 一旦超过序列当前值，后续每次 nextval 都撞主键，且**不会自愈**。
+
+
+class SeqConn:
+    """按 SQL 内容分发结果的桩：pg_sequences / max(id) / setval 各回各的。"""
+
+    def __init__(
+        self,
+        *,
+        last_value: int | None,
+        max_id: int | None,
+        sequence_exists: bool = True,
+    ) -> None:
+        self.last_value = last_value
+        self.max_id = max_id
+        self.sequence_exists = sequence_exists
+        self.statements: list[tuple[str, Any]] = []
+
+    def cursor(self) -> SeqCursor:
+        return SeqCursor(self)
+
+
+class SeqCursor:
+    def __init__(self, conn: SeqConn) -> None:
+        self._conn = conn
+        self._result: tuple | None = None
+
+    def __enter__(self) -> SeqCursor:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        pass
+
+    def execute(self, sql: str, params: tuple = ()) -> None:
+        self._conn.statements.append((sql, params))
+        if "pg_sequences" in sql:
+            # 序列不存在时 PG 返回零行；存在但无 SELECT 权限时 last_value 为 NULL
+            self._result = (self._conn.last_value,) if self._conn.sequence_exists else None
+        elif "max(id)" in sql:
+            self._result = (self._conn.max_id,)
+        elif "setval" in sql:
+            self._result = (params[0],)
+        else:  # pragma: no cover — 出现未预期的 SQL 就红
+            raise AssertionError(f"未预期的 SQL: {sql}")
+
+    def fetchone(self) -> tuple | None:
+        return self._result
+
+
+def test_ensure_id_sequence_pushes_when_lagging() -> None:
+    """last_value < max(id) ⇒ setval 到 max(id)，返回值是新值。"""
+    conn = SeqConn(last_value=900_009, max_id=903_138)
+    assert store.ensure_id_sequence(conn) == 903_138  # type: ignore[arg-type]
+
+    setval = [(sql, p) for sql, p in conn.statements if "setval" in sql]
+    assert len(setval) == 1
+    sql, params = setval[0]
+    assert "public.cpt_structure_event_id_seq" in sql
+    assert params == (903_138,)
+    # 第三参必须是 true（下一个 nextval 返回 max+1），写成 false 会重发一个已用号
+    assert ", true)" in sql
+
+
+def test_ensure_id_sequence_is_noop_when_already_ahead() -> None:
+    """已对齐就不写 —— 不然每批都去拿序列上的锁。"""
+    conn = SeqConn(last_value=903_138, max_id=903_138)
+    assert store.ensure_id_sequence(conn) == 0  # type: ignore[arg-type]
+    assert not [s for s, _ in conn.statements if "setval" in s]
+
+
+def test_ensure_id_sequence_noop_on_empty_table() -> None:
+    """空表没有 max(id)，别 setval —— 也从不用 NULL 调 setval。"""
+    conn = SeqConn(last_value=1, max_id=None)
+    assert store.ensure_id_sequence(conn) == 0  # type: ignore[arg-type]
+    assert not [s for s, _ in conn.statements if "setval" in s]
+
+
+def test_ensure_id_sequence_ignores_missing_sequence() -> None:
+    """序列不存在（迁移没跑）时早退，不自作主张建 —— 那不是本函数该修的。"""
+    conn = SeqConn(last_value=None, max_id=100, sequence_exists=False)
+    assert store.ensure_id_sequence(conn) == 0  # type: ignore[arg-type]
+    assert not [s for s, _ in conn.statements if "setval" in s]
+
+
+def test_ensure_id_sequence_treats_null_last_value_as_lagging() -> None:
+    """有 USAGE 无 SELECT 权限时 pg_sequences.last_value 是 NULL。
+
+    这时按「可能落后」处理：多做一次无效 setval 的代价，远小于漏修后每次
+    跑批都 UniqueViolation。
+    """
+    conn = SeqConn(last_value=None, max_id=903_138)
+    assert store.ensure_id_sequence(conn) == 903_138  # type: ignore[arg-type]
+    assert [s for s, _ in conn.statements if "setval" in s]
+
+
+def test_append_events_calls_ensure_before_insert() -> None:
+    """自愈必须在 INSERT 之前 —— 撞了再修，这批已经废了还得重跑。"""
+    conn = FakeConn()
+    store.append_events(conn, [StructureEvent("created", "bi:5:1", 1, {}, 1_700_000_000_000)])
+    statements = [sql for sql, _ in conn.executed]
+    seq_at = next(i for i, s in enumerate(statements) if "pg_sequences" in s)
+    insert_at = next(i for i, s in enumerate(statements) if "INSERT INTO" in s)
+    assert seq_at < insert_at
+
+
+def test_append_events_does_not_commit() -> None:
+    """store 层不 commit —— 事务边界归调用方（序列自愈也不能例外）。"""
+    conn = FakeConn()
+    store.append_events(conn, [StructureEvent("created", "bi:5:1", 1, {}, 1_700_000_000_000)])
+    assert conn.commits == 0

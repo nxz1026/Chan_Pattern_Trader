@@ -75,6 +75,10 @@ class FakeConn:
             def fetchall(self) -> list[tuple]:
                 return []
 
+            def fetchone(self) -> tuple | None:
+                # 序列自愈的探测查询：None = 序列不存在 ⇒ 自愈早退（R72）
+                return None
+
         return C()
 
     def commit(self) -> None:

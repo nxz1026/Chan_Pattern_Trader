@@ -408,6 +408,38 @@ def fx_value_plumbing_null_guard(root: Path) -> tuple[str, str]:
     return "check_value_plumbing.py", "[note] R4"
 
 
+def fx_bigserial_sequence(root: Path) -> tuple[str, str]:
+    """⑯ 序列自愈：造一个「自愈被挪到 INSERT 之后」的错例。
+
+    R72 的病是 ``UniqueViolation: Key (id)=(900008) already exists``，
+    不会自愈、每次跑批都炸。修法是在写批之前把序列推到 ``max(id)``。
+
+    这里把 ``append_events`` 里 ``ensure_id_sequence(conn)`` 那一行
+    **挪到 executemany 之后** —— 语义上等于「撞了再修」，这批已经废了。
+    R1（自愈必须在写入之前）必须报红。
+
+    ⚠️ 只改临时目录里的副本，真实仓库一个字节都不动。
+    """
+    # 脚本副本已由 run_one 拷进临时仓库的 scripts/，但 store 源码是我们自己写的：
+    # 必须读**真实仓库**那份来当底稿，否则临时目录里没有 cpt/ 可改。
+    store = root / "cpt/storage/structure_event_store.py"
+    src = (ROOT / "cpt/storage/structure_event_store.py").read_text(encoding="utf-8")
+    lines = src.splitlines(keepends=True)
+    heal_at = next(i for i, ln in enumerate(lines) if ln.strip() == "ensure_id_sequence(conn)")
+    heal_line = lines.pop(heal_at)
+    # 挪到 executemany 调用**结束之后**（``return len(rows)`` 那一行之前）。
+    # ⚠️ 不能按 VALUES 那行插入 —— 那段是跨行字符串字面量，插进去会把
+    # 字面量切成两半，源码直接语法错误，门禁崩在 ast.parse 上，
+    # 自检看到的是 traceback 而不是「晚于 executemany」，于是误报「漏报」。
+    ret_at = next(i for i, ln in enumerate(lines) if "return len(rows)" in ln)
+    indent = lines[ret_at][: len(lines[ret_at]) - len(lines[ret_at].lstrip())]
+    lines.insert(ret_at, indent + heal_line.strip() + "\n")
+    _write(store, "".join(lines))
+    # 白名单里的另一张表也得在位，否则 R4 先报红、掩盖 R1 的结论
+    _write(root / "cpt/storage/signal_event_store.py", "ensure_sequence_at\n")
+    return "check_bigserial_sequence.py", "晚于 executemany"
+
+
 FIXTURES = {
     "check_doc_drift.py": fx_doc_drift,
     "check_all_claims.py": fx_all_claims,
@@ -425,6 +457,7 @@ FIXTURES = {
     "check_test_mutation.py": fx_test_mutation,
     "check_value_plumbing.py": fx_value_plumbing,
     "check_value_plumbing.py#R4": fx_value_plumbing_null_guard,
+    "check_bigserial_sequence.py": fx_bigserial_sequence,
 }
 
 #: 这些门禁的夹具必须在**真实仓库**里跑，而不是临时目录。

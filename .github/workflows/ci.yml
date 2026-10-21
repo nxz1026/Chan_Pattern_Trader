@@ -183,6 +183,13 @@ jobs:
       # 夹具必须指向真实存在的脚本；磁盘上的 check_*.py 必须都在 CI 里跑。
       - name: No gate escapes the self-test
         run: python scripts/check_gate_coverage.py
+      # 门禁⑯（R72 新增）：**bigserial 序列必须与表对齐**。
+      # 生产上真实撞了三次 `UniqueViolation: Key (id)=(900008) already exists`：
+      # 有代码带 id 显式写入（迁移的 INSERT...SELECT id、测试的 setval 回滚），
+      # 一旦超过序列当前值，后续每次 nextval 都撞主键，**不会自愈**、每次跑批都炸。
+      # 修法是写批之前把序列推到 max(id)；这道门禁防止自愈被删、被挪到写入之后。
+      - name: bigserial sequences stay aligned
+        run: python scripts/check_bigserial_sequence.py
       # 门禁⑬（R55 新增）：测试的结论**不许是本机环境的函数**。
       # R49 的两个失败（沙箱没注入 url_safety.js / 把「本机没装 Wind」当前提）
       # 是**第二类**静默失效：断言依赖本机环境 —— 本机绿、CI 红，或反之，

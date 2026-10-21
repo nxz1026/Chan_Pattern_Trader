@@ -2005,3 +2005,65 @@ CPT 中枢与 czsc `zs_list` 从「0/10 逐项相同」变成 **10/10、8/10、9
 
 **回归钉子**：`tests/test_audit_r68_czsc_max_bi_num_truncation.py`（9 条）。
 
+
+## 60. `bigserial` 序列落后于 `max(id)`：不会自愈，每次跑批都炸（R72 实测，生产三次）
+
+**现象**（同一症状出现三次，2026-10-20 / 10-21 / 10-22）：
+
+```
+psycopg.errors.UniqueViolation: duplicate key value violates unique constraint
+"cpt_structure_event_pkey"
+DETAIL:  Key (id)=(900008) already exists.
+```
+
+**根因**：`id` 是 `bigserial`，插入不写 id，取号靠序列。但仓里有代码**带 id
+显式写入** —— 迁移的 `INSERT ... SELECT d.id`、测试的 `setval` 回滚。
+一旦显式 id 超过序列当前值，后续每次 `nextval` 都落在已占用区间上：
+
+- **不会自愈**：序列不会自己跳过已占用的号；
+- **每次都炸**：不是偶发，是恒定失败，跑批逐只降级；
+- **修了又坏**：手工 `setval` 之后，只要再跑一次带 id 的脚本就复发。
+  第三次复发时 `last_value=900007`，而 `max(id)=903451` —— 落后 3444 个号。
+
+**为什么手工修不管用**：手工 `setval` 修的是**当前状态**，不是**下一次**。
+只要有第二个人（或第二个脚本）带 id 写入，落后就重新发生。所以修法必须是
+运行时的、幂等的。
+
+**修法**（`cpt/storage/structure_event_store.ensure_sequence_at`）：
+
+```python
+# 每次批量写之前，幂等地把它推到表尾
+cur.execute("SELECT last_value FROM pg_sequences "
+            "WHERE schemaname = %s AND sequencename = %s", (...))
+cur.execute(f"SELECT max(id) FROM {table}")
+# 只在真落后时才 setval —— 不然每批都要拿序列上的锁
+cur.execute(f"SELECT setval('{sequence}', %s, true)", (max_id,))
+```
+
+四个实现要点，每个都有踩坑成本：
+
+| 要点 | 不这么做会怎样 |
+|---|---|
+| 第三参必须是 **`true`** | `false` 会让下一个 `nextval` **重发 `max(id)` 本身** ⇒ 必撞 |
+| `pg_sequences.last_value`，不是 `SELECT last_value FROM <seq>` | 后者要序列的 SELECT 权限，生产账户通常只有 USAGE ⇒ `insufficient_privilege` |
+| `last_value` 为 NULL 按「要修」处理 | 无 SELECT 权限时它是 NULL；当成「已对齐」就会**静默漏修** |
+| 放在 **INSERT 之前** | 撞了再修 = 这批已经废了，还得重跑；且失败语句已让事务 aborted |
+
+**门禁⑯**（`scripts/check_bigserial_sequence.py`，R1–R4）：自愈必须在
+`executemany` 之前调用（AST 判，不看字面量）、只允许一份实现、`setval`
+第三参必须是 `true`、白名单里每张 bigserial 表都得接上。自检夹具
+`fx_bigserial_sequence` 把自愈挪到写入之后 —— 证明它**能红**。
+
+**通用判据**：
+- 任何 `bigserial` / `serial` / `IDENTITY` 主键的表，只要仓里**存在**带 id 的
+  写入路径（迁移、回滚、测试重置），就必须有运行时自愈。**「我们能保证不带 id
+  写」不成立** —— 管得住 `cpt/`，管不住 `scripts/migrations/`。
+- 测试替身（duck-typed cursor）在 store 层加了探测查询之后**必须同步补方法**：
+  R72 加 `fetchone` 之后，两个测试文件的桩各有 `fetchall` 没有 `fetchone`，
+  6 个测试同时红。替身与真实驱动的接口差距是**测试自身的缺陷**，修法是补桩，
+  不是把生产代码降级成 `fetchall`。
+- 断言「只开了一个 cursor」这类**计数**断言，一加查询就会碎。优先按语义定位
+  （R72 里 `_insert_call` 按 `INSERT INTO ...` 子串找），而非钉下标/计数。
+
+**回归钉子**：`tests/test_structure_event_store.py`（`ensure_id_sequence` 7 条）
++ `scripts/check_bigserial_sequence.py` + 自检夹具。

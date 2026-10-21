@@ -46,11 +46,11 @@ from cpt.adapters.validators import validate_ashare_bars
 from cpt.application import signal_notify
 from cpt.application.dashboard_snapshot_v2 import build_dashboard_snapshot_v2
 from cpt.application.first_buy_bridge import derive_first_buy_facts, detect_structural_break
-from cpt.application.signal_progress import first_buy_progress
-from cpt.application.signal_invalidation import invalidation_payload
 from cpt.application.multi_level import build_multi_level, format_multi_level
 from cpt.application.parity_reference import build_parity_snapshot_for
 from cpt.application.replay import compute_domain_structures
+from cpt.application.signal_invalidation import invalidation_payload
+from cpt.application.signal_progress import first_buy_progress
 from cpt.application.structure_event_recorder import record_structure_events
 from cpt.domain.a_share_rules import apply_ashare_tags_to_bis
 from cpt.domain.config import RulesConfig

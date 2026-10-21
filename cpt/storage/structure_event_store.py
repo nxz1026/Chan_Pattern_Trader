@@ -53,6 +53,8 @@ _LOG = logging.getLogger(__name__)
 __all__ = [
     "append_events",
     "current_states",
+    "ensure_id_sequence",
+    "ensure_sequence_at",
     "is_missing_table_error",
     "latest_events",
     "recent_events",
@@ -103,6 +105,103 @@ def is_missing_table_error(exc: BaseException) -> bool:
     return getattr(exc, "sqlstate", None) == _SQLSTATE_UNDEFINED_TABLE
 
 
+#: ``id`` 是 ``bigserial``（迁移 ``2026-10-05_r26_structure_event.sql:31``），
+#: 插入不写 id，取号来自这个序列。
+_ID_SEQUENCE = "public.cpt_structure_event_id_seq"
+
+#: 事件表全名。序列名/表名都是**编译期常量**，不接受外部输入 ——
+#: ``setval`` 不是参数化能覆盖的函数（它收 regclass 字面量），所以这里用
+#: f-string 拼 SQL 是安全的；**引入任何变量都必须改成 ``%s::regclass``**。
+_ID_TABLE = "public.cpt_structure_event"
+
+
+def ensure_sequence_at(conn: Any, *, table: str, sequence: str) -> int:
+    """把 ``id`` 序列推到 ``max(id)``，返回推到的新值；无事可做返回 0。
+
+    修的是**序列落后于表**这一类故障。2026-10-20/21 在生产上真实撞了两次：
+
+    ``psycopg.errors.UniqueViolation: duplicate key value violates unique
+    constraint "cpt_structure_event_pkey"`` / ``DETAIL: Key (id)=(900008)
+    already exists``
+
+    根因不是"序列坏了"，而是**有代码带 id 显式写入**（迁移脚本的
+    ``INSERT ... SELECT id``、测试的 ``setval`` 回滚）。一旦显式 id 超过
+    序列当前值，后续每次 ``nextval`` 都会落在已占用区间上，且**不会自愈** ——
+    每次跑批都炸，直到有人手工 ``setval``。
+
+    正确做法本是所有写入都不带 id、序列自行前进；但那管不住外部脚本。
+    这里在写批之前做一次幂等的"推到表尾"，代价是每轮两条快照查询。
+
+    实现要点：
+
+    - ``setval(..., max(id), true)``：第三参 ``true`` 表示**下一个** ``nextval``
+      返回 ``max+1``。写 ``max+1`` 会让间隔凭空多一个号，与回滚脚本
+      ``2026-10-19_r67_symbol_in_id_rollback.sql:95`` 的写法保持一致。
+    - 表为空时 ``COALESCE(max(id), 1)`` —— ``setval`` 不接 NULL。
+    - **只在真落后时才写**：比较用 ``last_value``，落后才 ``setval``，
+      免得每批都拿一把序列上的锁。
+    - 用 ``pg_sequences.last_value`` 而不是 ``SELECT last_value FROM <seq>``：
+      后者要序列的 SELECT 权限，而生产账户通常只有 USAGE。
+      ``pg_sequences`` 对无权限的序列返回 NULL，此时按「要修」处理 ——
+      宁可多做一次无效 setval，也不要漏修。
+    - **不 commit**：事务边界归调用方，与同模块其它函数一致。
+
+    :param conn: psycopg 连接（**不 commit**）。
+    :param table: 表全名，如 ``public.cpt_structure_event``（**调用方常量**）。
+    :param sequence: 序列全名，如 ``public.cpt_structure_event_id_seq``。
+    :returns: ``setval`` 后的新值；序列已对齐、表为空、或查询不到序列时返回 0。
+    """
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT last_value FROM pg_sequences WHERE schemaname = %s AND sequencename = %s",
+            ("public", sequence.split(".")[-1]),
+        )
+        row = cur.fetchone()
+        last_value = row[0] if row else None
+
+        # 序列不存在（迁移没跑）就别 setval —— 那会报错，而这不是本函数要修的问题。
+        # fetchone() 返回 None 是「没有这个序列」，与「有序列但查不到 last_value
+        # （NULL，无权限）」必须分开：前者早退，后者照修。
+        if row is None:
+            return 0
+
+        cur.execute(f"SELECT max(id) FROM {table}")  # noqa: S608 — 调用方常量表名
+        max_row = cur.fetchone()
+        max_id = max_row[0] if max_row else None
+
+        if max_id is None:
+            return 0
+
+        # last_value 为 NULL（USAGE 有、SELECT 无）时按"可能落后"处理。
+        if last_value is not None and last_value >= max_id:
+            return 0
+
+        cur.execute(
+            f"SELECT setval('{sequence}', %s, true)",  # noqa: S608 — 调用方常量序列名
+            (max_id,),
+        )
+        new_row = cur.fetchone()
+        new_value = int(new_row[0]) if new_row and new_row[0] is not None else int(max_id)
+        _LOG.warning(
+            "结构事件 id 序列落后：last_value=%s < max(id)=%s，已 setval 到 %s"
+            "（通常是迁移/测试带 id 显式写入所致）",
+            last_value,
+            max_id,
+            new_value,
+        )
+        return new_value
+
+
+def ensure_id_sequence(conn: Any) -> int:
+    """把 ``public.cpt_structure_event`` 的 ``id`` 序列推到 ``max(id)``。
+
+    :func:`ensure_sequence_at` 的本表绑定版。**序列自愈只有这一条路径** ——
+    其它 bigserial 表（如 ``cpt_signal_event``）应当直接调
+    :func:`ensure_sequence_at` 并传自己的常量，**不要**另写一份 setval。
+    """
+    return ensure_sequence_at(conn, table=_ID_TABLE, sequence=_ID_SEQUENCE)
+
+
 def append_events(conn: Any, events: Sequence[StructureEvent]) -> int:
     """追加一批事件，返回**真正写入**的条数。
 
@@ -133,6 +232,10 @@ def append_events(conn: Any, events: Sequence[StructureEvent]) -> int:
         for ev in events
     ]
     try:
+        # 先自愈序列再写。序列落后于 max(id) 时，本批的每一次 nextval 都会
+        # 落在已占用区间上 ⇒ UniqueViolation，且**不会自愈**，每轮都炸。
+        # 放在 INSERT 之前的理由：撞了之后再修等于这批已经废了，还得重跑。
+        ensure_id_sequence(conn)
         with conn.cursor() as cur:
             cur.executemany(
                 "INSERT INTO public.cpt_structure_event "

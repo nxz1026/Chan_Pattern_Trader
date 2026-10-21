@@ -97,5 +97,9 @@ def test_reason_text_matches_frontend_wording() -> None:
 def test_bundle_is_in_sync_with_sources() -> None:
     """改了源文件没重跑构建，线上拿到的还是旧逻辑。"""
     bundle = (_DASH / "dashboard.bundle.js").read_text(encoding="utf-8")
-    for marker in ("INVALIDATION_REASON_LABELS", "signal-history-reason", "stats.invalidation_reasons"):
+    for marker in (
+        "INVALIDATION_REASON_LABELS",
+        "signal-history-reason",
+        "stats.invalidation_reasons",
+    ):
         assert marker in bundle, f"{marker} 没进 bundle，构建没跑"

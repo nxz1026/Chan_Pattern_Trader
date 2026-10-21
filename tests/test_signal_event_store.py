@@ -43,8 +43,20 @@ class MockCursor:
         self.executed.append((sql, params))
         if self._pending is not None:
             self.rows = self._pending
+        # R72 序列自愈的探测查询：pg_sequences 找不到序列 ⇒ 自愈早退。
+        # 不模拟这一步的话，自愈会把下面预设的 rows 当成序列状态读走，
+        # 真正的业务查询就取不到自己的结果了。
+        if "pg_sequences" in sql:
+            self._probe = None
+        elif "setval" in sql:
+            self._probe = (params[0],) if params else None
+        if "pg_sequences" in sql or "setval" in sql:
+            self.rows = []
 
     def fetchone(self) -> tuple | None:
+        probe = getattr(self, "_probe", "unset")
+        if probe != "unset":
+            return probe
         if self.rows:
             return self.rows[0]
         return None
@@ -203,7 +215,9 @@ def test_record_signal_event_writes_on_status_change() -> None:
         event_time=1704067200000,
     )
     assert written is True
-    assert len(conn.cursors) == 1
+    # 自愈要单独开一个 cursor（R72）—— 它不再和业务读写挤在同一个里，
+    # 因为 ``ensure_sequence_at`` 自带 ``with conn.cursor()`` 边界。
+    assert len(conn.cursors) == 2
     sql, params = _insert_call(conn)
     assert "INSERT INTO public.cpt_signal_event" in sql
     assert params[0] == "first_buy:0:level0:zs1"  # signal_id

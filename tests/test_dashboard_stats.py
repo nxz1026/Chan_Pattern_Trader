@@ -84,7 +84,7 @@ def test_empty_signal_history_yields_empty_reason_map() -> None:
 
 def test_loader_surfaces_reason_from_center_ids_tail() -> None:
     """读侧：``load_signal_events`` 的投影必须把尾项还原成 ``invalidated_reason``。"""
-    from cpt.storage.signal_event_store import _history_row_to_dict, _HISTORY_COLUMNS
+    from cpt.storage.signal_event_store import _HISTORY_COLUMNS, _history_row_to_dict
 
     values = []
     for name in _HISTORY_COLUMNS:
