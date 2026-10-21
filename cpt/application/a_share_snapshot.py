@@ -886,7 +886,25 @@ def _derive_first_sell_signal(
     prev_status: str | None = previous.status if previous is not None else None
     if conn is not None and signal is not None:
         try:
-            record_signal_event(conn, signal, prev_status, code, event_time)
+            # R79：失效归因必须与 first_buy 对称 —— R71 只给一买接上了
+            # ``invalidation_payload``，一卖这边一直是裸 ``record_signal_event``，
+            # 结果 ``first_sell`` 的失效行**永远没有原因**。
+            # 生产实测（2026-10-21，非盲区失效行）：first_buy 99 行/带原因 36，
+            # **first_sell 85 行/带原因 0** —— 85 只票在全景里只能落进
+            # 「不知道走到哪」。
+            #
+            # ⚠️ 这里必须用 **first_sell 自己的 facts**，不能借 first_buy 的：
+            # 一卖的「三步」是一买的镜像（中枢 → 中枢二之后还在涨 → 涨势里冒出
+            # 一笔回落），facts 字段名相同但方向相反。
+            reason = invalidation_payload(
+                trend_direction=level_bis[-1].direction,
+                facts=facts,
+                previous_status=prev_status,
+                kind="first_sell",
+            )
+            record_signal_event(
+                conn, signal, prev_status, code, event_time, invalidated_reason=reason
+            )
             conn.commit()  # ← store 层不 commit，边界在这里
         except Exception as exc:
             _LOG.warning("提交信号事件失败 %s: %s", code, exc)

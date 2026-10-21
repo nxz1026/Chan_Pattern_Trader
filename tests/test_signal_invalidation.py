@@ -252,3 +252,78 @@ def test_reason_from_center_ids_roundtrip() -> None:
     assert reason_from_center_ids(None) is None
     # 记号不在尾项 ⇒ 不认（防止历史数据里混入的字符串被误读）
     assert reason_from_center_ids(["reason:no_divergence_leg", "cn:zhongshu:5:1"]) is None
+
+
+# --- R79：一卖的失效归因（此前完全空缺） --------------------------------
+
+def test_first_sell_needs_an_uptrend_not_a_downtrend() -> None:
+    """一卖只在**上涨**走势里有意义；方向判据与一买相反。
+
+    R79 之前 ``classify_invalidation`` 把 ``trend_direction != -1`` 写死成
+    「方向不对」，一卖接上去就会把**正确的上涨走势**判成方向不对 —— 85 只
+    一卖的失效票会被打上错误原因，比没有原因更糟。
+    """
+    import cpt.application.signal_invalidation as si
+
+    assert si.classify_invalidation(
+        trend_direction=1, facts=_Facts(), kind="first_sell"
+    ) is None, "上涨走势 + 结构满足，一卖不该被判失效原因"
+    assert (
+        si.classify_invalidation(trend_direction=-1, facts=_Facts(), kind="first_sell")
+        == "not_in_downtrend"
+    )
+    # 一买保持原判
+    assert si.classify_invalidation(trend_direction=-1, facts=_Facts()) is None
+    assert (
+        si.classify_invalidation(trend_direction=1, facts=_Facts()) == "not_in_downtrend"
+    )
+
+
+def test_first_sell_text_never_says_downtrend_or_first_buy() -> None:
+    """一卖的失效文案不许出现「下跌」「一买」「底部」—— 那是镜像的另一半。"""
+    from cpt.application.signal_invalidation import REASON_CODES, explain_invalidation
+
+    for code in REASON_CODES:
+        text = explain_invalidation(code, kind="first_sell")
+        for bad in ("下跌走势", "一买", "底部"):
+            assert bad not in text, f"{code} 的一卖文案里混进了一买措辞：{bad}"
+
+
+def test_first_sell_text_is_the_mirror_of_first_buy() -> None:
+    """一买/一卖文案成对出现：同一个码，两边都得有、且互不相同。"""
+    from cpt.application.signal_invalidation import (
+        REASON_CODES,
+        REASON_TEXT,
+        REASON_TEXT_SELL,
+    )
+
+    assert set(REASON_TEXT_SELL) == set(REASON_CODES) == set(REASON_TEXT)
+    for code in REASON_CODES:
+        assert REASON_TEXT[code] != REASON_TEXT_SELL[code], f"{code} 两边文案一模一样"
+
+
+def test_payload_defaults_to_first_buy_so_old_callers_do_not_change() -> None:
+    """``kind`` 有默认值 ``first_buy`` —— 既有调用点不改行为。"""
+    import inspect
+
+    import cpt.application.signal_invalidation as si
+
+    sig = inspect.signature(si.invalidation_payload)
+    assert sig.parameters["kind"].default == "first_buy"
+
+
+def test_first_sell_side_records_the_reason() -> None:
+    """接线钉子：``_derive_first_sell_signal`` 必须把原因传进 ``record_signal_event``。
+
+    R71 只接了 first_buy，一卖一直是裸调用 —— 生产实测 85 行失效、带原因 0。
+    """
+    from pathlib import Path
+
+    src = (
+        Path(__file__).resolve().parents[1] / "cpt/application/a_share_snapshot.py"
+    ).read_text(encoding="utf-8")
+    start = src.index("def _derive_first_sell_signal(")
+    end = src.index("def _apply_daily_tags(")
+    body = src[start:end]
+    assert 'kind="first_sell"' in body, "一卖没把 kind 传给归因层"
+    assert "invalidated_reason=reason" in body, "一卖算了原因却没落库"

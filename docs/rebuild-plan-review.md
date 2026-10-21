@@ -372,6 +372,28 @@ m01562 补充：横幅要**有数字、也要有建议**（自用项目，不写
   `tests/test_signal_overview.py::test_missing_reason_yields_none_step_index_not_a_guess`
   钉住。
 
+#### R79（2026-10-21）：一卖的失效归因一直缺着，补数据补不出来
+
+「补数据能降低 unknown 比例」这个假设被实测推翻，换来的是一处代码缺口的定位。
+
+- **假设**：117 只「不知道走到哪」是历史行没记原因，重跑一遍即可补上。
+- **实测**：重跑热池 98 只（`ok=98 skip=0 err=0`，126 秒），`unknown` 只从 117 降到 110。
+- **拆因**（非盲区失效行，按 `signal_type`）：
+
+  | 类型 | 失效行 | 带原因 |
+  |---|---|---|
+  | `first_buy` | 99 | 36 |
+  | `first_sell` | 85 | **0** |
+
+- **根因**：`invalidation_payload` 只在 `_derive_first_buy_signal` 里被调用；`_derive_first_sell_signal` 一直是裸 `record_signal_event(conn, signal, prev_status, code, event_time)`，**从来没传 `invalidated_reason`**。所以一卖的失效行不可能有原因 —— 这不是数据缺失，是代码缺口，补数补不出来。
+- **修法**：`classify_invalidation` / `explain_invalidation` / `invalidation_payload` 加 `kind` 参数（默认 `first_buy`，既有调用点零改动）；`_WANTED_DIRECTION = {"first_buy": -1, "first_sell": 1}` 让方向判据镜像；文案走新表 `REASON_TEXT_SELL`。
+- **改完实测**（热池重跑后）：`first_sell` 带原因 0 → 11，`unknown` 110 → 99。
+
+**两条教训**：
+
+- **「补数据」之前先证明缺的是数据**。这里的数据写入逻辑本身就是破的，重跑只会把同样的空缺再写一遍。
+- **一卖不是一买的复制品**。原因**码**可以复用（码是稳定标识，前端按码查标签），但**文案**必须换一套：直接把 `REASON_TEXT` 套到一卖上会输出「一卖只对下跌走势有意义」。`_WANTED_DIRECTION` 换成 `!= -1` 的写死判断同样会把**正确的上涨走势**判成方向不对 —— 比没有原因更糟。`tests/test_signal_invalidation.py::test_first_sell_text_never_says_downtrend_or_first_buy` 钉住。
+
 #### Phase 1.5 续（R76，2026-10-21）：买点语气从「后端所有出口」删净
 
 R71 只改了 `dash-core.js` 里的 `STATUS_LABELS`，页面确实显示了「位置已到（不是买点）」。

@@ -21,6 +21,7 @@ from typing import Any, Protocol
 __all__ = [
     "REASON_CODES",
     "REASON_TEXT",
+    "REASON_TEXT_SELL",
     "classify_invalidation",
     "explain_invalidation",
     "invalidation_payload",
@@ -34,9 +35,9 @@ REASON_CODES: tuple[str, ...] = (
     "previous_invalidated",
 )
 
-#: 原因码 → 一句人话。与 :mod:`cpt.application.signal_progress` 的措辞同源，
-#: 但**不复用**它的 ``_explain``：那边讲的是「卡在第二步行进中」，这边讲的是
-#: 「这个结构已经作废了」，时态不同，混用会说错话。
+#: 原因码 → 一句人话（**一买**语境）。与 :mod:`cpt.application.signal_progress`
+#: 的措辞同源，但**不复用**它的 ``_explain``：那边讲的是「卡在第二步行进中」，
+#: 这边讲的是「这个结构已经作废了」，时态不同，混用会说错话。
 REASON_TEXT: dict[str, str] = {
     "not_in_downtrend": (
         "失效原因：现在不是下跌走势。一买只对下跌走势有意义，"
@@ -53,6 +54,36 @@ REASON_TEXT: dict[str, str] = {
     "previous_invalidated": (
         "失效原因：这个结构此前已被判定作废，本轮没有重新成立。"
         "作废是**终态**（``assess_first_buy`` 一旦进 invalidated 就不再回退），"
+        "要重新出现位置提示，得等一个新结构。"
+    ),
+}
+
+#: 信号类型 → 「本类信号有意义」所需的趋势方向。
+#: 一买只对下跌走势有意义（-1），一卖只对上涨走势有意义（+1）。
+_WANTED_DIRECTION: dict[str, int] = {"first_buy": -1, "first_sell": 1}
+
+#: 原因码 → 一句人话（**一卖**语境，R79）。
+#:
+#: 一卖的「三步」是一买的镜像：中枢 → 中枢二之后**还在涨** → 涨势里冒出
+#: 一笔回落。所以码完全复用（码是稳定标识，前端按码查标签），但**文字必须
+#: 换一套** —— 直接把一买的句子套到一卖上会说出「一卖只对下跌走势有意义」
+#: 这种自相矛盾的话（R79 实测复现过）。
+REASON_TEXT_SELL: dict[str, str] = {
+    "not_in_downtrend": (
+        "失效原因：现在不是上涨走势。一卖只对上涨走势有意义，"
+        "方向不对就不评估——它消失不是因为涨完了，是因为这段走势不再是涨势。"
+    ),
+    "not_enough_centers": (
+        "失效原因：同级中枢不到两个。这段走势没形成「涨—盘整—再涨」的形状，"
+        "顶部位置无从谈起。"
+    ),
+    "no_divergence_leg": (
+        "失效原因：中枢二之后没有再往上走一笔。两个中枢有了，"
+        "但上涨已经停了，不存在「背驰段」，所以不构成顶部位置。"
+    ),
+    "previous_invalidated": (
+        "失效原因：这个结构此前已被判定作废，本轮没有重新成立。"
+        "作废是**终态**（``assess_first_sell`` 一旦进 invalidated 就不再回退），"
         "要重新出现位置提示，得等一个新结构。"
     ),
 }
@@ -83,6 +114,7 @@ def classify_invalidation(
     trend_direction: int,
     facts: _Facts | None,
     previous_status: str | None = None,
+    kind: str = "first_buy",
 ) -> str | None:
     """判定本轮失效的原因码；**没失效就返回 ``None``**。
 
@@ -107,9 +139,11 @@ def classify_invalidation(
     :param previous_status: 上一轮状态；只在结构条件全满足时用来解释「为何仍作废」。
     :returns: :data:`REASON_CODES` 之一，或 ``None``（没失效 / 证据不足）。
     """
-    # ① 方向不对（含 ``0`` = 不知道）：一买不评估。``facts is None`` 也走这里
-    #    —— 向上走势下 bridge 本就返回 None，是同一件事的两种表达。
-    if trend_direction != -1:
+    # ① 方向不对（含 ``0`` = 不知道）：本类信号不评估。``facts is None`` 也走这里
+    #    —— 方向不符时 bridge 本就返回 None，是同一件事的两种表达。
+    #    R79：一买要向下（-1），一卖要向上（+1）—— 判据方向相反，不能共用 -1。
+    wanted = _WANTED_DIRECTION[kind]
+    if trend_direction != wanted:
         return "not_in_downtrend"
     if facts is None:
         return None
@@ -125,11 +159,16 @@ def classify_invalidation(
     return None
 
 
-def explain_invalidation(reason: str | None) -> str:
-    """原因码 → 一句人话。未知码返回**显式未知**，绝不返回空串冒充「没原因」。"""
+def explain_invalidation(reason: str | None, *, kind: str = "first_buy") -> str:
+    """原因码 → 一句人话。未知码返回**显式未知**，绝不返回空串冒充「没原因」。
+
+    :param kind: ``"first_buy"`` 或 ``"first_sell"``。两者的「三步」互为镜像，
+        文案必须分开（见 :data:`REASON_TEXT_SELL`）。
+    """
     if reason is None:
         return "未失效。"
-    return REASON_TEXT.get(reason, f"失效原因码 {reason!r} 未登记文案。")
+    table = REASON_TEXT_SELL if kind == "first_sell" else REASON_TEXT
+    return table.get(reason, f"失效原因码 {reason!r} 未登记文案。")
 
 
 def invalidation_payload(
@@ -138,6 +177,7 @@ def invalidation_payload(
     facts: _Facts | None,
     previous_status: str | None = None,
     segment_position: float | None = None,
+    kind: str = "first_buy",
 ) -> dict[str, Any] | None:
     """组装落库/展示用的失效归因；未失效返回 ``None``。
 
@@ -146,13 +186,16 @@ def invalidation_payload(
     ``previous_status``) 唯一还原，``explain`` 是 ``reason`` 的纯函数。
     """
     reason = classify_invalidation(
-        trend_direction=trend_direction, facts=facts, previous_status=previous_status
+        trend_direction=trend_direction,
+        facts=facts,
+        previous_status=previous_status,
+        kind=kind,
     )
     if reason is None:
         return None
     return {
         "reason": reason,
-        "explain": explain_invalidation(reason),
+        "explain": explain_invalidation(reason, kind=kind),
         "evidence": {
             "trend_direction": trend_direction,
             "has_two_centers": None if facts is None else bool(facts.has_two_centers),
