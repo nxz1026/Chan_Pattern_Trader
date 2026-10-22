@@ -107,12 +107,28 @@ def test_contract_mentions_the_hour_step_trap() -> None:
 def test_contract_records_the_current_data_volume() -> None:
     """写死「当时表里有几行几个交易日」，防止读方拿空表当采集器坏了。
 
-    实测值是 2026-10-22 收盘后的快照（116 行 / 1 个北京交易日）。数字变了要同步
-    更新 §9，否则读方会按旧基数判「数据暴涨/暴跌」。
+    实测值是 2026-10-22 清理假数据之后的快照（99 行 / 1 个北京交易日 / 3 轮）。
+    数字变了要同步更新 §9，否则读方会按旧基数判「数据暴涨/暴跌」。
+
+    116 那个数是被清理掉的旧值（含 19 行探针假数据），**必须不再出现** ——
+    留着一个错的基数比没有基数更糟。
     """
     text = _contract_text()
-    assert "116" in text, "§9 没记录当时的行数"
+    assert "99" in text, "§9 没记录清理后的行数"
+    assert "116" not in text, "§9 还留着清理前的旧基数（含假数据）"
     assert "覆盖的交易日" in text
+
+
+def test_contract_warns_about_probe_rows_for_raw_sql_readers() -> None:
+    """绕过 storage 层自己写 SQL 的读方，必须被告知要过滤哨兵行。
+
+    R91 实测：19 行 `code='600519'` 的探针假数据晚于真实轮次，
+    `SELECT max(at)` 只读到那 1 行假的，33 只真实票被完全遮蔽。
+    """
+    text = _contract_text()
+    assert "\\x01" in text, "契约没告诉裸 SQL 读方哨兵行前缀"
+    assert "_REAL_ROWS" in text, "契约没提 storage 层已有的过滤"
+    assert "遮蔽" in text, "契约没说明假数据的实际后果"
 
 
 def test_session_is_cut_by_beijing_date_not_utc() -> None:

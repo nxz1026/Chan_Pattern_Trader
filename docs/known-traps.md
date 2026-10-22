@@ -2300,3 +2300,99 @@ OnCalendar=Mon..Fri *-*-* 09..11,13..14:00/2:00 Asia/Shanghai
    必须按**节点身份**（`fn.body[0].value is n`）排除。
 3. `ImportFrom` 的被导入名字在 `n.names` 里，不在 `n.module` 里。只看
    `module` 会得出「没导入 is_trade_day」的假结论。
+
+## #66 测试直接写进了生产表：`_persist()` 没被隔离，19 行假数据晚于所有真实轮次（R91 实测）
+
+**现象**：`public.intraday_seal_snapshot` 117 行里有 19 行是
+`code='600519', sealed=true, bid1_lots=50000.0, limit_price=1100.0`，时间戳
+UTC 11:51–15:05，**全部晚于** 3 个真实轮次（09:20:36Z / 09:20:55Z / 09:22:13Z）。
+后果不是「多几行噪音」—— 盘中面板用 `at = (SELECT max(at) ...)` 取最新一轮，
+于是它读到的是那 1 行假的：**显示「1 只封板、封单 5 万手、强度正常」，
+33 只真实票被完全遮蔽**。
+
+**根因**：`tests/test_intraday_collectd.py` 的隔离夹具只做了**一半**。
+
+```python
+# 隔离了日志……
+monkeypatch.setattr(collectd, "LOG_PATH", tmp_path / "intraday.log")
+# ……但没隔离数据库。run_round() 末尾无条件调 _persist()，
+# DB_WRITE_ENABLED 默认为 True，于是假 scan() 的结果真的落库了。
+```
+
+那两条用例（`test_no_candidates_is_empty_not_error`、`test_ok_round_carries_counts`）
+喂的是 `600519 / 50_000.0 / 1100.0` 这种一眼可辨的假值，**它们自己写得没错，
+错在没意识到 `run_round()` 有副作用**。
+
+**三层防线**（只做一层不够）：
+
+| 层 | 做法 | 抓得住什么 |
+|---|---|---|
+| 夹具 | autouse `_no_real_database`：`DB_WRITE_ENABLED = False` | 所有走 `run_round()` 的用例 |
+| 读取端 | `_REAL_ROWS = "code NOT LIKE '\x01%%'"` 加进三个读取函数 | 万一有哨兵行漏进来，也读不到 |
+| 真库测试 | 一个事务 + `finally: rollback()`，哨兵代码 `\x01` 开头 | 验证过滤器真的生效（反向注入 `_REAL_ROWS="TRUE"` → 4 failed） |
+
+**通用判据**：写测试前问一句「**这条用例调到的那条路径，会写到哪里**」。
+`run_round()` 名字像纯函数，实际做 HTTP + 写库两件事 —— 名字不承诺副作用。
+
+**同族事故（CPT 第 3 次，都是「测试的副作用越过了只影响自己」）**：
+
+| 次 | 事故 | 事后防线 |
+|---|---|---|
+| R81 | 测试用 `setval` 改序列，`rollback` 撤不掉 | 门禁⑯ R5：`tests/` 里不许出现 `setval` |
+| R90 | 测试 `pop` `sys.modules`，重导出造出第二份异常类 | 回归钉子：断言「执行前后是同一个模块对象」 |
+| R91 | 测试直接写生产表 | 夹具关写 + 读取端过滤 + 真库回滚测试 |
+
+清理方式：先按**可判定特征**定位（`code` + `bid1_lots` + `limit_price` 三个一起），
+再两项对照确认（这些 `at` 上总行数 == 19 ⇒ 确为单票轮；真实轮里该代码从未出现
+⇒ 不会误删），备份成 CSV 再 `DELETE`。
+
+## #67 用文本锚点插代码，锚点落在**函数之间的空白**：上一个函数被截断却不报错（R91 实测三次）
+
+**现象**：给 `scripts/watch_period_check.py` 加 `_MARKET_TZ()` 和 `check_seal_coverage()`。
+跑巡检直接崩：
+
+```
+TypeError: 'NoneType' object is not subscriptable
+  problems = [p for c in checks for p in c["problems"]]
+```
+
+`check_service()` 返回了 `None`。
+
+**根因**：用 `def _now() -> datetime:` 当锚点插入 —— 这个锚点**也出现在
+`check_service` 的函数体之前**，而插入时把新函数塞进了：
+
+```python
+def check_service() -> dict:
+    result = {...}
+                            # ← 新函数塞在这里，check_service 到此结束
+def _MARKET_TZ() -> Any:
+    ...
+    return ZoneInfo("Asia/Shanghai")
+    # unit 状态：……            # ← 原 check_service 的剩余全部变成死代码
+    if state != "active":
+        ...
+    return result
+```
+
+Python 不报错（死代码合法），`ruff` 不报错（没有语法问题），
+**只有真的跑一遍才发现**。
+
+**判据**：改完一个文件，至少跑一次「会用这个文件的那条真实路径」。
+单跑 `check_intraday()` / `check_seal_coverage()` 都是 dict，看起来全对 ——
+崩的是我没单独测的 `check_service()`。
+
+**同轮第 2、3 次**：
+
+- 给 `cpt/web/app.py` 插 `_seal_board_payload`，锚点 `def _latest_market_day() -> Any:`
+  命中两处，把 `_intraday_log_path` 的函数名盖掉了 → `ruff` 的 `F821 Undefined name`
+  是唯一抓手，且表现为「全量红、单跑绿」。
+- 反向注入后想撤销，用 `git checkout <untracked 文件>` —— 报错且什么都没还原，
+  随后手工 `replace` 又把一行删多了。
+
+**三条可直接执行的规矩**：
+
+1. 插入代码前先 `grep -n "<锚点>"`，**确认命中数**。命中 ≥2 就必须换更长的锚点
+   （带上函数上一行的注释或签名全行）。
+2. 改完跑一次**真实路径**，不是只跑单测。函数返回 `None` 这种错单测很难覆盖到。
+3. **untracked 文件不许用 `git checkout` 撤销** —— 它本来就不在版本库里。
+   改之前先 `cp` 一份备份，或者精确 `replace` 回去。

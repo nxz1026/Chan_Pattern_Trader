@@ -109,6 +109,8 @@ HEALTH_TIMEOUT: Final[float] = 2.0
 
 #: 盘中采集的新鲜度上限（分钟）。timer 每 2 分钟一轮，10 分钟 = 允许连挂 5 轮。
 #: 只在**盘中时段**判，收盘后当然不会再有新记录 —— 全天候判会每天误报。
+SEAL_OBSERVE_DAYS: Final[int] = 5
+MIN_ROUNDS_PER_DAY: Final[int] = 10
 INTRADAY_STALE_MINUTES: Final[float] = float(os.environ.get("CPT_INTRADAY_STALE_MINUTES") or 10.0)
 
 #: 采集日志路径。与 ``scripts/intraday_collectd.py`` 共用同一条环境变量。
@@ -119,6 +121,13 @@ INTRADAY_LOG: Final[Path] = Path(
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _MARKET_TZ() -> Any:
+    """北京时间。本机系统时区是 UTC —— 所有「今天」都必须先换到北京再比。"""
+    from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+    return ZoneInfo("Asia/Shanghai")
 
 
 def check_service() -> dict[str, Any]:
@@ -319,6 +328,105 @@ def check_quote(code: str = QUOTE_PROBE_CODE) -> dict[str, Any]:
     return result
 
 
+def check_seal_coverage(*, now: datetime | None = None) -> dict[str, Any]:
+    """R92：封板快照的**观察期进度**（每天有没有完整落库）。
+
+    为什么单列一项：``check_intraday()`` 只看**日志**，回答「采集器转了没有」；
+    落库是另一条链路（``_persist()`` → ``intraday_seal_snapshot``），它坏了日志
+    照样漂亮 —— R91 就实测过：10-22 日志 106 轮全绿，而库里只有 3 轮，因为落库
+    是 17:20 才接上的。
+
+    判据（与 emotion-core 侧 ``lab/cpt_watch.py`` **刻意不同**，两边各查各的）：
+
+    - 干净日 = 当天有落库轮次 **且** 该日日志里 error 轮数 = 0 **且** 落库轮数 ≥
+      ``MIN_ROUNDS_PER_DAY``。用「落库轮数」而不是「日志轮数」—— 我们要验的是
+      emotion 读到的数据完不完整，它读的是表不是日志。
+    - 只统计**已收盘**的交易日：盘中的当天天然不完整，算进来永远是红的。
+
+    本项**不判红**（``ok`` 恒为 True），只报进度。理由：观察期没攒够不是故障，
+    是事实；把它判红会让真正的故障被这条长期红项淹掉。进度与结论都放进 ``detail``。
+    """
+    detail: dict[str, Any] = {
+        "required": SEAL_OBSERVE_DAYS,
+        "min_rounds_per_day": MIN_ROUNDS_PER_DAY,
+        "streak": 0,
+        "clean_days": [],
+        "dirty_days": [],
+        "progress": "0/5",
+    }
+    try:
+        import psycopg
+        from cpt.adapters.a_share_local import connection_kwargs
+
+        conn = psycopg.connect(**connection_kwargs())
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT (at AT TIME ZONE 'Asia/Shanghai')::date AS d, count(DISTINCT at) "
+                    "FROM public.intraday_seal_snapshot "
+                    f"GROUP BY d ORDER BY d DESC LIMIT {SEAL_OBSERVE_DAYS + 10}"
+                )
+                rounds_by_day = {row[0]: int(row[1]) for row in cur.fetchall()}
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "name": "seal_coverage",
+            "ok": True,
+            "problems": [],
+            "detail": {**detail, "error": f"读不到落库表：{exc}"},
+        }
+
+    errors_by_day = _log_errors_by_day()
+    today = (now or _now()).astimezone(_MARKET_TZ()).date()
+    clean: list[str] = []
+    dirty: list[dict[str, Any]] = []
+    for day, rounds in sorted(rounds_by_day.items(), reverse=True):
+        if day >= today:
+            continue  # 当天没收盘，天然不完整
+        errors = errors_by_day.get(day, 0)
+        if rounds >= MIN_ROUNDS_PER_DAY and errors == 0:
+            clean.append(day.isoformat())
+        else:
+            dirty.append({"day": day.isoformat(), "rounds": rounds, "errors": errors})
+    # streak = 从最近一个已收盘日往前，连续干净的天数
+    streak = 0
+    for day in sorted((d for d in rounds_by_day if d < today), reverse=True):
+        if day.isoformat() in clean:
+            streak += 1
+        else:
+            break
+    detail.update(
+        {
+            "streak": streak,
+            "clean_days": clean[:SEAL_OBSERVE_DAYS],
+            "dirty_days": dirty[:SEAL_OBSERVE_DAYS],
+            "progress": f"{streak}/{SEAL_OBSERVE_DAYS}",
+        }
+    )
+    return {"name": "seal_coverage", "ok": True, "problems": [], "detail": detail}
+
+
+def _log_errors_by_day() -> dict[Any, int]:
+    """从采集日志里按北京日期数 ``outcome == "error"`` 的轮次。读不到就给空 dict。"""
+    try:
+        from cpt.application.intraday_status import parse_log_tail
+
+        out: dict[Any, int] = {}
+        for rec in parse_log_tail(INTRADAY_LOG):
+            if rec.get("outcome") != "error":
+                continue
+            stamp = str(rec.get("at") or "")
+            try:
+                day = datetime.fromisoformat(stamp).astimezone(_MARKET_TZ()).date()
+            except ValueError:
+                continue
+            out[day] = out.get(day, 0) + 1
+        return out
+    except Exception:  # noqa: BLE001 - 日志读不到不该让本项崩
+        return {}
+
+
 def collect(*, skip_network: bool = False) -> dict[str, Any]:
     """跑全部检查，返回汇总。单项失败不影响其它项（否则一个挂了全看不见）。"""
     checks: list[dict[str, Any]] = [check_service()]
@@ -344,6 +452,13 @@ def collect(*, skip_network: bool = False) -> dict[str, Any]:
         checks.append(
             {"name": "intraday", "ok": False, "problems": [f"采集巡检异常：{exc}"], "detail": {}}
         )
+    # R92：封板落库的观察期进度。不判红，只报进度；同样放在网络段之外。
+    try:
+        checks.append(check_seal_coverage())
+    except Exception as exc:  # noqa: BLE001
+        checks.append(
+            {"name": "seal_coverage", "ok": True, "problems": [], "detail": {"error": str(exc)}}
+        )
     if not skip_network:
         # 盘口探活要出网，最不可靠 —— 它抛异常时**必须**降级成一条问题，
         # 不能让整个巡检崩掉。否则「新浪抖了一下」与「服务挂了」在告警上
@@ -354,6 +469,18 @@ def collect(*, skip_network: bool = False) -> dict[str, Any]:
             checks.append(
                 {"name": "quote", "ok": False, "problems": [f"盘口探活异常：{exc}"], "detail": {}}
             )
+    # R92：单项返回 None 不许让整个巡检崩在列表推导里 —— 那会让「有一项没写好」
+    # 表现成「巡检完全没跑」（没有任何输出，也没有飞书）。R92 就踩过一次：
+    # 误把一个辅助函数插进 check_service 体内，check_service 少了 return，
+    # 脚本直接 TypeError 退出，比「某一项红了」危险得多。
+    for i, check in enumerate(checks):
+        if not isinstance(check, dict) or "problems" not in check:
+            checks[i] = {
+                "name": f"broken_{i}",
+                "ok": False,
+                "problems": [f"第 {i} 项检查返回了 {type(check).__name__}，不是一个检查结果"],
+                "detail": {},
+            }
     problems = [p for c in checks for p in c["problems"]]
     return {
         "checked_at": _now().isoformat(timespec="seconds"),
@@ -403,6 +530,8 @@ def _render(report: dict[str, Any]) -> list[str]:
             "batch": "批次",
             "quote": "盘口",
             "database": "数据库",
+            "intraday": "盘中采集",
+            "seal_coverage": "封板观察期",
         }
         label = names.get(check["name"], check["name"])
         extra = ""
@@ -411,6 +540,20 @@ def _render(report: dict[str, Any]) -> list[str]:
             extra = f"（最近一轮 {d['lag_hours']}h 前，阈值 {d['threshold_hours']:.0f}h）"
         elif check["name"] == "quote" and "levels" in check["detail"]:
             extra = f"（{check['detail']['code']} {check['detail']['levels']}/10 档）"
+        elif check["name"] == "seal_coverage":
+            d = check["detail"]
+            if d.get("progress"):
+                parts = []
+                if d.get("streak"):
+                    parts.append(f"连续干净 {d['streak']}/{d['required']} 天")
+                if d.get("dirty_days"):
+                    bad = d["dirty_days"][0]
+                    parts.append(
+                        f"最近不干净：{bad['day']} {bad['rounds']} 轮 / {bad['errors']} 报错"
+                    )
+                if not d.get("clean_days"):
+                    parts.append("还没有完整落库的一天")
+                extra = f"（{'；'.join(parts)}）"
         elif check["name"] == "sequence":
             parts = [f"{k} {v['seq']}/{v['max_id']}" for k, v in check["detail"].items()]
             extra = f"（seq/max(id)：{'，'.join(parts)}）" if parts else ""

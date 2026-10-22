@@ -1580,3 +1580,79 @@ R89 的首屏横幅说的是**收盘后的日线结构**（三步进度），盘
 - 部署 + 重启后线上：`/api/dashboard/seal-board` →
   `available:true, 17:22 这一轮：33 只封在板上；封单中位 35,644 手，封板偏薄`；
   `/cpt/` 200；页面含 `seal-board-line`
+
+## §13 R92（2026-10-22 夜）：把「观察期」变成可计算的闸门，并说清 10-22 到底采到了什么
+
+### 13.1 为什么 CPT 自己也要一道闸门
+
+emotion-core 的 `lab/cpt_watch.py` 已经在算「CPT 采集干净了几天」，但它数的是**日志轮次**。
+CPT 这边要数的是**落库轮次** —— 两条链路会分开坏，R91 就是实例：10-22 日志 106 轮、
+98 个 `ok`，库里只有 3 轮，因为落库是 17:20 才接上的。**日志漂亮不代表数据在。**
+
+所以两边判据**刻意不同，各查各的**：
+
+| | emotion-core `cpt_watch` | CPT `check_seal_coverage` |
+|---|---|---|
+| 数据源 | `~/logs/intraday-collect.log` | `intraday_seal_snapshot` + 日志（两边都要） |
+| 干净日 | error 轮数 = 0 且 ok 轮数 ≥ 10 | 有落库轮次 且 error = 0 且 落库轮数 ≥ 10 |
+| 当天算不算 | 算（日志是实时的） | **不算**（库里当天天然不完整） |
+
+现在两边都读得出「0/5」：库里有数据的交易日只有 2026-10-22 一天，且当天只落了 3 轮，
+连 `MIN_ROUNDS_PER_DAY=10` 都不到。
+
+### 13.2 实现
+
+`scripts/watch_period_check.py`：
+
+- 常量 `SEAL_OBSERVE_DAYS = 5`、`MIN_ROUNDS_PER_DAY = 10`
+- `check_seal_coverage()` —— 只用 `intraday_seal_snapshot` 的 `at` 分布 + 日志 error 计数
+- `_log_errors_by_day()` —— 复用 `cpt.application.intraday_status.parse_log_tail`，
+  按北京日期聚合 `outcome == "error"`
+- **本项永远不判红**（`ok` 恒 True）。观察期没攒够是事实不是故障；判红会让真故障
+  被一个长期红项淹掉。红只给「采集器挂了 / 序列落后 / 批次停了」这类有对策的事。
+
+### 13.3 `check_service()` 被插断（这一轮最贵的教训）
+
+用 `def _now() -> datetime:` 当锚点插 `_MARKET_TZ()`，而这个锚点**也出现在
+`check_service` 之前** —— 新函数被塞进了 `check_service` 函数体里，后面的
+`return result` 全变成死代码，函数返回 `None`：
+
+```
+TypeError: 'NoneType' object is not subscriptable
+  problems = [p for c in checks for p in c["problems"]]
+```
+
+**Python 不报错、ruff 不报错，只有真跑巡检才看得见。** 我单跑了
+`check_intraday()` 和 `check_seal_coverage()` 都是 dict，看起来全对 ——
+崩的恰好是我没单独跑的那一个。
+
+两处加固：
+
+1. `collect()` 加 None 守卫：任何一项返回非 dict，替换成一个
+   `{"name": "broken_<i>", "ok": False, ...}` 而不是让整轮巡检崩掉。
+   **巡检崩了等于没有巡检** —— 比某一项判红严重得多。
+2. 测试加 `TestBrokenCheckDoesNotKillTheRound`：`None` → 报 problem 不崩；
+   并逐项跑一遍真函数断言每个都返回 dict。
+
+规则已写进 `docs/known-traps.md` **#67**：插入代码前 `grep -n` 确认锚点命中数，
+≥2 就换更长的锚点；改完跑一次真实路径。
+
+### 13.4 给读方的两句硬话
+
+`docs/intraday-seal-contract.md` §9 已更新（99 行 / 1 个交易日 / 3 轮），并新增两条：
+
+1. **10-22 只落了 3 轮是因为落库 17:20 才上线**，上午 100 多轮只进了日志。
+   这些轮次**无法回填** —— 日志只有汇总没有代码级明细，重放抓回来的是第二天数据。
+2. **裸 SQL 读方必须自己加 `code NOT LIKE '\x01%'`**。storage 层三个读取函数都带了
+   `_REAL_ROWS` 过滤，但绕过它自己写查询的人拿不到这层保护。同时写清了
+   19 行假数据当时的实际后果：`SELECT max(at)` **只读到那 1 行假的，33 只真实票被完全遮蔽**。
+
+### 13.5 验收
+
+- `tests/test_watch_period_check.py` **30 passed**（原 24，新增 `TestSealCoverage` 4 条 + `TestBrokenCheckDoesNotKillTheRound` 2 条）
+- `tests/test_intraday_seal_contract.py` **11 passed**（原 10，新增「裸 SQL 读方要过滤哨兵行」）
+  - 反向验证过：改成检查 `"116" in text` 立刻红 —— 契约里留着被清理掉的旧基数，
+    比没有基数更糟
+- 两处反向注入全中：去掉「当天不算干净日」→ 1 failed；去掉 None 守卫 → 1 failed
+- 实跑 `scripts/watch_period_check.py --skip-network --print`：**六项全绿**
+  `✅ 服务 / ✅ 序列（911228/911214，985/958）/ ✅ 批次（7.5h 前，阈值 30h）/ ✅ 盘中采集 / ✅ 封板观察期（还没有完整落库的一天）`

@@ -382,3 +382,135 @@ def _load_module():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     return mod
+
+
+class TestSealCoverage:
+    """R92：封板落库的观察期进度。
+
+    这一项**不判红**（观察期没攒够不是故障），所以测试守的是「算得对不对」
+    与「别把当天算进完整日」这两件事。
+    """
+
+    def _mod(self, monkeypatch, rounds_by_day, errors_by_day):
+        mod = _load_module()
+
+        class _Cur:
+            def __init__(self, rows):
+                self._rows = rows
+
+            def execute(self, sql, params=None):
+                self._sql = sql
+
+            def fetchall(self):
+                return self._rows
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        class _Conn:
+            def cursor(self):
+                return _Cur(rounds_by_day)
+
+            def close(self):
+                pass
+
+        import psycopg
+
+        monkeypatch.setattr(psycopg, "connect", lambda **kw: _Conn())
+        monkeypatch.setattr(mod, "_log_errors_by_day", lambda: errors_by_day)
+        import cpt.adapters.a_share_local as local
+
+        monkeypatch.setattr(local, "connection_kwargs", lambda: {})
+        return mod
+
+    def test_today_is_never_a_clean_day(self, monkeypatch):
+        """盘中的当天天然不完整，算进来永远是红的 —— 必须排除。"""
+        import datetime as dt
+
+        mod = self._mod(
+            monkeypatch,
+            [(dt.date(2026, 10, 22), 120), (dt.date(2026, 10, 21), 120)],
+            {},
+        )
+        now = dt.datetime(2026, 10, 22, 15, 30, tzinfo=mod._MARKET_TZ())
+        out = mod.check_seal_coverage(now=now)
+        assert out["ok"] is True, "这一项不许判红"
+        assert out["detail"]["streak"] == 1, "只应数到 10-21，10-22 当天不算"
+        assert out["detail"]["clean_days"] == ["2026-10-21"]
+
+    def test_a_short_day_breaks_the_streak(self, monkeypatch):
+        """落库轮数不够（R91 的 3 轮那种）不算干净日。"""
+        import datetime as dt
+
+        mod = self._mod(
+            monkeypatch,
+            [
+                (dt.date(2026, 10, 22), 120),
+                (dt.date(2026, 10, 21), 3),
+                (dt.date(2026, 10, 20), 120),
+            ],
+            {},
+        )
+        now = dt.datetime(2026, 10, 22, 15, 30, tzinfo=mod._MARKET_TZ())
+        out = mod.check_seal_coverage(now=now)
+        assert out["detail"]["streak"] == 0
+        assert out["detail"]["dirty_days"][0]["day"] == "2026-10-21"
+        assert out["detail"]["dirty_days"][0]["rounds"] == 3
+
+    def test_a_day_with_errors_is_not_clean(self, monkeypatch):
+        """日志里有 error 轮次，即便落库轮数够，也不算干净。"""
+        import datetime as dt
+
+        mod = self._mod(monkeypatch, [(dt.date(2026, 10, 21), 120)], {dt.date(2026, 10, 21): 2})
+        now = dt.datetime(2026, 10, 22, 15, 30, tzinfo=mod._MARKET_TZ())
+        out = mod.check_seal_coverage(now=now)
+        assert out["detail"]["streak"] == 0
+        assert out["detail"]["dirty_days"][0]["errors"] == 2
+
+    def test_unreadable_table_degrades_to_a_note(self, monkeypatch):
+        mod = _load_module()
+        import psycopg
+
+        def _boom(**kw):
+            raise OSError("连不上")
+
+        monkeypatch.setattr(psycopg, "connect", _boom)
+        out = mod.check_seal_coverage()
+        assert out["ok"] is True
+        assert "读不到落库表" in out["detail"]["error"]
+
+
+class TestBrokenCheckDoesNotKillTheRound:
+    """R92：单项返回 None 不许让整个巡检崩在列表推导里。
+
+    R92 实测踩过：把辅助函数误插进 ``check_service`` 体内 → ``check_service``
+    少了 ``return`` → ``collect()`` 直接 TypeError 退出，**没有任何输出**。
+    「某一项红了」至少还能看见，这种是「巡检完全没跑」。
+    """
+
+    def test_none_check_becomes_a_reported_problem(self, monkeypatch):
+        mod = _load_module()
+        monkeypatch.setattr(mod, "check_service", lambda: None)
+        monkeypatch.setattr(mod, "check_seal_coverage", lambda: None)
+        monkeypatch.setattr(
+            mod,
+            "check_intraday",
+            lambda **kw: {"name": "intraday", "ok": True, "problems": [], "detail": {}},
+        )
+        import psycopg
+
+        monkeypatch.setattr(psycopg, "connect", lambda **kw: (_ for _ in ()).throw(OSError("x")))
+        report = mod.collect(skip_network=True)
+        assert report["ok"] is False
+        assert any("不是一个检查结果" in p for p in report["problems"])
+
+    def test_every_check_returns_a_dict(self):
+        """真跑一遍全部检查（不联网），断言每项都返回 dict。"""
+        mod = _load_module()
+        for name in ("check_service", "check_seal_coverage"):
+            out = getattr(mod, name)()
+            assert isinstance(out, dict), f"{name} 返回了 {type(out).__name__}"
+            assert set(out) >= {"name", "ok", "problems", "detail"}
