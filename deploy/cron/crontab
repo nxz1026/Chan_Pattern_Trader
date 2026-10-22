@@ -44,6 +44,7 @@
 # | 10:10 | `watchlist-daily-summary.sh` | 关注列表收盘汇总发飞书（R4/C2 ④；**每个交易日都推**；必须先于 11:00 日报，好让失败当天可见） |
 # | 11:00 | `cron-daily-report.sh` | 扫上面 6 条作业日志 + 共享表新鲜度，异常发飞书（R57 第 5 条） |
 # | **每 15 分钟** | `watchlist-snapshot.sh` | R80：只跑关注列表的快照批次，新关注的票 15 分钟内进全景 |
+# | **每 2 分（盘中）** | `cpt-intraday-collect.timer`（systemd，非本文件） | R89：盘中采集守护，只采集不判定；是 ADR 0003 §D10 观察期条件②的观测对象 |
 #
 # 六个时间**刻意错开**：巡检 03:40 跑在因子重算 02:20 之后、两条清理 04:10/04:30 之前 ——
 # 这样巡检读到的是「刚重算完」的因子状态，而清理不会与它抢同一批行；
@@ -196,3 +197,15 @@ PATH=/usr/local/bin:/usr/bin:/bin
 #
 # 为什么不进 cron-daily-report.sh 的 JOBS：那是「每天一次」的口径。
 0 */2 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/watch-period-check.sh
+
+## 十、盘中采集守护（R89）—— **不在本文件，在 systemd timer**
+#
+# 这一条刻意**不写成 cron**：交易时段每 2 分钟一次、跨午休要停。
+# systemd 的 `OnCalendar=*-*-* 09:30/2:00 Asia/Shanghai` 能把时段与午休写进
+# 表达式，而且 `systemd-analyze calendar` 能预演；cron 写 `*/2 1,2,5,6 * * 1-5`
+# 会在 11:32~13:00 与 15:00 之后多跑一堆空轮，也没法预演。
+#
+# 单元在仓内：`deploy/systemd/cpt-intraday-collect.{service,timer}`
+# 检查：`systemctl list-timers cpt-intraday-collect.timer`
+# 手动跑一轮：`deploy/cron/intraday-collect.sh --once --ignore-session`
+# 日志：`/home/ubuntu/logs/intraday-collect.log`（JSON 行，一轮一行）

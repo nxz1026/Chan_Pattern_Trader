@@ -1,0 +1,17 @@
+[Unit]
+Description=交易时段每 2 分钟拉起一次盘中采集（R89）
+
+[Timer]
+# ⚠️ 本机系统时区是 UTC（见 deploy/cron/crontab 头注），所以这里**显式写时区**，
+#    不靠机器本地时区推。
+#    ⚠️ 一个 OnCalendar 里塞两个区间（`01:30/2,5:00/2:00`）**解析不了**（systemd-analyze
+#    报 Invalid argument），必须拆成两行。
+#    上午 9:30-11:30 → 01:30/2 起；下午 13:00-15:00 → 05:00/2 起。
+#    两行叠加后 11:30 与 12:xx 不采（午休），15:00 之后不采。
+OnCalendar=*-*-* 09:30/2:00 Asia/Shanghai
+OnCalendar=*-*-* 13:00/2:00 Asia/Shanghai
+Persistent=false
+Unit=cpt-intraday-collect.service
+
+[Install]
+WantedBy=timers.target

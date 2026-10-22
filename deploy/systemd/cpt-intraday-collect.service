@@ -1,0 +1,30 @@
+[Unit]
+Description=CPT 盘中采集守护（只采集，不判定；ADR 0003 §E2 分工）
+Documentation=file:///home/ubuntu/DSH/Chan_Pattern_Trader/docs/rebuild-plan-review.md
+# 谁先起来都行：本单元只读行情与库，不依赖 web 服务
+After=network-online.target postgresql.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+User=ubuntu
+Group=ubuntu
+WorkingDirectory=/home/ubuntu/DSH/Chan_Pattern_Trader
+EnvironmentFile=-/home/ubuntu/DSH/Chan_Pattern_Trader/deploy/env/cpt-dashboard.env
+# 跑一轮就退。跨日/假活/日志轮转全交给 systemd 与下一次 timer。
+# ⚠️ 不带 PYTHONPATH：R74 修的正是「cron/systemd 直接跑脚本时 sys.path[0]=scripts/，
+#    依赖 editable 安装把 cpt 指到本仓」——这条路径顺便当门禁⑰的日常回归。
+ExecStart=/home/ubuntu/DSH/Chan_Pattern_Trader/.venv/bin/python scripts/intraday_collectd.py --once
+# 一轮正常 2~5 秒；卡死时别让下一轮被叠住。
+TimeoutStartSec=90
+
+# R58 沙箱加固标准
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=-/home/ubuntu/logs
+ReadWritePaths=-/home/ubuntu/.cache/cpt
+
+[Install]
+WantedBy=multi-user.target

@@ -1081,3 +1081,85 @@ R87 以后页面还挂着 R70 那组数（`+0.11% / +0.18% / +0.02%`、胜率 46
 PYTHONPATH=. .venv/bin/python scripts/backtest_run.py --limit 300 --days 800   # 面板层三档
 PYTHONPATH=. .venv/bin/python .tmp_audit/shape_probe.py                        # 8.19 那张形状表（一次性探针，未入仓）
 ```
+
+## R89（2026-10-22）：盘中采集守护 —— 把 emotion-core 的观察期从「无对象」变成「有对象」
+
+### 9.1 这条为什么是主线，不是支线
+
+emotion-core 2026-10-22 的原话：
+
+> 质量闸门先过再建表。§D10 观察期条件②（盘中采集任务无失败）现在**无对象
+> 可观测**——CPT 那边采集器还没接线。等它落地并跑起来，才开始计 5 个交易日。
+
+也就是说：**emotion-core 卡在这一步，等的不是判据，是一个真实在跑的采集任务。**
+CPT 侧 R86 写好了 `IntradayCollector`，但当时**故意不接线**（测试
+`test_nothing_imports_the_probe_in_production_paths` 钉着），代价就是没有对象。
+
+R89 把这个对象补上，但**只补采集、不补判定**。
+
+### 9.2 边界（写在 `scripts/intraday_collectd.py` 模块头，改之前先看）
+
+| 做 | 不做 |
+|---|---|
+| 按 timer 拉起、采涨幅榜 + 五档 | 判「该不该触发买点」 |
+| 每轮写一行 JSON 日志 | **建表**（`intraday_quote` 归 emotion-core） |
+| 只读 DB 判今天是不是交易日 | 写任何数据库 |
+| 连续失败 3 轮才报警 | 单轮失败就报警 |
+
+**为什么不做判定**：同一个「封板」两个仓各判一次，口径迟早分叉 —— R88 里
+`board_of` 顺序之争就是前车之鉴。CPT 只出**原始材料**。
+
+### 9.3 「无失败」的可观测口径（对 emotion-core 交代清楚）
+
+- 一轮 = 一次 `IntradayCollector.scan()`，结果只有三态：
+  - `ok` —— 拿到候选与报价；
+  - `empty` —— 榜单空（非交易时段或真没票接近涨停）。**不算失败**，午休与竞价前都会 empty；
+  - `error` —— 抛异常。**连续 3 轮**才算采集挂了，进程 rc=1。
+- 运行总结字段固定：`{"rounds","ok","empty","errors","first_error"}`。
+- 日志：`/home/ubuntu/logs/intraday-collect.log`，一轮一行 JSON。
+
+### 9.4 部署形态：systemd timer，不是 cron
+
+| | cron | systemd timer（选它） |
+|---|---|---|
+| 跨午休停 | `*/2 1,2,5,6 * * 1-5` 会多跑 11:32~13:00、15:00 后一堆空轮 | `OnCalendar=*-*-* 09:30/2:00 Asia/Shanghai` 把时段写进表达式 |
+| 可预演 | 否 | `systemd-analyze calendar` 能打出未来几次触发 |
+| 时区 | 靠机器本地时区（本机是 UTC） | 表达式里显式带 `Asia/Shanghai` |
+
+**踩到的坑**：把一个 OnCalendar 里塞两个区间
+（`01:30/2,5:00/2:00 Asia/Shanghai`）**解析不了**，`systemd-analyze calendar`
+报 `Invalid argument`。必须拆成两行 `OnCalendar`。已写进 timer 注释并被
+`tests/test_intraday_collectd.py::TestDeployment` 钉住。
+
+实跑预演：上午行 `Next elapse: Fri 2026-10-23 01:30:00 UTC`（= 北京 09:30），
+下午行 `Next elapse: Thu 2026-10-22 05:00:00 UTC`（= 北京 13:00）。
+
+### 9.5 验收实跑
+
+| 项 | 结果 |
+|---|---|
+| 手跑一轮（`--once --ignore-session`） | `{"rounds":1,"ok":1,"empty":0,"errors":0}`，2.49 秒 |
+| 那一轮的真实内容 | `rank_size 100 → 候选 27 → 已封 26 · 逼近 1 · 判不了 0`，封单中位 188,616 手，`board_label=厚` |
+| `systemctl start cpt-intraday-collect.service` | `Result=success` `ExecMainStatus=0`；因本机库里最新交易日是 10-21（今天 10-22 行还没进库），正确输出 `skipped`：`库里的最新交易日比今天旧 —— 今天休市` |
+| timer 已启用 | `systemctl list-timers` 显示 `Thu 2026-10-22 05:00:00 UTC` 下次触发 |
+| 单元与仓内副本 | `diff` 逐字节一致（service + timer） |
+| 新测试 | `tests/test_intraday_collectd.py` **19 passed**；反向注入「error 伪报成 ok」→ 1 条红 |
+| 全量 pytest | **2238 passed / 5 skipped / 0 failed** |
+| 11 道门禁 | 全绿；`ruff check .` All checks passed；mypy Success |
+
+### 9.6 对 emotion-core 的两句回话（他们问的）
+
+1. **「判据别改回去」** —— CPT 侧顺序**本来就是对的**（`growth → bse → st_main → main`），
+   不需要改。R88 做了反向的保护：模块头写「判据锁」段，`TestBoardOrderingIsLocked`
+   12 条（含源码级断言 `_BSE_PREFIXES` 必须在 `return "st_main"` 之前）。
+   反向注入把 bse 挪到 st_main 之后 → 4 条红。跨仓对账复跑 **44 组，差异 0 处**。
+2. **「先接线才有观察对象」** —— R89 已接线：`cpt-intraday-collect.timer` 交易时段每
+   2 分钟拉起一次，只采集不判定，连续 3 轮失败才 rc=1。**从 2026-10-22 起可以开始
+   计那 5 个交易日**，判据见 §9.3。
+
+### 9.7 遗留（不阻塞，但要记）
+
+- **北交所按用户决定不接**（2026-10-22）。后果：`board_of` 的 `bse` 分支有代码、
+  有对账测试、有判据锁，但**本地 `daily_bar` 里一只北交所票都没有**（实测
+  `920/8/4` 号段 count = 0）。它是「写了但无生产对象」的分支 —— 这正是跨仓对账
+  只能靠人肉跑探针的原因。接数据前，任何北交所结论都不许进产品。
