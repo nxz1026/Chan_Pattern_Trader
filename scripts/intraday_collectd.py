@@ -100,34 +100,42 @@ def in_session(now: datetime) -> bool:
 def trading_day(now: datetime) -> str | None:
     """今天是不是交易日。是则返回 ``YYYY-MM-DD``，否则 ``None``。
 
-    读 ``public.daily_bar`` 最近一个有数据的交易日 —— **不猜节假日**。
-    停牌一天造成的日历错位在这里是安全的：只要库里当天有行就算交易日，
-    没有就跳过（宁可少采一轮，不要在休市日采出一堆昨收数据）。
+    查 ``public.trade_calendar``（``a_share_local.is_trade_day``）—— **不猜节假日**。
 
-    **读库失败时选择「跑」而不是「跳过」**：漏采一天会让 emotion-core 的
-    观察期计数中断，采到一轮无用的数据只是多写一行日志。故障方向不对称。
+    ## ⚠️ 不能拿 ``daily_bar`` 的最新日期当判据（R89 实测翻车）
+
+    第一版写的是「``max(date) FROM daily_bar`` 等于今天就开市，比今天旧就休市」。
+    看着合理，实际**盘中恒为假**：``daily_bar`` 存的是**收盘后**才落的日线，
+    盘中它永远只有截止昨天的数据。结果这个定时器每 2 分钟如实报
+    ``skipped: 库里的最新交易日比今天旧 —— 今天休市``，**一次都没真正采过**，
+    而日志看起来一切正常。
+
+    那段时间正是交易时段（10:48），``systemctl list-timers`` 正常、
+    ``outcome`` 也不是 ``error`` —— 只有 ``check_intraday`` 的「12 分钟没有
+    新记录」和实际读日志才能发现不对劲。
+
+    **判据要选「事先就有答案」的表**：交易日历在年初就排好了，日线要等收盘。
+
+    ## 读库失败时跑到，不停跑
+    漏采一天会让 emotion-core 的观察期计数中断，采到一轮无用数据只是多写一行
+    日志。故障方向不对称。
     """
     try:
         import psycopg
-        from cpt.adapters.a_share_local import connection_kwargs
+        from cpt.adapters.a_share_local import connection_kwargs, is_trade_day
 
+        today = now.strftime("%Y-%m-%d")
         conn = psycopg.connect(**connection_kwargs())
         try:
-            with conn.cursor() as cur:
-                cur.execute("SELECT max(date) FROM public.daily_bar")
-                row = cur.fetchone()
+            verdict = is_trade_day(conn, today)
         finally:
             conn.close()
     except Exception:  # noqa: BLE001 - 读不到日历不该拦住采集
         return now.strftime("%Y-%m-%d")
-    if not row or row[0] is None:
+    if verdict is None:
+        # 日历里没这一天：可能还没排到。宁可跑一轮（空结果成本极低）。
         return now.strftime("%Y-%m-%d")
-    latest = row[0]
-    today = now.date()
-    # 库里最新一行是今天 ⇒ 交易日；比今天旧 ⇒ 今天还没行情（未开盘或休市）。
-    if latest >= today:
-        return today.isoformat()
-    return None
+    return now.strftime("%Y-%m-%d") if verdict else None
 
 
 def run_round(*, limit: int, main_board_only: bool) -> dict[str, Any]:

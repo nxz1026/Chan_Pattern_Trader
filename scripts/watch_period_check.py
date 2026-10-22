@@ -109,9 +109,7 @@ HEALTH_TIMEOUT: Final[float] = 2.0
 
 #: 盘中采集的新鲜度上限（分钟）。timer 每 2 分钟一轮，10 分钟 = 允许连挂 5 轮。
 #: 只在**盘中时段**判，收盘后当然不会再有新记录 —— 全天候判会每天误报。
-INTRADAY_STALE_MINUTES: Final[float] = float(
-    os.environ.get("CPT_INTRADAY_STALE_MINUTES") or 10.0
-)
+INTRADAY_STALE_MINUTES: Final[float] = float(os.environ.get("CPT_INTRADAY_STALE_MINUTES") or 10.0)
 
 #: 采集日志路径。与 ``scripts/intraday_collectd.py`` 共用同一条环境变量。
 INTRADAY_LOG: Final[Path] = Path(

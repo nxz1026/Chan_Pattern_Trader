@@ -275,16 +275,84 @@ class TestDeployment:
         assert "PYTHONPATH" in svc
         assert "NoNewPrivileges=true" in svc
 
-    def test_timer_uses_two_calendar_lines_not_one_comma_form(self) -> None:
-        """``01:30/2,5:00/2:00`` 这种逗号合并形式 systemd 解析不了（实测 Invalid argument）。"""
+    def test_timer_does_not_use_the_hour_step_trap(self) -> None:
+        """``HH:MM/STEP`` 的 STEP 是**小时**步长（R89 实测翻车）。
+
+        第一版写 ``09:30/2:00``，本意「每 2 分钟」，systemd 解成「每 2 小时的
+        第 00 分」⇒ 一天只跑 3 次，而日志显示 ``outcome: skipped`` 看着一切正常。
+        正确写法是把**小时**写成范围：``09..11,13..14:00/2:00``。
+        """
         timer = (ROOT / "deploy" / "systemd" / "cpt-intraday-collect.timer").read_text(
             encoding="utf-8"
         )
         lines = [ln for ln in timer.splitlines() if ln.startswith("OnCalendar=")]
-        assert len(lines) == 2, lines
-        assert all("Asia/Shanghai" in ln for ln in lines)
-        assert "09:30/2:00" in lines[0]
-        assert "13:00/2:00" in lines[1]
+        assert len(lines) == 1, lines
+        expr = lines[0].split("=", 1)[1]
+        # 小时必须是范围（含 ``..``），否则 /2:00 会被当成小时步长
+        after_date = expr.split(" *-*-* ", 1)[1]
+        hour_part = after_date.split(":", 1)[0]
+        assert ".." in hour_part, f"小时字段必须是范围：{hour_part!r}"
+        # 分钟步长必须是 2
+        assert ":00/2:00" in expr, expr
+        assert "Asia/Shanghai" in expr, "必须显式带时区（本机是 UTC）"
+        assert "Mon..Fri" in expr, "周末不该跑"
+
+    def test_trading_day_uses_the_calendar_not_daily_bar(self) -> None:
+        """盘中没有当天的日线，拿 ``daily_bar`` 判交易日会**永远 skipped**。
+
+        R89 实测：第一版拿 ``max(date) FROM daily_bar`` 判「今天开市没有」，
+        盘中它恒为昨天 ⇒ 每 2 分钟都报 skipped，一次没真正采过，而日志看起来
+        完全正常。判据必须是事先排好表的 ``trade_calendar``。
+        """
+        import ast
+
+        src = (ROOT / "scripts" / "intraday_collectd.py").read_text(encoding="utf-8")
+        tree = ast.parse(src)
+        fn = next(
+            n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "trading_day"
+        )
+        # 只看真正会执行的东西：字符串常量与 import。**注释和 docstring 不算** ——
+        # 判据要是搜全文，docstring 里写一句「不能拿 daily_bar 判」就自己把自己
+        # 判死（这个坑 R89 一轮踩了三次）。
+        # docstring 节点的**身份**要排除，不能靠字符串比较 ——
+        # ``ast.get_docstring`` 返回的是去缩进后的文本，与 ``Constant.value``
+        # 原文并不相等，按值排除会漏掉它（R89 实测踩过）。
+        doc_node = (
+            fn.body[0]
+            if fn.body
+            and isinstance(fn.body[0], ast.Expr)
+            and isinstance(fn.body[0].value, ast.Constant)
+            else None
+        )
+        strings = [
+            n.value
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Constant)
+            and isinstance(n.value, str)
+            and n is not (doc_node.value if doc_node is not None else None)
+        ]
+        # 函数体内的惰性 import 是 ``from X import a, b`` 形式，被导入的名字在
+        # ``ImportFrom.names`` 里，不在 ``module`` 里（R89 实测踩过）。
+        imported: list[str] = []
+        for n in ast.walk(fn):
+            if isinstance(n, ast.Import):
+                imported.extend(a.name for a in n.names)
+            elif isinstance(n, ast.ImportFrom):
+                imported.extend(a.name for a in n.names)
+                imported.append(n.module or "")
+        assert any("a_share_local" in m for m in imported), imported
+        assert "is_trade_day" in imported, f"必须查交易日历：{imported}"
+        # 光 import 不够 —— 必须**真的调用**。只断 import 的话，把返回值换成
+        # ``None`` 照样绿（R89 反向注入实测：注入后 20 条全绿没抓到）。
+        called = [
+            n.func.id
+            for n in ast.walk(fn)
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+        ]
+        assert "is_trade_day" in called, f"必须调用 is_trade_day：{called}"
+        assert not any("daily_bar" in st for st in strings), (
+            f"trading_day 不许拿 daily_bar 判交易日：{strings}"
+        )
 
     def test_manual_entry_script_has_no_pythonpath(self) -> None:
         body = (ROOT / "deploy" / "cron" / "intraday-collect.sh").read_text(encoding="utf-8")

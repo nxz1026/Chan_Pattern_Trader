@@ -2237,3 +2237,66 @@ psql -c "SELECT max(id), (SELECT last_value FROM pg_sequences
 - 断言 `not_tradable == 1`，实际是「每个 horizon 各计一次」= 4。
 - 正则搜全文判「有没有 import 某模块」，文档字符串里提一句就误判 → 改用 AST 节点。
 
+## #64 systemd `OnCalendar` 的 `/STEP` 是**小时**步长，不是分钟（R89 实测翻车）
+
+**现象**：给盘中采集写了
+
+```
+OnCalendar=*-*-* 09:30/2:00 Asia/Shanghai
+OnCalendar=*-*-* 13:00/2:00 Asia/Shanghai
+```
+
+本意「从 9:30 起每 2 分钟一轮」。装上后 `systemctl list-timers` 显示
+**Next 是两小时之后**，第一批数据只在 09:30 / 11:30 / 13:30 各来一次。
+
+**根因**：`HH:MM/STEP` 的 `STEP` 修饰的是**小时字段**。
+`systemd-analyze calendar "*-*-* 09:30/2:00 Asia/Shanghai"` 打印
+`Next elapse: Fri 2026-10-23 01:30:00 UTC`（明天），一眼可见它没在按分钟走。
+写 `09:30/2` 也一样 —— 规范化结果仍是 `09:30/2:00`，`/2` 默认按小时解释。
+
+**正确写法**：把**小时**写成范围、分钟的步长写在冒号后面：
+
+```
+OnCalendar=Mon..Fri *-*-* 09..11,13..14:00/2:00 Asia/Shanghai
+```
+
+规范化成 `09..11,13..14:00/2:00`，实测 Next elapse 是 2 分钟后。
+
+**顺带作废的一条旧结论**：R89 第一版注释写「一个 OnCalendar 里塞两个时间点
+（`01:30/2,5:00/2:00`）解析不了，必须拆两行」。那是**同一误解的副作用** ——
+失败的不是「两个区间」，是把 `/2:00` 当分钟用。用 `9..11,13..14` 这种小时
+列表一行就够。
+
+**怎么提前发现**：任何新 timer 装之前先跑
+`systemd-analyze calendar "<表达式>"` 看 **Next elapse**，而不是等
+`list-timers` 出结果。`list-timers` 也会显示，但要等到装上才发现。
+
+## #65 「有没有 import」不是判据，「有没有调用」才是（R89 第三次踩同一坑）
+
+**现象**：给 `intraday_collectd.trading_day` 写了条防回归测试，断言函数体里
+「查的是 `trade_calendar` 而不是 `daily_bar`」。实现方式是 AST 找 import +
+字符串常量。然后反向注入把 `verdict = is_trade_day(conn, today)` 改成
+`verdict = None`（**不再查日历**），**20 条全绿没抓到** —— 因为 import 还在。
+
+**根因**：`from cpt.adapters.a_share_local import is_trade_day` 这一句没删，
+测试只看「导入列表里有 `is_trade_day`」，它就在。至于结果有没有被用，没查。
+
+**通用判据**：用 AST 做「某函数有没有真的做某件事」时，三档判据强度是
+
+| 判据 | 强度 | 骗过它只需 |
+|---|---|---|
+| 搜全文文本 | 最弱 | 注释/docstring 里提一句 |
+| AST 找 import | 中 | 保留 import 不调用 |
+| AST 找 **Call** 节点 | 够 | 只能真删调用 |
+
+`ast.Call` 的 `func` 是 `ast.Name` 时取 `.id`，是 `ast.Attribute` 时取 `.attr`，
+两种都要覆盖（`is_trade_day(...)` 与 `self.is_trade_day(...)`）。
+
+**同一轮踩的三个变体**（记在一起，因为它们是一类）：
+1. 搜全文判 import —— `intraday_analysis.py` 的 docstring 提了一句 `psycopg`
+   就被判成「接线了」。
+2 判 docstring 时用 `ast.get_docstring(fn)` 的返回值去比对 `ast.Constant.value`
+   —— 前者是去缩进后的文本，**永远不相等**，按值排除会漏掉 docstring。
+   必须按**节点身份**（`fn.body[0].value is n`）排除。
+3. `ImportFrom` 的被导入名字在 `n.names` 里，不在 `n.module` 里。只看
+   `module` 会得出「没导入 is_trade_day」的假结论。

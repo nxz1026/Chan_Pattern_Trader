@@ -1259,3 +1259,74 @@ R88 的 +4.05% / 58.4% 复现成立（差 0.3pp 来自窗口终点从 10-19 推�
 | 门禁修的一处真问题 | SQL 分层：`app.py` 里写 `SELECT max(date) FROM daily_bar` 被门禁抓到，**下沉到 `cpt/storage/backtest_panel_store.latest_market_day()`** |
 | 线上 | `/api/dashboard/intraday-status` → `available:true, state:running`；`/cpt/` → 200，页面含 `intraday-status-line` |
 | `ruff check .` | All checks passed |
+
+### 10.6 装完才发现的两个真 bug（这一节比 10.1~10.5 更值钱）
+
+R89 第一次提交（`ac776748e`）后，我在交易时段实跑巡检，`check_intraday`
+立刻报「12 分钟没有新记录」。顺着查下去，露出两个**上线才算出来**的 bug。
+两个都通过了代码审查、通过了 21+26 条测试、通过了 CLI 手动跑 —— 因为它们
+都不在「被测试覆盖的那一半」里。
+
+#### bug ① timer 的 `/STEP` 是小时步长，不是分钟
+
+```ini
+# 本意：从 9:30 起，每 2 分钟一轮
+OnCalendar=*-*-* 09:30/2:00 Asia/Shanghai     # ❌ 实为「每 2 小时的第 0 分」
+```
+
+`systemd-analyze calendar` 给出 `Next elapse: 明天 01:30 UTC` —— 一天只跑
+3 次（09:30 / 11:30 / 13:30）。`systemctl list-timers` 显示 active，日志
+显示 `outcome` 正常，**没有任何一处报错**。
+
+正确写法（小时写范围，分钟写步长）：
+
+```ini
+OnCalendar=Mon..Fri *-*-* 09..11,13..14:00/2:00 Asia/Shanghai   # ✅ 每 2 分钟
+```
+
+顺带作废了 R89 首版的一条注释：「一个 OnCalendar 塞两个时间点解析不了，必须
+拆两行」。失败的不是「两个区间」，是把 `/2:00` 当分钟用。见 known-traps #64。
+
+#### bug ② 拿 `daily_bar` 判交易日，盘中恒为假
+
+```python
+# 本意：库里最新日线是今天就开市，否则休市
+SELECT max(date) FROM public.daily_bar   # ❌ 盘中永远返回昨天
+```
+
+`daily_bar` 存的是**收盘后**才落的日线。于是这个定时器每 2 分钟如实报
+`skipped: 库里的最新交易日比今天旧 —— 今天休市`，**一次都没真正采过**，
+而 `outcome` 不是 `error`、巡检在修好前也没报（修好后才加的第五项）。
+
+判据要选「事先就有答案」的表 —— `public.trade_calendar` 年初就排好了。
+改用 `is_trade_day(conn, today)` 之后 10:52:02 立刻采到第一轮真实数据。
+
+#### 两个 bug 的共同点
+
+**「跑起来了」和「跑对了」是两件事，而日志默认只证明前者。** 这两处都有日志、
+都有非 `error` 的 outcome、timer 都 active。真正的证据只有两条：
+①`systemd-analyze calendar` 的 Next elapse ②日志的 `outcome` 字段到底是
+`ok` 还是 `skipped`。
+
+修好后的实证（同一份日志前后对照）：
+
+```
+10:46:37  skipped  库里的最新交易日比今天旧 —— 今天休市   ← 旧判据
+10:48:13  skipped  同上
+10:50:01  skipped  同上
+10:52:02  ok  rank_size=100 candidates=24 sealed=24 median_bid_lots=168744.76  ← 新判据第一轮
+10:54:14  ok  rank_size=100 candidates=26 sealed=26 median_bid_lots=165810.76
+```
+
+巡检五项全绿：服务 / 序列 / 批次 / **intraday** / 盘口。
+
+#### 补的测试（两条都做了反向注入）
+
+| 测试 | 守什么 | 注入 | 结果 |
+|---|---|---|---|
+| `test_timer_does_not_use_the_hour_step_trap` | 小时字段必须是范围 | 退回 `09:30/2:00` | ✅ 抓到 |
+| `test_trading_day_uses_the_calendar_not_daily_bar` | 必须**调用** `is_trade_day` | `verdict = None` | ✅ 抓到 |
+
+第二条第一版**没抓到**：判据是「import 里有 `is_trade_day`」，而注入只换了
+返回值、没删 import。改成查 AST 的 `ast.Call` 节点才抓到。见 known-traps #65
+——「有没有 import」不是判据，「有没有调用」才是。
