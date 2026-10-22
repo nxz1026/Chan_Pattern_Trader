@@ -79,11 +79,19 @@ def test_progress_block_hidden_by_default_and_hidden_when_empty() -> None:
 
 
 def test_signal_panel_still_declares_the_measured_numbers() -> None:
-    """R71 的核心承诺：面板上有实测数字和建议。删掉横幅要红。"""
+    """R88：面板上的实测数字换成 R87 那组（R70 的 +0.02% 是 confirmed 组，已作废）。
+
+    这个测试盯两件事：数字在（删掉横幅要红）、且不许出现 R70 那组老数字
+    （老数字与 §8 的可复跑面板层不是同一口径，混用会让文案自相矛盾）。
+    """
     html = (_DASH / "index.html").read_text(encoding="utf-8")
-    assert "688,496" in html
-    assert "+0.11% / +0.18% / +0.02%" in html
+    assert "+0.56%" in html
+    assert "45.6%" in html
+    assert "+0.57%" in html
+    assert "44.8%" in html
     assert "它不预测涨跌" in html
+    for stale in ("688,496", "+0.11% / +0.18% / +0.02%", "+0.81%"):
+        assert stale not in html, f"{stale} 是 R70 口径，已作废"
     assert "data-testid=signal-advice" in html or 'data-testid="signal-advice"' in html
 
 

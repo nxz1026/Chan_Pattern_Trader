@@ -390,7 +390,7 @@ def test_confirmed_headline_states_it_is_not_a_buy_point() -> None:
     )
     assert "不是买点" in out["headline"]
     # R70 的实测数字要跟着出去：只说「不是买点」而不说为什么，用户会当成免责话术。
-    assert "0.02%" in out["headline"] and "46%" in out["headline"]
+    assert "+0.57%" in out["headline"] and "45.4%" in out["headline"]
 
 
 def test_action_label_is_descriptive_not_imperative() -> None:

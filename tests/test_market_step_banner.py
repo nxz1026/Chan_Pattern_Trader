@@ -95,7 +95,8 @@ def test_renderer_carries_the_no_alpha_evidence() -> None:
     js = _js("dash-signal.js")
     start = js.find("function buildMarketStepBanner")
     body = js[start : js.find("\n  }\n", start) + 4]
-    assert "+0.02%" in body and "46%" in body, "必须有 R70 的 20 日收益与胜率"
+    assert "+0.56%" in body and "45.6%" in body, "必须有 R87 的 20 日收益与胜率"
+    assert "+0.22%" in body and "44.8%" in body, "必须给出同一批票的随机买入基线"
     assert "不是买点" in body
 
 

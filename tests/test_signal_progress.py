@@ -116,7 +116,7 @@ def test_ready_position_action_mentions_both_do_and_dont() -> None:
     action = first_buy_progress(_F(True, True, True), segment_status="down")["action"]
     assert "该做的" in action
     assert "不该做的" in action
-    assert "20 日新低后收阳" in action
+    assert "跌超 4% 之后" in action
 
 
 def test_progress_is_read_only_and_does_not_mutate_facts() -> None:
