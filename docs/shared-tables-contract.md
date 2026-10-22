@@ -32,8 +32,10 @@ emotion-core  ──写──▶  public.<7 张共享表>  ──只读──▶
 | `hot_rank` | emotion-core | `data/ingest.py:602`（当日）/ `:638`（回补） | 东财人气榜 top100（绕开 akshare 字段不兼容） | 与 `daily_bar` 同 |
 | `ladder_day` | emotion-core | `data/loader.py:164`（DELETE+INSERT） | **无外部源**，派生自 `derived_bar`/`limit_pool_em` | 与 `daily_bar` 同 |
 | `limit_pool_em` | emotion-core | `data/ingest.py:509` | akshare 涨停/炸板/跌停池 | 与 `daily_bar` 同 |
-| `strategy_signal` | emotion-core | `services/strategy/runner.py:241` | **LLM**（15 个 YAML 策略） | 与 `daily_bar` 同 |
+| `strategy_signal` | emotion-core | `src/emotion_core/services/strategy/strategy_runner.py:281`（`run_for_date`） | **LLM**（15 个 YAML 策略） | 与 `daily_bar` 同 |
 | `trade_calendar` | emotion-core | `data/trade_calendar.py:69` | akshare 新浪交易日历，**刻意独立于库内行情数据** | 覆盖到今天即算新鲜 |
+
+> **路径写法**：本表一律写**仓内完整路径**。`check_line_refs.py` 按 basename 解析，全仓有多份同名文件（`runner.py` 就有 `cpt/backtest/` 与 `emotion-core/lab/` 两份）时会**跳过不校验**——写完整路径才是真被门禁看着的。
 
 **「期望新鲜度」的判定**：收盘时刻（北京时间 15:00）已过的**最近一个交易日**。
 - 今天休市 / 周末 ⇒ 期望上一个交易日（数据停在那儿是**正确的**）

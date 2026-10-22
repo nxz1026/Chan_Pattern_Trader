@@ -7,11 +7,13 @@ emotion-core 的 ``algorithms/intraday.py`` 逐条对账 —— 两份实现是�
 
 from __future__ import annotations
 
+import inspect
 import sys
 from pathlib import Path
 
 import pytest
 from cpt.domain import intraday_rules as ir
+from cpt.domain.intraday_rules import board_of, board_pct_limit
 
 #: emotion-core 仓库位置（对账用；不存在则跳过那条测试）。
 _EMOTION_CORE = Path("/home/ubuntu/DSH/emotion-core/src")
@@ -263,3 +265,52 @@ def test_constants_match_adr():
     assert ir.BOARD_PCT_ST == 5.0
     # 与 emotion-core 的判据常量不冲突（那边是触发门槛，这边是口径宽度）
     assert ec.SEAL_BID1_VOL_MIN == 30_000
+
+
+class TestBoardOrderingIsLocked:
+    """⛔ 判据锁（R88）：``board_of`` 的顺序就是口径，不许改回去。
+
+    emotion-core 2026-10-22 跨仓对账发现它自己的 ``board_pct_limit`` 顺序是
+    ``st → growth → bse``，北交所 ST（``920xxx`` + ST 名）落进 ``st_main`` 按 5%
+    算，涨停价算低 ⇒「已封板」被误判成「未到板」。CPT 侧顺序本来就是对的，
+    这些用例钉住「它继续对下去」。
+    """
+
+    @pytest.mark.parametrize(
+        ("code", "name", "board", "pct"),
+        [
+            # 北交所 ST：必须走 bse=30%，不是 st_main=5%
+            ("920001", "*ST海航", "bse", 30.0),
+            ("920296", "ST某某", "bse", 30.0),
+            ("430047", "*ST升达", "bse", 30.0),
+            ("830799", "ST天龙", "bse", 30.0),
+            # 创业板/科创板 ST：走 st_growth 但仍是 20%
+            ("300001", "*ST特锐德", "st_growth", 20.0),
+            ("688981", "ST中芯", "st_growth", 20.0),
+            # 主板 ST：5%
+            ("600001", "*ST某某", "st_main", 5.0),
+            ("000004", "ST国华", "st_main", 5.0),
+            # 非 ST 基线
+            ("600001", None, "main", 10.0),
+            ("920001", None, "bse", 30.0),
+        ],
+    )
+    def test_board_and_pct(self, code: str, name: str | None, board: str, pct: float) -> None:
+        assert board_of(code, name=name) == board
+        assert board_pct_limit(code, name=name) == pct
+
+    def test_st_check_never_precedes_the_bse_check(self) -> None:
+        """源码级钉住：``bse`` 的分支必须出现在 ``st_main`` 之前。
+
+        这一条读函数体而不是只跑用例 —— 用例可能被「顺手改宽」,
+        而顺序本身才是口径。
+        """
+        src = inspect.getsource(board_of)
+        bse_at = src.index("_BSE_PREFIXES")
+        st_main_at = src.index('return "st_main"')
+        assert bse_at < st_main_at, "bse 判定必须在 st_main 之前，否则北交所 ST 按 5% 算"
+
+    def test_growth_check_precedes_the_bse_check(self) -> None:
+        """``growth`` 必须在 ``bse`` 之前：否则创业板 ST 会按 30% 算。"""
+        src = inspect.getsource(board_of)
+        assert src.index("_GROWTH_PREFIXES") < src.index("_BSE_PREFIXES")

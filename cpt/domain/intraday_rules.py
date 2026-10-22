@@ -33,6 +33,30 @@ ADR 0003 定的分工是「**原始采集与口径归 CPT，触发判据归 emot
    把「没有这一档」读成「买一 0 手」，方向完全相反。
 4. **板块按代码前缀判，不是 ±10% 一刀切** —— 创业板/科创板 20%、北交所 30%、
    主板 ST 5%。用 9.7 筛选会得出「20% 板的票从来没封过板」。
+
+## ⛔ 判据锁：``board_of`` 的判定顺序**就是口径**，不许改回去（R88）
+
+emotion-core 2026-10-22 的跨仓对账结论（``tests/oracle/test_intraday_rules_vs_cpt.py``）：
+
+> 判据别改回去。本仓已跟 CPT 的 ``cpt/domain/intraday_rules.py`` 逐条对账，
+> 发现并修了本仓一个真 bug（ST 判定顺序导致北交所 ST 涨停价算低 10pp，
+> 会把「已封板」判成「未到板」）。
+
+那边原来的顺序是 **st → growth → bse**，于是北交所 ST（``920xxx`` + ST 名）
+落进 ``st_main`` 按 5% 算，涨停价被算低；涨停价一低，「现价 ≥ 涨停价」就更容易
+成立，反过来是「已封板」被误判 —— 现实测有 40 条 ``limit_price`` 不一致。
+
+本模块的顺序是 **growth → bse → st_main → main**，北交所 ST 走 ``bse`` = 30%。
+**这是两边对齐后的唯一答案**：
+
+- 把 ``st`` 提到 ``bse`` 之前 ⇒ 回到那个 bug；
+- 把 ``bse`` 提到 ``growth`` 之前 ⇒ 创业板 ST（``300xxx``）会按 30% 算，错得更远。
+
+R88 实测 9 个代码 × 4 种名字（``None`` / ``*ST海航`` / ``ST熊猫`` / ``退市某某``）
+共 36 组，与 emotion-core 的 ``board_pct_limit`` **0 处差异**。
+
+改动这个顺序前先问：**北交所 ST 该按 30% 还是 5%？** 答案写在交易所规则里，
+不写在我们俩谁的代码里。定论之前，顺序保持 ``growth → bse → st_main → main``。
 """
 
 from __future__ import annotations
@@ -115,6 +139,9 @@ def board_of(code: str, *, name: str | None = None) -> str:
     标签（沪市主板/科创板），这里是给**判据**用的枚举。两者消费者不同，
     不合并（合并会让任一方改文案时动到另一方的行为）。
     """
+    # ⛔ 顺序即口径：growth → bse → st_main → main，见模块头「判据锁」（R88）。
+    # 别把 st 提到 bse 前面 —— 北交所 ST 会按 5% 算，涨停价算低、把「已封板」
+    # 判成「未到板」；也别把 bse 提到 growth 前面 —— 创业板 ST 会按 30% 算。
     code = code.strip()
     st = is_st_name(name)
     if code.startswith(_GROWTH_PREFIXES):
