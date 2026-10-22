@@ -61,6 +61,23 @@
     renderIntradayStatus(remoteOps.intradayStatus);
   }
 
+  /* ---------------- R91：今天的封板情绪 ---------------- */
+
+  // 读表不读日志（与 loadIntradayStatus 分工），同样**不进 30s 轮询**：
+  // 一轮采集 2 分钟一次，30s 轮一次纯浪费。
+  async function loadSealBoard() {
+    try {
+      const { body } = await requestJson(`${DASHBOARD_BASE()}/seal-board`);
+      remoteOps.sealBoard = isObject(body) ? body : null;
+    } catch (exc) {
+      remoteOps.sealBoard = null;
+      if (globalThis.console && typeof globalThis.console.warn === "function") {
+        globalThis.console.warn("seal-board fetch failed", exc);
+      }
+    }
+    renderSealBoard(remoteOps.sealBoard);
+  }
+
   /* ---------------- R27 结构事件流 ---------------- */
 
   // 与上面 snapshot.events 是**两个不同的东西**，标题必须分开写：
@@ -592,6 +609,7 @@
     loadSignalStats();
     loadSignalOverview();
     loadIntradayStatus();
+    loadSealBoard();
     // R27：结构事件流。同样**不进 30s 轮询** —— 这张表只在结构真变了才追加，
     // 30s 轮一次几乎永远是同一批数据，纯浪费。
     loadStructureEvents();

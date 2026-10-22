@@ -44,6 +44,7 @@
 | `GET` | `/api/dashboard/reproducibility` | `200` | 可复现性哈希 / dataset_hash | `app.py` |
 | `GET` | `/api/dashboard/runs` | `200` | 运行索引列表（ring 与 PG 表合并后的冷路径） | `app.py` |
 | `GET` | `/api/dashboard/intraday-status` | `200` | 盘中采集活没活（读一行日志，不查库） | `app.py` |
+| `GET` | `/api/dashboard/seal-board` | `200` | 今天的封板情绪（读 `intraday_seal_snapshot` 最新一轮） | `app.py` |
 | `GET` | `/api/dashboard/signal-overview` | `200` | 信号全景（按**票**，含步骤分布） | `app.py` |
 | `GET` | `/api/dashboard/signal-radar` | `200` | 信号雷达 | `app.py` |
 | `GET` | `/api/dashboard/signal-stats` | `200` | 信号状态跃迁统计 | `app.py` |

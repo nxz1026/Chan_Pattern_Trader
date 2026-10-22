@@ -37,8 +37,64 @@ def _isolated_log(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return log
 
 
+@pytest.fixture(autouse=True)
+def _no_real_database(monkeypatch: pytest.MonkeyPatch) -> None:
+    """⚠️ **测试不许写真库。**
+
+    ``run_round()`` 末尾会调 ``_persist()`` 把这一轮的结论写进
+    ``public.intraday_seal_snapshot`` —— 而上面那些用例喂的是假 ``scan()``
+    （``600519 / bid1_lots=50000 / limit_price=1100``）。只要机器上连得到库、
+    且 ``CPT_INTRADAY_DB`` 没关，**假数据就真的落进生产表**。
+
+    R91 生产实测到的后果：表里 117 行有 18 行是这个夹具漏出来的假数据，而且它们的
+    时间戳落在真实轮次之后，盘中面板于是显示「1 只封板、封单 5 万手、强度正常」——
+    看着像真的，实际是测试数据。
+
+    修法用 ``DB_WRITE_ENABLED``（生产开关）而不是打桩 psycopg：它就在被测函数的
+    第一行，关掉之后连 import 都不会发生，比打桩更难被骗过。
+    """
+    monkeypatch.setattr(collectd, "DB_WRITE_ENABLED", False)
+
+
 def _read(log: Path) -> list[dict[str, Any]]:
     return [json.loads(line) for line in log.read_text(encoding="utf-8").splitlines() if line]
+
+
+class TestNoRealDatabaseWrites:
+    """R91：把「单测不许写真库」这条钉住，防止夹具被删后又悄悄开始写。"""
+
+    def test_db_write_is_disabled_inside_tests(self) -> None:
+        assert collectd.DB_WRITE_ENABLED is False, (
+            "单测里 DB_WRITE_ENABLED 必须是 False —— 否则 run_round() 会把用例里的"
+            "假行情写进真实生产表 intraday_seal_snapshot"
+        )
+
+    def test_ok_round_reports_disabled_and_writes_nothing(
+        self, _isolated_log: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        class _Some:
+            def scan(self, **_: Any) -> dict[str, Any]:
+                return {
+                    "rank_size": 100,
+                    "candidates": [{"code": "600519", "name": "贵州茅台"}],
+                    "quotes": {},
+                    "sealed": [
+                        {
+                            "code": "600519",
+                            "name": "贵州茅台",
+                            "bid1_lots": 50_000.0,
+                            "distance_pct": 0.0,
+                            "limit_price": 1100.0,
+                        }
+                    ],
+                    "errors": [],
+                }
+
+        monkeypatch.setattr(collectd, "IntradayCollector", lambda: _Some())
+        rec = collectd.run_round(limit=40, main_board_only=False)
+        assert rec["outcome"] == "ok"
+        # 开关关着时 _persist 在 import 之前就返回，连 psycopg 都不会被 import
+        assert rec["db"] == "disabled"
 
 
 class TestSessionGate:

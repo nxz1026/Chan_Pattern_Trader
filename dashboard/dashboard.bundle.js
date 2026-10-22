@@ -2158,7 +2158,8 @@
 
   // fetch 结果不在 snapshot 里（C5/C6/C3/C4 是独立路由），存这里供重渲染；
   // 只由 boot() 与手动刷新按钮触发，**不进 30s 轮询**（避免每轮多打几个请求）。
-  const remoteOps = { signalStats: null, signalOverview: null, intradayStatus: null, watchlist: null, compare: null, multiRun: null, structureEvents: null, structureTimeline: null, llmCalls: null, llmTimer: null, days: "30" };
+  const remoteOps = { signalStats: null, signalOverview: null, intradayStatus: null,
+    sealBoard: null, watchlist: null, compare: null, multiRun: null, structureEvents: null, structureTimeline: null, llmCalls: null, llmTimer: null, days: "30" };
 
   const SIGNAL_STATS_REASON_LABELS = { signal_history_unavailable: "信号历史不可用" };
   const STRUCTURE_EVENTS_REASON_LABELS = { structure_event_stream_unavailable: "结构事件流不可用（数据库未就绪）" };
@@ -3433,6 +3434,32 @@
     setText("[data-testid=market-step-action]", action);
   }
 
+
+  /* ---------------- R91：今天的封板情绪 ---------------- */
+
+  // ⚠️ 与下面的「盘中采集」那一行**分工不同，不许合并**：
+  //   - 本函数读表（intraday_seal_snapshot 最新一轮）→ 回答「盘面长什么样」
+  //   - renderIntradayStatus 读日志 → 回答「采集器在不在跑」
+  // 采集器在跑但今天空盘、采集器挂了 —— 这两种情况的对策完全相反。
+  function renderSealBoard(payload) {
+    const node = q("[data-testid=seal-board-line]");
+    if (!node) return;
+    const board = isObject(payload) && isObject(payload.board) ? payload.board : null;
+    if (!isObject(payload) || payload.available !== true || !board) {
+      node.hidden = true;
+      return;
+    }
+    if (board.available !== true) {
+      // 没数据必须说出来，不能藏起来 —— 藏起来等于让人以为今天没票封板。
+      node.textContent = `封板强度：${board.headline || "没有今天的封板快照"}`;
+      node.dataset.state = "unavailable";
+      node.hidden = false;
+      return;
+    }
+    node.textContent = `封板强度：${board.headline || "—"} ${board.action || ""}`.trim();
+    node.dataset.state = String(board.label || "");
+    node.hidden = false;
+  }
 
   /* ---------------- R89 B3：盘中采集活没活 ---------------- */
 
@@ -5168,6 +5195,23 @@
     renderIntradayStatus(remoteOps.intradayStatus);
   }
 
+  /* ---------------- R91：今天的封板情绪 ---------------- */
+
+  // 读表不读日志（与 loadIntradayStatus 分工），同样**不进 30s 轮询**：
+  // 一轮采集 2 分钟一次，30s 轮一次纯浪费。
+  async function loadSealBoard() {
+    try {
+      const { body } = await requestJson(`${DASHBOARD_BASE()}/seal-board`);
+      remoteOps.sealBoard = isObject(body) ? body : null;
+    } catch (exc) {
+      remoteOps.sealBoard = null;
+      if (globalThis.console && typeof globalThis.console.warn === "function") {
+        globalThis.console.warn("seal-board fetch failed", exc);
+      }
+    }
+    renderSealBoard(remoteOps.sealBoard);
+  }
+
   /* ---------------- R27 结构事件流 ---------------- */
 
   // 与上面 snapshot.events 是**两个不同的东西**，标题必须分开写：
@@ -5699,6 +5743,7 @@
     loadSignalStats();
     loadSignalOverview();
     loadIntradayStatus();
+    loadSealBoard();
     // R27：结构事件流。同样**不进 30s 轮询** —— 这张表只在结构真变了才追加，
     // 30s 轮一次几乎永远是同一批数据，纯浪费。
     loadStructureEvents();

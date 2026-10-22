@@ -1476,3 +1476,107 @@ DO NOTHING`、**不 commit**）、`load_latest_round`（**只取一轮**）、`l
 提交过** ⇒ `git checkout` 报错且**没撤销**，反向注入残留在工作树里。幸好改的是
 同一行、脚本内另有还原语句。
 **规矩：对未跟踪文件不许用 `git checkout` 撤销，用备份或直接改回。**
+
+---
+
+## R91（2026-10-22）：首屏封板强度 + 生产表里那 18 行假数据
+
+### 12.1 先修事故：产品测试往生产表写了 18 行假数据
+
+设计首屏封板强度时，先盘点 `public.intraday_seal_snapshot`（117 行），发现其中
+**19 行是探针**：`code=600519, sealed=True, bid1_lots=50000.0, limit_price=1100.0`，
+**19 个独立单票轮**，时间戳全部晚于那 3 个真实轮次（`09:20:36Z` / `09:20:55Z` /
+`09:22:13Z`，每轮 33 只）。
+
+后果不是「多几行脏数据」，而是 **`max(at)` 落在探针行上**：盘中面板会显示
+「1 只封板、封单 5 万手、强度 1.00 正常」—— 看着像真的，实际是 `test_intraday_collectd.py`
+里 `600519 / 50_000.0 / 1100.0` 那个假夹具。
+
+根因：`tests/test_intraday_collectd.py` 的 `_isolated_log` 夹具只隔离了**日志路径**，
+没隔离**数据库**；而 `run_round()` 末尾无条件调 `_persist()`，`DB_WRITE_ENABLED`
+默认为真。`test_no_candidates_is_empty_not_error` 与 `test_ok_round_carries_counts`
+因此把假行情写进了生产表。
+
+三层修法：
+
+| 层 | 做法 |
+|---|---|
+| 测试 | 新增 autouse 夹具 `_no_real_database`：`monkeypatch.setattr(collectd, "DB_WRITE_ENABLED", False)`；配 `class TestNoRealDatabaseWrites` 两条钉子 |
+| 读取 | `intraday_seal_store` 加 `PROBE_CODE_PREFIX = "\x01"` 与 `_REAL_ROWS`，**三处读取全部带过滤**（`load_latest_round` / `load_seal_track` / `load_session_rows`） |
+| 验证 | 新建 `tests/test_intraday_seal_live.py`（5 条，**真库 + 必回滚**）：插一条比真实最新轮更新的探针行，断言 `max(at)` 不动、`counts` 一个数不变 |
+
+反向注入实测：夹具改 `pass` → 2 failed；`_REAL_ROWS = "TRUE"` → 4 failed。
+生产清理：先按 (code, bid1_lots, limit_price) 三元组精确圈定 19 行、核对「这些
+`at` 上的总行数 == 19」（即确实是单票轮）与「真实轮里 600519 从未出现」，
+备份到 `~/logs/intraday_seal_probe_rows_backup_20261022.csv` 后 DELETE。
+结果：117 → **99 行**，只剩 3 轮真实采集。
+
+**`%%` 坑**：`_REAL_ROWS` 里的 `%` 必须写成 `%%`。SQL 全走 psycopg 参数化路径，
+裸写 `%` 报 `only '%s', '%b', '%t' are allowed as placeholders, got '%'`。
+
+### 12.2 首屏「今天的封板情绪」
+
+R89 的首屏横幅说的是**收盘后的日线结构**（三步进度），盘中不动。盘中最想知道的是
+另一件事：今天的封板情绪怎么样。R90 落库之后有数据了，但那表是「每只票每轮一行」，
+人读不懂。
+
+新增 `cpt/application/seal_board.py::seal_board_summary(latest)`，把
+`load_latest_round()` 的结果压成一句话 + 三个数 + 分档：
+
+| 输出 | 来自 |
+|---|---|
+| 几只封着 | 最新一轮 `sealed=True` 的行数 |
+| 封单中位 / 厚薄分档 | `board_health()` 对 `median_bid_lots` 的判据（厚线 5 万手） |
+| 几只冲到板附近 | 最新一轮 `sealed=False` 的行数 |
+
+三条纪律（都进了 docstring）：
+
+1. **没数据不许说成「封板少」**：表里没有轮次 → `available=False` + 「今天还没有盘中
+   封板快照 —— 采集器没跑过，或今天休市。这不是「今天没有票封板」」。
+2. **有轮次但一只没封是另一种情况**：「板附近 N 只，没有一只封住…封板情绪按「没样本」
+   处理 —— 不是「封得薄」，是压根没有样本可评」。
+3. **不给买卖指令**：`action` 恒为「封板强度是位置描述，不是买入信号…」。
+
+实测四分支（生产真数据 + 构造数据）：
+
+| 输入 | headline |
+|---|---|
+| 真实最新一轮（33 只封、中位 35,644 手） | `17:22 这一轮：33 只封在板上；封单中位 35,644 手，封板偏薄。` |
+| 一只没封 | `10:00 这一轮：板附近 1 只，没有一只封住。封板情绪按「没样本」处理…` |
+| 空表 | `今天还没有盘中封板快照 —— 采集器没跑过，或今天休市…` |
+| 有开板 | `10:00 这一轮：1 只封在板上、1 只冲到板附近没封住；封单中位 300,000 手，封板厚。` |
+
+接线：`cpt/web/app.py::_seal_board_payload()`（降级不抛，`available=false` +
+`seal_board_unavailable`）→ 路由 `/api/dashboard/seal-board` → 前端
+`dash-signal.js::renderSealBoard()` → 首屏 `[data-testid=seal-board-line]`。
+
+**与「盘中采集活没活」分工明确、不许合并**：那条读**日志**答「采集器在不在跑」，
+这条读**表**答「盘面长什么样」。「采集器在跑但今天空盘」与「采集器挂了」的对策相反。
+
+### 12.3 一个差点蒙混过去的 bug
+
+`base.update({..., "as_of_hms": _hms(at), "headline": f"{base['as_of_hms']} ..."})`
+—— **同一个 `dict.update()` 里读 `base[...]` 读到的是旧值**，headline 渲染出
+`None 这一轮：33 只封在板上…`。改成先算 `stamp = _hms(at)` 再一起写。
+这个 bug 单看代码很难发现，是**实跑真实数据**时打印出来才看到的。
+
+### 12.4 另一处回归：插入函数时把 `_latest_market_day` 覆盖了
+
+插入 `_seal_board_payload` 时按 `def _latest_market_day() -> Any:` 做锚点，
+连续命中两处，结果 `_intraday_log_path` 的**函数名**被换成 `_latest_market_day`，
+导致 `app.py:630` 出现 `F821 Undefined name '_intraday_log_path'`，
+而 `test_payload_reads_the_configured_log` 在全量里红、单跑绿（因为它 monkeypatch
+的 `_latest_market_day` 被第二次定义覆盖后语义变了）。
+`ruff check` 的 F821 是抓到这个的唯一手段 —— **它不是噪音**。
+
+### 12.5 验收
+
+- 全量 pytest **2366 passed / 5 skipped / 0 failed**（128.87s）
+- 12 道门禁全绿（`check_doc_drift` / `check_line_refs` / `check_doc_counts` 首次红，
+  分别由新路由未登记、`app.py` 行号漂移 `1369 → 1403`、web 5,729→5,766 与
+  dashboard 17,198→17,307 造成，改后转绿）
+- 新增测试：`tests/test_seal_board.py`（11）、`tests/test_seal_board_wiring.py`（14）、
+  `tests/test_intraday_seal_live.py`（5）
+- 部署 + 重启后线上：`/api/dashboard/seal-board` →
+  `available:true, 17:22 这一轮：33 只封在板上；封单中位 35,644 手，封板偏薄`；
+  `/cpt/` 200；页面含 `seal-board-line`

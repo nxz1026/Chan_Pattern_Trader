@@ -191,6 +191,15 @@
       <!-- R89（B3）：盘中采集活没活。**单独一行、贴在第一屏底部** ——
            采集挂了不影响上面那句「今天该不该看盘」的判断，但用户需要知道
            「现在看到的东西是不是最新的」。数据来自 /api/dashboard/intraday-status。 -->
+      <!-- R91：今天的封板情绪。与下面「盘中采集」那一行**分工不同** ——
+           这一行说的是盘面（几只封着、厚不厚），那一行说的是采集器活没活。
+           数据来自 /api/dashboard/seal-board（读 intraday_seal_snapshot 最新一轮）。 -->
+      <p
+        data-testid="seal-board-line"
+        class="seal-board-line"
+        title="封板强度：最新一轮盘中快照里封板票的封单量中位数，相对 5 万手的厚线"
+        hidden
+      >—</p>
       <p
         data-testid="intraday-status-line"
         class="intraday-status-line"

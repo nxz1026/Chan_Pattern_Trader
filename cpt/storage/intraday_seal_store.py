@@ -26,6 +26,17 @@ from typing import Any, Final
 
 _SNAPSHOT_TABLE: Final[str] = "public.intraday_seal_snapshot"
 
+#: 探针行的代码前缀。真实采集只写 6 位数字代码；产品测试 / 手工验证用的哨兵行
+#: 一律以 ``\x01`` 开头。SQL 的 ``LIKE`` 里 ``\x01`` 没有通配含义，不必转义。
+PROBE_CODE_PREFIX: Final[str] = "\x01"
+
+#: 「这一行是真实采集轮」的 SQL 片段。**读取一律带上它**，否则一条探针行就能让
+#: 盘中面板显示一个有模有样的假封板（R91 生产实测：117 行里 18 行是探针）。
+#:
+#: ``%`` 必须写成 ``%%``：这些 SQL 全走 ``psycopg`` 的参数化路径，裸写 ``%`` 会被
+#: 当成占位符报 ``only '%s', '%b', '%t' are allowed as placeholders, got '%'``。
+_REAL_ROWS: Final[str] = f"code NOT LIKE '{PROBE_CODE_PREFIX}%%'"
+
 _INSERT_SQL: Final[str] = (
     "INSERT INTO public.intraday_seal_snapshot (at, code, sealed, bid1_lots, limit_price) "
     "VALUES (%s, %s, %s, %s, %s) "
@@ -67,16 +78,25 @@ def load_latest_round(conn: Any) -> dict[str, Any]:
     但**只用这一轮的行**算 —— 跨轮混算会把「上一轮封着、这一轮开板」读成两只票。
 
     轮次由「最新一行 ``at``」界定；采集是每 2 分钟整轮写入，一轮的 ``at`` 相同。
+
+    ## 为什么排除 ``PROBE_CODE_PREFIX`` 开头的行
+
+    真实写入方 ``scripts/intraday_collectd.py`` 只认 6 位数字代码。库里出现别的东西
+    = 有人在往里塞探针（手工验证、产品测试），**不是真实采集轮**。若不排除，一条
+    探针行会让整个盘中面板显示「1 只封板、封单 5 万手」—— 看着像真的，其实是假的。
+    这是 R91 在生产库上实测踩到的：117 行里 18 行是探针。
     """
+    where = _REAL_ROWS
     with conn.cursor() as cur:
-        cur.execute(f"SELECT max(at) FROM {_SNAPSHOT_TABLE}")  # noqa: S608 - 常量表名
+        cur.execute(f"SELECT max(at) FROM {_SNAPSHOT_TABLE} WHERE {where}")  # noqa: S608
         row = cur.fetchone()
         latest = row[0] if row else None
         if latest is None:
             return {"at": None, "rows": [], "counts": {"total": 0, "sealed": 0, "open_board": 0}}
         cur.execute(
             f"SELECT at, code, sealed, bid1_lots, limit_price FROM {_SNAPSHOT_TABLE} "  # noqa: S608
-            "WHERE at = %s ORDER BY sealed DESC, bid1_lots DESC NULLS LAST, code",
+            f"WHERE at = %s AND {where} "
+            "ORDER BY sealed DESC, bid1_lots DESC NULLS LAST, code",
             (latest,),
         )
         rows = [
@@ -105,7 +125,7 @@ def load_seal_track(conn: Any, code: str, *, since: Any, until: Any) -> list[dic
     with conn.cursor() as cur:
         cur.execute(
             f"SELECT at, sealed, bid1_lots, limit_price FROM {_SNAPSHOT_TABLE} "  # noqa: S608
-            "WHERE code = %s AND at >= %s AND at < %s ORDER BY at",
+            f"WHERE code = %s AND at >= %s AND at < %s AND {_REAL_ROWS} ORDER BY at",
             (code, since, until),
         )
         # 带上 code：下游 track_summary 要它，缺了会在真数据上报 KeyError（测试里
@@ -123,6 +143,7 @@ def load_seal_track(conn: Any, code: str, *, since: Any, until: Any) -> list[dic
 
 
 __all__ = [
+    "PROBE_CODE_PREFIX",
     "insert_seal_snapshot",
     "load_latest_round",
     "load_seal_track",
@@ -135,7 +156,7 @@ def load_session_rows(conn: Any, *, start: Any, end: Any) -> list[dict[str, Any]
     with conn.cursor() as cur:
         cur.execute(
             f"SELECT at, code, sealed, bid1_lots, limit_price FROM {_SNAPSHOT_TABLE} "  # noqa: S608
-            "WHERE at >= %s AND at < %s ORDER BY at, code",
+            f"WHERE at >= %s AND at < %s AND {_REAL_ROWS} ORDER BY at, code",
             (start, end),
         )
         return [

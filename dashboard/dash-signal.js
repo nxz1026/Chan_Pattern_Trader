@@ -669,6 +669,32 @@
   }
 
 
+  /* ---------------- R91：今天的封板情绪 ---------------- */
+
+  // ⚠️ 与下面的「盘中采集」那一行**分工不同，不许合并**：
+  //   - 本函数读表（intraday_seal_snapshot 最新一轮）→ 回答「盘面长什么样」
+  //   - renderIntradayStatus 读日志 → 回答「采集器在不在跑」
+  // 采集器在跑但今天空盘、采集器挂了 —— 这两种情况的对策完全相反。
+  function renderSealBoard(payload) {
+    const node = q("[data-testid=seal-board-line]");
+    if (!node) return;
+    const board = isObject(payload) && isObject(payload.board) ? payload.board : null;
+    if (!isObject(payload) || payload.available !== true || !board) {
+      node.hidden = true;
+      return;
+    }
+    if (board.available !== true) {
+      // 没数据必须说出来，不能藏起来 —— 藏起来等于让人以为今天没票封板。
+      node.textContent = `封板强度：${board.headline || "没有今天的封板快照"}`;
+      node.dataset.state = "unavailable";
+      node.hidden = false;
+      return;
+    }
+    node.textContent = `封板强度：${board.headline || "—"} ${board.action || ""}`.trim();
+    node.dataset.state = String(board.label || "");
+    node.hidden = false;
+  }
+
   /* ---------------- R89 B3：盘中采集活没活 ---------------- */
 
   // 四种状态各有各的说法，**不许合并**（见 cpt/application/intraday_status.py）：

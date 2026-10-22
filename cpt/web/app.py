@@ -79,6 +79,7 @@ _MAX_DAYS = 3650
 #: 这里取 4 而不是 0.25：一只票跑过但状态没变就不写行，界面上看到的 ``age_days``
 #: 动得比 cron 慢得多 —— 跟用户承诺「每 15 分钟」会变成每天都在问「怎么没更新」。
 #: 所以对外只说「几小时内自动跑一次」，调度细节留在 cron 注释里。
+SEAL_BOARD_BASIS = "intraday_seal_snapshot_latest_round"
 WATCHLIST_REFRESH_HOURS = 4
 
 #: R59（审计 M5）：``/inspection`` 里 distinct ``(market, symbol)`` 的硬上限。
@@ -640,6 +641,39 @@ def _intraday_status_payload() -> dict[str, Any]:
         _LOG.warning("intraday status unavailable: %s", exc)
         payload["available"] = False
         payload["reason"] = "intraday_log_unavailable"
+    return payload
+
+
+def _seal_board_payload() -> dict[str, Any]:
+    """R91：首屏「今天的封板情绪」。**降级不抛**。
+
+    与 :func:`_intraday_status_payload` 分工明确：那条读**日志**回答「采集器在不在跑」，
+    这条读**表**回答「盘面长什么样」。两个都坏了必须能分开说 —— 「采集器在跑但今天
+    空盘」与「采集器挂了」是两件事，混成一个就分不清该修什么。
+
+    返回结构与 :func:`cpt.application.seal_board.seal_board_summary` 一致，
+    外面包一层 ``schema_version`` / ``basis``，与其它 dashboard 路由同款。
+    """
+    payload: dict[str, Any] = {
+        "schema_version": "dashboard_seal_board.v1",
+        "basis": SEAL_BOARD_BASIS,
+    }
+    try:
+        from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+        from cpt.application.seal_board import seal_board_summary  # noqa: PLC0415
+        from cpt.storage.intraday_seal_store import load_latest_round  # noqa: PLC0415
+
+        client = AShareLocalClient()
+        try:
+            latest = load_latest_round(client._get_conn())  # noqa: SLF001
+        finally:
+            client.close()
+        payload["available"] = True
+        payload["board"] = seal_board_summary(latest)
+    except Exception as exc:  # noqa: BLE001 — 首屏旁路，坏了不该 500
+        _LOG.warning("seal board unavailable: %s", exc)
+        payload["available"] = False
+        payload["reason"] = "seal_board_unavailable"
     return payload
 
 
@@ -1569,6 +1603,9 @@ def make_handler(
                     return
                 days = max(1, min(days, _MAX_DAYS))
                 payload = _signal_overview_payload(days)
+            elif path.path == "/api/dashboard/seal-board":
+                # R91：「今天的封板情绪」。同样旁路，坏了降级。
+                payload = _seal_board_payload()
             elif path.path == "/api/dashboard/intraday-status":
                 # R89 B3：「今天的盘中采集跑了没有」。旁路，坏了自己降级，
                 # 不许影响 dashboard 其它面板（它只读一行日志）。

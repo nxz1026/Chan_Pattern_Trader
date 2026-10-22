@@ -135,7 +135,8 @@
 
   // fetch 结果不在 snapshot 里（C5/C6/C3/C4 是独立路由），存这里供重渲染；
   // 只由 boot() 与手动刷新按钮触发，**不进 30s 轮询**（避免每轮多打几个请求）。
-  const remoteOps = { signalStats: null, signalOverview: null, intradayStatus: null, watchlist: null, compare: null, multiRun: null, structureEvents: null, structureTimeline: null, llmCalls: null, llmTimer: null, days: "30" };
+  const remoteOps = { signalStats: null, signalOverview: null, intradayStatus: null,
+    sealBoard: null, watchlist: null, compare: null, multiRun: null, structureEvents: null, structureTimeline: null, llmCalls: null, llmTimer: null, days: "30" };
 
   const SIGNAL_STATS_REASON_LABELS = { signal_history_unavailable: "信号历史不可用" };
   const STRUCTURE_EVENTS_REASON_LABELS = { structure_event_stream_unavailable: "结构事件流不可用（数据库未就绪）" };

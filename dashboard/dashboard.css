@@ -2198,3 +2198,13 @@ noscript p {
   font-size: 0.9rem;
   color: var(--color-text-muted, #8a8f98);
 }
+/* R91：首屏「今天的封板情绪」。与 .intraday-status-line（采集器活没活）
+   是两件事，字号与颜色都刻意弱于 .market-step-headline —— 它是一条旁注。 */
+.seal-board-line {
+  margin: 0 0 4px;
+  font-size: 0.9rem;
+  color: var(--color-text-muted, #8a8f98);
+}
+.seal-board-line[hidden] {
+  display: none;
+}
