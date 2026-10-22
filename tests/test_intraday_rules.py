@@ -222,11 +222,30 @@ def test_matches_emotion_core_implementation() -> None:
     for code in codes:
         assert ir.board_pct_limit(code) == ec.board_pct_limit(code), f"{code} 板块幅度不一致"
 
+    # emotion-core 在 931f43d 把 ``limit_up_price`` 更名 ``limit_price``
+    # （它的 caliber 门禁要求「涨停价只许有一个实现」，所以那边改成走
+    #  ``utils.price.limit_up_price_cents``）。两个名字都认，少一个就红 ——
+    # 对账测试要抓的是口径漂移，不是函数名。
+    ec_limit = getattr(ec, "limit_price", None) or getattr(ec, "limit_up_price", None)
+    assert ec_limit is not None, "emotion-core 既没有 limit_price 也没有 limit_up_price"
+
     for pre_close in (1.01, 3.03, 4.69, 7.77, 10.0, 12.34, 31.30):
         for code in ("600519", "300750", "830799"):
-            assert ir.limit_up_price(code, pre_close) == ec.limit_up_price(code, pre_close), (
+            assert ir.limit_up_price(code, pre_close) == ec_limit(code, pre_close), (
                 f"{code} 昨收 {pre_close} 的涨停价不一致"
             )
+
+    # 穷举分位 1..3000（0.01~30.00 元）× 11 个代码，覆盖四舍五入的 .5 边界。
+    # 只在抽样点上比对，改一位四舍五入（HALF_UP vs HALF_EVEN）就可能漏网。
+    bad: list[tuple[str, int, float, float]] = []
+    for code in (*codes, "920296", "600001"):
+        for cents in range(1, 3001):
+            pre_close = cents / 100
+            a = ir.limit_up_price(code, pre_close)
+            b = ec_limit(code, pre_close)
+            if a is not None and b is not None and abs(a - b) > 1e-9:
+                bad.append((code, cents, a, b))
+    assert bad == [], f"涨停价穷举对账不一致 {len(bad)} 组：{bad[:5]}"
 
     for name in ("*ST康佳", "贵州茅台", "ST某某", None):
         assert ir.is_st_name(name) == ec.is_st_name(name), f"{name} 的 ST 判定不一致"

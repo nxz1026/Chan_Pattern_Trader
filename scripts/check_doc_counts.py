@@ -44,6 +44,9 @@ CHECKS: list[tuple[str, str | None, str, str | None]] = [
     ("cpt/storage", None, "storage 层 .py 文件数", None),
     ("cpt/llm", None, "llm 层 .py 文件数", None),
     ("cpt/web", None, "web 层 .py 文件数", None),
+    # 🆕 R86 新增回测层。**加这行之前 `backtest/` 从没被任何计数门禁看过** ——
+    # 分层门禁（SQL 位置）管它，但「N 文件 / M 行」这种断言没人核。
+    ("cpt/backtest", None, "backtest 层 .py 文件数", None),
     # dashboard/ 原来不在 CHECKS 里 ⇒ architecture §2.1 那一行**从没被核过**
     # （它当时写「6 文件 / ~1.6 MB」，实际早就对不上了，门禁却一直绿）。
     # ⚠️ 前端**没有** .py：文件数与行数都得按 js/css/html 统计，

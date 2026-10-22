@@ -25,4 +25,51 @@ R70 用 10 个临时探针跑了 688,496 次评估，得到三条结论，也踩
 
 from __future__ import annotations
 
-__all__: list[str] = []
+from cpt.backtest.panel import HORIZONS, BarPanel, load_panel
+from cpt.backtest.runner import (
+    A_STATUS,
+    B_STATUS,
+    BacktestResult,
+    PairSet,
+    StatusSamples,
+    ab_pairs,
+    collect_status_samples,
+    run_backtest,
+    status_samples,
+)
+from cpt.backtest.signals import SignalAt, SignalTrace, structure_signals, trace_summary
+from cpt.backtest.stats import (
+    Comparison,
+    Sample,
+    Summary,
+    compare,
+    excess_over_market,
+    paired,
+    summarise,
+)
+
+__all__ = [
+    "A_STATUS",
+    "B_STATUS",
+    "HORIZONS",
+    "BacktestResult",
+    "BarPanel",
+    "Comparison",
+    "PairSet",
+    "Sample",
+    "SignalAt",
+    "SignalTrace",
+    "StatusSamples",
+    "Summary",
+    "ab_pairs",
+    "collect_status_samples",
+    "compare",
+    "excess_over_market",
+    "load_panel",
+    "paired",
+    "run_backtest",
+    "status_samples",
+    "structure_signals",
+    "summarise",
+    "trace_summary",
+]
