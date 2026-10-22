@@ -314,3 +314,71 @@ def test_collect_keeps_going_when_one_check_raises(monkeypatch: pytest.MonkeyPat
     quote = next(c for c in report["checks"] if c["name"] == "quote")
     assert quote["ok"] is False
     assert any("db down" in p for p in report["problems"])
+
+
+# ───────────────── R89 B4：盘中采集新鲜度 ─────────────────
+
+
+def test_intraday_is_skipped_outside_the_session(tmp_path, monkeypatch):
+    """收盘后不该判 —— 全天候判就是每天 15:00 之后必红一次。"""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    TZ = ZoneInfo("Asia/Shanghai")
+    log = tmp_path / "collect.log"
+    stale_at = datetime(2026, 10, 22, 10, 0, tzinfo=TZ)
+    log.write_text(
+        f'{{"at": "{stale_at.isoformat()}", "outcome": "ok"}}\n',
+        encoding="utf-8",
+    )
+    mod = _load_module()
+    monkeypatch.setattr(mod, "INTRADAY_LOG", log)
+    # 收盘后：同一条老记录不该报
+    got = mod.check_intraday(now=datetime(2026, 10, 22, 16, 0, tzinfo=TZ))
+    assert got["ok"] is True, got["problems"]
+    assert got["detail"]["in_session"] is False
+    # 盘中：超过 10 分钟必须报
+    got2 = mod.check_intraday(now=stale_at + timedelta(minutes=30))
+    assert got2["ok"] is False
+    assert "没有新记录" in got2["problems"][0]
+
+
+def test_intraday_missing_log_is_healthy_outside_session(tmp_path, monkeypatch):
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    TZ = ZoneInfo("Asia/Shanghai")
+    mod = _load_module()
+    monkeypatch.setattr(mod, "INTRADAY_LOG", tmp_path / "nope.log")
+    outside = datetime(2026, 10, 22, 16, 0, tzinfo=TZ)
+    assert mod.check_intraday(now=outside)["ok"] is True
+    bad = mod.check_intraday(now=datetime(2026, 10, 22, 10, 0, tzinfo=TZ))
+    assert bad["ok"] is False
+    assert "日志不存在" in bad["problems"][0]
+
+
+def test_intraday_single_error_is_not_a_problem(tmp_path, monkeypatch):
+    """单轮失败是常态 —— 连续失败由 intraday_collectd 自己判。"""
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    TZ = ZoneInfo("Asia/Shanghai")
+    now = datetime(2026, 10, 22, 10, 30, tzinfo=TZ)
+    log = tmp_path / "collect.log"
+    line = f'{{"at": "{now.isoformat()}", "outcome": "error", "error": "boom"}}\n'
+    log.write_text(line, encoding="utf-8")
+    mod = _load_module()
+    monkeypatch.setattr(mod, "INTRADAY_LOG", log)
+    assert mod.check_intraday(now=now)["ok"] is True
+
+
+def _load_module():
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "watch_period_check.py"
+    spec = importlib.util.spec_from_file_location("watch_period_check_b4", path)
+    assert spec is not None and spec.loader is not None
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod

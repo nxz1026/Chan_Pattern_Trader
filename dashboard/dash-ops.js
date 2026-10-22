@@ -43,6 +43,24 @@
       : null);
   }
 
+  /* ---------------- R89 B3：盘中采集状态 ---------------- */
+
+  // 只读一行日志（后端不查库），**不进 30s 轮询** —— 一轮采集是 2 分钟一次，
+  // 30s 轮一次纯浪费；它跟着 refreshOps 一起刷新就够了。
+  async function loadIntradayStatus() {
+    try {
+      const { body } = await requestJson(`${DASHBOARD_BASE()}/intraday-status`);
+      remoteOps.intradayStatus = isObject(body) ? body : null;
+    } catch (exc) {
+      // 采集状态是旁路：拉不到就把那一行藏起来（后端也降级成 available=false）。
+      remoteOps.intradayStatus = null;
+      if (globalThis.console && typeof globalThis.console.warn === "function") {
+        globalThis.console.warn("intraday-status fetch failed", exc);
+      }
+    }
+    renderIntradayStatus(remoteOps.intradayStatus);
+  }
+
   /* ---------------- R27 结构事件流 ---------------- */
 
   // 与上面 snapshot.events 是**两个不同的东西**，标题必须分开写：
@@ -573,6 +591,7 @@
     loadWatchlist();
     loadSignalStats();
     loadSignalOverview();
+    loadIntradayStatus();
     // R27：结构事件流。同样**不进 30s 轮询** —— 这张表只在结构真变了才追加，
     // 30s 轮一次几乎永远是同一批数据，纯浪费。
     loadStructureEvents();

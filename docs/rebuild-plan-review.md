@@ -1163,3 +1163,99 @@ R89 把这个对象补上，但**只补采集、不补判定**。
   有对账测试、有判据锁，但**本地 `daily_bar` 里一只北交所票都没有**（实测
   `920/8/4` 号段 count = 0）。它是「写了但无生产对象」的分支 —— 这正是跨仓对账
   只能靠人肉跑探针的原因。接数据前，任何北交所结论都不许进产品。
+
+---
+
+## 10. R89 收尾（2026-10-22）：采集状态上首屏、观察期巡检补第五项
+
+R89 本体（§9）只做了「采起来」。采起来之后有两个新问题，这一节是收尾：
+
+### 10.1 B3：首页第一屏能看见「盘中采集活没活」
+
+用户问「如果我有新的关注，会自动跑数据吗」。回答时发现一个坑：**采集在跑，
+但界面上没有任何地方能看出来它在跑**。采集中断只能等飞书巡检（每 2 小时）
+才发现 —— 中间最多瞎 2 小时。
+
+落点：
+
+| 位置 | 内容 |
+|---|---|
+| `cpt/application/intraday_status.py`（新） | `parse_log_tail()` 读日志尾部 8 KiB；`collect_status()` 判四态 |
+| `cpt/web/app.py` | `GET /api/dashboard/intraday-status` → `{available, basis, log_path, status}` |
+| `dashboard/index.html:195` | `[data-testid=intraday-status-line]`，在**第一屏横幅**里、`dashboard-body` 之前 |
+| `dashboard/dash-signal.js` | `INTRADAY_STATE_LABELS` + `renderIntradayStatus()` |
+| `dashboard/dash-ops.js` | `loadIntradayStatus()`，跟着 `refreshOps` 走，**不进 30s 轮询** |
+
+四条口径（都写进了 docstring）：
+
+1. **四态不许合并**：`running` / `stale` / `failed` / `never`。合成一句「有点问题」
+   等于没说 —— 用户需要知道是该等、该查日志、还是该改配置。
+2. **`empty` / `skipped` 不算失败**。午休、竞价前都会空；把它们算失败就是
+   每周五次假警。
+3. **「今天休市」与「采集挂了」必须分开**。判据是同一个 `market_day != today`，
+   但一个是正常（周末）、一个是故障（盘中）。`failed` 优先于「休市」——
+   连续报错时先说报错。
+4. **日志坏行跳过不抛**。写一半断电是常态。
+
+### 10.2 反向注入挠出来的测试漏洞（这一轮最值得记的）
+
+第一版 `test_empty_and_skipped_are_not_failures` 只放 **2 条** empty 记录。
+我把 `empty` 注入成「算失败」，跑出来 **21 条全绿没一条抓住**。
+原因是连续失败阈值是 3 —— 2 条 empty 就算全算错也到不了阈值，状态还是
+`running`。
+
+**光看「测试全绿」不能证明测试有效。** 改法是凑够 `max_failures` 条（3 条），
+注入后立刻 **1 failed**，抓到了。这条教训写进了测试的 docstring。
+
+### 10.3 B4：观察期巡检补第五项
+
+`scripts/watch_period_check.py` 加 `check_intraday()`：
+
+- **只在盘中（北京 09:30–15:00）判**。收不了盘后当然没有新记录，全天候判
+  就是每天 15:00 之后必红一次 —— 人开始忽略告警时，告警就死了。
+- **「最新一条是 error」不算问题**。单轮失败是常态；连续失败由
+  `intraday_collectd` 按 `max_failures` 判 rc=1，那是它自己的职责。
+- 放在**网络段之外**（`--skip-network` 也跑）。它恰好就是在弱网下最该判的东西。
+
+手动跑巡检那次四加一项全绿：
+
+```
+✅ 服务    cpt-dashboard.service active（health ok）
+✅ 序列    structure 910xxx / signal 9xx（都没有落后）
+✅ 批次    0.9 小时前
+✅ 盘口    600519 10/10 档
+✅ 盘中采集  age_minutes=0.9（盘中）
+```
+
+### 10.4 B1：形状扫描基线也入仓了
+
+`cpt/backtest/shapes.py` + `scripts/shape_scan.py`：把 R88 那句
+「跌超 4% 之后 +4.05% / 58.4%」变成可复跑的 `drop_4pct`，并且**同批票同窗口
+同预热**量基线。全市场复跑结果（5,131 只 / 预热 250 / h20 / 剔涨停）：
+
+| 形状 | n | 20 日均值 | 胜率 |
+|---|---:|---:|---:|
+| `drop_4pct`（收盘 ≤ 前 20 日最低 × 96%） | 19,592 | **+4.37%** | **59.4%** |
+| 累计跌 4%（前 20 日跌幅，不管位置） | 476,252 | +1.07% | 49.4% |
+| 累计跌 4% 且收阳 | 228,660 | +1.04% | 49.5% |
+| `low_20_up`（20 日新低后收阳） | 10,435 | **−0.02%** | 44.2% |
+| `near_low_20_up` | 93,989 | +0.17% | 45.8% |
+| `below_ma20_up` | 270,051 | +0.74% | 47.6% |
+| **基线（随便挑一天）** | 1,289,208 | **+0.35%** | — |
+
+R88 的 +4.05% / 58.4% 复现成立（差 0.3pp 来自窗口终点从 10-19 推到 10-22）。
+最值得注意的是**三个近义「跌 4%」差 23 倍样本**：说「跌了 4%」有 47 万样本、
+只多 0.7pp；说「跌到前 20 日最低的 96% 以下」只有 1.9 万样本、多 4pp。
+产品文案已经改成后者并在旁边写明了这个对照 —— **一个词的差别就是 23 倍样本**。
+
+### 10.5 验收
+
+| 项 | 结果 |
+|---|---|
+| 全量 pytest | **2285 passed / 5 skipped / 0 failed**（145.56s） |
+| 新增测试 | `tests/test_intraday_status.py` 21 条、`tests/test_backtest_shapes.py` 26 条、`tests/test_watch_period_check.py` +3 条（共 24） |
+| 反向注入 | ①empty 算失败（测试写弱时漏报 → 改强后抓到）②去掉盘中判断（抓到）③`drop_in_window` 加收阳（抓到） |
+| 11 道门禁 | 全绿 |
+| 门禁修的一处真问题 | SQL 分层：`app.py` 里写 `SELECT max(date) FROM daily_bar` 被门禁抓到，**下沉到 `cpt/storage/backtest_panel_store.latest_market_day()`** |
+| 线上 | `/api/dashboard/intraday-status` → `available:true, state:running`；`/cpt/` → 200，页面含 `intraday-status-line` |
+| `ruff check .` | All checks passed |

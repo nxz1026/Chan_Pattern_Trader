@@ -669,6 +669,34 @@
   }
 
 
+  /* ---------------- R89 B3：盘中采集活没活 ---------------- */
+
+  // 四种状态各有各的说法，**不许合并**（见 cpt/application/intraday_status.py）：
+  //   running 正在采 / stale 不在采集时段或太旧 / failed 连续报错 / never 还没跑过
+  const INTRADAY_STATE_LABELS = {
+    running: "✅",
+    stale: "⏸",
+    failed: "❌",
+    never: "·",
+  };
+
+  function renderIntradayStatus(payload) {
+    const node = q("[data-testid=intraday-status-line]");
+    if (!node) return;
+    const st = isObject(payload) && isObject(payload.status) ? payload.status : null;
+    if (!isObject(payload) || payload.available !== true || !st) {
+      node.hidden = true;
+      return;
+    }
+    const mark = INTRADAY_STATE_LABELS[st.state] || "·";
+    // 一句话：状态 + 人话标题 + 该做什么。数据来源与操作口径都在 payload.action 里。
+    const action = st.action ? ` ${st.action}` : "";
+    node.textContent = `盘中采集 ${mark} ${st.headline || "—"}。${action}`.trim();
+    node.dataset.state = String(st.state || "");
+    node.hidden = false;
+  }
+
+
   function renderSignalOverview() {
     const panel = q("[data-testid=event-panel]");
     if (!panel) return;

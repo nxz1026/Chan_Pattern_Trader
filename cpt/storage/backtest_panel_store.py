@@ -11,7 +11,7 @@ import datetime as dt
 from collections.abc import Sequence
 from typing import Any, Final
 
-__all__ = ["PANEL_SQL", "PANEL_SCOPE_SQL", "fetch_panel_rows"]
+__all__ = ["PANEL_SQL", "PANEL_SCOPE_SQL", "fetch_panel_rows", "latest_market_day"]
 
 #: 面板查询的骨架。``{scope}`` 由 :data:`PANEL_SCOPE_SQL` 填。
 #:
@@ -81,3 +81,25 @@ def fetch_panel_rows(
     with conn.cursor() as cur:
         cur.execute(sql, tuple(params))
         return list(cur.fetchall())
+
+
+def latest_market_day(conn: Any) -> dt.date | None:
+    """``public.daily_bar`` 里的最新交易日；表空时返 ``None``。
+
+    界面用它区分「今天休市」（库里最新交易日落后于今天，正常）与
+    「采集挂了」（同样的日期差，但不正常）。两者必须分开说 —— 合成一句
+    「没数据」会让人不知道该等还是该查。
+
+    SQL 住在这里而不是调用方（``cpt/web/app.py``）：分层门禁要求 SQL 只许
+    出现在 ``cpt/adapters/`` 与 ``cpt/storage/``。
+    """
+    with conn.cursor() as cur:
+        cur.execute("SELECT max(date) FROM public.daily_bar")
+        row = cur.fetchone()
+    if not row or row[0] is None:
+        return None
+    value = row[0]
+    # ``date`` 列在 psycopg 里给 ``date``；某些配置下给 ``datetime`` —— 统一成 date。
+    if isinstance(value, dt.datetime):
+        return value.date()
+    return value if isinstance(value, dt.date) else None

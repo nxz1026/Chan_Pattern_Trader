@@ -603,6 +603,76 @@ def _signal_overview_payload(days: int) -> dict[str, Any]:
     return payload
 
 
+def _intraday_status_payload() -> dict[str, Any]:
+    """R89 B3：盘中采集「今天跑没跑」。**降级不抛**。
+
+    数据源是 ``~/logs/intraday-collect.log``（一行一次运行），**不查库** ——
+    盘中采集刻意不写数据库（ADR 0003 §E2，``intraday_quote`` 归 emotion-core），
+    日志是唯一事实来源。所以这条路由坏了也不影响别的面板。
+
+    ``market_day`` 取 ``public.daily_bar`` 的最新日期，用来区分「今天休市」
+    与「采集挂了」—— 前者周末每天都成立，后者才是要处理的事。
+    """
+    payload: dict[str, Any] = {
+        "schema_version": "dashboard_intraday_status.v1",
+        "basis": "intraday_collect_log",
+    }
+    try:
+        import datetime as _dt  # noqa: PLC0415
+        from zoneinfo import ZoneInfo  # noqa: PLC0415
+
+        from cpt.application.intraday_status import (  # noqa: PLC0415
+            collect_status,
+            parse_log_tail,
+        )
+
+        log_path = _intraday_log_path()
+        records = parse_log_tail(log_path)
+        market_day = _latest_market_day()
+        payload["available"] = True
+        payload["log_path"] = str(log_path)
+        payload["status"] = collect_status(
+            records,
+            now=_dt.datetime.now(ZoneInfo("Asia/Shanghai")),
+            market_day=market_day,
+        )
+    except Exception as exc:  # noqa: BLE001 — 状态条是旁路，坏了不该 500
+        _LOG.warning("intraday status unavailable: %s", exc)
+        payload["available"] = False
+        payload["reason"] = "intraday_log_unavailable"
+    return payload
+
+
+def _intraday_log_path() -> Any:
+    """与 ``scripts/intraday_collectd.py`` 用同一条环境变量，避免两边漂。"""
+    import os  # noqa: PLC0415
+    from pathlib import Path  # noqa: PLC0415
+
+    return Path(
+        os.environ.get("CPT_INTRADAY_LOG") or (Path.home() / "logs" / "intraday-collect.log")
+    )
+
+
+def _latest_market_day() -> Any:
+    """库里最新交易日；查不到返 ``None``（状态条降级成「只说日志」）。
+
+    查询本身在 :func:`cpt.storage.backtest_panel_store.latest_market_day`
+    —— 分层门禁要求 SQL 不出 ``cpt/adapters`` 与 ``cpt/storage``。
+    """
+    try:
+        from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
+        from cpt.storage.backtest_panel_store import latest_market_day  # noqa: PLC0415
+
+        client = AShareLocalClient()
+        try:
+            return latest_market_day(client._get_conn())  # noqa: SLF001
+        finally:
+            client.close()
+    except Exception as exc:  # noqa: BLE001 — 日历是旁路
+        _LOG.warning("market day unavailable: %s", exc)
+        return None
+
+
 def _structure_events_payload(
     *,
     limit: int,
@@ -1499,6 +1569,10 @@ def make_handler(
                     return
                 days = max(1, min(days, _MAX_DAYS))
                 payload = _signal_overview_payload(days)
+            elif path.path == "/api/dashboard/intraday-status":
+                # R89 B3：「今天的盘中采集跑了没有」。旁路，坏了自己降级，
+                # 不许影响 dashboard 其它面板（它只读一行日志）。
+                payload = _intraday_status_payload()
             elif path.path == "/api/dashboard/watchlist":
                 # 只读旁路，纪律与同组的 /inspection 一致：DB 抖动不 500，
                 # 降级成 available=false + reason。原先这里**裸调**

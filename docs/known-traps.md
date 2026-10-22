@@ -693,7 +693,7 @@ grep -rnE "(index|idx|col|pos|offset|ix)\w* *= *[a-z_]+\([^)]*\) +or " cpt/
 |---|---|---|
 | `reference_backend:386-390` | `int(f.get("x", 0) or 0)` | 两边都是 0，收敛成默认值本就正确 |
 | `a_share_factor:552` | `getattr(act,"share_ratio",0.0) or 0.0` | 同上（None → 0.0 是有意的） |
-| `app.py:1299` | `find_run(run_id) or _index_row_from_body(...)` | `find_run` 返回 **dict 或 None**；非空 dict 恒为真，None 才回落 ⇒ 正确 |
+| `app.py:1369` | `find_run(run_id) or _index_row_from_body(...)` | `find_run` 返回 **dict 或 None**；非空 dict 恒为真，None 才回落 ⇒ 正确 |
 
 ⇒ **判据不是「用了 `or`」，而是「左边函数的返回值合法地包含 0 / "" / []」**。
 这条 grep 只能**筛出候选**，逐个看清左边是什么才算结论。
@@ -2216,3 +2216,24 @@ psql -c "SELECT max(id), (SELECT last_value FROM pg_sequences
 事务外全局对象（序列、 advisory lock、文件、外部服务）的测试，都要单独问一句
 「这个副作用回滚了吗」—— `setval` / `nextval` / `pg_advisory_lock`（会话级）
 都不在事务保护范围内。
+
+## #63 「测试全绿」不等于「测试有效」：阈值类断言必须凑够阈值（R89 实测）
+
+**现象**：给 `intraday_status.collect_status` 写了条测试
+`test_empty_and_skipped_are_not_failures`，断言「empty/skipped 不算失败」。
+21 条测试全绿。然后把 `empty` 注入成「算失败」，**21 条还是全绿**，一条没抓。
+
+**根因**：那条测试只放了 **2 条** empty 记录，而「连续失败」的门槛是 3。
+即使把 2 条都误算成失败，也到不了阈值，`state` 依然是 `running` ——
+测试断言的东西（state）根本没被触发。
+
+**通用判据**：凡是 `n >= 阈值` 才改变行为的逻辑，测试**至少**要喂到阈值那一条。
+写 `max_failures=3` 的测试，输入就得是 3 条。
+
+**怎么发现**：只有反向注入能发现。正向全绿 + 肉眼读代码都不行 ——
+代码是对的，测试看着也像对的，错在**输入的规模**。
+
+**这条的变体**（同一轮踩过的）：
+- 断言 `not_tradable == 1`，实际是「每个 horizon 各计一次」= 4。
+- 正则搜全文判「有没有 import 某模块」，文档字符串里提一句就误判 → 改用 AST 节点。
+

@@ -188,6 +188,15 @@
       <p data-testid="market-step-headline" class="market-step-headline">—</p>
       <p data-testid="market-step-numbers" class="market-step-numbers">—</p>
       <p data-testid="market-step-action" class="hint">—</p>
+      <!-- R89（B3）：盘中采集活没活。**单独一行、贴在第一屏底部** ——
+           采集挂了不影响上面那句「今天该不该看盘」的判断，但用户需要知道
+           「现在看到的东西是不是最新的」。数据来自 /api/dashboard/intraday-status。 -->
+      <p
+        data-testid="intraday-status-line"
+        class="intraday-status-line"
+        title="盘中采集：交易时段每 2 分钟采一次涨幅榜与五档，只采不判定"
+        hidden
+      >—</p>
     </section>
 
     <div data-testid="dashboard-body" class="dashboard-body">
@@ -436,8 +445,11 @@
               <b>怎么用：</b>把它当「跌到哪一步」的进度条，不是买点提醒。
               看到「位置已到」，该做的是<b>别在恐慌低点割肉</b>、
               检查自己有没有在这个位置追空；<b>不是</b>加仓。
-              同一个面板里，实测<b>比它更有差别</b>的是「跌超 4% 之后」
-              （样本 20,189 个，20 日 +4.05%、胜率 58.4%，基线 44.8%）。
+              同一个面板里，实测<b>比它更有差别</b>的是「收盘跌到前 20 日最低价的
+              96% 以下」—— 这比「前 20 日累计跌 4%」严 23 倍（样本 <b>19,592</b> 个
+              对 476,252 个），收益也差 3 个百分点。语序别搞反：是「跌穿前 20 日最低」
+              才有 20 日 <b>+4.37%、胜率 59.4%</b>（基线 +0.35%、45%），
+              不是「随便跌了 4%」。复跑：<code>scripts/shape_scan.py</code>。
             </p>
           </div>
           <dl class="kv">

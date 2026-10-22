@@ -57,6 +57,7 @@ import sys
 import urllib.error
 import urllib.request
 from datetime import UTC, datetime
+from datetime import time as dtime
 from pathlib import Path
 from typing import Any, Final
 
@@ -105,6 +106,17 @@ QUOTE_PROBE_CODE: Final[str] = os.environ.get("CPT_QUOTE_PROBE_CODE") or "600519
 
 #: health 接口的超时（秒）。本地环回，2 秒足够；挂了就能立刻判死。
 HEALTH_TIMEOUT: Final[float] = 2.0
+
+#: 盘中采集的新鲜度上限（分钟）。timer 每 2 分钟一轮，10 分钟 = 允许连挂 5 轮。
+#: 只在**盘中时段**判，收盘后当然不会再有新记录 —— 全天候判会每天误报。
+INTRADAY_STALE_MINUTES: Final[float] = float(
+    os.environ.get("CPT_INTRADAY_STALE_MINUTES") or 10.0
+)
+
+#: 采集日志路径。与 ``scripts/intraday_collectd.py`` 共用同一条环境变量。
+INTRADAY_LOG: Final[Path] = Path(
+    os.environ.get("CPT_INTRADAY_LOG") or (Path.home() / "logs" / "intraday-collect.log")
+)
 
 
 def _now() -> datetime:
@@ -206,6 +218,75 @@ def check_batch(conn: Any, *, now: datetime | None = None) -> dict[str, Any]:
     return result
 
 
+def check_intraday(*, now: datetime | None = None) -> dict[str, Any]:
+    """盘中采集活没活（R89 B4）。
+
+    **只在盘中时段判**：收盘后当然没有新记录，全天候判就是每天 15:00 之后
+    必红一次，然后人就会习惯性忽略告警 —— 那比不告警更糟。
+
+    判据只有一条：最新一条日志距今不超过 :data:`INTRADAY_STALE_MINUTES`。
+    「最新一条是 error」不算问题 —— 单轮失败是常态，连续失败由
+    ``intraday_collectd`` 自己按 ``max_failures`` 判（那边才会 rc=1）。
+    """
+    result: dict[str, Any] = {"name": "intraday", "ok": True, "problems": [], "detail": {}}
+    moment = now or _now()
+    from zoneinfo import ZoneInfo
+
+    market_now = moment.astimezone(ZoneInfo("Asia/Shanghai"))
+    in_session = dtime(9, 30) <= market_now.time() <= dtime(15, 0)
+    detail: dict[str, Any] = {
+        "log": str(INTRADAY_LOG),
+        "in_session": in_session,
+        "market_time": market_now.isoformat(timespec="seconds"),
+    }
+    result["detail"] = detail
+    if not INTRADAY_LOG.exists():
+        if in_session:
+            result["ok"] = False
+            result["problems"].append(f"盘中采集日志不存在：{INTRADAY_LOG}")
+        return result
+
+    try:
+        from cpt.application.intraday_status import parse_log_tail
+    except ImportError as exc:  # pragma: no cover
+        result["ok"] = False
+        result["problems"].append(f"import 失败：{exc}")
+        return result
+
+    records = parse_log_tail(INTRADAY_LOG)
+    if not records:
+        if in_session:
+            result["ok"] = False
+            result["problems"].append("盘中有采集时段，但日志里一条记录都没有")
+        return result
+
+    from datetime import datetime as _dt
+
+    try:
+        last_at = _dt.fromisoformat(str(records[-1].get("at")))
+    except (TypeError, ValueError):
+        result["ok"] = False
+        result["problems"].append("采集日志最后一条的 at 无法解析")
+        return result
+    if last_at.tzinfo is None:
+        last_at = last_at.replace(tzinfo=market_now.tzinfo)
+    age_min = (market_now - last_at).total_seconds() / 60.0
+    detail.update(
+        {
+            "last_at": last_at.isoformat(timespec="seconds"),
+            "age_minutes": round(age_min, 1),
+            "last_outcome": records[-1].get("outcome"),
+        }
+    )
+    if in_session and age_min > INTRADAY_STALE_MINUTES:
+        result["ok"] = False
+        result["problems"].append(
+            f"盘中采集 {age_min:.0f} 分钟没有新记录（上限 {INTRADAY_STALE_MINUTES:.0f} 分钟）"
+            f" —— 最后一轮 {last_at.isoformat(timespec='seconds')}"
+        )
+    return result
+
+
 def check_quote(code: str = QUOTE_PROBE_CODE) -> dict[str, Any]:
     """盘口通道通不通：新浪批量五档能不能拿到至少一档。"""
     result: dict[str, Any] = {"name": "quote", "ok": True, "problems": [], "detail": {}}
@@ -256,6 +337,14 @@ def collect(*, skip_network: bool = False) -> dict[str, Any]:
     except Exception as exc:  # noqa: BLE001 - 连不上库本身就是要报的结论
         checks.append(
             {"name": "database", "ok": False, "problems": [f"连不上库：{exc}"], "detail": {}}
+        )
+    # 盘中采集只看本地日志，不出网、不查库 —— 放在网络段之外，
+    # ``--skip-network`` 时也要跑（它就是用来在弱网下判断采集链路的）。
+    try:
+        checks.append(check_intraday())
+    except Exception as exc:  # noqa: BLE001
+        checks.append(
+            {"name": "intraday", "ok": False, "problems": [f"采集巡检异常：{exc}"], "detail": {}}
         )
     if not skip_network:
         # 盘口探活要出网，最不可靠 —— 它抛异常时**必须**降级成一条问题，

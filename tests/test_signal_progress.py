@@ -116,7 +116,10 @@ def test_ready_position_action_mentions_both_do_and_dont() -> None:
     action = first_buy_progress(_F(True, True, True), segment_status="down")["action"]
     assert "该做的" in action
     assert "不该做的" in action
-    assert "跌超 4% 之后" in action
+    # R89：措辞必须是「跌穿前 20 日最低价的 96% 以下」，不是含糊的「跌超 4%」——
+    # 两者样本差 23 倍（19,592 vs 476,252）、收益差 3 个百分点。
+    assert "跌到前 20 日最低价的 96% 以下" in action
+    assert "跌超 4% 之后" not in action
 
 
 def test_progress_is_read_only_and_does_not_mutate_facts() -> None:

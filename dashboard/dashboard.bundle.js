@@ -2158,7 +2158,7 @@
 
   // fetch 结果不在 snapshot 里（C5/C6/C3/C4 是独立路由），存这里供重渲染；
   // 只由 boot() 与手动刷新按钮触发，**不进 30s 轮询**（避免每轮多打几个请求）。
-  const remoteOps = { signalStats: null, signalOverview: null, watchlist: null, compare: null, multiRun: null, structureEvents: null, structureTimeline: null, llmCalls: null, llmTimer: null, days: "30" };
+  const remoteOps = { signalStats: null, signalOverview: null, intradayStatus: null, watchlist: null, compare: null, multiRun: null, structureEvents: null, structureTimeline: null, llmCalls: null, llmTimer: null, days: "30" };
 
   const SIGNAL_STATS_REASON_LABELS = { signal_history_unavailable: "信号历史不可用" };
   const STRUCTURE_EVENTS_REASON_LABELS = { structure_event_stream_unavailable: "结构事件流不可用（数据库未就绪）" };
@@ -3431,6 +3431,34 @@
         " —— 它是位置提示，不是买点。";
     }
     setText("[data-testid=market-step-action]", action);
+  }
+
+
+  /* ---------------- R89 B3：盘中采集活没活 ---------------- */
+
+  // 四种状态各有各的说法，**不许合并**（见 cpt/application/intraday_status.py）：
+  //   running 正在采 / stale 不在采集时段或太旧 / failed 连续报错 / never 还没跑过
+  const INTRADAY_STATE_LABELS = {
+    running: "✅",
+    stale: "⏸",
+    failed: "❌",
+    never: "·",
+  };
+
+  function renderIntradayStatus(payload) {
+    const node = q("[data-testid=intraday-status-line]");
+    if (!node) return;
+    const st = isObject(payload) && isObject(payload.status) ? payload.status : null;
+    if (!isObject(payload) || payload.available !== true || !st) {
+      node.hidden = true;
+      return;
+    }
+    const mark = INTRADAY_STATE_LABELS[st.state] || "·";
+    // 一句话：状态 + 人话标题 + 该做什么。数据来源与操作口径都在 payload.action 里。
+    const action = st.action ? ` ${st.action}` : "";
+    node.textContent = `盘中采集 ${mark} ${st.headline || "—"}。${action}`.trim();
+    node.dataset.state = String(st.state || "");
+    node.hidden = false;
   }
 
 
@@ -5122,6 +5150,24 @@
       : null);
   }
 
+  /* ---------------- R89 B3：盘中采集状态 ---------------- */
+
+  // 只读一行日志（后端不查库），**不进 30s 轮询** —— 一轮采集是 2 分钟一次，
+  // 30s 轮一次纯浪费；它跟着 refreshOps 一起刷新就够了。
+  async function loadIntradayStatus() {
+    try {
+      const { body } = await requestJson(`${DASHBOARD_BASE()}/intraday-status`);
+      remoteOps.intradayStatus = isObject(body) ? body : null;
+    } catch (exc) {
+      // 采集状态是旁路：拉不到就把那一行藏起来（后端也降级成 available=false）。
+      remoteOps.intradayStatus = null;
+      if (globalThis.console && typeof globalThis.console.warn === "function") {
+        globalThis.console.warn("intraday-status fetch failed", exc);
+      }
+    }
+    renderIntradayStatus(remoteOps.intradayStatus);
+  }
+
   /* ---------------- R27 结构事件流 ---------------- */
 
   // 与上面 snapshot.events 是**两个不同的东西**，标题必须分开写：
@@ -5652,6 +5698,7 @@
     loadWatchlist();
     loadSignalStats();
     loadSignalOverview();
+    loadIntradayStatus();
     // R27：结构事件流。同样**不进 30s 轮询** —— 这张表只在结构真变了才追加，
     // 30s 轮一次几乎永远是同一批数据，纯浪费。
     loadStructureEvents();

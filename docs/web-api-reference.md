@@ -43,6 +43,8 @@
 | `GET` | `/api/dashboard/parity` | `200` | 与参照实现的结构一致性对照 | `app.py` |
 | `GET` | `/api/dashboard/reproducibility` | `200` | 可复现性哈希 / dataset_hash | `app.py` |
 | `GET` | `/api/dashboard/runs` | `200` | 运行索引列表（ring 与 PG 表合并后的冷路径） | `app.py` |
+| `GET` | `/api/dashboard/intraday-status` | `200` | 盘中采集活没活（读一行日志，不查库） | `app.py` |
+| `GET` | `/api/dashboard/signal-overview` | `200` | 信号全景（按**票**，含步骤分布） | `app.py` |
 | `GET` | `/api/dashboard/signal-radar` | `200` | 信号雷达 | `app.py` |
 | `GET` | `/api/dashboard/signal-stats` | `200` | 信号状态跃迁统计 | `app.py` |
 | `GET` | `/api/dashboard/snapshot` | `200` | **看板主数据**（K 线 / 结构 / 复现性一次取全） | `app.py` |
@@ -50,6 +52,19 @@
 | `GET` | `/api/dashboard/structure-events` | `200` | 结构事件流（append-only） | `app.py` |
 | `GET` | `/api/dashboard/structure-events/timeline` | `200` | 单个结构的完整时间线 | `app.py` |
 | `GET` | `/api/dashboard/watchlist` | `200` | 自选（读） | `app.py` |
+
+> **R73 / R89 新加的两个 dashboard 接口，口径与老的不一样，别混用**：
+>
+> - `signal-stats` 数的是**事件条数**（同一票跃迁 5 次算 5 条）；
+>   `signal-overview` 取**每票最新一条**再数票。两者数值必然不同。
+> - `signal-overview` 的 `step_distribution.step_index_counts` 里有一个
+>   **`unknown` 桶**：失效行没记原因的票 `step_index` 是 `None`，**不是 0~3**。
+>   上界推断（一律记成 2）曾被当成分布读，把 117 只「不知道走到哪」的票
+>   算成「走到第二步」，读出「市场普遍就差临门一脚」的反向结论。
+> - `intraday-status` 只读 `~/logs/intraday-collect.log` 的**尾部 8 KiB**，
+>   不查块。四态 `running`/`stale`/`failed`/`never` 不许合并；
+>   `empty`/`skipped` 不算失败（午休与竞价前都会空）。
+>   日志不可读时降级成 `available=false` + `reason=intraday_log_unavailable`。
 
 > **R56 更正的两处（R45 抄录时漏了/重了）**：
 > - 原文把 `structure-events` **列了两遍**（同一行重复），已去重；
