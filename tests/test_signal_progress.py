@@ -122,6 +122,30 @@ def test_ready_position_action_mentions_both_do_and_dont() -> None:
     assert "跌超 4% 之后" not in action
 
 
+def test_steps_1_and_2_done_says_waiting_for_the_bounce_not_position_not_reached() -> None:
+    """前两步都走完、只差反弹时，不许说「位置还没到」。
+
+    R89 在 000002（2026-10-22）上实跑撞到：同一块的 explain 说「价格停在低位」，
+    action 却说「位置还没到，等第二步、第三步依次走完」—— 同一句话里自相矛盾。
+    判据不看具体词，看**两句 fact 的口径必须一致**：
+    explain 承认到了位置，action 就不能否认它。
+    """
+    facts = _F(True, True, False)
+    payload = first_buy_progress(facts, segment_status="down")
+    assert "位置" in payload["explain"] and "低位" in payload["explain"]
+    action = payload["action"]
+    assert "位置还没到" not in action
+    assert "跌到位" in action
+    # 只差反弹时也不能因此变成买点话术。
+    assert "买入" not in action
+
+
+def test_first_step_failed_still_says_position_not_reached() -> None:
+    """第一步都没走完时，「位置还没到」才是对的 —— 别为了修上一条把它也删了。"""
+    action = first_buy_progress(_F(False, False, False), segment_status="down")["action"]
+    assert "位置还没到" in action
+
+
 def test_progress_is_read_only_and_does_not_mutate_facts() -> None:
     facts = _F(True, True, True, "detected")
     before = (facts.has_two_centers, facts.has_divergence_leg, facts.has_reversal_bi)

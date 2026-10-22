@@ -62,6 +62,18 @@ def _win(value: float | None) -> str:
     return "—" if value is None else f"{value * 100:.1f}%"
 
 
+def _watchlist_codes() -> set[str]:
+    """关注列表里 A 股的代码集合。
+
+    读不到（文件不存在/格式坏）就返回空集合 —— 调用方会因此跑 0 只，
+    这比悄悄退回全市场诚实。
+    """
+    from cpt.adapters.a_share_pool import WatchlistStore
+    from cpt.web.a_share_routes import watchlist_path_for
+
+    return {e.code for e in WatchlistStore(watchlist_path_for()).list() if e.market == "A"}
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(description="跑一次 A/B 回测（structure_ready vs confirmed）")
     p.add_argument(
@@ -75,6 +87,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--warmup", type=int, default=DEFAULT_WARMUP, help="结构冷启动根数")
     p.add_argument("--min-bi-len", type=int, default=DEFAULT_MIN_BI_LEN, help="笔的最短根数")
     p.add_argument("--limit", type=int, default=0, help="只跑前 N 只（0 = 全部）")
+    p.add_argument(
+        "--only",
+        choices=("watchlist",),
+        default=None,
+        help="只跑关注列表里的 A 股（--limit 仍然生效）",
+    )
     p.add_argument("--tradable-only", action="store_true", default=True)
     p.add_argument(
         "--include-limit-up",
@@ -107,6 +125,9 @@ def main(argv: list[str] | None = None) -> int:
                 (args.min_bars,),
             )
             codes = [r[0] for r in cur.fetchall()]
+        if args.only == "watchlist":
+            watched = _watchlist_codes()
+            codes = [c for c in codes if c in watched]
         if args.limit:
             codes = codes[: args.limit]
         panels = load_panel(

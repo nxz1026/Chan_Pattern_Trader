@@ -150,6 +150,14 @@ def _action(facts: _Facts, steps: list[dict[str, Any]], segment_status: str) -> 
         return "不用做任何事：这个结构不成立，等它自己长出来。"
     states = [step["state"] for step in steps]
     if states[2] != STEP_DONE:
+        # 走到哪一步决定说什么：前两步都走完、只差反弹时，说「位置还没到」是错的
+        # —— 位置恰恰到了（R89 在 000002 上实跑撞到：同一块的 explain 说
+        # 「价格停在低位」、action 却说「位置还没到」，自相矛盾）。
+        if states[1] == STEP_DONE:
+            return (
+                "不用做任何事：价格已经跌到位了，现在等的是「跌势里冒出一笔反弹」。"
+                "这一步走完之前，别在恐慌低点割肉，也别在这里继续往下看空。"
+            )
         return "不用做任何事：位置还没到，等第二步、第三步依次走完再来看。"
     return (
         "该做的：检查自己有没有在这个位置追空或恐慌割肉。"

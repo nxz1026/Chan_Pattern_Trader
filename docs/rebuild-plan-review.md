@@ -1330,3 +1330,56 @@ SELECT max(date) FROM public.daily_bar   # ❌ 盘中永远返回昨天
 第二条第一版**没抓到**：判据是「import 里有 `is_trade_day`」，而注入只换了
 返回值、没删 import。改成查 AST 的 `ast.Call` 节点才抓到。见 known-traps #65
 ——「有没有 import」不是判据，「有没有调用」才是。
+
+### R89.8 真跑一次就抓到：位置到了，话却说「位置还没到」
+
+R89 装完当天用**生产同一套路径**（`NativeChanlunBackend` + `map_bi`/`map_zhongshu`
++ `derive_first_buy_facts` + `first_buy_progress`）跑了关注列表，000002 的输出是：
+
+```
+buy 三步: two_centers=done divergence_leg=done reversal_bi=failed | div=not_detected
+卡在哪: 位置到了，但还没反弹：下跌背驰段走完了，价格停在低位。
+       这一步的用处是提醒你别在恐慌低点割肉，不是叫你加仓。
+该做:   不用做任何事：位置还没到，等第二步、第三步依次走完再来看。
+```
+
+**同一块里两句打架**：`explain` 说「位置到了、价格停在低位」，
+`_action` 说「位置还没到」。根因是 `_action` 只判了第三步
+（`states[2] != STEP_DONE` 就套同一句话），没区分「第二步都没走完」
+和「前两步都走完、只差反弹」。
+
+改法：`_action` 按 (states[1], states[2]) 两档说话 ——
+
+| 情况 | 旧 | 新 |
+|---|---|---|
+| 第 1 步就卡住 | 位置还没到，等第二步、第三步 | 不变 ✓ |
+| 前两步走完、只差反弹 | 位置还没到，等第二步、第三步 | 价格已经跌到位了，现在等的是「跌势里冒出一笔反弹」。这一步走完之前，别在恐慌低点割肉，也别在这里继续往下看空。 |
+
+`tests/test_signal_progress.py` 加两条：`test_steps_1_and_2_done_says_waiting_for_the_bounce_not_position_not_reached`
+（口径一致性：explain 承认到位置，action 不许否认）与
+`test_first_step_failed_still_says_position_not_reached`（防止矫枉过正，
+第一步卡住时那句仍必须说「位置还没到」）。删掉新分支反向注入 →
+第一条红、第二条仍绿，说明两条各守一边。
+
+**教训（可复用）**：翻译层的两条文案是**同一件事的两种说法**，它们必须
+由同一组状态同时决定。分开写、各自判条件，就一定会出现互斥的描述。
+
+### R89.9 关注列表回测（`--only watchlist`，R89 补的参数）
+
+`scripts/backtest_run.py` 加 `--only watchlist`（走 `WatchlistStore` +
+`watchlist_path_for()`，与 `/api/dashboard/signal-overview` 的 `watched` 同源；
+读到空列表就如实跑 0 只，不偷偷退回全市场）。
+
+**结论：1 只票的收益数字是噪声，没有意义，不要拿它下判断。**
+
+| 状态 | n | h1 | h5 | h10 | h20 |
+|---|---:|---|---|---|---|
+| structure_ready | 5（丢 4 个窗口不足） | −0.194%/50.0% | −0.056%/25.0% | +0.098%/25.0% | −1.027%/50.0% |
+| confirmed | 0 | — | — | — | — |
+| invalidated | 7 | −0.398%/28.6% | +0.242%/42.9% | −0.693%/28.6% | −1.762%/14.3% |
+
+同票在 2026-10-22 的定位（生产路径实跑）：下跌走势、前两步 done、
+第三步 failed、`divergence_status=not_detected`。**没有任何信号处于可交易状态。**
+
+全市场口径（R89 B1 扫描，5,131 只）才是有统计意义的数：
+`drop_4pct` n=19,592 / 20 日 +4.37% / 59.4%；基线 +0.35%。
