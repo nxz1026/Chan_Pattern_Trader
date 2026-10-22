@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import datetime as dt
 
-import pytest
 from cpt.backtest import runner as rn
 from cpt.backtest import signals as sg
 from cpt.backtest.panel import BarPanel
@@ -171,125 +170,6 @@ def test_trace_summary_counts_transitions_and_days() -> None:
 # ───────────────────────── 配对纪律 ─────────────────────────
 
 
-def test_ab_pairs_pairs_same_structure() -> None:
-    """同一结构 ready→confirmed 配一对，收益各算各的。"""
-    closes = [10.0] * 60
-    closes[10] = 10.0
-    closes[15] = 11.0
-    panel = _panel(closes)
-    trace = _trace(
-        "600000", [(10, "structure_ready", "not_detected"), (15, "confirmed", "not_detected")]
-    )
-    pairs = rn.ab_pairs(trace, panel)
-    assert len(pairs[5]) == 1
-    assert pairs[5].a[0] == pytest.approx(closes[15] / closes[10] - 1.0)
-
-
-def test_ab_pairs_drops_whole_pair_when_a_side_is_limit_up() -> None:
-    """**纪律二**：A 端涨停买不进，这一对整对丢掉 —— 不是只剔 A 端。
-
-    只剔一端会让两只脚站在不同的样本世界里。
-    """
-    closes = [10.0] * 60
-    panel = _panel(closes, limit_up_at={10})
-    trace = _trace(
-        "600000", [(10, "structure_ready", "not_detected"), (15, "confirmed", "not_detected")]
-    )
-    pairs = rn.ab_pairs(trace, panel)
-    assert len(pairs[5]) == 0
-    assert pairs[5].dropped_not_tradable == 1
-
-
-def test_ab_pairs_drops_when_b_side_is_limit_up() -> None:
-    """B 端涨停同样整对丢掉。"""
-    closes = [10.0] * 60
-    panel = _panel(closes, limit_up_at={15})
-    trace = _trace(
-        "600000", [(10, "structure_ready", "not_detected"), (15, "confirmed", "not_detected")]
-    )
-    pairs = rn.ab_pairs(trace, panel)
-    assert len(pairs[5]) == 0
-    assert pairs[5].dropped_not_tradable == 1
-
-
-def test_ab_pairs_requires_ready_before_confirmed() -> None:
-    """没经过 ready 就 confirmed 的（历史行不全）配不上。"""
-    panel = _panel([10.0] * 60)
-    trace = _trace("600000", [(15, "confirmed", "not_detected")])
-    pairs = rn.ab_pairs(trace, panel)
-    assert len(pairs[5]) == 0
-
-
-def test_ab_pairs_uses_first_ready_only() -> None:
-    """同一结构多次 ready 只认第一次 —— 后面的 ready 是新的一轮还是重复，分不清。"""
-    closes = [10.0] * 60
-    closes[12] = 12.0
-    panel = _panel(closes)
-    trace = _trace(
-        "600000",
-        [
-            (10, "structure_ready", "not_detected"),
-            (12, "structure_ready", "detected"),
-            (20, "confirmed", "detected"),
-        ],
-    )
-    pairs = rn.ab_pairs(trace, panel)
-    assert len(pairs[5]) == 1
-    # 用的是 i=10（第一次 ready），不是 i=12
-    assert pairs[5].a[0] == pytest.approx(closes[15] / closes[10] - 1.0)
-
-
-def test_ab_pairs_drops_when_window_missing() -> None:
-    """末尾窗口不足时丢掉，并单独计数。"""
-    panel = _panel([10.0] * 60)
-    trace = _trace(
-        "600000", [(10, "structure_ready", "not_detected"), (57, "confirmed", "not_detected")]
-    )
-    pairs = rn.ab_pairs(trace, panel)
-    assert len(pairs[20]) == 0
-    assert pairs[20].dropped_no_window >= 1
-
-
-def test_ab_pairs_counts_confirmed_without_a_ready() -> None:
-    """没配到就绪日的 confirmed 要计数，不能静默消失。
-
-    历史行不全时（R71 之前不落 structure_ready）大量 confirmed 配不上——
-    这些沉默丢掉会让配对样本量看起来比实际大。
-    """
-    panel = _panel([10.0] * 60)
-    trace = _trace("600000", [(15, "confirmed", "not_detected")])
-    pairs = rn.ab_pairs(trace, panel)
-    assert len(pairs[5]) == 0
-    assert pairs[5].unpaired == 1
-
-
-def test_ab_pairs_keeps_two_structures_apart() -> None:
-    """两个结构各配各的，不交叉。"""
-    panel = _panel([10.0] * 60)
-    s1 = _trace(
-        "600000",
-        [(10, "structure_ready", "not_detected"), (15, "confirmed", "not_detected")],
-        structure="S1",
-    )
-    s2 = _trace(
-        "600000",
-        [(12, "structure_ready", "detected"), (20, "confirmed", "detected")],
-        structure="S2",
-    )
-    merged = SignalTrace(
-        code="600000",
-        bars_count=60,
-        signals=s1.signals + s2.signals,
-        status_counts={"structure_ready": 2, "confirmed": 2},
-        skipped=0,
-    )
-    pairs = rn.ab_pairs(merged, panel)
-    assert len(pairs[5]) == 2
-
-
-# ───────────────────────── 不依赖未来 ─────────────────────────
-
-
 def test_status_samples_take_every_ready_regardless_of_future() -> None:
     """**纪律三**：``structure_ready`` 是不是被采纳，不许看它后来有没有 confirmed。
 
@@ -347,16 +227,19 @@ def test_run_backtest_merges_across_codes() -> None:
     )
     res = rn.run_backtest(panels={"600000": p1, "600519": p2}, traces={"600000": t1, "600519": t2})
     assert res.codes == 2
-    assert len(res.pairs[5]) == 2
+    # 两个 structure_ready 事件都在样本里（confirmed 不参与「当买点」统计）
+    assert len(rn.status_samples(res, rn.A_STATUS, 5)) == 2
 
 
-def test_run_backtest_comparison_says_insufficient_when_no_pairs() -> None:
-    """没配对上时结论必须是「样本不足」或「配对不成立」，不能报差异。"""
-    panel = _panel([10.0] * 60)
-    trace = _trace("600000", [(10, "structure_ready", "not_detected")])
-    res = rn.run_backtest(panels={"600000": panel}, traces={"600000": trace})
-    verdict = res.comparison(5).verdict
-    assert "样本不足" in verdict or "配对比较不成立" in verdict
+def test_no_pairing_api_survives_r88() -> None:
+    """R88：配对口径已删除，不许悄悄复活。
+
+    删除的理由写在 ``runner`` 模块 docstring 里（样本被未来信息筛过）。想加回来
+    必须同时改这份测试与文档 —— 这是故意的阻力。
+    """
+    assert not hasattr(rn, "ab_pairs")
+    assert not hasattr(rn, "PairSet")
+    assert not hasattr(rn.BacktestResult(codes=1), "pairs")
 
 
 def test_run_backtest_ignores_trace_without_panel() -> None:
@@ -364,7 +247,10 @@ def test_run_backtest_ignores_trace_without_panel() -> None:
     trace = _trace("600000", [(10, "structure_ready", "not_detected")])
     res = rn.run_backtest(panels={}, traces={"600000": trace})
     assert res.codes == 1
-    assert res.pairs[5].a == ()
+    # 三个状态键都在（statuses 默认值），但每个 horizon 都是空样本
+    assert set(res.status) == {rn.A_STATUS, rn.B_STATUS, "invalidated"}
+    for got in res.status.values():
+        assert all(not v for v in got.by_horizon.values())
 
 
 def test_runner_has_no_sql_and_no_io_imports() -> None:

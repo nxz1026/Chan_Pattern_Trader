@@ -19,7 +19,7 @@
 | 位置 | ``/tmp`` 一次性 | 仓内，可复用 |
 | 涨跌停 | 自己按 0.098/0.198 算 | 读 ``derived_bar``（CPT 从不算涨跌停） |
 | 价格口径 | 后复权（来自适配层） | 后复权（``ref_adjust_factor``） |
-| 统计单元 | 全量 K 线当基线 | 事件样本，配对纪律写进 ``runner`` |
+| 统计单元 | 全量 K 线当基线 | 事件样本（**不配对**，见 R88） |
 | 结论 | 人工看日志 | ``stats.compare`` 判四级，噪声不许报差异 |
 
 **跑一次约 20–40 分钟**（5,131 只票 × 527 根），用 ``--limit`` 先小规模验证。
@@ -48,7 +48,6 @@ from cpt.backtest.signals import (  # noqa: E402
     structure_signals,
     trace_summary,  # noqa: E402
 )
-from cpt.backtest.stats import Sample  # noqa: E402
 
 
 def _parse_date(text: str) -> dt.date:
@@ -191,8 +190,6 @@ def _report(  # noqa: PLR0913 - 报告层的入参就是这一轮的全部产物
     reasons: dict[str, int] | None = None,
     first_error: tuple[str, str] | None = None,
 ) -> None:
-    from cpt.backtest.stats import summarise
-
     print()
     print("=" * 78)
     print(f"窗口 {start} ~ {args.end}   票数 {result.codes}   耗时 {elapsed / 60:.1f} 分")
@@ -236,25 +233,6 @@ def _report(  # noqa: PLR0913 - 报告层的入参就是这一轮的全部产物
         print(f"  {'  (因涨停丢掉)':<16}" + "".join(f"{got.not_tradable:>12,}" for _ in HORIZONS))
         print(f"  {'  (窗口不足)':<16}" + "".join(f"{got.no_window:>12,}" for _ in HORIZONS))
 
-    print("\n【配对：同一结构，A=就绪日买 vs B=确认日买】")
-    for h in HORIZONS:
-        ps = result.pairs.get(h)
-        if ps is None or not ps.a:
-            print(f"  h{h:<2} 配对 n=0 —— 没有可比样本")
-            continue
-        cmp = result.comparison(h)
-        a_sum = summarise([_sample(x) for x in ps.a])
-        b_sum = summarise([_sample(x) for x in ps.b])
-        print(
-            f"  h{h:<2} n={len(ps):<6,} A={_pct(a_sum.mean)}/{_win(a_sum.win_rate)}"
-            f"  B={_pct(b_sum.mean)}/{_win(b_sum.win_rate)}"
-        )
-        print(
-            f"       剔：涨停买不进 {ps.dropped_not_tradable:,} · 窗口不足 {ps.dropped_no_window:,}"
-            f" · 没配到就绪日 {ps.unpaired:,}"
-        )
-        print(f"       → {cmp.verdict}")
-
     if args.json:
         payload = {
             "window": {"start": start.isoformat(), "end": args.end.isoformat()},
@@ -263,15 +241,6 @@ def _report(  # noqa: PLR0913 - 报告层的入参就是这一轮的全部产物
             "tradable_only": bool(args.tradable_only),
             "elapsed_minutes": round(elapsed / 60, 2),
             "trace_summary": summary,
-            "pairs": {
-                str(h): {
-                    "n": len(ps),
-                    "a_mean": _mean(ps.a),
-                    "b_mean": _mean(ps.b),
-                    "verdict": result.comparison(h).verdict,
-                }
-                for h, ps in result.pairs.items()
-            },
             "status": {
                 s: {
                     str(h): {
@@ -287,10 +256,6 @@ def _report(  # noqa: PLR0913 - 报告层的入参就是这一轮的全部产物
         args.json.parent.mkdir(parents=True, exist_ok=True)
         args.json.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
         print(f"\nJSON 已写入 {args.json}")
-
-
-def _sample(v: float) -> Sample:
-    return Sample(code="", date_ms=0, ret=v)
 
 
 def _mean(values: Iterable[float]) -> float | None:
