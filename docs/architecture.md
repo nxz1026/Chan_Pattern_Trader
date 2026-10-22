@@ -361,10 +361,11 @@ dashboard/          前端静态产物（Nginx 从 /var/www/cpt-dashboard 提供
                         踩到，known-traps #44）。
 tests/              扁平布局：120 个 test_*.py 直接放 tests/ 下，仅一个 fixtures/
                     人工构造案例；**没有** unit/ oracle/ e2e 子目录（见 §12）
-docs/               11 份 .md（**不含** archive/；rules.md / architecture.md /
-                    progress-log.md / known-traps.md / web-api-reference.md /
-                    known-traps.md / archive/reviews-r45.md 各一份 /
-                    docs/archive/audits-2026-09.md 各轮修复总报告 / audit/ …）
+docs/               16 份 .md（**不含** archive/；rules.md / architecture.md /
+                    intraday-seal-contract.md（R90：CPT 写 → emotion-core 读的
+                    盘中封板快照契约） / shared-tables-contract.md（反向：emotion-core
+                    写 → CPT 读的 7 张表） / known-traps.md / 各轮修复总报告在
+                    docs/archive/ 下）
 deploy/             nginx/  systemd/  cron/  env/  golden/  README.md
 references/         czsc @ 701e480a（可选 extra `chan`）  ~~wbt @ 39bb1e8a~~（R51 随画布 D 下线）
                     ⚠️ 「参照侧」= **czsc**，不是 references/ 里的某个独立实现

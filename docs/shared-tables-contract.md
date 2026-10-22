@@ -78,3 +78,21 @@ emotion-core  ──写──▶  public.<7 张共享表>  ──只读──▶
   提示词（`llm/strategies/chan_theory.yaml`，`instructions: |` 自然语言块），
   `algorithms/` 里没有任何分型/笔/中枢的确定性计算代码 —— **同名不同物**，
   重复实现这个合并的主要理由不存在。
+
+## 6. 反向的那张表（CPT 写 → emotion-core 读）
+
+本契约管的是「emotion-core 写、CPT 读」的 7 张表。**方向相反的那张另有契约**：
+
+- **表名**：`intraday_seal_snapshot`（`public` schema）
+- **写入方**：CPT（`scripts/intraday_collectd.py`）
+- **读方**：emotion-core（只读）
+- **契约**：[`docs/intraday-seal-contract.md`](intraday-seal-contract.md)
+
+> ⚠️ 这张表**故意不用表格行写**。`tests/test_shared_tables_contract.py::
+> test_shared_tables_match_contract_doc` 用 `^\|\s*`(\w+)`\s*\|` 抓文档里所有
+> 「表格首列是反引号表名」的行，断言其集合与 `check_shared_tables.SHARED_TABLES`
+> **完全相等**。`SHARED_TABLES` 的定义是「emotion-core 写、CPT 读」，方向相反的表
+> 写成表格行会立刻让它变红。所以这里只给指路，不重复列。
+
+它不并进上面的表清单，因为两边的**新鲜度判据完全不同**：那 7 张是「收盘后当日」，
+这一张是「盘中每 2 分钟一轮」。混在一起判会让「盘中轮次」被按日频标准误判成陈旧。
