@@ -63,6 +63,13 @@ SELF = "selftest_gates.py"
 NOT_A_GATE: dict[str, str] = {
     "scan_doc_claims.py": "R45 的**一次性**普查工具，产出已并入 check_all_claims.py",
     "verify_public_contracts.py": "人工按需跑的对外契约抽查，依赖真实上游，不进 CI",
+    "check_derived_gap.py": (
+        "**需要真实数据库**的运行期检查，与 check_shared_tables.py 同类：判据是数据事实"
+        "（derived_bar 的缺口是不是只有上市首日），CI 的干净库答不了。2026-10-22 实测"
+        "221 条缺口全是上市首日，非首日 0 条。它的执行点是 deploy/cron/cron-daily-report.sh"
+        "（与共享表检查同一趟），出现非首日缺口就发飞书。静态部分（SQL 判据与首日的"
+        "定义一致）由 tests/test_derived_gap.py 在 CI 里守。"
+    ),
     "check_shared_tables.py": (
         "**需要真实数据库**的运行期检查，不是静态门禁：它查 emotion-core 写的 7 张"
         "共享 A 股表在生产上停更了没有（2026-10-07 实测 Oracle 上确实没有任何东西"

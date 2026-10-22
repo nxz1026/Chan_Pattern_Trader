@@ -65,6 +65,7 @@ from zoneinfo import ZoneInfo
 
 from cpt.adapters.intraday_probe import IntradayCollector, IntradayError
 from cpt.application.intraday_analysis import board_health, seal_board
+from cpt.storage.intraday_seal_store import insert_seal_snapshot
 
 #: 市场时区。交易日与盘中时段一律按北京时间算，不按机器时区。
 _MARKET_TZ: Final[ZoneInfo] = ZoneInfo("Asia/Shanghai")
@@ -138,6 +139,65 @@ def trading_day(now: datetime) -> str | None:
     return now.strftime("%Y-%m-%d") if verdict else None
 
 
+DB_WRITE_ENABLED: Final[bool] = os.environ.get("CPT_INTRADAY_DB", "1").strip().lower() not in (
+    "0",
+    "false",
+    "no",
+)
+
+
+def _persist(record: dict[str, Any], snap: dict[str, Any]) -> None:
+    """把这一轮的判定结论写进 ``public.intraday_seal_snapshot``（R90）。
+
+    **写库失败只记 warning，不改 ``outcome``。** 行情采到了就是采到了；
+    落库失败是另一件事，由巡检（``scripts/watch_period_check.py``）单独抓，
+    混进 ``outcome`` 会让「行情断了」和「库断了」变成同一个红灯。
+
+    写的是 ``seal_strength()`` 的结论（``sealed`` / ``bid1_lots`` / ``limit_price``），
+    **不写原始五档** —— 判据只许有一个实现（ADR 0003 §E2）。
+    """
+    if not DB_WRITE_ENABLED:
+        record["db"] = "disabled"
+        return
+    rows = [
+        {
+            "code": item["code"],
+            "sealed": True,
+            "bid1_lots": item["bid1_lots"],
+            "limit_price": item["limit_price"],
+        }
+        for item in snap.get("sealed", [])
+    ]
+    # 候选里没封板（或判不了）的也要落一行 sealed=False ——
+    # 「这一轮看过了、没封」与「这一轮没这只票」是两件事。
+    sealed_codes = {r["code"] for r in rows}
+    for cand in snap.get("candidates", []):
+        if cand["code"] in sealed_codes:
+            continue
+        rows.append(
+            {
+                "code": cand["code"],
+                "sealed": False,
+                "bid1_lots": None,
+                "limit_price": None,
+            }
+        )
+    # import **也在 try 里**：库驱动装不上/环境缺包同样是「库这一侧坏了」，
+    # 让它在 try 外面炸会直接打断整轮采集成 error（R90 实测）。
+    try:
+        import psycopg
+        from cpt.adapters.a_share_local import connection_kwargs
+
+        at = datetime.fromisoformat(record["at"])
+        with psycopg.connect(**connection_kwargs()) as conn:
+            written = insert_seal_snapshot(conn, rows, at=at)
+            conn.commit()
+        record["db"] = f"ok:{written}"
+    except Exception as exc:  # noqa: BLE001 - 写库失败不许打断采集
+        record["db"] = f"warn:{type(exc).__name__}"
+        print(f"[warn] 封板快照写库失败：{type(exc).__name__}: {exc}", file=sys.stderr)
+
+
 def run_round(*, limit: int, main_board_only: bool) -> dict[str, Any]:
     """采一轮。**任何异常都收敛成返回值**，不往上抛（常驻循环要能继续）。"""
     started = time.monotonic()
@@ -162,6 +222,7 @@ def run_round(*, limit: int, main_board_only: bool) -> dict[str, Any]:
             "rank_size": snap["rank_size"],
             "elapsed_s": _elapsed(started),
         }
+    _persist(base, snap)
     health = board_health(board)
     return {
         **base,

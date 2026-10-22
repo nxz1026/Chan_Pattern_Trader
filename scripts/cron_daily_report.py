@@ -191,6 +191,37 @@ def _shared_table_problems() -> tuple[list[str], list[str]]:
     return [f"共享表检查失败：{label}"], detail
 
 
+def _derived_gap_problems() -> tuple[list[str], list[str]]:
+    """``derived_bar`` 的缺口是不是只有上市首日（R90 新增）。
+
+    与 ``_shared_table_problems`` 同一趟、同一套退出码语义：
+    0 干净 / 1 有非首日缺口 / 2 查不到。用子进程的理由也一样
+    （``scripts/`` 没有 ``__init__.py``，import 会撞 mypy 的双模块名）。
+    """
+    script = Path(__file__).resolve().parent / "check_derived_gap.py"
+    if not script.exists():
+        return [f"derived_bar 缺口检查脚本缺失: {script}"], []
+    try:
+        proc = subprocess.run(
+            [sys.executable, str(script)],
+            cwd=str(Path(__file__).resolve().parent.parent),
+            capture_output=True,
+            text=True,
+            timeout=300,
+        )
+    except Exception as exc:  # noqa: BLE001
+        return [f"derived_bar 缺口检查执行失败: {type(exc).__name__}: {exc}"], []
+
+    blob = (proc.stdout + proc.stderr).strip()
+    detail = ["derived_bar 缺口检查：", *blob.splitlines()] if blob else []
+    if proc.returncode == 0:
+        return [], detail
+    label = {1: "出现非首日缺口", 2: "无法验证（连不上库或查询出错）"}.get(
+        proc.returncode, f"退出码 {proc.returncode}"
+    )
+    return [f"derived_bar 缺口检查失败：{label}"], detail
+
+
 def build_report(
     hours: int,
     logs_dir: str | None = None,
@@ -230,6 +261,10 @@ def build_report(
         st_problems, st_lines = _shared_table_problems()
         problems.extend(st_problems)
         lines.extend(st_lines)
+
+        dg_problems, dg_lines = _derived_gap_problems()
+        problems.extend(dg_problems)
+        lines.extend(dg_lines)
 
     return {
         "problems": problems,

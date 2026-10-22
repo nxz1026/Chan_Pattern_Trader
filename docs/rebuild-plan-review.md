@@ -1383,3 +1383,96 @@ buy 三步: two_centers=done divergence_leg=done reversal_bi=failed | div=not_de
 
 全市场口径（R89 B1 扫描，5,131 只）才是有统计意义的数：
 `drop_4pct` n=19,592 / 20 日 +4.37% / 59.4%；基线 +0.35%。
+
+## 11. R90（2026-10-22）：让 emotion-core 能消费盘中数据 + `derived_bar` 缺口查清
+
+用户 m06969：「A+B 都要做，然后同步文档，让 emotion 修改代码去消费数据」。
+
+### 11.1 A：建表 + 写库 + 读取接口
+
+此前 CPT 的盘中采集器**只写本地日志**，库里一张 `intraday` 表都没有 ⇒
+emotion-core 消费不到（只能读没有代码的日志，或自己调 `fetch_quotes()` 自己
+判涨停 —— 判据分叉，违反 ADR 0003 §E2）。
+
+新增 `public.intraday_seal_snapshot`（迁移脚本
+`scripts/migrations/2026-10-22_r90_intraday_seal_snapshot.sql`）。**只有 5 列**，
+每一列都是采集端已经算出来的结论：
+
+| 列 | 含义 |
+|---|---|
+| `at` | 这一轮采集时刻 |
+| `code` | 6 位纯代码，与 `fetch_quotes` 的键同形 |
+| `sealed` | `seal_strength()["at_limit"]` |
+| `bid1_lots` | 封单量（手），判不了为 NULL |
+| `limit_price` | 本轮用的涨停价（存下来自证口径） |
+
+不存 open/high/low/涨跌幅 —— 那是 `daily_bar` 与日志的职责。用户此前明确反对
+「为方便查询冗余多列」（叫停过 12 列里 7 列冗余）。
+
+存储层 `cpt/storage/intraday_seal_store.py`：`insert_seal_snapshot`（`ON CONFLICT
+DO NOTHING`、**不 commit**）、`load_latest_round`（**只取一轮**）、`load_seal_track`、
+`load_session_rows`。三条口径写进模块 docstring：
+
+1. **没行 = 判不了**，不是「没封板」；
+2. `sealed=False` = 采到了、这一轮没封；
+3. 下游按 `at` 分组取最新一轮，**不要按 code 单点查最新**（混轮次会造出并不
+   存在的状态）。
+
+采集器 `scripts/intraday_collectd.py` 加 `_persist()`：写「封住的」+「候选里
+没封的」两类行。`CPT_INTRADAY_DB=0` 可关。
+
+**写库失败不改 `outcome`** —— 只记 `db=warn:<异常名>` 并打 warning。行情断了与
+库断了是两个不同的红灯，混成一个就没法排查。测试
+`test_persist_failure_does_not_change_outcome` 钉住这条（反向注入把
+`except Exception` 改成 `except ValueError` → 红）。
+
+**踩坑**：`import psycopg` 也必须在 `try` 里。驱动装不上同样是「库这一侧坏了」，
+放 `try` 外会直接打断整轮成 `error`。
+
+回顾层 `cpt/application/intraday_review.py` + `scripts/intraday_review.py`：把一天的
+快照翻成人话（ADR 0003 §C3 的「封住率」需要每日真实样本，那个 70.1% 来自一次性
+回测）。口径：**「开过板」= 某个 True 之后出现过 False**，不是「没封着」；
+**「最后封住」看当天最后一轮**，不是「出现过 True」；没有样本时 `hold_rate`
+是 `None` **不是 0**（0 会被读成「一只都没封住」）。
+
+实跑 2026-10-22：`今天 33 只封过板，最后一轮还封着 33 只（封住率 100%），其中
+0 只中途开过板。样本：99 轮 · 每只票 3~3 轮`。
+
+### 11.2 B：`derived_bar` 缺 221 行 —— 查清了，不补
+
+| 事实 | 数 |
+|---|---|
+| `daily_bar` | 3,451,091 |
+| `derived_bar` | 3,450,870 |
+| 差 | 221 |
+| 其中「上市首日」（`date = min(date)` per code） | **221 / 221** |
+| 其中「非上市首日」 | **0** |
+
+根因：`derived_bar` 不是 CPT 写的，是 **emotion-core 的
+`services/derive_service.py`** 写的。`compute_derived` 要算 `cont_days`（连板数）
+与 `amplitude`（振幅），这些量需要**前一根**日线 —— 新股首日没有，跳过是对的。
+
+**所以这 221 行不该补**（补了就是编造），也不影响回测：`cpt/backtest/panel.py`
+的 `PANEL_SQL` 是 `LEFT JOIN derived_bar`，缺行时标签读成 `None`；而
+`_build_panel` 只在 `rn > 250`（预热期后）取样本 —— 首日永远落在预热期里。
+
+**真正的问题不是缺口，是「差 221 这个数字不带信息」**：同样是 221，可能是首日，
+也可能是上游整批断更，人眼分不出。
+
+⇒ 新增**门禁⑱** `scripts/check_derived_gap.py`：断言缺口**全部**满足
+`date = 该票 min(date)`，出现任何非首日缺口就红并列出样例。它与
+`check_shared_tables.py` 同类（判据是数据事实，CI 的干净库答不了），执行点是
+`deploy/cron/cron-daily-report.sh` 那一趟日报，红了发飞书。
+
+实跑：`上市首日缺口 221 条（已知形态，不算问题） / 非上市首日缺口 0 条 / ✅`。
+反向注入（假连接喂 `other_day=3`）→ 报红并列出 `600000 2026-10-22` 样例。
+
+补跑：`derive_service.run(date(2026,10,22))` 写入 **5,224 行**，差值仍为 221、
+非首日 0 条 —— 印证这 221 就是首日的稳定值，不是「今天没跑」。
+
+### 11.3 一条流程事故（记下来）
+
+`git checkout scripts/check_derived_gap.py` 想撤销反向注入，**但这个文件从没
+提交过** ⇒ `git checkout` 报错且**没撤销**，反向注入残留在工作树里。幸好改的是
+同一行、脚本内另有还原语句。
+**规矩：对未跟踪文件不许用 `git checkout` 撤销，用备份或直接改回。**
