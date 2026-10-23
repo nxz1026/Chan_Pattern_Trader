@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any, Final
+from typing import Any
 
 _LOG = logging.getLogger(__name__)
 
@@ -40,58 +40,21 @@ __all__ = [
     "compute_points",
 ]
 
-#: BUY reference 的缓冲：在算出的 raw 价上**再上调 2%**，给行情波动留余地
-#: （基本面：中枢下沿是"触底即反弹"的参考，2% 缓冲避免刚好擦边进不去）
-BUY_BUFFER: Final[float] = 1.02
-#: SELL reference 的缓冲：在算出的 raw 价上**再下调 3%**
-#: （阻力位附近"摸一下"是常态，3% 缓冲降低"差一分钱没到"的挫败）
-SELL_BUFFER: Final[float] = 0.97
-#: 止损相对 BUY reference 的比例
-STOP_LOSS_RATIO: Final[float] = 0.95
-
-#: 双向各取最近 N 笔 + 全部中枢（一般 1-2 个）
-_BI_LOOKBACK: Final[int] = 3
-_ZHONGSHU_LOOKBACK: Final[int] = 2
-
-
-def _h(obj: Any) -> float | None:
-    """结构对象的 ``high``（dict 或 dataclass 都认）。"""
-    if obj is None:
-        return None
-    if isinstance(obj, dict):
-        v = obj.get("high")
-    else:
-        v = getattr(obj, "high", None)
-    return float(v) if v is not None else None
-
-
-def _l(obj: Any) -> float | None:
-    """结构对象的 ``low``。"""
-    if obj is None:
-        return None
-    if isinstance(obj, dict):
-        v = obj.get("low")
-    else:
-        v = getattr(obj, "low", None)
-    return float(v) if v is not None else None
-
-
-def _direction(obj: Any) -> int | None:
-    """笔的方向 ``+1`` 向上 / ``-1`` 向下。"""
-    if obj is None:
-        return None
-    if isinstance(obj, dict):
-        v = obj.get("direction")
-    else:
-        v = getattr(obj, "direction", None)
-    return int(v) if v is not None else None
-
-
-def _to_raw(adjusted_price: float, price_ratio: float | None) -> float | None:
-    """后复权 → raw。``price_ratio`` 不可用时返 None，不静默用错数。"""
-    if price_ratio is None or price_ratio <= 0:
-        return None
-    return adjusted_price / price_ratio
+# ── 判据常量与算式本体已迁至 Emotion-CPT（2026-10-23）────────────────────
+# 单一真源：emotion_cpt.contracts.pricing（常量）
+#         emotion_cpt.snapshot.points（算式）
+# 此前 emotion-core 侧各手抄了一份，常量与公式都可能漂 —— 现在两侧共用同一份。
+from emotion_cpt.contracts.pricing import (  # noqa: E402
+    BUY_BUFFER,
+    SELL_BUFFER,
+    STOP_LOSS_RATIO,
+)
+from emotion_cpt.snapshot.points import (  # noqa: E402
+    confirmed_point as _shared_confirmed_point,
+)
+from emotion_cpt.snapshot.points import (  # noqa: E402
+    structure_pick as _shared_structure_pick,
+)
 
 
 def _last_bar_day(snapshot: dict[str, Any]) -> str | None:
@@ -233,32 +196,22 @@ def _buy_reference(
 
     优先用中枢下沿（结构比单笔强），其次最近 N 笔低点。**取最低**后上调 2% 留缓冲。
     """
-    candidates: list[tuple[str, float]] = []
-    for zs in zhongshus[-_ZHONGSHU_LOOKBACK:]:
-        low = _l(zs)
-        if low is not None:
-            candidates.append((f"中枢下沿 {low:.2f}", low))
-
-    for bi in bis[-_BI_LOOKBACK:]:
-        # 向下笔的 low 才是"低点"参考（向上笔的 high 不算买点附近的参考）
-        if _direction(bi) == -1:
-            low = _l(bi)
-            if low is not None:
-                candidates.append((f"向下笔低点 {low:.2f}", low))
-
-    if not candidates:
-        return {
-            "price_level": None,
-            "condition": "无结构数据，刷新后再看",
-            "rationale": "overlays.bis / zhongshus 为空（可能是 degraded snapshot）",
-        }
-
-    # 取最低（最保守：让价格真正下来才到）
-    label, raw_adj = min(candidates, key=lambda x: x[1])
-    raw_price = _to_raw(raw_adj, price_ratio)
-    if raw_price is None:
+    # 算式本体在 Emotion-CPT（emotion_cpt.snapshot.points）—— 两侧单一真源。
+    pick = _shared_structure_pick(
+        {"zhongshus": zhongshus, "bis": bis}, price_ratio, "buy"
+    )
+    if pick.price_level is None:
+        if pick.n_candidates == 0:
+            # 没有结构数据 ⇒ 给出可展示的占位（与旧实现同形）
+            return {
+                "price_level": None,
+                "condition": "无结构数据，刷新后再看",
+                "rationale": pick.reason,
+            }
+        # 有候选但 ratio 无效 ⇒ 不给参考价（与旧实现同形：返回 None）
         return None
-    final = round(raw_price * BUY_BUFFER, 2)
+    label = pick.label or ""
+    final = pick.price_level
     return {
         "price_level": final,
         "condition": "价格回到这个下沿、并且结构位置成立时，才有参考意义",
@@ -275,31 +228,19 @@ def _sell_reference(
 
     优先用中枢上沿，其次最近 N 笔高点（向上笔）。**取最高**后下调 3% 留缓冲。
     """
-    candidates: list[tuple[str, float]] = []
-    for zs in zhongshus[-_ZHONGSHU_LOOKBACK:]:
-        high = _h(zs)
-        if high is not None:
-            candidates.append((f"中枢上沿 {high:.2f}", high))
-
-    for bi in bis[-_BI_LOOKBACK:]:
-        if _direction(bi) == 1:
-            high = _h(bi)
-            if high is not None:
-                candidates.append((f"向上笔高点 {high:.2f}", high))
-
-    if not candidates:
-        return {
-            "price_level": None,
-            "condition": "无结构数据，刷新后再看",
-            "rationale": "overlays.bis / zhongshus 为空（可能是 degraded snapshot）",
-        }
-
-    # 取最高（最保守：等价格真正上去才卖）
-    label, raw_adj = max(candidates, key=lambda x: x[1])
-    raw_price = _to_raw(raw_adj, price_ratio)
-    if raw_price is None:
+    pick = _shared_structure_pick(
+        {"zhongshus": zhongshus, "bis": bis}, price_ratio, "sell"
+    )
+    if pick.price_level is None:
+        if pick.n_candidates == 0:
+            return {
+                "price_level": None,
+                "condition": "无结构数据，刷新后再看",
+                "rationale": pick.reason,
+            }
         return None
-    final = round(raw_price * SELL_BUFFER, 2)
+    label = pick.label or ""
+    final = pick.price_level
     return {
         "price_level": final,
         "condition": "价格上行到这个上沿、并且出现上涨位置提示时，才有参考意义",
@@ -316,31 +257,4 @@ def _confirmed_point(
 
     仅在 ``signal.status == "confirmed"`` 且 ``action`` 匹配时被调。
     """
-    obj = last_zs if last_zs is not None else last_bi
-    if obj is None:
-        return None
-    if side == "buy":
-        adj = _l(obj)
-        if adj is None:
-            return None
-        raw = _to_raw(adj, price_ratio)
-        if raw is None:
-            return None
-        return {
-            "price_level": round(raw, 2),
-            "condition": "信号已经走到确认这一步，且价格仍在区间内",
-            "rationale": f"取最新结构的下沿 {adj:.2f}（adjusted）÷ {price_ratio:.4f}",
-        }
-    if side == "sell":
-        adj = _h(obj)
-        if adj is None:
-            return None
-        raw = _to_raw(adj, price_ratio)
-        if raw is None:
-            return None
-        return {
-            "price_level": round(raw, 2),
-            "condition": "信号已经走到确认这一步，且价格仍在区间内",
-            "rationale": f"取最新结构的上沿 {adj:.2f}（adjusted）÷ {price_ratio:.4f}",
-        }
-    return None
+    return _shared_confirmed_point(last_bi, last_zs, price_ratio, side)
