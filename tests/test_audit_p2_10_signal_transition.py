@@ -268,7 +268,10 @@ def test_docs_no_longer_claim_the_transition_is_wired() -> None:
     from pathlib import Path
 
     root = Path(__file__).resolve().parents[1]
-    signal_py = (root / "cpt/domain/signal.py").read_text(encoding="utf-8")
+    # 判据源码已迁至 emotion_cpt.structure ⇒ 跟随已安装包定位，别硬编码仓库路径
+    import emotion_cpt.structure.signal as _signal_mod
+
+    signal_py = Path(_signal_mod.__file__).read_text(encoding="utf-8")
     assert "状态推进**没有生产" in signal_py
     assert "状态推进**也已接**" not in signal_py
 

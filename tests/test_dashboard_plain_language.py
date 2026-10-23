@@ -114,7 +114,10 @@ def test_trend_kind_labels_cover_every_domain_constant() -> None:
     少一个的后果：将来接上数据时，界面上会突然冒出一个英文 raw 值，
     而且没人会想起来是这里漏了。
     """
-    src = (_ROOT / "cpt" / "domain" / "trend_type.py").read_text(encoding="utf-8")
+    # 判据源码已迁至 emotion_cpt.structure ⇒ 跟随已安装包定位，别硬编码仓库路径
+    import emotion_cpt.structure.trend_type as _trend_type_mod
+
+    src = Path(_trend_type_mod.__file__).read_text(encoding="utf-8")
     kinds = set(re.findall(r'_KIND_[A-Z_]+:\s*Final\[str\]\s*=\s*"([^"]+)"', src))
     assert kinds, "从 trend_type.py 里没解析出 _KIND_* 常量，解析规则可能失效了"
 

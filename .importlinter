@@ -2,6 +2,11 @@
 root_package = cpt
 include_external_packages = True
 
+# 2026-10-23：判据内核已迁至 Emotion-CPT 的 ``emotion_cpt.structure``，
+# ``cpt.domain`` 变成**模块别名转发层**（``cpt.domain.X is emotion_cpt.structure.X``）。
+# ⇒ 这条契约的**语义反而更严了**：判据层现在连本仓的任何包都不依赖，
+# 只依赖 ``emotion_cpt`` 这一个外部的、纯标准库的判据内核。
+# ``emotion_cpt`` 不在下面的 forbidden 列表里，是**有意的**。
 [importlinter:contract:domain-has-no-third-party-deps]
 name = Domain has no third-party deps
 type = forbidden
