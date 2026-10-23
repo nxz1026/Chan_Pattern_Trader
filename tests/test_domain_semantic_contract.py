@@ -27,7 +27,12 @@ from pathlib import Path
 
 import pytest
 
-DOMAIN = Path(__file__).resolve().parents[1] / "cpt" / "domain"
+#: 判据源码目录。**跟随已安装的包定位**，不硬编码仓库路径 ——
+#: 判据已于 2026-10-23 迁至 ``emotion_cpt.structure``（仓：nxz1026/Emotion-CPT），
+#: 硬编码路径会在搬家或装到别处时**静默失效**（读不到文件 → 断言空过）。
+import emotion_cpt.structure as _structure
+
+DOMAIN = Path(_structure.__file__).resolve().parent
 
 #: 出现「单位是分钟」这种**无条件**断言的位置，就该被盯上。
 #: 出现「分钟」本身没问题（A 股那条要说明「不是 5 分钟」），
@@ -168,7 +173,12 @@ def test_domain_still_has_no_third_party_imports() -> None:
             stripped = line.strip()
             if not stripped.startswith(("import ", "from ")):
                 continue
-            mod = stripped.split()[1].split(".")[0]
-            if mod not in stdlib and mod != "cpt":
+            token = stripped.split()[1]
+            if token.startswith("."):
+                # 包内相对导入（``from . import X`` / ``from .x import Y``）⇒ 天然合规
+                continue
+            mod = token.split(".")[0]
+            # ``emotion_cpt`` 是判据本体的新家（等价于原来的包内相对导入 ``cpt.domain.*``）
+            if mod not in stdlib and mod not in ("cpt", "emotion_cpt"):
                 bad.append(f"{path.name}: {stripped}")
     assert not bad, "domain 引入了非 stdlib 依赖：\n" + "\n".join(bad)
