@@ -111,11 +111,29 @@ def test_pinned_version_matches_pyproject_extra() -> None:
 
 
 def test_core_dependencies_stay_empty() -> None:
-    """接入 czsc 不得污染核心依赖（方案 C 的核心约束）。"""
+    """接入 czsc 不得污染核心依赖（方案 C 的核心约束）。
+
+    2026-10-23 更新：判据内核迁至 Emotion-CPT 后，核心依赖**不再为空**，
+    但「核心不引入任何三方库」这条约束**不变，而且更严了**：
+
+    - 允许且**仅**允许 ``emotion-cpt``（自家判据内核 —— 原先就是仓内的 ``cpt/domain``，
+      2026-10-23 才搬到独立仓）；
+    - **不得**出现任何第三方库；
+    - ``emotion-cpt`` 必须钉到 **tag**（``@vX.Y.Z``）——
+      ``main`` 是移动目标，重建环境会拿到不确定的判据版本。
+    """
     pyproject = Path(__file__).parent.parent / "pyproject.toml"
     with pyproject.open("rb") as handle:
         data = tomllib.load(handle)
-    assert data["project"]["dependencies"] == []
+    deps = data["project"]["dependencies"]
+    assert len(deps) == 1, f"核心依赖只允许 emotion-cpt 一项，实际：{deps}"
+    (dep,) = deps
+    assert dep.startswith(
+        "emotion-cpt @ git+https://github.com/nxz1026/Emotion-CPT.git@"
+    ), dep
+    # 必须钉到 tag：不能是 main / 任意分支 / 裸 commit
+    ref = dep.rsplit("@", 1)[-1]
+    assert ref.startswith("v") and ref[1:2].isdigit(), f"emotion-cpt 必须钉到 tag（当前 {dep}）"
 
 
 def test_rules_config_min_bi_len_matches_adapter_default() -> None:
