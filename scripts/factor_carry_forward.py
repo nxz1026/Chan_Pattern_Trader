@@ -121,11 +121,30 @@ def carry_forward(conn: Any, *, dry_run: bool = False) -> tuple[int, int, int]:
                 VALUES (%s, %s, %s, %s, %s, now())
                 ON CONFLICT (code, trade_date) DO NOTHING
                 """,
-                (code, target, factor, basis, f"{CARRY_SOURCE}:{source}"),
+                (
+                    code,
+                    target,
+                    factor,
+                    basis,
+                    # ⚠️ 先剥掉已有的 carry_forward: 前缀再写 ——
+                    # 否则「重算失败的那天」会让前缀逐日叠加
+                    # （carry_forward:carry_forward:...），标签会烂掉。
+                    # 正常情况重算每天都会把暂存表的 source 改回 eastmoney:，
+                    # 所以最多只叠一层；但那恰恰是重算失败的时候，不能指望它。
+                    f"{CARRY_SOURCE}:{_strip_carry(source)}",
+                ),
             )
         conn.commit()
     _LOG.info("已沿用 %d 只到 %s（跳过 %d 只）", len(todo), target, skipped)
     return len(candidates), len(todo), skipped
+
+
+def _strip_carry(source: str) -> str:
+    """剥掉已有的 ``carry_forward:`` 前缀（最多剥到只剩原来源）。"""
+    prefix = CARRY_SOURCE + ":"
+    while source.startswith(prefix):
+        source = source[len(prefix) :]
+    return source
 
 
 def _fresh_conn(client: Any) -> Any:
