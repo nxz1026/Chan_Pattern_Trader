@@ -36,7 +36,8 @@
 #
 # | 时刻(UTC) | 脚本 | 干什么 |
 # |---|---|---|
-# | 02:20 | `factor-recompute-daily.sh` | 按公司行动重算复权因子（**只写暂存表**） |
+# | 09:50 | `factor-recompute-daily.sh` | 按公司行动重算复权因子（**只写暂存表**） |
+# | 09:45 / 11:30 | `factor-carry-forward.sh` | 把前一日因子沿用到当天（秒级），补全市场当天档 |
 # | 03:40 | `run-inspection-daily.sh` | 读 `cpt_run_metric` + 源状态 → 状态变化/failing 时发飞书 |
 # | 04:10 | `run-metric-prune-daily.sh` | 清 `cpt_run_metric` 过期行（run 90 天 / inspection 30 天） |
 # | 04:30 | `dashboard-run-prune-daily.sh` | 清 `cpt_dashboard_run` 过期行（默认 7 天） |
@@ -46,7 +47,7 @@
 # | **每 15 分钟** | `watchlist-snapshot.sh` | R80：只跑关注列表的快照批次，新关注的票 15 分钟内进全景 |
 # | **每 2 分（盘中）** | `cpt-intraday-collect.timer`（systemd，非本文件） | R89：盘中采集守护，只采集不判定；是 ADR 0003 §D10 观察期条件②的观测对象 |
 #
-# 六个时间**刻意错开**：巡检 03:40 跑在因子重算 02:20 之后、两条清理 04:10/04:30 之前 ——
+# 六个时间**刻意错开**：巡检 03:40 跑在因子重算之后、两条清理 04:10/04:30 之前 ——
 # 这样巡检读到的是「刚重算完」的因子状态，而清理不会与它抢同一批行；
 # 追踪维护 07:30 放在 A 股 15:00（北京）收盘之后，避开盘中写入；
 # 日报 11:00 排在全部作业跑完之后（见其下方「被上游决定」说明）。
@@ -74,11 +75,12 @@ SHELL=/bin/bash
 PATH=/usr/local/bin:/usr/bin:/bin
 
 # ⚠️⚠️ **下面的时刻是「服务器本地时区」，当前这台机器是 `Etc/UTC`** ——
-# 照抄「02:20」去做运维判断会算错 8 小时。对照：
+# ⚠️ 照抄时刻去做运维判断会算错 8 小时（机器时区是 Etc/UTC）。对照：
 #
 #   本文件时刻(UTC)   北京时间
 #   ──────────────   ──────────────
-#      02:20             10:20
+#      09:50             17:50        （因子重算；原为 02:20→10:20，已挪）
+#      09:45/11:30       17:45/19:30  （因子沿用）
 #      03:40             11:40
 #      04:10             12:10
 #      04:30             12:30
@@ -104,8 +106,18 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # 换机器时取消注释并改成实际路径（两个都要改，别只改一处）：
 # CPT_REPO=/home/ubuntu/DSH/Chan_Pattern_Trader
 
-# ── 每日 02:20 复权因子重算（只写暂存表 asel.ref_adjust_factor_v2）──────────
-20 2 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/factor-recompute-daily.sh >> /home/ubuntu/logs/factor-recompute.log 2>&1
+# ── 每日 09:50 复权因子重算（只写暂存表 asel.ref_adjust_factor_v2）──────────
+# ⚠️ 2026-10-23：原为 02:20（北京 10:20）—— 那时当天 K 线还没入库
+# （emotion-core-daily 在北京 17:20 = 09:20 UTC 才落，跑约 11.5 分钟）
+# ⇒ 重算的 target 永远停在前一天 ⇒ 当天因子全市场缺失 ⇒ 结构位退化为不复权。
+# 现挪到 09:50 UTC（北京 17:50），在 daily 之后 ⇒ target 能追上当天。
+50 9 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/factor-recompute-daily.sh
+
+# 因子沿用（把前一日因子沿用到当天，秒级）—— 排在 daily 之后、
+# 全市场重算之前 ⇒ 当天因子立刻可用，全量重算在当晚再纠正事件票。
+# 第二条（11:30 UTC）兜底：daily 偶尔跑得晚时补一轮。
+45 9 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/factor-carry-forward.sh
+30 11 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/factor-carry-forward.sh
 
 # ── 每日 03:40 巡检（状态变化 / failing → 飞书告警）──────────────────────────
 # ⚠️ 缺 CPT_FEISHU_WEBHOOK 时脚本**非零退出**（R56 修复）：告警通道自己坏了
@@ -187,7 +199,7 @@ PATH=/usr/local/bin:/usr/bin:/bin
 # 字段会显示「没跑过 / 数据旧」的票（见 `cpt/application/signal_overview.py`）。
 # 日志在 `/home/ubuntu/logs/watchlist-snapshot.log`，排障时直接看。
 #
-# 时刻不做整点对齐：`*/15` 落在 :00/:15/:30/:45，与其它作业（02:20 等）都错开。
+# 时刻不做整点对齐：`*/15` 落在 :00/:15/:30/:45，与其它作业（09:45/09:50 等）都错开。
 */15 * * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/watchlist-snapshot.sh
 
 ## 九、观察期巡检（R83）—— 每 2 小时

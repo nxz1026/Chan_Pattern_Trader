@@ -278,6 +278,73 @@ def coverage_of(state: dict[str, Any]) -> dict[str, str]:
     return {str(k): str(v) for k, v in covered.items() if k and v}
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 2026-10-23：连接层面的错误处理（此前完全没有）
+#
+# 实测：RDS 把连接掐断（AdminShutdown）后，脚本握着的**同一条**连接
+# 10,438 次调用里废了 5,227 只，而退出码仍是 0。
+# 根因：``AShareLocalClient._conn`` 是**缓存**的，全程一条连接；
+# 而「连接被掐断」不属于 ``source.fatal_errors``（那是额度/通道类），
+# 于是它掉进 ``except Exception`` 被当成单票失败吞掉 —— 每只票都失败，
+# 循环照跑，**最后还报成功**。
+# ─────────────────────────────────────────────────────────────────────────────
+
+#: 连接层错误的类名（psycopg 的 OperationalError 覆盖 AdminShutdown 等）
+_CONN_ERROR_NAMES = frozenset(
+    {
+        "OperationalError",
+        "InterfaceError",
+        "AdminShutdown",
+        "ConnectionException",
+        "ConnectionDoesNotExist",
+        "ConnectionFailure",
+        "CrashShutdown",
+    }
+)
+
+#: 连接层错误的特征串（类名对不上时的兜底）
+_CONN_ERROR_MARKERS = (
+    "the connection is closed",
+    "connection is closed",
+    "server closed the connection",
+    "terminating connection",
+    "connection not open",
+    "connection already closed",
+    "connection reset by peer",
+    "could not receive data from server",
+)
+
+
+def _is_conn_error(exc: BaseException) -> bool:
+    """这是不是一个**连接层**错误？
+
+    这类错误**重试同一只票没有意义** —— 连接本身已经废了，
+    必须换一条连接（见 :func:`_reset_conn`）。
+    """
+    if type(exc).__name__ in _CONN_ERROR_NAMES:
+        return True
+    msg = str(exc).lower()
+    return any(marker in msg for marker in _CONN_ERROR_MARKERS)
+
+
+def _reset_conn(client: Any) -> Any:
+    """丢掉并重建连接，返回新连接。
+
+    ``AShareLocalClient._conn`` 是缓存的 ⇒ 不显式清掉它，
+    下一次 ``_get_conn()`` 还会把那条死连接递回来。
+    """
+    old = getattr(client, "_conn", None)
+    try:
+        if old is not None:
+            old.close()
+    except Exception:  # noqa: BLE001 - 关不掉就关不掉，别在这里炸
+        pass
+    try:
+        client._conn = None
+    except Exception:  # noqa: BLE001
+        pass
+    return client._get_conn()  # noqa: SLF001
+
 def coverage_target(conn: Any) -> str | None:
     """本地 K 线的**最新交易日** —— 因子账本追赶的目标。
 
@@ -809,6 +876,9 @@ def main(argv: list[str] | None = None) -> int:
     # ⚠️ R44：``state["stopped"]`` 会**留在进度文件里跨轮次**，所以不能用它判断
     # 「本轮是否被打断」—— 必须用这个只在本轮存活的局部标志。
     stopped_reason: str | None = None
+    # 2026-10-23：连接层失败的次数。>0 ⇒ 本轮**没跑完** ⇒ 必须以非零码退出
+    # （此前一轮废掉 5,227 只却 rc=0，外部完全看不出来）。
+    conn_failures = 0
     for code in todo:
         if calls >= args.max_calls:
             _LOG.info("到达本轮上限 %d 次调用，就此打住（下次续跑即可）", args.max_calls)
@@ -824,12 +894,41 @@ def main(argv: list[str] | None = None) -> int:
             save_state(state)
             break
         except Exception as exc:  # noqa: BLE001
-            calls += 1
-            _LOG.warning("%s 失败：%s: %s", code, type(exc).__name__, str(exc)[:160])
-            state.setdefault("failed", {})[code] = f"{type(exc).__name__}: {str(exc)[:120]}"
-            state.setdefault("days", {})[today] = calls
-            save_state(state)
-            continue
+            if _is_conn_error(exc):
+                # 连接被服务端掐断（RDS 重启 / 故障转移）。
+                # ⚠️ 不换连接的话，后面每只票都会以同样方式失败
+                #    （实测一轮 10,438 次里废掉 5,227 只）。
+                conn_failures += 1
+                _LOG.warning(
+                    "%s 连接被断开（%s: %s）⇒ 换连接重试",
+                    code,
+                    type(exc).__name__,
+                    str(exc)[:120],
+                )
+                conn = _reset_conn(client)
+                try:
+                    result, used = process_code(
+                        client, source, code, write=not args.dry_run, retries=args.retries
+                    )
+                except Exception as exc2:  # noqa: BLE001
+                    calls += 1
+                    _LOG.warning(
+                        "%s 重连后仍失败：%s: %s", code, type(exc2).__name__, str(exc2)[:160]
+                    )
+                    state.setdefault("failed", {})[code] = (
+                        f"{type(exc2).__name__}: {str(exc2)[:120]}"
+                    )
+                    state.setdefault("days", {})[today] = calls
+                    save_state(state)
+                    continue
+                # 重连后成功 ⇒ 落回正常处理
+            else:
+                calls += 1
+                _LOG.warning("%s 失败：%s: %s", code, type(exc).__name__, str(exc)[:160])
+                state.setdefault("failed", {})[code] = f"{type(exc).__name__}: {str(exc)[:120]}"
+                state.setdefault("days", {})[today] = calls
+                save_state(state)
+                continue
         calls += used  # 含重试消耗的额度
         if result.ok:
             # R67：成功的含义是「这只票已按本地 K 线重算**到 target 这一天**」，
@@ -856,8 +955,17 @@ def main(argv: list[str] | None = None) -> int:
     # ⚠️ R64：promote 放在这里（而不是脚本外单跑一步）—— 取数与搬运必须成对，
     # 否则 cron 里漏了后半步就会「算得再多也不上线」。本轮被通道打断时**照样**
     # 搬已经算好的那部分（promote 不碰网络），但退出码仍按 3 报「未完成」。
+    promote_failed = False
     if args.promote:
-        _log_promote(*promote_recompute_factors(conn, dry_run=args.dry_run), dry_run=args.dry_run)
+        try:
+            _log_promote(
+                *promote_recompute_factors(conn, dry_run=args.dry_run), dry_run=args.dry_run
+            )
+        except Exception as exc:  # noqa: BLE001
+            # ⚠️ promote 用的是**同一条**连接 ⇒ 连接被掐断时它必然也失败
+            # ⇒ 暂存表算好的新数据永远搬不进生产表，且此前**不报错**。
+            promote_failed = True
+            _LOG.error("promote 失败：%s: %s", type(exc).__name__, exc)
 
     # ⚠️ R44：本轮**被打断**必须以非零码退出。
     #
@@ -868,6 +976,14 @@ def main(argv: list[str] | None = None) -> int:
     #
     # 用 3 而不是 1：1 常被脚本当成「一般错误」，3 明确表示
     # 「任务未完成，进度已存盘，可续跑」，与「跑完了」区分得开。
+    if conn_failures:
+        # 2026-10-23：连接层失败也算「未完成」。
+        # 此前这类失败被当单票失败吞掉 ⇒ 一轮废掉一半仍然 rc=0。
+        _LOG.warning("本轮有 %d 次连接层失败（已自动重连续跑）", conn_failures)
+        if not stopped_reason:
+            stopped_reason = "connection"
+    if promote_failed and not stopped_reason:
+        stopped_reason = "promote_failed"
     if stopped_reason:
         print(f"\n  ⚠️ 本轮因 {stopped_reason} 提前停止（退出码 3）—— 进度已存盘，下次可续跑。")
         return 3
