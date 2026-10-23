@@ -65,6 +65,7 @@ from zoneinfo import ZoneInfo
 
 from cpt.adapters.intraday_probe import IntradayCollector, IntradayError
 from cpt.application.intraday_analysis import board_health, seal_board
+from cpt.domain.intraday_rules import is_st_name
 from cpt.storage.intraday_seal_store import insert_seal_snapshot
 
 #: 市场时区。交易日与盘中时段一律按北京时间算，不按机器时区。
@@ -159,27 +160,45 @@ def _persist(record: dict[str, Any], snap: dict[str, Any]) -> None:
     if not DB_WRITE_ENABLED:
         record["db"] = "disabled"
         return
-    rows = [
-        {
-            "code": item["code"],
-            "sealed": True,
-            "bid1_lots": item["bid1_lots"],
-            "limit_price": item["limit_price"],
-        }
-        for item in snap.get("sealed", [])
-    ]
+    # 候选清单里有 name / last / prev_close，先按 code 索引 ——
+    # ``sealed`` 那条只带 code/name/distance_pct/bid1_lots/limit_price，
+    # 价格要回候选里取（R93）。
+    by_code = {str(c["code"]): c for c in snap.get("candidates", [])}
+    rows = []
+    for item in snap.get("sealed", []):
+        code = str(item["code"])
+        cand = by_code.get(code) or {}
+        rows.append(
+            {
+                "code": code,
+                "sealed": True,
+                "bid1_lots": item["bid1_lots"],
+                "limit_price": item["limit_price"],
+                "price": cand.get("last"),
+                "prev_close": cand.get("prev_close"),
+                "distance_pct": item.get("distance_pct"),
+                "is_st": is_st_name(item.get("name") or cand.get("name")),
+            }
+        )
     # 候选里没封板（或判不了）的也要落一行 sealed=False ——
     # 「这一轮看过了、没封」与「这一轮没这只票」是两件事。
     sealed_codes = {r["code"] for r in rows}
     for cand in snap.get("candidates", []):
-        if cand["code"] in sealed_codes:
+        code = str(cand["code"])
+        if code in sealed_codes:
             continue
         rows.append(
             {
-                "code": cand["code"],
+                "code": code,
                 "sealed": False,
                 "bid1_lots": None,
                 "limit_price": None,
+                # 没封板的票**也要**带价格四件套：emotion 判「封住之后掉出涨停」
+                # 要的是现价，不能只有封板那一轮才有。
+                "price": cand.get("last"),
+                "prev_close": cand.get("prev_close"),
+                "distance_pct": cand.get("distance_pct"),
+                "is_st": is_st_name(cand.get("name")),
             }
         )
     # import **也在 try 里**：库驱动装不上/环境缺包同样是「库这一侧坏了」，

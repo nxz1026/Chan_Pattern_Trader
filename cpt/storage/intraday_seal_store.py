@@ -37,9 +37,15 @@ PROBE_CODE_PREFIX: Final[str] = "\x01"
 #: 当成占位符报 ``only '%s', '%b', '%t' are allowed as placeholders, got '%'``。
 _REAL_ROWS: Final[str] = f"code NOT LIKE '{PROBE_CODE_PREFIX}%%'"
 
+#: 全部 9 列，读侧统一用这一份。
+_SELECT_COLS: Final[str] = (
+    "at, code, sealed, bid1_lots, limit_price, price, prev_close, distance_pct, is_st"
+)
+
 _INSERT_SQL: Final[str] = (
-    "INSERT INTO public.intraday_seal_snapshot (at, code, sealed, bid1_lots, limit_price) "
-    "VALUES (%s, %s, %s, %s, %s) "
+    "INSERT INTO public.intraday_seal_snapshot ("
+    "at, code, sealed, bid1_lots, limit_price, price, prev_close, distance_pct, is_st) "
+    "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s) "
     "ON CONFLICT (at, code) DO NOTHING"
 )
 
@@ -48,7 +54,13 @@ def insert_seal_snapshot(conn: Any, rows: Sequence[dict[str, Any]], *, at: Any) 
     """写一轮快照。返回真正插入的行数。
 
     ``rows`` 每项至少要有 ``code``；``sealed`` 缺省按 ``False``；
-    ``bid1_lots`` / ``limit_price`` 缺省为 ``None``（判不出来的情况）。
+    其余数值列（``bid1_lots`` / ``limit_price`` / ``price`` / ``prev_close`` /
+    ``distance_pct`` / ``is_st``）缺省为 ``None``（判不出来的情况，**不许填 0**）。
+
+    R93 起写 9 列：``at, code, sealed, bid1_lots, limit_price, price, prev_close,
+    distance_pct, is_st``。后 4 列是 emotion-core N5 要的，其中
+    ``distance_pct`` 和 ``is_st`` 是**判定结果**不是原始字段 ——
+    判据只许有一处（ADR 0003 §E2）。
 
     ``ON CONFLICT DO NOTHING``：同一时刻重复写（例如手动重跑同一轮）不报错也不重复。
     **不 commit** —— 事务边界归调用方。
@@ -62,6 +74,10 @@ def insert_seal_snapshot(conn: Any, rows: Sequence[dict[str, Any]], *, at: Any) 
             bool(row.get("sealed", False)),
             row.get("bid1_lots"),
             row.get("limit_price"),
+            row.get("price"),
+            row.get("prev_close"),
+            row.get("distance_pct"),
+            row.get("is_st"),
         )
         for row in rows
     ]
@@ -94,7 +110,7 @@ def load_latest_round(conn: Any) -> dict[str, Any]:
         if latest is None:
             return {"at": None, "rows": [], "counts": {"total": 0, "sealed": 0, "open_board": 0}}
         cur.execute(
-            f"SELECT at, code, sealed, bid1_lots, limit_price FROM {_SNAPSHOT_TABLE} "  # noqa: S608
+            f"SELECT {_SELECT_COLS} FROM {_SNAPSHOT_TABLE} "  # noqa: S608
             f"WHERE at = %s AND {where} "
             "ORDER BY sealed DESC, bid1_lots DESC NULLS LAST, code",
             (latest,),
@@ -124,7 +140,7 @@ def load_seal_track(conn: Any, code: str, *, since: Any, until: Any) -> list[dic
     """
     with conn.cursor() as cur:
         cur.execute(
-            f"SELECT at, sealed, bid1_lots, limit_price FROM {_SNAPSHOT_TABLE} "  # noqa: S608
+            f"SELECT {_SELECT_COLS} FROM {_SNAPSHOT_TABLE} "  # noqa: S608
             f"WHERE code = %s AND at >= %s AND at < %s AND {_REAL_ROWS} ORDER BY at",
             (code, since, until),
         )
@@ -155,7 +171,7 @@ def load_session_rows(conn: Any, *, start: Any, end: Any) -> list[dict[str, Any]
     """取 ``[start, end)`` 区间内的全部快照行（按时间升序），供当天回顾用。"""
     with conn.cursor() as cur:
         cur.execute(
-            f"SELECT at, code, sealed, bid1_lots, limit_price FROM {_SNAPSHOT_TABLE} "  # noqa: S608
+            f"SELECT {_SELECT_COLS} FROM {_SNAPSHOT_TABLE} "  # noqa: S608
             f"WHERE at >= %s AND at < %s AND {_REAL_ROWS} ORDER BY at, code",
             (start, end),
         )

@@ -90,7 +90,7 @@ def test_insert_writes_one_row_per_code_with_assumed_defaults() -> None:
     _, sql, params = conn.calls[0]
     assert "INSERT INTO public.intraday_seal_snapshot" in sql
     assert "ON CONFLICT (at, code) DO NOTHING" in sql
-    assert params[0] == (AT, "600293", True, 847522.54, 5.23)
+    assert params[0] == (AT, "600293", True, 847522.54, 5.23, None, None, None, None)
 
 
 def test_insert_omits_judgement_columns_when_unknown() -> None:
@@ -98,7 +98,18 @@ def test_insert_omits_judgement_columns_when_unknown() -> None:
     conn = _Conn()
     insert_seal_snapshot(conn, [{"code": "000001"}], at=AT)
     _, _, params = conn.calls[0]
-    assert params[0] == (AT, "000001", False, None, None)
+    # R93 起 9 列：判不出来的 7 个量一律 None，**不许用 0 冒充**。
+    assert params[0] == (
+        AT,
+        "000001",
+        False,
+        None,
+        None,
+        None,
+        None,
+        None,
+        None,
+    )
 
 
 def test_insert_of_nothing_does_not_touch_the_connection() -> None:

@@ -151,3 +151,31 @@ def test_real_rows_survive_the_filter(live_conn: Any) -> None:
     assert all(not str(r["code"]).startswith(PROBE_CODE_PREFIX) for r in real["rows"])
     six_digit = [r for r in real["rows"] if len(str(r["code"])) == 6 and str(r["code"]).isdigit()]
     assert six_digit, f"真实行里没有一只是 6 位代码：{[r['code'] for r in real['rows']][:5]}"
+
+
+def test_r93_price_columns_round_trip(live_conn: Any) -> None:
+    """R93 补的 4 列必须能真写进去、真读出来（类型对得上、NULL 不被换成 0）。"""
+    code = _probe_code("r93")
+    at = dt.datetime(2026, 10, 22, 2, 5, tzinfo=dt.UTC)
+    with live_conn.cursor() as cur:
+        cur.execute(
+            "INSERT INTO public.intraday_seal_snapshot "
+            "(at, code, sealed, bid1_lots, limit_price, price, prev_close, distance_pct, is_st) "
+            "VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (at, code, True, 12345.0, 9.49, 9.49, 8.63, 0.0, False),
+        )
+    # 直接查，**不走 load_***：那三个函数都带 _REAL_ROWS 过滤，哨兵行会被自己滤掉。
+    # 这里验的是「列能不能写进去」而不是「过滤器生不生效」。
+    with live_conn.cursor() as cur:
+        cur.execute(
+            "SELECT price, prev_close, distance_pct, is_st "
+            "FROM public.intraday_seal_snapshot WHERE at = %s AND code = %s",
+            (at, code),
+        )
+        row = cur.fetchone()
+    assert row is not None, "探针行没写进去"
+    price, prev_close, distance_pct, is_st = row
+    assert price == 9.49
+    assert prev_close == 8.63
+    assert distance_pct == 0.0
+    assert is_st is False

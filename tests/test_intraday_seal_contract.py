@@ -31,9 +31,20 @@ ROOT = pathlib.Path(__file__).resolve().parents[1]
 
 CONTRACT = ROOT / "docs" / "intraday-seal-contract.md"
 MIGRATION = ROOT / "scripts" / "migrations" / "2026-10-22_r90_intraday_seal_snapshot.sql"
+MIGRATION_R93 = ROOT / "scripts" / "migrations" / "2026-10-23_r93_seal_snapshot_extra_columns.sql"
 
-#: 契约规定的列（顺序即 INSERT 顺序）。
-EXPECTED_COLUMNS: tuple[str, ...] = ("at", "code", "sealed", "bid1_lots", "limit_price")
+#: 契约规定的列（顺序即 INSERT 顺序）。R90 建表 5 列，R93 补 4 列。
+EXPECTED_COLUMNS: tuple[str, ...] = (
+    "at",
+    "code",
+    "sealed",
+    "bid1_lots",
+    "limit_price",
+    "price",
+    "prev_close",
+    "distance_pct",
+    "is_st",
+)
 
 
 def _contract_text() -> str:
@@ -46,8 +57,8 @@ def test_contract_document_exists_and_names_the_table() -> None:
     assert "PRIMARY KEY (at, code)" in text
 
 
-def test_contract_lists_exactly_the_five_columns() -> None:
-    """契约文档的行数少写一列、多写一列都要红。"""
+def test_contract_lists_exactly_the_expected_columns() -> None:
+    """契约文档少写一列、多写一列都要红（R93：5 列 → 9 列）。"""
     text = _contract_text()
     block = re.search(r"public\.intraday_seal_snapshot \((.*?)\);", text, re.S)
     assert block is not None, "契约里没找到建表块"
@@ -73,14 +84,24 @@ def test_insert_sql_writes_exactly_the_contract_columns() -> None:
     assert "ON CONFLICT (at, code) DO NOTHING" in _INSERT_SQL
 
 
-def test_migration_creates_the_same_columns() -> None:
+def test_migration_creates_the_five_base_columns() -> None:
+    """R90 建表脚本负责前 5 列，R93 那份 ALTER 负责后 4 列。
+
+    分两次迁移是历史事实（R90 建表，R93 补列），所以这里只钉前 5 列，
+    后 4 列由 ``test_r93_migration_adds_exactly_the_four_new_columns`` 钉。
+    两条加起来必须等于 ``EXPECTED_COLUMNS``。
+    """
     sql = MIGRATION.read_text(encoding="utf-8")
     body = re.search(r"CREATE TABLE[^(]*\((.*?)\n\);", sql, re.S)
     assert body is not None, "迁移脚本里没找到 CREATE TABLE"
-    found = re.findall(
-        r"^\s+(\w+)\s+(?:timestamptz|text|boolean|double precision)\b", body.group(1), re.M
+    found = tuple(
+        re.findall(
+            r"^\s+(\w+)\s+(?:timestamptz|text|boolean|double precision)\b",
+            body.group(1),
+            re.M,
+        )
     )
-    assert tuple(found) == EXPECTED_COLUMNS
+    assert found == EXPECTED_COLUMNS[:5]
     assert "PRIMARY KEY (at, code)" in sql
 
 
@@ -159,3 +180,37 @@ def test_contract_file_is_not_orphaned() -> None:
         except (OSError, UnicodeDecodeError):
             continue
     assert referrers, "没有文件指向 docs/intraday-seal-contract.md"
+
+
+def test_r93_migration_adds_exactly_the_four_new_columns() -> None:
+    """R93 补的 4 列必须与契约对齐，且都是可空 —— 判不了就是 NULL，不许用 0 冒充。"""
+    text = MIGRATION_R93.read_text(encoding="utf-8")
+    added = re.findall(r"ADD COLUMN IF NOT EXISTS (\w+)", text)
+    assert tuple(added) == ("price", "prev_close", "distance_pct", "is_st")
+
+
+def test_contract_says_lots_are_lots_not_shares() -> None:
+    """emotion 侧阈值是股、这里是手 —— 契约必须写明 ×100，否则静默差 100 倍。"""
+    text = _contract_text()
+    assert "手" in text
+    assert "× 100" in text or "x 100" in text, "契约没提醒读方单位是手"
+
+
+def test_contract_explains_the_two_swapped_columns() -> None:
+    """chg_pct→distance_pct、name→is_st 两处换法必须写进契约，否则读方会去找不存在的列。"""
+    text = _contract_text()
+    assert "distance_pct" in text
+    assert "is_st" in text
+    assert "chg_pct" in text, "契约没解释为什么不要 chg_pct"
+    assert "name" in text, "契约没解释为什么不要 name"
+
+
+def test_two_migrations_together_cover_every_expected_column() -> None:
+    """R90 的 5 列 + R93 的 4 列必须恰好等于契约的 9 列，不能漏也不能重复。"""
+    r90 = re.search(r"CREATE TABLE[^(]*\((.*?)\n\);", MIGRATION.read_text(encoding="utf-8"), re.S)
+    assert r90 is not None
+    base = re.findall(
+        r"^\s+(\w+)\s+(?:timestamptz|text|boolean|double precision)\b", r90.group(1), re.M
+    )
+    added = re.findall(r"ADD COLUMN IF NOT EXISTS (\w+)", MIGRATION_R93.read_text(encoding="utf-8"))
+    assert tuple(base) + tuple(added) == EXPECTED_COLUMNS

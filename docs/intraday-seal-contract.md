@@ -29,23 +29,50 @@ CPT (scripts/intraday_collectd.py)  ──写──▶  public.intraday_seal_sna
 
 ```sql
 public.intraday_seal_snapshot (
-    at          timestamptz      NOT NULL,  -- 这一轮采集时刻（UTC 存储、UTC 输出）
-    code        text             NOT NULL,  -- 6 位纯代码，如 '600293'
-    sealed      boolean          NOT NULL,  -- 这一轮是否封在板上
-    bid1_lots   double precision,           -- 封单量（单位：手，1 手 = 100 股）；判不了为 NULL
-    limit_price double precision,           -- 本轮用的涨停价（存下来自证口径）
+    at           timestamptz      NOT NULL,  -- 这一轮采集时刻（UTC 存储、UTC 输出）
+    code         text             NOT NULL,  -- 6 位纯代码，如 '600293'
+    sealed       boolean          NOT NULL,  -- 这一轮是否封在板上
+    bid1_lots    double precision,           -- 买一挂单量（单位：手，1 手 = 100 股）；判不了为 NULL
+    limit_price  double precision,           -- 本轮用的涨停价（存下来自证口径）
+    price        double precision,           -- 这一轮现价；判不了为 NULL        ┐
+    prev_close   double precision,           -- 昨收；判不了为 NULL              │ R93
+    distance_pct double precision,           -- (limit-price)/limit*100；负数=已在板上 │ 新增
+    is_st        boolean,                    -- ST 判定结果；NULL=没判             ┘
     PRIMARY KEY (at, code)
+);
 
 CREATE INDEX idx_intraday_seal_snapshot_code_at ON public.intraday_seal_snapshot (code, at);
 CREATE INDEX idx_intraday_seal_snapshot_at ON public.intraday_seal_snapshot (at DESC);
 ```
 
-迁移脚本：`scripts/migrations/2026-10-22_r90_intraday_seal_snapshot.sql`。
+迁移脚本：`scripts/migrations/2026-10-22_r90_intraday_seal_snapshot.sql`（建表 5 列）、
+`scripts/migrations/2026-10-23_r93_seal_snapshot_extra_columns.sql`（R93 补 4 列）。
 
-**为什么只有 5 列**：每一列都是采集端已经算出来、读方拿不走也推不出来的量。
-`sealed` 推不出来（要涨停价 + 板块规则）；`limit_price` 推不出来（要昨收 + 板块阈值，
-且它是"当时用的是哪个阈值"的自证）；`bid1_lots` 是十档原始数据。OHLC / 涨跌幅 / 名称
-**不存** —— 那是 `daily_bar` 的职责，重复存会造出第二套口径。
+### 2.1 为什么是这 9 列（R93：从 5 列扩到 9 列）
+
+emotion-core 建常驻采集器要 4 列，要了 `price / prev_close / chg_pct / name`。
+CPT 只接受 3 列 + 1 个布尔，两处换掉了：
+
+| 要的 | 给的 | 为什么换 |
+|---|---|---|
+| `price` | `price` | 要。判「封住之后有没有松」必需，`sealed` 只是个布尔，判不出程度 |
+| `prev_close` | `prev_close` | 要。算涨停价基准 + 交叉校验 CPT 的 `limit_price` |
+| `chg_pct` | **`distance_pct`** | 换。`chg_pct=(price-prev_close)/prev_close` 三个成分都在，读方自己除；存成列是同一事实的第二份拷贝，两份迟早不一致（R76 踩过：`median` 算两遍导致口径打架）。而 `distance_pct=(limit_price-price)/limit_price*100` **推不出来** —— 它用的是 CPT 的 Decimal 取整口径，读方自己算会差一分钱 |
+| `name` | **`is_st`** | 换。`name` 会变（`600xxx` 改名成 `ST某某`），**同一条 `at` 上的历史行会自相矛盾**。读方要 `name` 只有一个目的：判 ST。那就只存判定结果，判据留在 CPT（ADR 0003 §E2 只许一处） |
+
+**为什么原来那 5 列不存 OHLC / 涨跌幅**：那些是 `daily_bar` 的职责。而上面新增的
+`price / prev_close` 不重复 —— `daily_bar` 是**收盘后**才落的，盘中它没有今天的数据。
+这两个是**盘中快照**，不是日线的拷贝。
+
+**存量 99 行这 4 列全部 NULL，不回填** —— 它们当时确实没采，补出来的是推算值不是采集值。
+
+**列名对照（emotion 侧读的时候注意）**：
+
+| 你可能以为的列名 | 实际列名 | 单位/含义 |
+|---|---|---|
+| `chg_pct` | `distance_pct` | **百分数**（`0.0` = 封在板上，`-1.23` = 已涨超涨停价）。不是小数 |
+| `name` | `is_st` | 布尔。判 ST 用，判据在 CPT |
+| `bid1_lots` | `bid1_lots` | **手**。emotion 侧阈值是**股**，读时必须 `× 100` |
 
 ## 3. 三条读表口径（错了会造出并不存在的状态）
 
@@ -60,7 +87,7 @@ CREATE INDEX idx_intraday_seal_snapshot_at ON public.intraday_seal_snapshot (at 
 取某一天的全部行，在内存里按 code 分组：
 
 ```sql
-SELECT at, code, sealed, bid1_lots, limit_price
+SELECT at, code, sealed, bid1_lots, limit_price, price, prev_close, distance_pct, is_st
   FROM public.intraday_seal_snapshot
  WHERE at >= %s AND at < %s      -- 半开区间；注意换成北京日期边界
  ORDER BY at, code

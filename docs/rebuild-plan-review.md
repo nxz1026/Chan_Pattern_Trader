@@ -1656,3 +1656,71 @@ TypeError: 'NoneType' object is not subscriptable
 - 两处反向注入全中：去掉「当天不算干净日」→ 1 failed；去掉 None 守卫 → 1 failed
 - 实跑 `scripts/watch_period_check.py --skip-network --print`：**六项全绿**
   `✅ 服务 / ✅ 序列（911228/911214，985/958）/ ✅ 批次（7.5h 前，阈值 30h）/ ✅ 盘中采集 / ✅ 封板观察期（还没有完整落库的一天）`
+
+## §14 R93（2026-10-23 盘前）：封板快照从 5 列扩到 9 列
+
+### 14.1 起因：emotion-core 的 N5 清单
+
+它要建常驻采集器（`emotion-intraday.service`，现在是「装了不 enable」），说现有 5 列不够，
+要 4 列：`price / prev_close / chg_pct / name`。
+
+**这四列的原料 CPT 一直在采，只是没存。** 实跑一轮就能看到采集记录里全都有：
+
+```json
+{"code":"000530","name":"冰山冷热","prev_close":8.63,"last":9.49,"high":9.49,...}
+```
+
+所以这不是新增采集能力，是**把已经在手里的东西存下来**。
+
+### 14.2 两处换法（不给原始 4 列）
+
+| 要的 | 给的 | 为什么 |
+|---|---|---|
+| `price` | `price` | 要。`sealed` 是个布尔，判不出「封住之后松没松」的**程度** |
+| `prev_close` | `prev_close` | 要。算涨停价基准 + 交叉校验 CPT 的 `limit_price` |
+| `chg_pct` | **`distance_pct`** | `chg_pct=(price-prev_close)/prev_close`，三个成分都在，读方自己除。存成列是同一事实的第二份拷贝（R76 踩过：`median` 算两遍导致口径打架）。而 `distance_pct=(limit_price-price)/limit_price*100` **推不出来** —— 用的是 CPT 的 Decimal 取整口径，读方自己算差一分钱 |
+| `name` | **`is_st`** | `name` **会变**（`600xxx` 改名成 `ST某某`），同一条 `at` 上的历史行会自相矛盾。读方要 `name` 只为一个目的：判 ST。那就只存判定结果，判据留在 CPT（ADR 0003 §E2 只许一处） |
+
+净结果：**5 + 4 = 9 列**，其中 `distance_pct` 和 `is_st` 是**判定结果**不是原始字段。
+
+### 14.3 两件它另外问的事
+
+1. **`bid1_lots` 单位是手** —— 确认。契约 §2 已写，R93 又在列名对照表里加了
+   「emotion 侧阈值是股，读时必须 × 100」。
+2. **「保证哨兵行永远不进生产表」** —— **做不到，也没这么说**。现在有三层：
+   夹具关写 + 读取端 `_REAL_ROWS` 过滤 + 真库回滚测试。
+   保证的是「**写进去了也读不到**」，不是「永远写不进去」。R91 那次是三层都没建的时候。
+
+### 14.4 实施（盘前 40 分钟）
+
+| 步骤 | 内容 |
+|---|---|
+| 1 | `scripts/migrations/2026-10-23_r93_seal_snapshot_extra_columns.sql`：`ADD COLUMN IF NOT EXISTS` 4 列，全可空，带 `COMMENT ON COLUMN`。已在生产执行 |
+| 2 | `cpt/storage/intraday_seal_store.py`：抽出 `_SELECT_COLS` 常量（9 列一处定义），`_INSERT_SQL` 扩到 9 列，参数顺序同步 |
+| 3 | `scripts/intraday_collectd.py::_persist()`：先从 `candidates` 建 `by_code` 索引（`sealed` 那条只带 code/name/distance_pct，**价格要回候选里取**）；封板与未封板两类行**都**填价格四件套 —— emotion 判「封住之后掉出涨停」要现价，不能只有封板那一轮才有 |
+| 4 | 契约 §2 建表块改成 9 列 + 新增 §2.1「为什么是这 9 列」+ 列名对照表 |
+| 5 | 守卫测试：`EXPECTED_COLUMNS` 5→9；`test_migration_creates_the_same_columns` 拆成「R90 建 5 列」+「R93 加 4 列」+「两份合起来恰好等于 9 列」；新增「契约必须写明单位是手」「契约必须解释两处换法」 |
+| 6 | 真库测试 `test_r93_price_columns_round_trip` |
+
+### 14.5 存量 99 行不回填
+
+这 4 列对老行全是 NULL。**不回填** —— 它们当时确实没采，补出来的是推算值不是采集值。
+这个决定写进了迁移脚本注释和契约 §2.1。
+
+### 14.6 验收
+
+- 生产 DDL 已执行，`information_schema` 核对 9 列顺序与类型全对
+- 实跑一轮 `--once --ignore-session`，落库样本：
+  `002249 sealed=True bid1=293674.49 limit=7.06 price=7.06 prev=6.42 dist=0.0 is_st=False`
+- 全量 pytest **2378 passed / 5 skipped / 0 failed**
+- 门禁全绿；ruff / mypy 通过
+- 守卫测试先红后绿：扩列时 `test_contract_lists_exactly_the_five_columns` 与
+  `test_insert_sql_writes_exactly_the_contract_columns` 立刻报
+  `Left contains 4 more items, first extra item: 'price'` —— **守卫在工作**
+
+### 14.7 一个踩到的坑
+
+`test_r93_price_columns_round_trip` 第一版用 `load_session_rows()` 读回来验，
+读到 0 行。原因：那个函数带 `_REAL_ROWS` 过滤，而测试用的正是 `\x01` 哨兵代码 ——
+**过滤器把测试自己的行滤掉了**。改成直接 `SELECT` 绕开过滤器：
+这条测试验的是「列能不能写进去」，不是「过滤器生不生效」。
