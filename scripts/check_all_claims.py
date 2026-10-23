@@ -248,6 +248,9 @@ _ALLOW: dict[str, str] = {
     # R51 的**代码**同样被删了。progress-log R51 段讲的是「删掉它根除了 CI 五连红」，
     # 那句话要成立就得提到这个文件名 —— 它是**因果链的一环**，改掉它等于抹掉根因。
     "cpt/application/canvas_wbt.py": "R51 随画布 D 下线删除；progress-log R51 段记的是删除动作本身",
+    # R93：「cpt_」前缀让 TABLES 正则把它当本仓表名，但它其实是**隔壁仓**的 provider 模块。
+    # 跨仓契约回复里必须写这个路径（emotion-core 要照它改代码），不能为了过门禁改文档。
+    "cpt_intraday": "emotion-core 仓的 intraday provider 模块名，不是本仓的表",
 }
 
 
