@@ -574,7 +574,13 @@ def save_recompute_factors(conn: Any, rows: Sequence[tuple[str, str, float, str,
                  VALUES (%s,%s,%s,%s,%s)
                  ON CONFLICT (code, trade_date) DO UPDATE
                  SET hfq_factor=EXCLUDED.hfq_factor,
-                     basis=EXCLUDED.basis, computed_at=now()""",
+                     basis=EXCLUDED.basis,
+                     -- ⚠️ 2026-10-23：必须一起更新 source。
+                     -- 「因子沿用」写进去的行 source=carry_forward:xxx；
+                     -- 若重算纠正了值却不改 source，这一格会一直挂着
+                     -- 「沿用来的」标记，**事后查不出它到底准不准**。
+                     source=EXCLUDED.source,
+                     computed_at=now()""",
             rows,
         )
     conn.commit()
