@@ -315,6 +315,46 @@ def test_every_repo_cron_job_writes_a_log() -> None:
     )
 
 
+def test_skip_exempt_jobs_do_not_count_as_failures(tmp_path: pathlib.Path) -> None:
+    """★ Q6=A（owner 裁决）：日报**按作业跳过 skip 检测**。
+
+    豁免作业的「还在跑,跳过」**不算故障**（不进 problems），
+    但**要留痕**（日报里照常写一行）—— **不静默**。
+
+    为什么需要：有些作业跑得比调度还密，「上一轮还在跑」是**正常**的；
+    把它当「未执行 ⇒ 故障」会天天误报 ⇒ **狼来了** ⇒ 真问题被埋掉。
+    """
+    _seed_all_logs(tmp_path)
+    exempt = sorted(cdr.SKIP_EXEMPT_JOBS)
+    assert exempt, "豁免清单不能为空（否则这条机制没被用上，等于没做）"
+    name = exempt[0]
+    path = next(p for n, p in cdr.JOBS if n == name)
+    _write(tmp_path, pathlib.Path(path).name, f"[{_ts(1)}] {cdr.SKIP_MARKER}\n")
+
+    report = cdr.build_report(24, str(tmp_path), check_shared=False)
+    assert not report["problems"], report["problems"]
+    body = "\n".join(report["lines"])
+    assert name in body, body
+    assert "已知可忽略" in body, body
+
+
+def test_non_exempt_job_skip_still_counts_as_problem(tmp_path: pathlib.Path) -> None:
+    """反向：没被豁免的作业，skip **仍然**算问题。
+
+    ⚠️ 这条是防止「豁免机制被用滥」——
+    加一个作业进豁免清单是**容易**的，加错了就少了一个真问题的出口。
+    """
+    _seed_all_logs(tmp_path)
+    non_exempt = [n for n, _ in cdr.JOBS if n not in cdr.SKIP_EXEMPT_JOBS]
+    assert non_exempt, "不该所有作业都被豁免"
+    name = non_exempt[0]
+    path = next(p for n, p in cdr.JOBS if n == name)
+    _write(tmp_path, pathlib.Path(path).name, f"[{_ts(1)}] {cdr.SKIP_MARKER}\n")
+
+    report = cdr.build_report(24, str(tmp_path), check_shared=False)
+    assert report["problems"], "非豁免作业的 skip 必须仍然算问题"
+
+
 def test_report_scans_its_own_log() -> None:
     """日报必须扫**自己的**日志。
 

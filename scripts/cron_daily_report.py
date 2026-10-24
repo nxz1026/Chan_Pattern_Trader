@@ -92,6 +92,24 @@ FAIL_MARKER: Final[str] = "!!!!!"
 #: 「上一轮还在跑，跳过」—— exit 0，所以 FAIL_MARKER 扫不到，得单独认。
 SKIP_MARKER: Final[str] = "还在跑，跳过"
 
+#: ★ 2026-10-24 owner 裁决 Q6=A：**按作业跳过 skip 检测**。
+#:
+#: 有些作业「上一轮还在跑，跳过」是**正常**的（它自己管日志、跑得比调度还密），
+#: 把它当「未执行 ⇒ 故障」会天天误报 ⇒ **狼来了** ⇒ 真问题被埋掉。
+#:
+#: ⇒ 这些作业的 skip **不算问题**，但**照常留一行在日报里**（不静默）。
+#:
+#: ⚠️ 实测：这两个日志里「还在跑,跳过」出现 **0 次**
+#: ⇒ 豁免是**安全阀**，不是必需；但机制本身要有（下一个高频作业就会用到）。
+SKIP_EXEMPT_JOBS: Final[frozenset[str]] = frozenset(
+    {
+        # 15 分钟一次、脚本自管日志（watchlist-snapshot.log）
+        "watchlist-snapshot",
+        # 2 小时一次、脚本自管日志（watch-period-check.log）
+        "watch-period-check",
+    }
+)
+
 #: 日报**自己**打印失败行时用的引用前缀（``  · {失败行}``）。
 #: ⚠️ 日报扫的日志里**包含它自己**（见 JOBS），而它会把别的作业的失败行原样抄进
 #: 自己的日志 ⇒ 不把这些引用行排掉，抄来的标记会被当成日报自己的失败，一路滚雪球：
@@ -249,6 +267,12 @@ def build_report(
             problems.append(f"{name}: {len(failures)} 条失败标记")
             lines.append(f"**{name}** 失败 {len(failures)} 条：")
             lines += [f"  · {f}" for f in failures[-5:]]
+        elif skips and name in SKIP_EXEMPT_JOBS:
+            # 已知豁免作业：skip **不算故障**，但**留痕**（不静默）
+            lines.append(
+                f"{name}：{len(skips)} 次未执行（上一轮还在跑）"
+                f"—— **已知可忽略**（该作业的 skip 不计故障）"
+            )
         elif skips:
             problems.append(f"{name}: {len(skips)} 次未执行（上一轮还在跑）")
             lines.append(f"**{name}** 未执行 {len(skips)} 次：")
