@@ -642,6 +642,40 @@ class AShareLocalClient:
                 self._conn = self._conn_factory()
         return self._conn
 
+    def close(self) -> None:
+        """关掉持有的连接（**幂等**）。
+
+        ⚠️ 2026-10-24 修**平台级故障**：本 client 懒连接后**从不关闭**，
+        而调用方（``a_share_snapshot.py`` / ``llm_cases.py`` /
+        ``source_registry.py`` …）**每次都 new 一个** ⇒ **每个请求泄漏一条连接**
+        ⇒ 实测 ``cpt-dashboard`` 进程持 103 个 socket，而 ``max_connections=100``
+        ⇒ 跑久了必然打满 ⇒ **同机所有依赖 DB 的服务一起挂**
+        （线上实测：``FATAL: sorry, too many clients already``，
+        连 psql 的 superuser 保留连接都进不去）。
+
+        ⇒ 这里补上关闭能力；``__del__`` 兜底 ⇒ **不用改任何调用点**。
+        """
+        conn, self._conn = getattr(self, "_conn", None), None
+        if conn is None:
+            return
+        try:
+            conn.close()
+        except Exception:  # noqa: BLE001 - 关闭失败不该影响调用方
+            pass
+
+    def __enter__(self) -> "AShareLocalClient":
+        return self
+
+    def __exit__(self, *exc_info: object) -> None:
+        self.close()
+
+    def __del__(self) -> None:  # noqa: D105
+        # 兜底：对象被回收时释放连接（CPython 引用计数回收 ⇒ 出作用域即释放）
+        try:
+            self.close()
+        except Exception:  # noqa: BLE001
+            pass
+
     def fetch_security_name(self, code: str) -> SecurityName | None:
         """查单只证券名称（查不到返回 ``None``）。
 
