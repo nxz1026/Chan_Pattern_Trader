@@ -60,25 +60,30 @@ from cpt.adapters.feishu import ENV_WEBHOOK, notify_problem, webhook_configured 
 
 _LOG = logging.getLogger("cron_daily_report")
 
-#: 被扫的作业 → 日志文件。**新增 cron 作业时必须同时加到这里** ——
-#: 否则新作业的失败永远不会出现在日报里，而日报看起来一切正常。
+#: 被扫的作业 → 日志文件。
+#:
+#: ★ 2026-10-24：**不再手抄**。此前是一份手写清单，与 ``deploy/cron/crontab``
+#: 各留一份、各漂各的 —— 真实故障：因子重算的日志重定向被弄丢后，
+#: 日报仍在扫一个**不存在的日志**（看着「一切正常」），而因子重算失败
+#: **彻底静默**。⇒ 现在从 Emotion-CPT 的 crontab 真相源**推导**，
+#: 漂移在结构上不可能再发生。
 #:
 #: ⚠️ 刻意**包含日报自己**：它失败时（rc=3 webhook 没配 / rc=4 飞书没送达）
 #: 恰恰是最需要人知道的时候，而下一轮日报会扫到它昨天写的 ``!!!!!``。
 #: 「谁来看日报的日报」这个死循环由**下一轮自己**解开。
-#:
-#: 判据测试在 ``tests/test_cron_daily_report.py`` 的
-#: ``test_every_cron_script_is_scanned_by_the_daily_report``：
-#: 本表与 ``deploy/cron/crontab`` 的调度行按**日志文件名**双向比对。
-JOBS: Final[tuple[tuple[str, str], ...]] = (
-    ("factor-recompute", "/home/ubuntu/logs/factor-recompute.log"),
-    ("run-inspection", "/home/ubuntu/logs/run-inspection.log"),
-    ("run-metric-prune", "/home/ubuntu/logs/run-metric-prune.log"),
-    ("dashboard-run-prune", "/home/ubuntu/logs/dashboard-run-prune.log"),
-    ("track-maintenance", "/home/ubuntu/logs/track-maintenance.log"),
-    ("watchlist-daily-summary", "/home/ubuntu/logs/watchlist-daily-summary.log"),
-    ("cron-daily-report", "/home/ubuntu/logs/cron-daily-report.log"),
-)
+def _derive_jobs() -> tuple[tuple[str, str], ...]:
+    """从 Emotion-CPT 的 crontab 真相源推导「要扫哪些日志」。"""
+    try:
+        from emotion_cpt.deploy.cron_spec import jobs_from_crontab
+    except ImportError as exc:  # pragma: no cover - 契约包没装
+        raise RuntimeError(
+            "emotion_cpt 没装 ⇒ 读不到 crontab 真相源。"
+            "日报是『作业失败唯一的出口』，宁可不跑也不能盲扫。"
+        ) from exc
+    return jobs_from_crontab()
+
+
+JOBS: Final[tuple[tuple[str, str], ...]] = _derive_jobs()
 
 #: 各脚本统一使用的失败标记。改这个标记要同时改**所有**用它的脚本
 #: （含上面 JOBS 里每条作业，以及日报自己）。

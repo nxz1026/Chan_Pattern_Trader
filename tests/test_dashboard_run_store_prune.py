@@ -185,6 +185,12 @@ def test_prune_clamps_or_rejects_bad_keep_days(bad: object) -> None:
 
 # ───────────────────── 作业真的被调度了（R43 教训）─────────────────────
 
+def _truth_source_crontab() -> pathlib.Path:
+    """crontab 真相源（Emotion-CPT，随契约包分发）。"""
+    from emotion_cpt.deploy.cron_spec import CRONTAB_PATH
+
+    return CRONTAB_PATH
+
 
 def test_cron_job_is_registered_in_repo_crontab() -> None:
     """``prune`` 必须真的出现在 ``deploy/cron/crontab`` 的**作业行**里。
@@ -204,7 +210,7 @@ def test_cron_job_is_registered_in_repo_crontab() -> None:
     测试依然全绿。**子串断言必须先确定「这段文本代表什么」**，
     否则它匹配到的是同一串字符在别处的合法出现。
     """
-    raw = (ROOT / "deploy" / "cron" / "crontab").read_text(encoding="utf-8")
+    raw = _truth_source_crontab().read_text(encoding="utf-8")
     job_lines = [
         line.strip()
         for line in raw.splitlines()

@@ -20,6 +20,13 @@ from typing import Any
 
 import pytest
 
+
+def _unit(name: str) -> Path:
+    """unit 真相源在 Emotion-CPT（随契约包分发）—— 跨仓对账，不是各读各的副本。"""
+    import emotion_cpt.deploy
+
+    return Path(emotion_cpt.deploy.__file__).resolve().parent / "systemd" / name
+
 ROOT = Path(__file__).resolve().parents[1]
 _SPEC = importlib.util.spec_from_file_location(
     "intraday_collectd", ROOT / "scripts" / "intraday_collectd.py"
@@ -322,7 +329,7 @@ class TestDeployment:
     """部署形态也是契约：漏了 systemd 单元，观察期就没有可观测对象。"""
 
     def test_systemd_unit_runs_one_round_and_exits(self) -> None:
-        svc = (ROOT / "deploy" / "systemd" / "cpt-intraday-collect.service").read_text(
+        svc = (_unit("cpt-intraday-collect.service")).read_text(
             encoding="utf-8"
         )
         assert "Type=oneshot" in svc
@@ -338,7 +345,7 @@ class TestDeployment:
         第 00 分」⇒ 一天只跑 3 次，而日志显示 ``outcome: skipped`` 看着一切正常。
         正确写法是把**小时**写成范围：``09..11,13..14:00/2:00``。
         """
-        timer = (ROOT / "deploy" / "systemd" / "cpt-intraday-collect.timer").read_text(
+        timer = (_unit("cpt-intraday-collect.timer")).read_text(
             encoding="utf-8"
         )
         lines = [ln for ln in timer.splitlines() if ln.startswith("OnCalendar=")]

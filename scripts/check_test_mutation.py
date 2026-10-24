@@ -144,7 +144,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         name="清理作业真的登记在 crontab 里",
-        rel="deploy/cron/crontab",
+        rel="pkg:emotion_cpt.deploy.cron_spec.CRONTAB_PATH",
         old=(
             "30 4 * * * /home/ubuntu/DSH/Chan_Pattern_Trader/deploy/cron/"
             "dashboard-run-prune-daily.sh"
@@ -372,7 +372,14 @@ def check_one(m: Mutation) -> tuple[bool, str, list[str]]:
     规范化会让「还原」悄悄改写文件行尾，那不是还原。
     还原完还要处理测试的写副作用（见 :func:`_restore_side_effects`）。
     """
-    path = ROOT / m.rel
+    if m.rel.startswith("pkg:"):
+        # 真相源在**另一个仓**（Emotion-CPT，随契约包分发）⇒ 从包解析，
+        # 这样在哪台机器 / 哪个 CI 上都定位到同一份。
+        from emotion_cpt.deploy.cron_spec import CRONTAB_PATH
+
+        path = CRONTAB_PATH
+    else:
+        path = ROOT / m.rel
     backup = path.read_bytes()
     try:
         _apply(path, m)

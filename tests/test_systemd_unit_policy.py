@@ -20,7 +20,15 @@ from pathlib import Path
 
 import pytest
 
-_SERVICE = Path(__file__).resolve().parents[1] / "deploy" / "systemd" / "cpt-dashboard.service"
+#: ★ unit 真相源在 Emotion-CPT（随契约包分发）—— 本测试从「仓内自检」
+#: 升级为「跨仓对账」：CPT 的代码 vs 全局唯一的 unit 真相源。
+def _unit(name: str) -> Path:
+    import emotion_cpt.deploy
+
+    return Path(emotion_cpt.deploy.__file__).resolve().parent / "systemd" / name
+
+
+_SERVICE = _unit("cpt-dashboard.service")
 
 
 def _directives() -> dict[str, str]:

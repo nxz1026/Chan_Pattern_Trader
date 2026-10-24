@@ -30,7 +30,14 @@ import pytest
 from scripts import cron_daily_report as cdr
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
-CRONTAB = ROOT / "deploy" / "cron" / "crontab"
+def _truth_source_crontab() -> pathlib.Path:
+    """crontab 真相源（Emotion-CPT，随契约包分发）。"""
+    from emotion_cpt.deploy.cron_spec import CRONTAB_PATH
+
+    return CRONTAB_PATH
+
+
+CRONTAB = _truth_source_crontab()  # ★ 真相源在 Emotion-CPT
 
 
 def _ts(offset_hours: float) -> str:
@@ -133,7 +140,10 @@ def test_quoted_failures_from_other_jobs_are_not_the_reports_own(tmp_path: pathl
     引用行属于**那条作业**，不属于日报。
     """
     _seed_all_logs(tmp_path, ok=True)
-    name = pathlib.Path(cdr.JOBS[-1][1]).name
+    # ★ 显式写文件名，不再用 `cdr.JOBS[-1]` 当代理 ——
+    #   JOBS 现在是从 crontab 真相源推导的，顺序由 crontab 决定
+    #   （2026-10-24 加了 carry-forward 等作业后，最后一条已经不是日报自己）
+    name = "cron-daily-report.log"
     _write(
         tmp_path,
         name,
@@ -223,6 +233,8 @@ def test_delivery_failure_exits_nonzero(
 # ── ⑥ ⚠️ JOBS 与 crontab 必须一一对应 ───────────────────────────────────────
 
 
+
+
 def _crontab_log_names() -> set[str]:
     """从 crontab 的调度行里抽出**重定向目标**的日志文件名。
 
@@ -241,26 +253,66 @@ def _crontab_log_names() -> set[str]:
     return found
 
 
-def test_every_cron_script_is_scanned_by_the_daily_report() -> None:
-    """⚠️ **本文件最重要的一条**。
+# ── ⑥ ⚠️ 日报扫的日志必须与真相源一致，且仓内作业必须写日志 ──────────────────
 
-    R57 加第 4 条 cron 时，``deploy/README.md`` 的合并安装清单漏了它 ⇒ 照文档
-    部署时那条作业**永远装不进 crontab**，而看板毫无异常。同类陷阱在日报这里
-    会再发生一次：加了作业却忘了登记 ``JOBS``，那条作业的失败就永远不会出现
-    在日报里，**而日报看起来一切正常**。
+
+def test_daily_report_jobs_are_derived_from_the_truth_source() -> None:
+    """日报的 JOBS 必须是**推导**出来的，不是手抄的。
+
+    手抄清单曾与 crontab 各漂各的（真实故障：因子重算的日志重定向被弄丢
+    ⇒ 日报扫着一个不存在的日志，而真正的作业失败没人知道）。
+    这条断言钉住「不许再手抄」。
     """
-    in_crontab = _crontab_log_names()
-    scanned = {pathlib.Path(p).name for _n, p in cdr.JOBS}
+    from emotion_cpt.deploy.cron_spec import jobs_from_crontab
 
-    missing = in_crontab - scanned
-    assert not missing, (
-        f"crontab 里有这些作业的日志，日报却不扫：{sorted(missing)} —— "
-        f"它们的失败永远不会出现在日报里。加作业时必须同步 "
-        f"scripts/cron_daily_report.py 的 JOBS。"
+    assert cdr.JOBS == jobs_from_crontab(), (
+        "日报的 JOBS 与 crontab 真相源推导结果不一致 —— "
+        "JOBS 必须是推导出来的（scripts/cron_daily_report.py 的 _derive_jobs）"
     )
-    # 反向也查一遍：日报扫了个 crontab 里没有的作业同样是配置漂移
-    extra = scanned - in_crontab
-    assert not extra, f"日报扫了 crontab 里没有的作业日志：{sorted(extra)}"
+
+
+def test_every_repo_cron_job_writes_a_log() -> None:
+    """★ 仓内 cron 作业**必须**有日志（两种合法形态都算）。
+
+    背景：2026-10-24 把因子重算的调度从 02:20 改到 09:50 时，顺手把
+    ``>> /home/ubuntu/logs/factor-recompute.log 2>&1`` 弄丢了
+    ⇒ **因子重算失败会彻底静默**（因子表继续陈旧），而日报因为
+    「扫的日志名对不上 crontab」报的是**配置漂移**，真正的故障没人提。
+
+    这类缺陷的特征：**配置看起来是对的**（作业在、脚本在、调度对），
+    只是「结果没人看」。所以必须有一条能失败的断言钉住。
+
+    合法形态有两种，**都算数**：
+    1. crontab 行上的 ``>> /home/ubuntu/logs/xxx.log 2>&1``
+    2. **脚本内部自己写日志**（``LOG=...`` + ``>>"$LOG"``）
+       —— 很多老脚本是这种，强行改成 (1) 反而会与脚本的锁文件逻辑打架。
+
+    豁免：脚本不在任何仓的 ``deploy/cron/`` 下（外部脚本，如 ``jc-*``、
+    ``backup-db.sh``）—— 它们自己管日志，不在本条断言范围内。
+    """
+    from emotion_cpt.deploy.cron_spec import load_crontab
+
+    offenders = []
+    for job in load_crontab():
+        if "/deploy/cron/" not in job.script:
+            continue  # 外部脚本
+        if job.log is not None:
+            continue  # 形态 1：crontab 级重定向
+        sp = pathlib.Path(job.script)
+        if not sp.is_file():
+            offenders.append(f"{job.schedule}  {job.script}（脚本不存在）")
+            continue
+        body = sp.read_text(encoding="utf-8", errors="replace")
+        # 形态 2：脚本内部自己重定向到某个日志
+        if re.search(r'>>\s*"?\$\{?\w*LOG', body) or re.search(r'>>\s*\S+\.log', body):
+            continue
+        offenders.append(f"{job.schedule}  {job.script}（没有任何日志重定向）")
+    assert not offenders, (
+        "这些仓内 cron 作业没有日志 ⇒ 失败会彻底静默：\n  "
+        + "\n  ".join(offenders)
+        + "\n请在 crontab 真相源（Emotion-CPT）里给它加 >> /home/ubuntu/logs/xxx.log 2>&1，"
+        "或让脚本自己写日志"
+    )
 
 
 def test_report_scans_its_own_log() -> None:
