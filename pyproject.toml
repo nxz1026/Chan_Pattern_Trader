@@ -17,7 +17,7 @@ dependencies = [
     # 判据内核已迁至 Emotion-CPT（2026-10-23）—— 单向依赖：cpt → emotion_cpt。
     # 钉到 tag 而非 main：main 是移动目标，重建环境会拿到不确定的判据版本。
     # 这是**唯一**的运行依赖，且它本身就是「判据」而不是三方库。
-    "emotion-cpt @ git+https://github.com/nxz1026/Emotion-CPT.git@v0.1.0",
+    "emotion-cpt @ git+https://github.com/nxz1026/Emotion-CPT.git@v0.2.1",
 ]
 
 [project.optional-dependencies]

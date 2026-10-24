@@ -251,3 +251,11 @@ jobs:
           # ⚠️ 再扩到 `tests/` 会把测试夹具也扫进来（大量有意为之的死代码），
           #    属另一件事，要扩时先想清楚。
           vulture --min-confidence 60 cpt scripts whitelist.py
+
+      # ★ 2026-10-24：契约门禁（Emotion-CPT）——
+      #   判据内核已迁至 Emotion-CPT，本仓从那边 import 价格常量。
+      #   这条守三件事：① 别又手抄常量回去 ② 9 列封板快照别漂
+      #   ③ pin 的契约版本别落后。契约包由上面 `pip install -e '.[db]'` 顺带装上
+      #   （pyproject 里已声明 emotion-cpt @ …@v0.1.0）。
+      - name: Contract gate (Emotion-CPT)
+        run: python -m emotion_cpt.cli.check_contracts --upstream-root .
