@@ -164,7 +164,7 @@ MUTATIONS: tuple[Mutation, ...] = (
     ),
     Mutation(
         name="跨度不足时合并端点（门槛的定义）",
-        rel="cpt/domain/bi.py",
+        rel="pkg:emotion_cpt.structure.bi",
         old="if span < min_bi_len:",
         new="if False:",
         tests=("tests/test_min_bi_len_calibration.py",),
@@ -373,11 +373,22 @@ def check_one(m: Mutation) -> tuple[bool, str, list[str]]:
     还原完还要处理测试的写副作用（见 :func:`_restore_side_effects`）。
     """
     if m.rel.startswith("pkg:"):
-        # 真相源在**另一个仓**（Emotion-CPT，随契约包分发）⇒ 从包解析，
-        # 这样在哪台机器 / 哪个 CI 上都定位到同一份。
-        from emotion_cpt.deploy.cron_spec import CRONTAB_PATH
+        # 真相源 / 被搬走的模块在**另一个仓**（Emotion-CPT，随契约包分发）
+        # ⇒ 从已安装的包解析，这样在哪台机器 / 哪个 CI 上都定位到同一份。
+        #
+        # 支持两种写法：
+        #   pkg:emotion_cpt.structure.bi              → 模块文件
+        #   pkg:emotion_cpt.deploy.cron_spec.CRONTAB_PATH → 包内常量（路径）
+        import importlib
 
-        path = CRONTAB_PATH
+        target = m.rel[4:]
+        try:
+            path = Path(importlib.import_module(target).__file__)
+        except ImportError:
+            modname, _, attr = target.rpartition(".")
+            mod = importlib.import_module(modname)
+            obj = getattr(mod, attr)
+            path = Path(getattr(obj, "__file__", str(obj)))
     else:
         path = ROOT / m.rel
     backup = path.read_bytes()
