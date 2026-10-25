@@ -133,9 +133,9 @@ def c5_hfq_matches_local_factor() -> str:
     """
     bars = TencentKlineClient().fetch_daily_bars("600519", limit=3)
     tencent_hfq_close = bars[-1].close
-    from cpt.adapters.a_share_local import AShareLocalClient
+    from cpt.adapters.a_share_local import open_conn
 
-    conn = AShareLocalClient()._get_conn()  # noqa: SLF001
+    conn = open_conn()
     conn.autocommit = True
     cur = conn.cursor()
     cur.execute("""SELECT hfq_factor FROM asel.ref_adjust_factor

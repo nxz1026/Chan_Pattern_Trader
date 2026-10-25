@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+
 #: ★ unit 真相源在 Emotion-CPT（随契约包分发）—— 本测试从「仓内自检」
 #: 升级为「跨仓对账」：CPT 的代码 vs 全局唯一的 unit 真相源。
 def _unit(name: str) -> Path:

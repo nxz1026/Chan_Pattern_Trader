@@ -17,7 +17,7 @@
 > ① 本清单**唯一在册项 T+1** 的性质被查清为「**CPT 层接不了**」（依赖消失：账户持仓与
 >    当日买入信息在 emotion-core，见下方「为什么是删除」）→ **owner 拍板删除**。该符号、
 >    `tests/test_a_share_rules.py` 里两个断言 `True` 的自证式用例、`whitelist.py` §4b 那条
->    豁免**三处同步移除**（本文档约束 5 正是这么要求的）；`cpt/domain/a_share_rules.py` 的
+>    豁免**三处同步移除**（本文档约束 5 正是这么要求的）；`emotion_cpt.structure.a_share_rules` 的
 >    C4 段落改写为指向真读点 `check_t_plus_one_calendar` → `_attach_t_plus_one`。
 >    ⇒ **本清单与 `whitelist.py` §4 至此没有任何在册符号**；
 > ② 更正一处**错的在册记录**：一卖 `check_first_sell` **早已接线**（见簇一末尾 R66 更正）；
@@ -151,8 +151,8 @@ R22 的 9 个接线点（路由与调用方均已 grep 复核）：
 
 | 模块 | 行数 | 处境 | 功能 | 接线目标 |
 |---|---:|---|---|---|
-| ~~`cpt/domain/signal.py`~~ | ~~311~~ | **已接线（R20）** | **一买状态机**：`assess_first_buy` / `transition_first_buy`，管 alert→confirmed→invalidated 转移 | 已进 A 股信号链（`a_share_snapshot.py:316`） |
-| `cpt/domain/a_share_rules.py` | 112 | ✅ **R19 已接线**（R66 删掉最后一条死谓词） | **A 股交易规则标签**：涨跌停 / 停牌 / T+1。`fetch_daily_tags` / `apply_ashare_tags_to_bis`；T+1 的**日历**读点在 adapters（`check_t_plus_one_calendar`） | 标签能力已进 A 股主看板（见下）；**无在册项** |
+| ~~`emotion_cpt.structure.signal`~~ | ~~311~~ | **已接线（R20）** | **一买状态机**：`assess_first_buy` / `transition_first_buy`，管 alert→confirmed→invalidated 转移 | 已进 A 股信号链（`a_share_snapshot.py:316`） |
+| `emotion_cpt.structure.a_share_rules` | 112 | ✅ **R19 已接线**（R66 删掉最后一条死谓词） | **A 股交易规则标签**：涨跌停 / 停牌 / T+1。`fetch_daily_tags` / `apply_ashare_tags_to_bis`；T+1 的**日历**读点在 adapters（`check_t_plus_one_calendar`） | 标签能力已进 A 股主看板（见下）；**无在册项** |
 
 ### `a_share_rules` 的 R19 接线结果
 
@@ -188,8 +188,8 @@ R22 的 9 个接线点（路由与调用方均已 grep 复核）：
 时读取」，即两者互锁。R20 前它接不上的根因不是「缺输入的生产者」，而是**缺翻译层**：
 数据其实齐了，只是没人把结构对象翻译成状态机的入参。
 `assess_first_buy` 需要 `has_two_centers` / `has_divergence_leg` / `has_reversal_bi`，
-这三个值只出现在 `signal.py` 自己、`cpt/domain/first_buy.py:12` 的 docstring 和本文件里；
-`TrendType`（`cpt/domain/models.py:193`）确实没有中心数/背驰笔/反转笔字段。
+这三个值只出现在 `signal.py` 自己、`emotion_cpt.structure.first_buy:12` 的 docstring 和本文件里；
+`TrendType`（`emotion_cpt.structure.models:193`）确实没有中心数/背驰笔/反转笔字段。
 
 > **R20 处置：新增 `cpt/application/first_buy_bridge.py`（翻译层），接进 A 股主看板。**
 > - 桥输出 `FirstBuyFacts`（三事实 + `center_ids` + `structure_id` + `divergence_status`），

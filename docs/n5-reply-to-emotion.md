@@ -88,7 +88,7 @@ distance_pct = (limit_price - price) / limit_price * 100
 
 N5 原文说得很清楚：「判 ST 必需（ST 板比 5%），只有 code 判不出」。那就只存判定结果。
 
-判据留在 CPT（`cpt/domain/intraday_rules.py::is_st_name`），emotion 不再自己解析字符串 ——
+判据留在 CPT（`emotion_cpt.structure.intraday_rules::is_st_name`），emotion 不再自己解析字符串 ——
 这符合 ADR 0003 §E2「判据只许一处」。你们已经吃过一次这个亏：`board_pct_limit`
 的 ST 判定顺序放错，北交所 ST 落到 20%，算出偏低涨停价，「已封板」被误判成「未到板」。
 

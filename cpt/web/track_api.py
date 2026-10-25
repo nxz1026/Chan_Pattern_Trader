@@ -33,7 +33,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any, Final
 from urllib.parse import urlsplit
 
-from cpt.adapters.a_share_local import AShareLocalClient
+from cpt.adapters.a_share_local import AShareLocalClient, open_conn
 from cpt.application.recommendation import (
     SIGNAL_TYPE_TEXT,
     divergence_text,
@@ -139,7 +139,18 @@ def _client() -> AShareLocalClient:
 
 
 def _conn() -> Any:
-    return _client()._get_conn()  # noqa: SLF001 — 同 trade_api 用法
+    """开一条**调用方拥有**的连接（由调用方 ``close()``）。
+
+    ⚠️ R94：这里原先是 ``_client()._get_conn()``，而 ``_client()`` 每次都建
+    **新的** client ⇒ 临时对象在语句结束时被 GC ⇒ ``AShareLocalClient.__del__``
+    → ``close()`` ⇒ 交出去的连接**已经是关的** ⇒ 本模块 12 处 ``_conn()``
+    全部拿到 ``status=BAD`` ⇒ 线上 ``GET /api/dashboard/track`` 恒返
+    ``{"available": false, "reason": "OperationalError: the connection is closed"}``
+    （优雅降级，所以不报错、不告警，谁都发现不了）。
+
+    ⇒ 要「一条活连接」就用 ``open_conn()``，不要经临时 client 中转。
+    """
+    return open_conn()
 
 
 def _subject_id(user_id: str, code: str) -> str:

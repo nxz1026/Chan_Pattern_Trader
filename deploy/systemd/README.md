@@ -9,6 +9,6 @@
 现在：
 - 只有一份 unit 真相源，在 Emotion-CPT 里；
 - `emotion_cpt.cli.check_unit_paths` 门禁做**双向对账**（仓内 ↔ 线上）；
-- 任何改动请改 Emotion-CPT，然后由 `scripts/install_units.sh` 装到线上。
+- 任何改动请改 Emotion-CPT，然后由 `Emotion-CPT/scripts/install_units.sh` 装到线上。
 
 > 装之前请先看 `Emotion-CPT/deploy/systemd/README.md` 的说明。

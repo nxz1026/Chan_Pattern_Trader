@@ -126,9 +126,9 @@ def available_backends(min_bi_len: int | None) -> list[tuple[str, Any]]:
 def fetch_bars(code: str, n: int) -> list[CanonicalBar]:
     import datetime as dt
 
-    from cpt.adapters.a_share_local import AShareLocalClient
+    from cpt.adapters.a_share_local import open_conn
 
-    conn = AShareLocalClient()._get_conn()  # noqa: SLF001
+    conn = open_conn()
     cur = conn.cursor()
     cur.execute(
         """SELECT date, open, high, low, close, volume FROM public.daily_bar

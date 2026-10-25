@@ -185,7 +185,7 @@ def test_prune_clamps_or_rejects_bad_keep_days(bad: object) -> None:
 
 # ───────────────────── 作业真的被调度了（R43 教训）─────────────────────
 
-def _truth_source_crontab() -> pathlib.Path:
+def _truth_source_crontab() -> Path:
     """crontab 真相源（Emotion-CPT，随契约包分发）。"""
     from emotion_cpt.deploy.cron_spec import CRONTAB_PATH
 

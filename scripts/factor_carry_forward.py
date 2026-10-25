@@ -167,7 +167,9 @@ def _fresh_conn(client: Any) -> Any:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(description="把暂存表的因子沿用到 daily_bar 最新日（并 promote）")
+    parser = argparse.ArgumentParser(
+        description="把暂存表的因子沿用到 daily_bar 最新日（并 promote）"
+    )
     parser.add_argument("--dry-run", action="store_true", help="只数不写")
     parser.add_argument("--verbose", action="store_true")
     args = parser.parse_args(argv)

@@ -58,7 +58,7 @@ grep `cpt/` 全量源码：
 
 | 侧 | 位置 | 判据 | 量纲 |
 |---|---|---|---|
-| native | `cpt/domain/bi.py:183` | `int(end.merged_index) - int(start.merged_index) + 1 >= min_bi_len` | **merged 跨度** |
+| native | `emotion_cpt.structure.bi:183` | `int(end.merged_index) - int(start.merged_index) + 1 >= min_bi_len` | **merged 跨度** |
 | czsc | `crates/czsc-core/src/analyze/utils.rs:413-417` | `!ab_include && bars_a.len() >= min_bi_len`，`bars_a` 从 `fx_a.elements[0].dt` 量到 `fx_b.elements[2].dt` | **merged 跨度 + 2** |
 
 换算到缠论原文的「独立 K 线数」：
@@ -142,7 +142,7 @@ min 跨度（= 门槛实际放行的最小值，三份 fixture 一致）：
 `:285` 对账用例）。R69 与之一致：新增 `_divergence_segment()` 从末笔向前锚定，
 规则为「末笔方向对 + 末笔创全段极值 + 首笔为段内反向极值 + 奇数笔 + 长度 ≤ 21」。
 
-**判定器一行未动**。`cpt/domain/first_buy.py::check_first_buy/check_first_sell` 保持
+**判定器一行未动**。`emotion_cpt.structure.first_buy::check_first_buy/check_first_sell` 保持
 czsc 逐行移植原样，`test_matches_czsc_signal_template` 的 oracle 对照仍成立；
 改的只是 CPT 自己该传哪一段。
 
@@ -243,9 +243,9 @@ confirmed」的条件下被选出来的**。要 confirmed，必须在 ready 之�
 
 审计写 A1 是「`first_buy.py` 内部口径」。实际：
 
-- `cpt/domain/first_buy.py` 是**从 czsc `crates/czsc-signals/src/utils/cxt.rs` 逐行移植**的
+- `emotion_cpt.structure.first_buy` 是**从 czsc `crates/czsc-signals/src/utils/cxt.rs` 逐行移植**的
   （`docs/reference-audit.md` §5 明载来源与许可证）。换背驰判据 = 主动放弃该模块的对照基础。
-- `divergence_compare` 目前是**死字段**：全仓仅 `cpt/domain/config.py:151`（声明）
+- `divergence_compare` 目前是**死字段**：全仓仅 `emotion_cpt.structure.config:151`（声明）
   与 `tests/test_domain_frozen_contract.py:60`（冻结契约）两处引用，
   `first_buy.py:104-111 _is_divergent` **从不读它** —— 它用 `power_price` / `power_volume` / `length`。
   MACD 只在展示层 `cpt/application/dashboard_indicators.py:12 macd_series` 计算，域内没有。
@@ -276,7 +276,7 @@ confirmed」的条件下被选出来的**。要 confirmed，必须在 ready 之�
 | P0-a | 用**未截断** czsc 重跑 §4.1 三方对照；`rules.md:174` / `architecture.md:434` 改成可复现值，或标「来源不可复现」 | docs ×3 |
 | P0-b | 重写 §9.8 的取值依据：删掉两条不成立的理由，改记 §4 的量纲实测表 + R56 那份 merged 量纲 90 天定档 | `rules.md` §9.8 |
 | P0-c | 定 native 走 **老笔 `G=6`**（现状，独立K≥2）还是 **新笔 `G=7`**（独立K≥3，需升 v2 + 重建 fixture） | `SCHEMA_VERSION` |
-| P0-d | `cpt/domain/bi.py:104` 的 `min_bi_len: int \| None = None` 改为必填或对 `None` 显式告警 | `bi.py` + 调用点 |
+| P0-d | `emotion_cpt.structure.bi:104` 的 `min_bi_len: int \| None = None` 改为必填或对 `None` 显式告警 | `bi.py` + 调用点 |
 
 > P0-d 是审计 §9「CPT 建议 1」，**至今未做**。现行默认 `None` 会放出
 > 326/356/352 笔（§4.2），正是审计 §7.4 用来否决 chanlun-pro 的那种形状。
@@ -755,13 +755,13 @@ cd /home/ubuntu/DSH/Chan_Pattern_Trader
 | | 主张 | 依据 |
 |---|---|---|
 | 审计 §11.1 | 是「**文档漂移**」；落地 = 给 `first_buy.py` 加面积分支使其名副其实 | `_is_divergent` 实际用 `power_price` |
-| 本文 §5.1 | 是**死字段**；第一步该定「接线还是删」 | 全仓仅 `cpt/domain/config.py:151`（声明）+ `tests/test_domain_frozen_contract.py:60`（冻结契约）两处引用，`first_buy.py:104-111 _is_divergent` **从不读它** |
+| 本文 §5.1 | 是**死字段**；第一步该定「接线还是删」 | 全仓仅 `emotion_cpt.structure.config:151`（声明）+ `tests/test_domain_frozen_contract.py:60`（冻结契约）两处引用，`first_buy.py:104-111 _is_divergent` **从不读它** |
 
 **分歧性质：定性之争 —— 且查完发现是三方互相矛盾。**
 
 - `docs/rules.md:574` 明写：“（`power_price` / `power_volume` / `length`）正是一买/一卖**背驰比较的输入**”
 - `docs/rules.md` §9.6 只把 `divergence_status` 定为 `{not_checked, not_detected, detected}`，**没有承诺过 area 口径**
-- 而 `cpt/domain/config.py:151` 写死 `divergence_compare: str = "area"`
+- 而 `emotion_cpt.structure.config:151` 写死 `divergence_compare: str = "area"`
 
 ⇒ **`rules.md` 站 `power_price` 一边，`config.py` 站 `area` 一边，`_is_divergent` 跟 `rules.md` 走。**
 矛盾在「config 声明」与「rules 承诺」之间，**不在实现里**。审计说的「漂移」与本文说的「死字段」，
@@ -884,7 +884,7 @@ R70 那个「structure_ready 20 日 +13.37%」的假结论，根源是非配对�
 | 文件 | 层 | 职责 |
 |---|---|---|
 | `cpt/adapters/intraday_probe.py` | adapters | 拉涨幅榜 + 并到五档行情，产出候选 |
-| `cpt/domain/intraday_rules.py` | domain | 涨跌停价、板别、封单强度（纯函数零 IO） |
+| `emotion_cpt.structure.intraday_rules` | domain | 涨跌停价、板别、封单强度（纯函数零 IO） |
 | `cpt/application/intraday_analysis.py` | application | 封板结构 + 强度分位数 |
 
 **「不接进项目」的可验证形式**：`tests/test_intraday_probe.py::test_nothing_imports_the_probe_in_production_paths` 用 AST 扫全仓，任何 `Import`/`ImportFrom` 指向 `intraday_probe` 就红。注意判据**只认 import 语句**——初版搜整份文件文本，于是 `intraday_analysis.py` 的 docstring 里提了一句「见 `cpt.adapters.intraday_probe`」就被判成「接线了」。注释里提一句不是接线。
@@ -912,7 +912,7 @@ R70 那个「structure_ready 20 日 +13.37%」的假结论，根源是非配对�
 
 ### 8.10 为什么搬
 
-R86 之后 `cpt/backtest/` 能算「给定信号收益多少」，但**信号本身算不出来** —— `probe10_ab.py` 里那段「逐根切 `bars[:t+1]` → 算结构 → 判一买」没有任何测试、没有前视约束、用的是自己按 `0.098/0.198` 算的涨停阈值（违反 `cpt/domain/a_share_rules.py` 模块头「CPT 不重新计算涨跌停」）。搬到仓里的三块：
+R86 之后 `cpt/backtest/` 能算「给定信号收益多少」，但**信号本身算不出来** —— `probe10_ab.py` 里那段「逐根切 `bars[:t+1]` → 算结构 → 判一买」没有任何测试、没有前视约束、用的是自己按 `0.098/0.198` 算的涨停阈值（违反 `emotion_cpt.structure.a_share_rules` 模块头「CPT 不重新计算涨跌停」）。搬到仓里的三块：
 
 | 文件 | 职责 | 关键约束 |
 |---|---|---|
@@ -1724,3 +1724,128 @@ TypeError: 'NoneType' object is not subscriptable
 读到 0 行。原因：那个函数带 `_REAL_ROWS` 过滤，而测试用的正是 `\x01` 哨兵代码 ——
 **过滤器把测试自己的行滤掉了**。改成直接 `SELECT` 绕开过滤器：
 这条测试验的是「列能不能写进去」，不是「过滤器生不生效」。
+
+---
+
+## 15. R94（2026-10-25）：`_get_conn()` 的临时对象取连接，把 `track` 页面静默打哑
+
+### 15.1 起因
+
+一份第三方核查报告（`2026-10-25-CPT现状核实报告.md`）报 6 条问题。逐条核实后
+**5 条成立、1 条根因诊断错**，但错的那条恰好是最要紧的那条 —— 它把症状归给
+「RDS 故障转移后不重连」，实际是本地对象生命周期。
+
+### 15.2 真根因
+
+`cpt/adapters/a_share_local.py` 的 `_get_conn()` 是 per-instance 缓存，
+而同一个类为修连接泄漏加了 `__del__ → close()`。于是：
+
+```
+AShareLocalClient()._get_conn()   ← 实例只在表达式里存活
+                                  ← 表达式结束引用计数归零 → __del__ → 连接被关
+```
+
+一行判据：
+
+```python
+AShareLocalClient()._get_conn()          # status=1 (BAD)
+c = AShareLocalClient(); c._get_conn()   # status=0
+```
+
+### 15.3 波及面比报告写的大一倍
+
+报告说 6 处，AST 实扫是 **8 处**，而且漏掉了唯一一处生产代码：
+
+| 位置 | 性质 | 症状 |
+|---|---|---|
+| `cpt/web/track_api.py:142` | **生产** | `GET /api/dashboard/track` 恒返 `{"available": false, "reason": "OperationalError: the connection is closed"}`；该模块 12 处 `_conn()` 共用 |
+| `scripts/compare_chanlun_backends.py:131` | 脚本 | 第 132 行 `Traceback` |
+| `scripts/verify_public_contracts.py:138` | 脚本 | 崩 + 顺带报出一条**假警** |
+| 5 处 `tests/` | 测试 | 26 条红（18 ERROR + 8 FAILED） |
+
+线上实证：
+
+```json
+{"available": false, "items": [], "reason": "OperationalError: the connection is closed", "recycle": []}
+```
+
+**优雅降级 ⇒ 不报错、不告警、不重启，靠人肉点页面才发现。**
+
+### 15.4 修法（方案 A）
+
+不给调用点打补丁，而是补一个**不经过 client 生命周期**的入口：
+
+```python
+def open_conn() -> Any:                       # cpt/adapters/a_share_local.py
+    return psycopg.connect(**connection_kwargs())
+```
+
+- `_get_conn()` 内部改成 `self._conn = open_conn()`（DRY）
+- 8 处「临时对象取连接」全部改成 `open_conn()`，AST 复扫剩余 **0 处**
+- `__all__` 加 `open_conn`
+
+**为什么不选「只改调用点让 client 活到用完」**：缺陷在接口不在调用方 ——
+`_get_conn()` 既交出连接又保留所有权，这个陷阱会等着下一个临时对象。
+
+### 15.5 顺带修出的第二件事：契约 5 的判据本身是错的
+
+连接修好后 `verify_public_contracts.py` 不再报 `OperationalError`，露出真实数据差：
+
+```
+交叉 腾讯 hfq vs 本地因子表
+  ⚠️ 两侧后复权价差 8.37%：腾讯 9316.39 vs 本地 8536.19
+❌ 1 条契约不再成立 —— 该改适配器
+```
+
+深挖：原始价两侧**完全一致**（1329.00 / 1335.00），差异全在复权因子上 ——
+腾讯隐含因子 ≈ 6.98，本地 `asel.ref_adjust_factor` = 6.39414671（三天不变，正常）。
+400 天逐日扫 ratio（tencent/local）在 **1.074~1.121** 之间漂、**没有阶跃**，
+回看 2025-06 也是 1.086 ⇒ 是**长存的常数级锚点差 ~8.6~9.1%**，不是新断的。
+
+- **对策略无影响**：常数倍缩放不改变收益率序列与缠论结构。
+- **错的是判据**：用「绝对后复权价相等」比两个数据源，本来就不成立，应当比收益率序列。
+- **不在 CI**（`check_gate_coverage.py` 明写「人工按需跑的对外契约抽查」）⇒ 不是门禁红项，列为待拍板。
+
+### 15.6 P0 门禁尾巴
+
+初始红 6 道，全部转绿：
+
+| 门禁 | 红 | 修法 |
+|---|---|---|
+| `check_all_claims` | 27 处 | `cpt/domain/X.py` → `emotion_cpt.structure.X`（12 份现行文档 50 处；排除 `docs/archive/`）；`deploy/*/README.md` 两个跨仓脚本路径加 `Emotion-CPT/` 前缀 |
+| `check_doc_counts` | 3 行 | `docs/architecture.md` §2.1：adapters 7,644→**7,712**、domain 18/3,581→**1/63**、web 5,766→**5,777** |
+| `check_line_refs` | 1 处 | 随 `config.py:214` 改写消失（该文件本仓不存在，无法也不该校验） |
+| `check_doc_drift` | 3 处 | 同上，随 §2.1 对齐 |
+| `check_test_mutation --selftest` | 1 崩 | 负控制 `rel` 从已删的 `cpt/domain/config.py` 换成 `cpt/backtest/stats.py`（`_MIN_ABS_T`），并写明「负控制要的是真的无关，不是随便换个文件」 |
+| `check_cold_environment` | 1 failed | 随连接修复消失 |
+
+**domain 那一行不是简单改数字**：18 文件/3,581 行 → 1 文件/63 行，语义已变
+（判据本体迁往 Emotion-CPT），所以整行改写并保留全部历史段落。
+
+### 15.7 顺带清掉的 ruff 债
+
+`ruff check` 6 个错，**全部是既有的**（`git show HEAD:...` 验证过），一并修：
+
+- `cpt/adapters/a_share_local.py` UP037（`-> "AShareLocalClient"` 去引号）
+- `scripts/factor_carry_forward.py` E501
+- `tests/test_dashboard_run_store_prune.py:188` / `tests/test_signal_overview_wiring.py:223`
+  **F821 `pathlib` 未定义** —— `from __future__ import annotations` 让它不崩，
+  但 `typing.get_type_hints` 会炸；改成已导入的 `Path`
+- 两个 `I001` 自动修
+
+### 15.8 验收
+
+- 全量 pytest：26 条红 → **0 failed**
+- 12 道门禁全绿：`check_all_claims` / `check_doc_counts` / `check_line_refs` / `check_doc_drift` /
+  `check_value_plumbing` / `check_gate_coverage`（16 道在 CI、16 条夹具、磁盘 17 个、豁免 4）/
+  `check_sql_layering`（65 文件）/ `check_storage_failure_semantics` / `check_ci_workflow` /
+  `check_bigserial_sequence` / `check_editable_import` / `check_derived_gap`
+- `ruff check .` **All checks passed**
+- `build_dashboard_bundle.py --check` 同步
+- 生产实证：`cpt.web.track_api._conn()` → `closed=False`、`SELECT 1` → `(1,)`
+
+### 15.9 仍然开放的
+
+- `ruff format --check` **19 个文件待重排**、`mypy cpt scripts` **21 个错** —— 都是既有的，
+  本轮未动（与 R94 无关，另案处理）
+- `verify_public_contracts.py` 契约 5 的判据要不要从「绝对价」改成「收益率序列」—— 待拍板

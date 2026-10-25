@@ -41,10 +41,10 @@ def _open_pg_conn() -> Any:
             pytest.fail(message)
         pytest.skip(message)
 
-    from cpt.adapters.a_share_local import AShareLocalClient
+    from cpt.adapters.a_share_local import open_conn
 
     try:
-        return AShareLocalClient()._get_conn()  # noqa: SLF001 — 同 track_api 用法
+        return open_conn()
     except Exception as exc:  # noqa: BLE001
         message = f"DB not reachable: {type(exc).__name__}: {str(exc)[:120]}"
         if _require_db():
@@ -190,10 +190,10 @@ def test_count_prunable_failure_raises_without_commit() -> None:
 def route(pg_conn: Any, monkeypatch: pytest.MonkeyPatch) -> Any:
     """让 handler 走真 DB：``_conn`` 换成「每次新开一连」的工厂。"""
     track_api = pytest.importorskip("cpt.web.track_api")
-    from cpt.adapters.a_share_local import AShareLocalClient
+    from cpt.adapters.a_share_local import open_conn
 
     def _factory() -> Any:
-        return AShareLocalClient()._get_conn()  # noqa: SLF001
+        return open_conn()
 
     monkeypatch.setattr(track_api, "_conn", _factory)
     return track_api

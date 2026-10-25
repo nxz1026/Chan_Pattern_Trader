@@ -148,11 +148,11 @@ CPT 不再逐项重新发明已有基础规则。凡 czsc 已有明确实现、�
 
 ### 7.3 一买/一卖的归属
 
-czsc 的一买/一卖判定是纯结构谓词。CPT 逐行移植到 `cpt/domain/first_buy.py`，而不直接调用——czsc 的 Python 绑定把它包在信号模板体系里（需要分析器对象、模板名与参数字典），而 CPT 需要的是"输入一串笔、输出布尔值"的纯谓词。
+czsc 的一买/一卖判定是纯结构谓词。CPT 逐行移植到 `emotion_cpt.structure.first_buy`，而不直接调用——czsc 的 Python 绑定把它包在信号模板体系里（需要分析器对象、模板名与参数字典），而 CPT 需要的是"输入一串笔、输出布尔值"的纯谓词。
 
 移植后与 czsc 在 3 个真实 fixture 上逐笔数交叉验证一致（6/6，含正例）。
 
-与 `cpt/domain/signal.py` 的分工：`signal.py` 是**状态机**，消费结构事实并管理状态阶梯；`first_buy.py` 负责**算出**那个最关键的事实——"这一段走势是否构成一买"。
+与 `emotion_cpt.structure.signal` 的分工：`signal.py` 是**状态机**，消费结构事实并管理状态阶梯；`first_buy.py` 负责**算出**那个最关键的事实——"这一段走势是否构成一买"。
 
 ### 7.4 明确不采用
 
@@ -539,7 +539,7 @@ Fractal.merged_index`）。同一份样本在 merged 量纲上是 p50=3 / p80=4 
 `calibration-r56-min-bi-len.json` 的 `drop_pct` 63.9~65.4，都印证这一点），
 而不是「砍掉最短两成」。
 
-> ⚠️ 2026-10-09（R59）修掉 `build_bis` 的伪笔缺陷（`cpt/domain/bi.py` 合并端点时
+> ⚠️ 2026-10-09（R59）修掉 `build_bis` 的伪笔缺陷（`emotion_cpt.structure.bi` 合并端点时
 > 不校验两端类型）后，json 的 `drop_pct` 重算为 **68.8/69.9/70.8**、`v1_zs`
 > 10/12/10 → **19/21/21**；上面那段 90 天长样本的聚合数字（含 65.2%）**仍是修前
 > 口径**（长样本不在仓里，无法重跑）。**gate 值仍是 6、结构口径未变**，
@@ -560,7 +560,7 @@ resolve_backend(DEFAULT_BACKEND, min_bi_len=RulesConfig().min_bi_len)
 ```
 
 `cpt/adapters/native_chanlun.py` 那时只透传了 `config`，而
-`cpt/domain/bi.py::build_bis` 压根没有门槛参数 —— **文档声称已接线、代码里没有**。
+`emotion_cpt.structure.bi::build_bis` 压根没有门槛参数 —— **文档声称已接线、代码里没有**。
 
 **R45 实测的退化笔数据**（40 只票 / 1360 笔，native 口径）：
 
@@ -609,7 +609,7 @@ czsc 在同一批数据上退化笔 **0%**（跨 10 只票）。力度度量
 
 ### 9.9 `RulesConfig` 字段一览（R45 补）
 
-`cpt/domain/config.py::RulesConfig` 的**全部字段与默认值**。此前本文只零散提到
+`emotion_cpt.structure.config::RulesConfig` 的**全部字段与默认值**。此前本文只零散提到
 其中 4 个（`zs_wzgx` / `divergence_compare` / `min_elements_for_higher_bi` /
 `min_bi_len`），**另外 7 个从未落进文档**，而 `config.py` 声称「字段语义详见本文 §9」——
 属于**声明比实际强**（与 web 层的幽灵接口、R45 那批「注释与代码不一致」同类）。

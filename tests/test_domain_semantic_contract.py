@@ -25,12 +25,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import pytest
-
 #: 判据源码目录。**跟随已安装的包定位**，不硬编码仓库路径 ——
 #: 判据已于 2026-10-23 迁至 ``emotion_cpt.structure``（仓：nxz1026/Emotion-CPT），
 #: 硬编码路径会在搬家或装到别处时**静默失效**（读不到文件 → 断言空过）。
 import emotion_cpt.structure as _structure
+import pytest
 
 DOMAIN = Path(_structure.__file__).resolve().parent
 

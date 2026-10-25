@@ -156,7 +156,7 @@ shared memory` / `cannot create directory`。是的话就是环境，不是代�
 
 > ⚠️ **R45 更正（2026-10-04）：「16 个」已经过时。**
 > **R22（2026-09-30）接掉了 9 个模块 + 3 个函数**，R41 复核、R45 再次 grep 确认，
-> 现在**只剩 1 项**：`cpt/domain/a_share_rules.py` 里的
+> 现在**只剩 1 项**：`emotion_cpt.structure.a_share_rules` 里的
 > `t_plus_one_purchase_allowed`（仍无任何生产调用方）。
 > > （原文这里写成 `模块路径::符号`；R66 删掉该符号后，这个写法会让
 > > `scripts/check_all_claims.py` 的 S 类断言把**历史叙述**当成现行符号，故拆开写。）
@@ -314,7 +314,7 @@ print(type(recent_metrics(conn, limit=1)[0]))
 `(market, symbol)` 存，而事件表不存 symbol。
 
 **原因**：`structure_id` 的形状是 `{market}:{kind}:{level}:{start_time}`
-（见 `cpt/domain/structure_events.py::structure_id_of`）—— **不含代码**。
+（见 `emotion_cpt.structure.structure_events::structure_id_of`）—— **不含代码**。
 我一开始写了段「从 id 里反解 6 位代码」的逻辑，那是**永远不可能成立**的死代码。
 
 **判定**：`structure_id_of("cn", "bi", 0, 1700000000000)` → `cn:bi:0:1700000000000`。
@@ -1755,7 +1755,7 @@ json.decoder.JSONDecodeError: Extra data: line 68 column 2 (char 901)
 
 ## 56. 门槛路径的端点折叠**不重裁极值**，而它引出的「修好它」代价是笔数腰斩（P2-12 / R67 实测）
 
-**现象**：`cpt/domain/bi.py` 的 `_build_bis_gated` 在 `end_idx += 2` 时把与起点**同类**的
+**现象**：`emotion_cpt.structure.bi` 的 `_build_bis_gated` 在 `end_idx += 2` 时把与起点**同类**的
 锚点夹进窗口并跳过，但从不重新裁定极值 ⇒ 笔端点可以**不是**该笔窗口内同类的极值点。
 
 | gate | 笔 | 中枢 | 端点非极值（起/末） |
@@ -1817,7 +1817,7 @@ PY
 # 迁移前实测 -> 4 段：一致 19396/20123（**727 行不一致**，全是 payload.id 停在 3 段）；5 段：84/84
 ```
 
-**根因**：`state_to_payload` 把 `state.id` 也写进 jsonb（`cpt/domain/structure_events.py:371`），
+**根因**：`state_to_payload` 把 `state.id` 也写进 jsonb（`emotion_cpt.structure.structure_events:371`），
 于是同一个 id 在表里有**两份**：`structure_id` 列 + `payload['id']`。R27-4 那次的迁移
 （`scripts/migrations/2026-10-06_r27_market_prefix.sql`）只 `UPDATE ... SET structure_id`，
 **没同步 payload** —— 于是这 727 行的 payload.id 停在 `bi:5:1788…` 这种 3 段形态，
@@ -2396,3 +2396,72 @@ Python 不报错（死代码合法），`ruff` 不报错（没有语法问题）
 2. 改完跑一次**真实路径**，不是只跑单测。函数返回 `None` 这种错单测很难覆盖到。
 3. **untracked 文件不许用 `git checkout` 撤销** —— 它本来就不在版本库里。
    改之前先 `cp` 一份备份，或者精确 `replace` 回去。
+
+---
+
+## #68 临时对象取连接：表达式一结束 `__del__` 就把连接关了（R94 实测，2026-10-25）
+
+**现象**：不是超时、不是网络、不是 RDS 故障转移。是 `psycopg.OperationalError: the connection is closed`，
+而且**两条路表现完全不同**：
+
+| 调用方 | 看到的东西 |
+|---|---|
+| 测试 | 26 条红（18 ERROR + 8 FAILED），看着像「数据库连不上」 |
+| `GET /api/dashboard/track` | `200` + `{"available": false, "reason": "OperationalError: the connection is closed"}` —— **优雅降级，不报错不告警不重启** |
+| `scripts/compare_chanlun_backends.py` | 直接 `Traceback` 崩在第 132 行 |
+
+**根因**：`cpt/adapters/a_share_local.py` 的 `_get_conn()` 是 **per-instance 缓存**
+（`if self._conn is None: self._conn = open_conn()`），而同一个类为了修连接泄漏加了：
+
+```python
+def __del__(self) -> None:
+    self.close()          # close() 里 conn, self._conn = self._conn, None; conn.close()
+```
+
+于是 `AShareLocalClient()._get_conn()` 这种**临时对象写法**命中了 CPython 的引用计数：
+
+```
+AShareLocalClient()   ← 实例只在表达式里存活
+    ._get_conn()      ← 交出一条连接
+                      ← 表达式结束，实例引用计数归零 → __del__ → close() → 连接被关
+调用方 cur = conn.cursor()  → OperationalError: the connection is closed
+```
+
+**一行判据**（决定性，秒出）：
+
+```python
+AShareLocalClient()._get_conn()          # status=1 (BAD)，cursor 报 the connection is closed
+c = AShareLocalClient(); c._get_conn()   # status=0，cursor ok
+```
+
+**为什么能潜伏**：
+- 两处修法各自都对 —— 加 `__del__` 修了「cpt-dashboard 持 103 个 socket 打满 max_connections=100」；
+  `_get_conn()` 缓存修了「每请求新建连接」。**两条凑一起才出错**。
+- 报错被最外层 `except Exception` 接住，写进 `reason` 字符串，页面只是少一块内容。
+- 单跑 `tests/test_track_maintenance.py` 时**同样的代码是绿的** —— 因为该文件里 `_open_pg_conn()`
+  恰好被 GC 时机错开了（`client` 变量在函数栈上多活了一帧）。**「单跑绿、全量红」不一定是测试污染**，
+  也可能是 GC 时机。
+
+**修法（R94，方案 A）**：给模块加一个**不经过 client 生命周期**的入口：
+
+```python
+def open_conn() -> Any:
+    """开一条新连接。调用方负责 close()。"""
+    return psycopg.connect(**connection_kwargs())
+```
+
+`_get_conn()` 内部改成 `self._conn = open_conn()`（DRY），8 处「临时对象取连接」全部改成 `open_conn()`：
+`cpt/web/track_api.py`（**生产代码**，12 处 `_conn()` 共用）、`scripts/compare_chanlun_backends.py`、
+`scripts/verify_public_contracts.py`、4 个测试文件。
+
+**为什么不用「只改调用点、让 client 活到用完」**：那是把陷阱留给下一个人。
+`_get_conn()` 的问题是**既交出连接又保留所有权** —— 缺陷在接口，不在调用方。
+
+**三条通用规矩**：
+
+1. **交出去的东西，不要保留所有权。** 一个方法要么返回「你自己管」，要么返回「我管着」，
+   不能两者都是。`__del__` 里关闭 `self._conn` 时，就假定它还归自己 —— 这个假定必须有接口保证。
+2. **`__del__` 里只关闭「确认还持有」的资源。** 加了 `__del__` 之后，所有「临时对象」写法都会变成本 bug。
+   加之前先 `grep` 一遍该类被实例化的地方。
+3. **降级路径要能被看见。** `available: false` + `reason` 是好设计，但**没有告警**就等于是
+   「静默失败」。这条 API 恒返 false 了至少一天，靠人肉点页面才发现。

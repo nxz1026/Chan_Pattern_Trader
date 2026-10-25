@@ -262,11 +262,17 @@ MUTATIONS: tuple[Mutation, ...] = (
 
 #: 自检用的**负控制**：改一个列出的测试**不会**碰到的文件。
 #: 它**必须**被报成「存活」—— 若被报成「抓到」，说明本脚本在乱报。
+#:
+#: 目标文件必须**在本仓且真实存在**。原先指 `cpt/domain/config.py`，
+#: 2026-10-23 判据本体迁往 Emotion-CPT 后该文件已删，于是 `--selftest`
+#: 直接 `FileNotFoundError` 崩掉（R94）。改用 `cpt/backtest/stats.py`：
+#: 它只被 `tests/test_backtest_*.py` 读，与下面列出的 dashboard 契约测试
+#: 完全不相干 —— 负控制要的正是「真的无关」，而不是「随便换个文件」。
 SELFTEST_UNWATCHED = Mutation(
     name="(自检负控制) 与所列测试无关的改动",
-    rel="cpt/domain/config.py",
-    old="min_bi_len: int = 6",
-    new="min_bi_len: int = 99",
+    rel="cpt/backtest/stats.py",
+    old="_MIN_ABS_T: Final[float] = 2.0",
+    new="_MIN_ABS_T: Final[float] = 9.9",
     tests=("tests/test_dashboard_polling_contract.py",),
     why="只读 dashboard/*.js 的契约测试不可能因为改 Python 默认值而变红。"
     "本条用来证明本脚本**能**报出「存活」，而不是无脑报「抓到」",

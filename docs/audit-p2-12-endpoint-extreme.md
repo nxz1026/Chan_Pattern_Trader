@@ -4,7 +4,7 @@
 > 「笔端点 = 该笔窗口内同类最极端分型」这一不变量（czsc 满足，native 违反
 > 53/57/59 处），而修好它的代价是把笔数从 98/104/110 压到 **41/53/38**，
 > 并且这与 `bi.py` 自己 docstring 承诺的「合并端点、不丢弃」语义冲突。
-> 处置：**记录为已知口径差异**，不改代码（`cpt/domain/bi.py` 未改动）。
+> 处置：**记录为已知口径差异**，不改代码（`emotion_cpt.structure.bi` 未改动）。
 
 生成命令（两个脚本都可重跑，判据自带合成自审）：
 
@@ -19,7 +19,7 @@
 
 ## 1. 缺陷本体
 
-报告 §4 P2-12 原文：`cpt/domain/bi.py:192` + `:94-95` —— `end_idx += 2` 跳过同类
+报告 §4 P2-12 原文：`emotion_cpt.structure.bi:192` + `:94-95` —— `end_idx += 2` 跳过同类
 分型，而 `_make_bi` 的 `high/low` 只取两端点 ⇒ 区间内更极端的同类分型被永久丢弃；
 `zhongshu._overlap` 直接用该 `high/low`。
 
@@ -176,7 +176,7 @@ native 多出的 1~5 个分型全在 czsc 因截断而**没覆盖到的窗口边
 
 ### 3.3 与「合并端点」语义冲突
 
-`cpt/domain/bi.py:127` 的契约是：*跨度不足时**合并端点**而不是丢弃该笔；合并的含义是
+`emotion_cpt.structure.bi:127` 的契约是：*跨度不足时**合并端点**而不是丢弃该笔；合并的含义是
 「当前笔的终点顺延到下一个够远的异类端点」*。
 
 DP 最优解**不是**贪心合并 —— 它是全局选择，会主动**跳过**某些合法端点以换取更长的链。
@@ -184,12 +184,12 @@ DP 最优解**不是**贪心合并 —— 它是全局选择，会主动**跳过
 
 ### 3.4 一旦落地，波及面
 
-- `SCHEMA_VERSION` v1 → v2（`cpt/domain/config.py:58` 定义；`cpt/domain/config.py:214` 版本不符即抛错）
+- `SCHEMA_VERSION` v1 → v2（`emotion_cpt.structure.config:58` 定义；`emotion_cpt.structure.config:214` 版本不符即抛错）
 - 全部回放 fixture 重建（笔/中枢/信号/背驰全变）
 - `min_bi_len` 重新校准：现行 6 是为「无约束贪心」调的；DP 解在 gate=4 时笔数
   89/89/70、gate=5 时 57/61/60，需整套重扫并同步
   `docs/calibration-r56-min-bi-len.json`
-- `min_bi_len_by_interval` 各档（`cpt/domain/config.py`）全部重调
+- `min_bi_len_by_interval` 各档（`emotion_cpt.structure.config`）全部重调
 - 历史结构/信号**不可比**
 
 ---
@@ -220,7 +220,7 @@ DP 最优解**不是**贪心合并 —— 它是全局选择，会主动**跳过
 
 ## 5. 处置
 
-**不改代码。** `cpt/domain/bi.py` 保持基线（md5 `83c5e3efb1dbdece69a26e080ede7784`）。
+**不改代码。** `emotion_cpt.structure.bi` 保持基线（md5 `83c5e3efb1dbdece69a26e080ede7784`）。
 
 理由：
 - 报告建议①②都**不能**归零（3.2），建议①还破坏连续性承诺；

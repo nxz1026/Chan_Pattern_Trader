@@ -23,7 +23,7 @@ v0.1（2026-09-22，M0-02）的 chanlun-pro / chanlun.py / chanlun_pine / chan.p
 | 三根分型 | 直接取 `analyzer.fx_list` |
 | 新笔判定 | 直接取 `analyzer.bi_list`，门槛由 `min_bi_len` 控制 |
 | 笔的力度度量 | `BI.power_price` / `power_volume` / `length` |
-| 一买/一卖结构谓词 | `check_first_buy` / `check_first_sell`，**逐行移植**为 `cpt/domain/first_buy.py` |
+| 一买/一卖结构谓词 | `check_first_buy` / `check_first_sell`，**逐行移植**为 `emotion_cpt.structure.first_buy` |
 
 ### 2.2 明确不复用
 
@@ -121,7 +121,7 @@ M0 曾验证「PyPI 上是否存在 MIT 许可的旧版 Python `chanlun` 包」�
 ## 5. 许可证义务
 
 - **Apache-2.0（czsc）**：保留原版权声明与 `LICENSE`；对修改过的部分须注明修改。
-  CPT 的 `cpt/domain/first_buy.py` 是从 czsc `crates/czsc-signals/src/utils/cxt.rs`
+  CPT 的 `emotion_cpt.structure.first_buy` 是从 czsc `crates/czsc-signals/src/utils/cxt.rs`
   **逐行移植**的，已在模块 docstring 中注明来源与许可证。
 - **MIT（wbt）**：无传染性；CPT 未复制其代码。
 - **CPT 自身许可证不受影响**：可选依赖（非复制源码进仓库）不触发传染义务。

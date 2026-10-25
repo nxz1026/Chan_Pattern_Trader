@@ -221,7 +221,7 @@ bar = fractal["bar_index"]       # 原始下标 —— 拿它当跨度会让门�
 
 | 字段 | 类型 | 说明 |
 |---|---|---|
-| `signal_id` | `str` | **稳定 upsert 主键**（见 `cpt/domain/signal.py`） |
+| `signal_id` | `str` | **稳定 upsert 主键**（见 `emotion_cpt.structure.signal`） |
 | `level` | `int` | 级别 |
 | `signal_type` | `"first_buy"` | 当前只实现一买 |
 | `status` | `str` | 见 §4 词表 |
@@ -237,7 +237,7 @@ bar = fractal["bar_index"]       # 原始下标 —— 拿它当跨度会让门�
 
 ---
 
-## 4. 取值域（`cpt/domain/models.py` 的 `Literal` 别名）
+## 4. 取值域（`emotion_cpt.structure.models` 的 `Literal` 别名）
 
 ```text
 FractalKind        = "top" | "bottom"

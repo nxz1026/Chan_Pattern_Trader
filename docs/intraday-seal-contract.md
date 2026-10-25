@@ -19,7 +19,7 @@ CPT (scripts/intraday_collectd.py)  ──写──▶  public.intraday_seal_sna
 - **单向**：CPT 写，emotion-core 只读。与 `docs/shared-tables-contract.md` 那批
   7 张表方向**相反**（那批 emotion-core 写、CPT 读），所以单独成文。
 - **判据只在 CPT 一处**：哪只票封在板上由
-  `cpt/domain/intraday_rules.py::seal_strength` 判。emotion-core **不要**再拿
+  `emotion_cpt.structure.intraday_rules::seal_strength` 判。emotion-core **不要**再拿
   `limit_price` / `is_at_limit` 判一遍 —— ADR 0003 §F.2 北交所 ST 那 40 条不一致
   就是"两套口径"的实测代价。
 - **不存原始五档**。存的是每轮每只票的**结论**（封没封 / 封单多厚 / 当时用的涨停价）。

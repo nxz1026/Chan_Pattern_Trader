@@ -90,6 +90,7 @@ __all__ = [
     "fetch_security_names",
     "hfq_factor_on",
     "is_trade_day",
+    "open_conn",
     "open_days_between",
     "raw_bar_exists_on",
 ]
@@ -582,6 +583,43 @@ class ASharePlaceholderRowsError(AShareLocalError):
     """
 
 
+def open_conn() -> Any:
+    """开一条**调用方拥有**的 DB 连接（独立于 :class:`AShareLocalClient` 的生命周期）。
+
+    ⚠️ 为什么需要它 —— R94 实测的平台级事故：
+
+    :meth:`AShareLocalClient._get_conn` 是 **per-instance 缓存**，而
+    ``close()`` / ``__del__`` 会把它关掉。于是这种写法拿到的是**刚被关掉的连接**::
+
+        conn = AShareLocalClient()._get_conn()   # ❌ 临时对象，语句结束即 __del__
+
+    CPython 的引用计数在语句结束时立刻回收那个临时 client ⇒ ``__del__`` ⇒
+    ``close()`` ⇒ 交给调用方的连接 ``status=BAD`` ⇒
+    ``psycopg.OperationalError: the connection is closed``。
+
+    线上实测（2026-10-25）：``cpt/web/track_api.py::_conn()`` 正是这么写的，
+    ``GET /api/dashboard/track`` 恒返
+    ``{"available": false, "reason": "OperationalError: the connection is closed"}``
+    —— 追踪页整页无数据，而它只是**优雅降级**，不报错、不告警、不重启。
+
+    判据：**要一条活连接、且不关心谁持有它** → 用本函数。
+    要「一次请求内复用同一条连接」→ ``client = AShareLocalClient()`` 之后再调
+    ``client._get_conn()``，**且 client 必须活到用完**（别写成临时对象）。
+
+    调用方负责 ``close()``，或用 ``with`` 管起来。
+
+    :raises AShareLocalError: psycopg 未安装时。
+    """
+    try:
+        import psycopg  # noqa: PLC0415
+    except ModuleNotFoundError as exc:
+        raise AShareLocalError(
+            "psycopg 未安装。A 股本地数据层需要 psycopg[binary]，"
+            "运行 `pip install -e '.[db]'` 后重启服务。"
+        ) from exc
+    return psycopg.connect(**connection_kwargs())
+
+
 @dataclass(frozen=True)
 class AShareFetchResult:
     """拉取结果（含被跳过的日期缺口，便于上层做可观测性）。"""
@@ -627,17 +665,15 @@ class AShareLocalClient:
         self._conn: Any | None = None
 
     def _get_conn(self) -> Any:
+        """本 client **缓存**的那条连接（`client` 必须先于连接活着）。
+
+        ⚠️ 只在本 client 会被持有的场景下用。临时对象写法
+        ``AShareLocalClient()._get_conn()`` 会因 ``__del__`` 立刻关掉连接 ——
+        那种场景要「一条独立连接」，请改用模块级 :func:`open_conn`。
+        """
         if self._conn is None:
             if self._conn_factory is None:
-                try:
-                    import psycopg  # noqa: PLC0415
-                except ModuleNotFoundError as exc:
-                    raise AShareLocalError(
-                        "psycopg 未安装。A 股本地数据层需要 psycopg[binary]，"
-                        "运行 `pip install -e '.[db]'` 后重启服务。"
-                    ) from exc
-
-                self._conn = psycopg.connect(**connection_kwargs())
+                self._conn = open_conn()
             else:
                 self._conn = self._conn_factory()
         return self._conn
@@ -663,7 +699,7 @@ class AShareLocalClient:
         except Exception:  # noqa: BLE001 - 关闭失败不该影响调用方
             pass
 
-    def __enter__(self) -> "AShareLocalClient":
+    def __enter__(self) -> AShareLocalClient:
         return self
 
     def __exit__(self, *exc_info: object) -> None:
