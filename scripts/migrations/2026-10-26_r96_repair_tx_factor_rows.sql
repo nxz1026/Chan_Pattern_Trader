@@ -47,6 +47,7 @@
 -- - 有日线的 251 行与东财口径不一致数：**0**
 -- - 剩余 `tx:fqkline` 行：**0**
 -- - 表总行数不变：3,484,374 → 3,484,374
+-- - migration 重跑第二遍：`IF NOT EXISTS` 保住首次备份，不会自我覆盖
 --
 -- ⚠️ 本条**只修数据，不改代码**。产生 tx 行的那台设备仍在：
 -- `cpt/application/a_share_snapshot.py::_ensure_factors_and_persist`
@@ -55,9 +56,12 @@
 
 BEGIN;
 
--- 1) 备份（重复执行会先删掉旧备份，以最新一次为准）
-DROP TABLE IF EXISTS asel.ref_adjust_factor_tx_backup_20261026;
-CREATE TABLE asel.ref_adjust_factor_tx_backup_20261026 AS
+-- 1) 备份 —— ⚠️ 必须用 IF NOT EXISTS，**绝不能 DELETE/DROP 后重建**。
+-- R96 第一版写的是 `DROP TABLE IF EXISTS` + `CREATE TABLE AS SELECT`，
+-- 于是「重复执行验证幂等」这一步把刚建好的 28,569 行备份清空了：
+-- 那时库里已经没有 tx 行，重建出来的备份是**空表**。
+-- 备份表一旦被自己覆盖，回滚能力就没了。
+CREATE TABLE IF NOT EXISTS asel.ref_adjust_factor_tx_backup_20261026 AS
 SELECT * FROM asel.ref_adjust_factor WHERE source LIKE 'tx:%';
 
 -- 2) 有日线的行：改用东财口径（因子 + source 一起）
