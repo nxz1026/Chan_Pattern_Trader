@@ -22,7 +22,7 @@ import threading
 import time as _time
 from collections import OrderedDict
 from collections.abc import Sequence
-from typing import Any
+from typing import Any, cast
 
 from cpt.adapters.backend_factory import BACKEND_CHOICES, DEFAULT_BACKEND, resolve_backend
 from cpt.adapters.binance_futures import (
@@ -197,7 +197,7 @@ def _compute_trend_types(
     走势类型边界问题会连带打掉整张快照。
     """
     try:
-        return classify_trend(bis, zhongshus, level=config.levels[0])
+        return cast("tuple[Any, ...]", classify_trend(bis, zhongshus, level=config.levels[0]))
     except (ValueError, TypeError) as exc:
         _LOG.warning("trend type classification failed: %s", exc)
         return ()

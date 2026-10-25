@@ -143,7 +143,7 @@ class ChanlunBackend(Protocol):
 def _resolve_time(bar_index: int, bars: Sequence[BarLike] | None) -> int:
     """把 bar 索引解析为毫秒时间戳;无 bars 时返回 PLACEHOLDER_TIME。"""
     if bars is None:
-        return PLACEHOLDER_TIME
+        return int(PLACEHOLDER_TIME)
     if not (0 <= bar_index < len(bars)):
         raise IndexError(f"bar_index={bar_index} 超出 bars 范围 [0, {len(bars)})")
     return int(bars[bar_index].open_time)

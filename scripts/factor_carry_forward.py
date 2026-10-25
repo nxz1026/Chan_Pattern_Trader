@@ -210,9 +210,7 @@ def main(argv: list[str] | None = None) -> int:
             scanned, changed = promote_recompute_factors(conn2, dry_run=False)
             break
         except Exception as exc:  # noqa: BLE001
-            _LOG.error(
-                "promote 失败（第 %d 次）：%s: %s", attempt, type(exc).__name__, exc
-            )
+            _LOG.error("promote 失败（第 %d 次）：%s: %s", attempt, type(exc).__name__, exc)
             if attempt == 2:
                 return 3
         finally:

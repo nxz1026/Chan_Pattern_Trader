@@ -218,8 +218,7 @@ def build_recommendation(snapshot: dict[str, Any]) -> dict[str, Any]:
         else:
             headline = "结构已作废"
             reason = (
-                f"{_label(sig_type)}已作废（不是反向信号，也不该反着做）"
-                "—— 之前那个判断不成立了。"
+                f"{_label(sig_type)}已作废（不是反向信号，也不该反着做）—— 之前那个判断不成立了。"
             )
         out = _build(
             ACTION_HOLD,

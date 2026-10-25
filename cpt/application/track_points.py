@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 _LOG = logging.getLogger(__name__)
 
@@ -197,9 +197,7 @@ def _buy_reference(
     优先用中枢下沿（结构比单笔强），其次最近 N 笔低点。**取最低**后上调 2% 留缓冲。
     """
     # 算式本体在 Emotion-CPT（emotion_cpt.snapshot.points）—— 两侧单一真源。
-    pick = _shared_structure_pick(
-        {"zhongshus": zhongshus, "bis": bis}, price_ratio, "buy"
-    )
+    pick = _shared_structure_pick({"zhongshus": zhongshus, "bis": bis}, price_ratio, "buy")
     if pick.price_level is None:
         if pick.n_candidates == 0:
             # 没有结构数据 ⇒ 给出可展示的占位（与旧实现同形）
@@ -228,9 +226,7 @@ def _sell_reference(
 
     优先用中枢上沿，其次最近 N 笔高点（向上笔）。**取最高**后下调 3% 留缓冲。
     """
-    pick = _shared_structure_pick(
-        {"zhongshus": zhongshus, "bis": bis}, price_ratio, "sell"
-    )
+    pick = _shared_structure_pick({"zhongshus": zhongshus, "bis": bis}, price_ratio, "sell")
     if pick.price_level is None:
         if pick.n_candidates == 0:
             return {
@@ -257,4 +253,6 @@ def _confirmed_point(
 
     仅在 ``signal.status == "confirmed"`` 且 ``action`` 匹配时被调。
     """
-    return _shared_confirmed_point(last_bi, last_zs, price_ratio, side)
+    return cast(
+        "dict[str, Any] | None", _shared_confirmed_point(last_bi, last_zs, price_ratio, side)
+    )

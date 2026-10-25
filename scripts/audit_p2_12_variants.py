@@ -62,7 +62,7 @@ def span_mi(anc: Sequence[Fractal], i: int, j: int) -> int:
     """
     lo, hi = anc[i].merged_index, anc[j].merged_index
     assert lo is not None and hi is not None, "分型缺 merged_index，跨度无从计算"
-    return hi - lo + 1
+    return int(hi - lo + 1)
 
 
 def is_ext(anc: Sequence[Fractal], i: int, j: int, kind: str) -> int:

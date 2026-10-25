@@ -256,6 +256,7 @@ def test_reason_from_center_ids_roundtrip() -> None:
 
 # --- R79：一卖的失效归因（此前完全空缺） --------------------------------
 
+
 def test_first_sell_needs_an_uptrend_not_a_downtrend() -> None:
     """一卖只在**上涨**走势里有意义；方向判据与一买相反。
 
@@ -265,18 +266,16 @@ def test_first_sell_needs_an_uptrend_not_a_downtrend() -> None:
     """
     import cpt.application.signal_invalidation as si
 
-    assert si.classify_invalidation(
-        trend_direction=1, facts=_Facts(), kind="first_sell"
-    ) is None, "上涨走势 + 结构满足，一卖不该被判失效原因"
+    assert si.classify_invalidation(trend_direction=1, facts=_Facts(), kind="first_sell") is None, (
+        "上涨走势 + 结构满足，一卖不该被判失效原因"
+    )
     assert (
         si.classify_invalidation(trend_direction=-1, facts=_Facts(), kind="first_sell")
         == "not_in_downtrend"
     )
     # 一买保持原判
     assert si.classify_invalidation(trend_direction=-1, facts=_Facts()) is None
-    assert (
-        si.classify_invalidation(trend_direction=1, facts=_Facts()) == "not_in_downtrend"
-    )
+    assert si.classify_invalidation(trend_direction=1, facts=_Facts()) == "not_in_downtrend"
 
 
 def test_first_sell_text_never_says_downtrend_or_first_buy() -> None:
@@ -319,9 +318,9 @@ def test_first_sell_side_records_the_reason() -> None:
     """
     from pathlib import Path
 
-    src = (
-        Path(__file__).resolve().parents[1] / "cpt/application/a_share_snapshot.py"
-    ).read_text(encoding="utf-8")
+    src = (Path(__file__).resolve().parents[1] / "cpt/application/a_share_snapshot.py").read_text(
+        encoding="utf-8"
+    )
     start = src.index("def _derive_first_sell_signal(")
     end = src.index("def _apply_daily_tags(")
     body = src[start:end]

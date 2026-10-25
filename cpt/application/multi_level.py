@@ -162,18 +162,10 @@ def structures_for_level(
     """Return ``(fractals, bis, zhongshus)`` for ``level``; fall back to nearest."""
     if level in multi:
         entry = multi[level]
-        return (
-            cast(tuple[Fractal, ...], entry["fractals"]),
-            cast(tuple[Bi, ...], entry["bis"]),
-            cast(tuple[ZhongShu, ...], entry["zhongshus"]),
-        )
+        return (entry["fractals"], entry["bis"], entry["zhongshus"])
     nearest = min(multi.keys(), key=lambda candidate: abs(candidate - level))
     entry = multi[nearest]
-    return (
-        cast(tuple[Fractal, ...], entry["fractals"]),
-        cast(tuple[Bi, ...], entry["bis"]),
-        cast(tuple[ZhongShu, ...], entry["zhongshus"]),
-    )
+    return (entry["fractals"], entry["bis"], entry["zhongshus"])
 
 
 __all__ = ["build_multi_level", "format_multi_level", "structures_for_level"]

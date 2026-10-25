@@ -1799,12 +1799,38 @@ def open_conn() -> Any:                       # cpt/adapters/a_share_local.py
 
 深挖：原始价两侧**完全一致**（1329.00 / 1335.00），差异全在复权因子上 ——
 腾讯隐含因子 ≈ 6.98，本地 `asel.ref_adjust_factor` = 6.39414671（三天不变，正常）。
-400 天逐日扫 ratio（tencent/local）在 **1.074~1.121** 之间漂、**没有阶跃**，
-回看 2025-06 也是 1.086 ⇒ 是**长存的常数级锚点差 ~8.6~9.1%**，不是新断的。
 
-- **对策略无影响**：常数倍缩放不改变收益率序列与缠论结构。
-- **错的是判据**：用「绝对后复权价相等」比两个数据源，本来就不成立，应当比收益率序列。
-- **不在 CI**（`check_gate_coverage.py` 明写「人工按需跑的对外契约抽查」）⇒ 不是门禁红项，列为待拍板。
+第一版结论是「长存的常数级锚点差，对策略无影响」。**这句是错的**，R95 当日自己推翻：
+
+| 比较（600519，40 个交易日） | 结果 |
+|---|---|
+| 腾讯 `qfq` vs 腾讯 `bfq` 价格 | 逐日**完全相同**，收益差 `0.00e+00` |
+| 腾讯 `hfq` vs 腾讯 `bfq` 收益 | **39/39 天全部不一致**，最大差 `5.03e-03` |
+| 腾讯 `hfq` 隐含因子 vs 本地因子 | 腾讯逐日漂 **6.978~7.088**（±0.2%），本地**恒定 6.39414671** |
+
+跨股实测「大涨大跌日 `hfq_ret/bfq_ret` 中位」（n≈24~29）：600519=`0.801`、000001=`0.768`、
+600036=`0.721`、002249=`0.745` —— 每只票各自的常数，**不是全局常数**。
+
+⇒ 差 8.4% 不是「锚点不同」这么温和：**腾讯 `hfq` 这条序列与它自家的 `qfq`/`bfq` 都对不上**。
+拿它当标尺去判本地因子表是伪判据，而且**如果 CPT 用 `hfq/raw` 反推因子，会得到逐日漂移的因子**。
+
+本地侧反而是自洽的：`tencent bfq` == `local daily_bar.close` **最大差 0.0**；
+`local_ret` == `bfq_ret` 完全相同；`asel.ref_adjust_factor` 的 `carry_forward` 口径
+（只在除权日变，其余日子沿用）意味着**窗口内恒定为设计如此**。
+
+新判据（`c5_hfq_matches_local_factor` 重写，三层）：
+
+1. **硬**：腾讯 `bfq`/`qfq` close == 本地 `daily_bar.close` 逐日零误差（容差 0.005）。
+2. **硬**：本地 `hfq_factor` 在无除权窗口内必须恒定（窗口内变了 ⇒ carry_forward 口径失效）。
+3. **条件**：只有腾讯 `hfq` 自身与 `bfq` 自洽时才真的拿它交叉校验本地因子；否则只记录比值。
+
+实跑：`✅ 原始价 60/60 天零误差、本地因子 60 天恒定 6.394147；⚠️ 腾讯 hfq 与自家的收益对不上（最大差 7.02e-03），因此不拿它当标尺`。
+
+**遗留**：`asel.ref_adjust_factor` 3,484,374 行里有 **28,569 行（0.8%）** 的 `source` 是
+`tx:fqkline` —— 那批因子由腾讯 `hfq/raw` 反推，按上面的实测口径值得复查。
+4,237 个代码的因子值在历史上有变化（= 有除权事件，正常）。见 `docs/known-traps.md` #69。
+
+- **不在 CI**（`check_gate_coverage.py` 明写「人工按需跑的对外契约抽查」）⇒ 不是门禁红项。
 
 ### 15.6 P0 门禁尾巴
 
@@ -1814,7 +1840,7 @@ def open_conn() -> Any:                       # cpt/adapters/a_share_local.py
 |---|---|---|
 | `check_all_claims` | 27 处 | `cpt/domain/X.py` → `emotion_cpt.structure.X`（12 份现行文档 50 处；排除 `docs/archive/`）；`deploy/*/README.md` 两个跨仓脚本路径加 `Emotion-CPT/` 前缀 |
 | `check_doc_counts` | 3 行 | `docs/architecture.md` §2.1：adapters 7,644→**7,712**、domain 18/3,581→**1/63**、web 5,766→**5,777** |
-| `check_line_refs` | 1 处 | 随 `config.py:214` 改写消失（该文件本仓不存在，无法也不该校验） |
+| `check_line_refs` | 1 处 | 随那处 `config.py` 引用改写消失（该文件本仓不存在，无法也不该校验） |
 | `check_doc_drift` | 3 处 | 同上，随 §2.1 对齐 |
 | `check_test_mutation --selftest` | 1 崩 | 负控制 `rel` 从已删的 `cpt/domain/config.py` 换成 `cpt/backtest/stats.py`（`_MIN_ABS_T`），并写明「负控制要的是真的无关，不是随便换个文件」 |
 | `check_cold_environment` | 1 failed | 随连接修复消失 |

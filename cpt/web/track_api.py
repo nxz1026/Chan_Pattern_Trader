@@ -405,9 +405,7 @@ def handle_track_advice(user_id: str, code: str) -> tuple[dict[str, Any], int]:
             "status_code": rec.get("status"),
             "facts": {
                 "has_reversal_bi": _safe_bool(snapshot, "signal", "has_reversal_bi"),
-                "divergence_status": divergence_text(
-                    str(rec.get("divergence_status") or "")
-                ),
+                "divergence_status": divergence_text(str(rec.get("divergence_status") or "")),
             },
             "triggers_to_confirm": ["再冒出一笔收盘的反向笔（叫「反抽」或「回调」都行）"]
             if rec.get("status") == "structure_ready"

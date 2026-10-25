@@ -24,7 +24,7 @@ import logging
 from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from dataclasses import replace
-from typing import Any
+from typing import Any, cast
 
 from cpt.application.persist_gate import prod_table_write_enabled
 from cpt.domain.models import Bi, Fractal, StructureEvent, TrendType, ZhongShu
@@ -217,7 +217,7 @@ def record_structure_events(
                 _rollback_quietly(db)
             else:
                 db.commit()  # ← store 层不 commit，边界在这里
-            return events
+            return cast("tuple[Any, ...]", events)
     except Exception as exc:  # noqa: BLE001 — 旁路失败不影响快照
         _LOG.warning("结构事件记录失败（不影响快照）: %s", exc)
         # 自己开的连接由 _connection 的 finally: close() 兜住；只有调用方传进来

@@ -164,7 +164,6 @@ def test_config_version_cannot_be_overridden_by_data() -> None:
         RulesConfig.from_dict({"config_version": "v99"})
     # 同版本 / 不带版本 ⇒ 正常接受（线上快照的 ``config`` 本来就是空的）
     assert (
-        RulesConfig.from_dict({"config_version": SCHEMA_VERSION}).config_version
-        == SCHEMA_VERSION
+        RulesConfig.from_dict({"config_version": SCHEMA_VERSION}).config_version == SCHEMA_VERSION
     )
     assert RulesConfig.from_dict({}).config_version == SCHEMA_VERSION

@@ -55,9 +55,7 @@ _SUBMODULES = (
 for _name in _SUBMODULES:
     _mod = getattr(_structure, _name, None)
     if _mod is None:  # pragma: no cover - 搬迁不完整时的显式失败
-        raise ImportError(
-            f"emotion_cpt.structure 缺少子模块 {_name!r} —— 搬迁不完整？"
-        )
+        raise ImportError(f"emotion_cpt.structure 缺少子模块 {_name!r} —— 搬迁不完整？")
     sys.modules[f"{__name__}.{_name}"] = _mod
 
 __all__ = _SUBMODULES

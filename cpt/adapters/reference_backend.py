@@ -184,7 +184,8 @@ class ReferenceChanlunBackend:
         """后端级 ``min_bi_len`` 优先；没给就退回 config（如果有这个字段）。"""
         if self.min_bi_len is not None:
             return self.min_bi_len
-        return _rules_cfg(config).min_bi_len
+        value = _rules_cfg(config).min_bi_len
+        return int(value) if value is not None else None
 
     def _log_debug_no_code(self) -> None:
         """没给 code 就走到腾讯那一级 —— **降为 debug**：这是调用方没传参数，

@@ -35,6 +35,7 @@ import json
 import sys
 import urllib.request
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -126,34 +127,135 @@ def c4_sina_quote() -> str:
 
 
 def c5_hfq_matches_local_factor() -> str:
-    """交叉校验（附加）：腾讯 hfq 价与**本地因子表**锚定值是否自洽。
+    """交叉校验（附加）：腾讯原始价 vs 本地 `daily_bar`，以及本地复权因子自洽性。
 
-    两条独立数据路径（腾讯 hfq  vs  东财重算的因子表）算出的**当日后复权价**
-    应该一致。不一致 ⇒ 至少有一边的复权口径漂了。
+    ## 为什么改判据（R95，2026-10-25）
+
+    改之前比的是「腾讯 hfq 绝对价 == 本地原始价 × 本地因子」。这个判据**两边都错**：
+
+    - 绝对后复权价本来就**不要求**相等 —— 两个源各挑自己的锚点日；
+    - 更要紧的是**腾讯 hfq 这条序列自己就不可靠**。同一时刻、同一标的实测：
+
+      | 比较 | 结果（40 个交易日） |
+      |---|---|
+      | 腾讯 `qfq` vs 腾讯 `bfq` | 价格逐日**完全相同**，收益差 **0.00e+00** |
+      | 腾讯 `hfq` vs 腾讯 `bfq` | 收益 **39/39 天全部不一致**，最大差 **5.03e-03** |
+
+      即腾讯的 `hfq` 与它自家的 `qfq`/`bfq` 都对不上，隐含因子逐日漂 0.1%~0.2%
+      （600519 实测 6.978~7.088）。拿它当标尺去判本地因子表，是**伪判据**。
+
+    ## 现在判什么
+
+    1. **硬**：腾讯 `bfq`（= `qfq`）收盘价 == 本地 `daily_bar.close`，逐日零误差。
+       两侧都是交易所原始价，这里不该有任何差。
+    2. **硬**：本地 `asel.ref_adjust_factor` 在「无除权窗口」内必须恒定。
+       它是 `carry_forward` 出来的 —— 只在东财有公司行动时才变，其余日子沿用。
+       一旦它天天变，说明有东西在抖，那是真 bug。
+    3. **条件**：只有当腾讯 `hfq` 自身与 `qfq` 自洽时（上游哪天修好了），才真正
+       拿它交叉校验本地因子；否则只**记录**比值，不作判据。
     """
-    bars = TencentKlineClient().fetch_daily_bars("600519", limit=3)
-    tencent_hfq_close = bars[-1].close
+    limit = 60
+    hfq = TencentKlineClient(adjust="hfq").fetch_daily_bars("600519", limit=limit)
+    bfq = TencentKlineClient(adjust="bfq").fetch_daily_bars("600519", limit=limit)
+    qfq = TencentKlineClient(adjust="qfq").fetch_daily_bars("600519", limit=limit)
+    if not hfq or not bfq or not qfq:
+        return "⚠️ 腾讯返回空序列，无法交叉校验"
+
+    from datetime import UTC, datetime
+
+    def _day(bar: Any) -> str:
+        ms = int(bar.open_time)
+        return datetime.fromtimestamp(ms / 1000, UTC).date().isoformat()
+
+    ten_hfq = {_day(b): float(b.close) for b in hfq}
+    ten_bfq = {_day(b): float(b.close) for b in bfq}
+    ten_qfq = {_day(b): float(b.close) for b in qfq}
+
     from cpt.adapters.a_share_local import open_conn
 
     conn = open_conn()
-    conn.autocommit = True
-    cur = conn.cursor()
-    cur.execute("""SELECT hfq_factor FROM asel.ref_adjust_factor
-                   WHERE code='600519' ORDER BY trade_date DESC LIMIT 1""")
-    row = cur.fetchone()
-    cur.execute("""SELECT close FROM public.daily_bar
-                   WHERE code='600519' ORDER BY date DESC LIMIT 1""")
-    raw = cur.fetchone()[0]
-    local_hfq_close = float(raw) * float(row[0])
-    dev = abs(local_hfq_close / tencent_hfq_close - 1)
-    if dev > 0.01:
+    try:
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT d.date, d.close, f.hfq_factor
+               FROM public.daily_bar d
+               LEFT JOIN asel.ref_adjust_factor f
+                 ON f.code = d.code AND f.trade_date = d.date
+               WHERE d.code='600519' AND d.date >= %s
+               ORDER BY d.date""",
+            (min(ten_hfq),),
+        )
+        local = {
+            r[0].isoformat(): (float(r[1]), None if r[2] is None else float(r[2]))
+            for r in cur.fetchall()
+        }
+    finally:
+        conn.close()
+
+    fac = {d: v[1] for d, v in local.items() if v[1] is not None}
+    days = sorted(d for d in ten_hfq if d in ten_bfq and d in ten_qfq and d in local and d in fac)
+    if len(days) < 10:
+        return f"⚠️ 可对齐的交易日只有 {len(days)} 天，样本不够做交叉校验"
+
+    # ── 硬判据 1：原始价零误差 ─────────────────────────────────────────
+    raw_bad = [d for d in days if abs(ten_bfq[d] - local[d][0]) > 0.005]
+    if raw_bad:
+        worst = max(abs(ten_bfq[d] - local[d][0]) for d in days)
         return (
-            f"⚠️ 两侧后复权价差 {dev * 100:.2f}%："
-            f"腾讯 {tencent_hfq_close:.2f} vs 本地 {local_hfq_close:.2f}"
+            f"❌ 原始价不一致：{len(raw_bad)}/{len(days)} 天对不上（最大差 {worst:.3f}，"
+            f"首个 {raw_bad[0]}）—— 这一层不该有任何误差"
+        )
+    qfq_bad = [d for d in days if abs(ten_qfq[d] - ten_bfq[d]) > 1e-9]
+    if qfq_bad:
+        return (
+            f"❌ 腾讯 qfq 与 bfq 不再相等：{len(qfq_bad)}/{len(days)} 天"
+            "（窗口内有除权？那需要改用因子表口径）"
+        )
+
+    # ── 硬判据 2：本地因子在窗口内必须恒定（窗口内无除权）────────────
+    factors = {fac[d] for d in days}
+    if len(factors) > 1:
+        lo, hi = min(factors), max(factors)
+        return (
+            f"❌ 本地复权因子在 {len(days)} 天内变了 {len(factors)} 次"
+            f"（{lo:.6f}~{hi:.6f}）—— carry_forward 口径应当只在除权日变，其余日子恒定"
+        )
+
+    # ── 判据 3：腾讯 hfq 自洽时才当标尺 ────────────────────────────────
+    def _ret(series: dict[str, float]) -> list[float]:
+        return [series[days[i]] / series[days[i - 1]] - 1 for i in range(1, len(days))]
+
+    ten_hfq_ret, ten_bfq_ret = _ret(ten_hfq), _ret(ten_bfq)
+    self_dev = max(abs(a - b) for a, b in zip(ten_hfq_ret, ten_bfq_ret, strict=True))
+    ratios = [ten_hfq[d] / (local[d][0] * fac[d]) for d in days]
+
+    if self_dev > 1e-6:
+        # 上游 hfq 与自身 qfq 不自洽 —— 只能记录，不能判
+        return (
+            f"✅ 原始价 {len(days)}/{len(days)} 天零误差、本地因子 {len(days)} 天恒定 "
+            f"{next(iter(factors)):.6f}；"
+            f"⚠️ 腾讯 hfq 与自家的收益对不上（最大差 {self_dev:.2e}），"
+            f"因此**不拿它当标尺**（绝对价比值 {min(ratios):.4f}~{max(ratios):.4f} 仅供记录）"
+        )
+
+    # 上游自洽了 ⇒ 这时才是真的交叉校验
+    local_ret = [
+        (local[days[i]][0] * fac[days[i]]) / (local[days[i - 1]][0] * fac[days[i - 1]]) - 1
+        for i in range(1, len(days))
+    ]
+    ret_dev = max(abs(a - b) for a, b in zip(ten_hfq_ret, local_ret, strict=True))
+    if ret_dev > 1e-6:
+        return f"❌ 复权收益率不一致：最大差 {ret_dev:.2e} —— 本地因子表漂了"
+    drift = max(ratios) / min(ratios) - 1
+    if drift > 0.01:
+        return (
+            f"❌ 复权锚点出现阶跃：比值 {min(ratios):.4f}~{max(ratios):.4f}"
+            f"（漂 {drift * 100:.2f}%，阈值 1%）"
         )
     return (
-        f"✅ 两侧一致（差 {dev * 100:.3f}%）："
-        f"腾讯 {tencent_hfq_close:.2f} / 本地 {local_hfq_close:.2f}"
+        f"✅ 三层全过：原始价零误差；复权收益率最大差 {ret_dev:.1e}；"
+        f"锚点比值 {min(ratios):.4f}~{max(ratios):.4f} 稳定"
     )
 
 

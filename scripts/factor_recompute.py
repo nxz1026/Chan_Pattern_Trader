@@ -345,6 +345,7 @@ def _reset_conn(client: Any) -> Any:
         pass
     return client._get_conn()  # noqa: SLF001
 
+
 def coverage_target(conn: Any) -> str | None:
     """本地 K 线的**最新交易日** —— 因子账本追赶的目标。
 

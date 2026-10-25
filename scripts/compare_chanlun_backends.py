@@ -91,7 +91,8 @@ def resolve_min_bi_len(raw: int | None) -> int | None:
     if raw is None:
         from cpt.domain.config import RulesConfig
 
-        return RulesConfig().min_bi_len_for("1d")
+        value = RulesConfig().min_bi_len_for("1d")
+        return int(value) if value is not None else None
     return raw or None
 
 

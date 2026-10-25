@@ -325,8 +325,7 @@ _NEGATIONS = (
 def _all_text(out: dict) -> str:
     """推荐块里**用户能看到**的全部文本（不含码值字段）。"""
     return " ".join(
-        str(out.get(k) or "")
-        for k in ("action_label", "headline", "reason", "disclaimer")
+        str(out.get(k) or "") for k in ("action_label", "headline", "reason", "disclaimer")
     )
 
 

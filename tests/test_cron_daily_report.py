@@ -30,6 +30,8 @@ import pytest
 from scripts import cron_daily_report as cdr
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
 def _truth_source_crontab() -> pathlib.Path:
     """crontab 真相源（Emotion-CPT，随契约包分发）。"""
     from emotion_cpt.deploy.cron_spec import CRONTAB_PATH
@@ -233,8 +235,6 @@ def test_delivery_failure_exits_nonzero(
 # ── ⑥ ⚠️ JOBS 与 crontab 必须一一对应 ───────────────────────────────────────
 
 
-
-
 def _crontab_log_names() -> set[str]:
     """从 crontab 的调度行里抽出**重定向目标**的日志文件名。
 
@@ -304,7 +304,7 @@ def test_every_repo_cron_job_writes_a_log() -> None:
             continue
         body = sp.read_text(encoding="utf-8", errors="replace")
         # 形态 2：脚本内部自己重定向到某个日志
-        if re.search(r'>>\s*"?\$\{?\w*LOG', body) or re.search(r'>>\s*\S+\.log', body):
+        if re.search(r'>>\s*"?\$\{?\w*LOG', body) or re.search(r">>\s*\S+\.log", body):
             continue
         offenders.append(f"{job.schedule}  {job.script}（没有任何日志重定向）")
     assert not offenders, (

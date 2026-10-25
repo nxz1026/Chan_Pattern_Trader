@@ -420,9 +420,7 @@ class SinaQuoteClient:
         return parse_sina_quotes(text, expected=symbols)
 
 
-def parse_sina_quotes(
-    text: str, *, expected: Sequence[str] = ()
-) -> dict[str, dict[str, Any]]:
+def parse_sina_quotes(text: str, *, expected: Sequence[str] = ()) -> dict[str, dict[str, Any]]:
     """把新浪批量快照响应解析成 ``{symbol: quote}``（R82）。
 
     从 ``fetch_quote`` 里拆出来是为了**能单测每一种脏数据形态**，不必为每种

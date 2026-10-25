@@ -128,9 +128,7 @@ def test_core_dependencies_stay_empty() -> None:
     deps = data["project"]["dependencies"]
     assert len(deps) == 1, f"核心依赖只允许 emotion-cpt 一项，实际：{deps}"
     (dep,) = deps
-    assert dep.startswith(
-        "emotion-cpt @ git+https://github.com/nxz1026/Emotion-CPT.git@"
-    ), dep
+    assert dep.startswith("emotion-cpt @ git+https://github.com/nxz1026/Emotion-CPT.git@"), dep
     # 必须钉到 tag：不能是 main / 任意分支 / 裸 commit
     ref = dep.rsplit("@", 1)[-1]
     assert ref.startswith("v") and ref[1:2].isdigit(), f"emotion-cpt 必须钉到 tag（当前 {dep}）"

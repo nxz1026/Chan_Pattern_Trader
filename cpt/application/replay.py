@@ -276,8 +276,8 @@ def _infer_interval_ms(bars: Sequence[CanonicalBar], config: RulesConfig) -> int
         if current.open_time > previous.open_time
     ]
     if positive_diffs:
-        return min(positive_diffs)
-    return configured_interval
+        return int(min(positive_diffs))
+    return int(configured_interval)
 
 
 def _validate_bars(

@@ -113,7 +113,7 @@ def native_stats(bars: list[CanonicalBar], gate: int | None) -> dict[str, Any]:
     merged = merge_contained_bars(bars)
     fxs = detect_fractals(merged)
     bis = build_bis(fxs, min_bi_len=gate)
-    mi = [int(f.merged_index) for f in fxs]  # type: ignore[arg-type]
+    mi = [int(f.merged_index) for f in fxs]
     st = {f.start_time: i for i, f in enumerate(fxs)}
     et = {f.end_time: i for i, f in enumerate(fxs)}
     spans = [mi[et[b.end_time]] - mi[st[b.start_time]] + 1 for b in bis]

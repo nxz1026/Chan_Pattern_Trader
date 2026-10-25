@@ -138,9 +138,7 @@ def test_trend_kind_labels_live_in_exactly_one_module() -> None:
     R77 把副本删干净，判据从「6 份一致」翻成「只有 1 份」—— 结构上不可能
     再漂移，也就不需要维护同步纪律。
     """
-    owners = [
-        name for name, src in _dash_scripts().items() if "const TREND_KIND_LABELS = {" in src
-    ]
+    owners = [name for name, src in _dash_scripts().items() if "const TREND_KIND_LABELS = {" in src]
     assert owners == ["dash-core.js"], f"TREND_KIND_LABELS 不是恰好一份：{owners}"
 
 

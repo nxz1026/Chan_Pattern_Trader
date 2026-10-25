@@ -34,7 +34,7 @@ from contextlib import contextmanager
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from threading import Lock
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs
 
 from cpt.domain.market_time import market_today
@@ -158,7 +158,7 @@ def _today() -> date:
     交易机在北京凌晨拉一次，拿到的是昨天那一批，且看不出任何异常。
     统一走 :func:`cpt.domain.market_time.market_today`（域层唯一口径）。
     """
-    return market_today()
+    return cast("date", market_today())
 
 
 def trade_dir() -> Path:

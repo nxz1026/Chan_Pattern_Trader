@@ -81,8 +81,8 @@ def _infer_interval_ms(bars: Sequence[CanonicalBar], config: RulesConfig) -> int
         if current.open_time > previous.open_time
     ]
     if positive_gaps:
-        return min(positive_gaps)
-    return config.levels[0] * _MS_PER_MINUTE
+        return int(min(positive_gaps))
+    return int(config.levels[0] * _MS_PER_MINUTE)
 
 
 def _market(bars: Sequence[CanonicalBar], config: RulesConfig, symbol: str) -> dict[str, object]:

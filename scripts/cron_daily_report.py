@@ -52,13 +52,14 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Final
+from typing import Any, Final, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from cpt.adapters.feishu import ENV_WEBHOOK, notify_problem, webhook_configured  # noqa: E402
 
 _LOG = logging.getLogger("cron_daily_report")
+
 
 #: 被扫的作业 → 日志文件。
 #:
@@ -80,7 +81,7 @@ def _derive_jobs() -> tuple[tuple[str, str], ...]:
             "emotion_cpt 没装 ⇒ 读不到 crontab 真相源。"
             "日报是『作业失败唯一的出口』，宁可不跑也不能盲扫。"
         ) from exc
-    return jobs_from_crontab()
+    return cast("tuple[tuple[str, str], ...]", jobs_from_crontab())
 
 
 JOBS: Final[tuple[tuple[str, str], ...]] = _derive_jobs()

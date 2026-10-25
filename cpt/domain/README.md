@@ -7,7 +7,8 @@
 ```python
 import cpt.domain.market_time as mt
 import emotion_cpt.structure.market_time as real
-assert mt is real          # True —— 同一个模块对象
+
+assert mt is real  # True —— 同一个模块对象
 ```
 
 因此 CPT 现有的 117 个 `from cpt.domain.X import ...` 调用点**一行都不用改**，

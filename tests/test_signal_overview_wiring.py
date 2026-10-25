@@ -220,12 +220,12 @@ def test_backend_ships_step_distribution_and_titles() -> None:
     assert '"step_distribution": _step_distribution(rows)' in module
     assert '"step_titles": dict(STEP_TITLES)' in module
 
+
 def _truth_source_crontab() -> Path:
     """crontab 真相源（Emotion-CPT，随契约包分发）。"""
     from emotion_cpt.deploy.cron_spec import CRONTAB_PATH
 
     return CRONTAB_PATH
-
 
 
 # --------------------------------------------------------------------------- #

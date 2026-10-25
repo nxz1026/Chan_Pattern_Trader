@@ -389,7 +389,10 @@ def check_one(m: Mutation) -> tuple[bool, str, list[str]]:
 
         target = m.rel[4:]
         try:
-            path = Path(importlib.import_module(target).__file__)
+            located = importlib.import_module(target).__file__
+            if located is None:
+                raise ImportError(f"{target} 没有 __file__，多半是命名空间包")
+            path = Path(located)
         except ImportError:
             modname, _, attr = target.rpartition(".")
             mod = importlib.import_module(modname)
