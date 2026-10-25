@@ -36,6 +36,7 @@ from __future__ import annotations
 import dataclasses
 from pathlib import Path
 
+import pytest
 from cpt.domain.config import SCHEMA_VERSION, RulesConfig
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -131,9 +132,9 @@ def test_every_frozen_param_is_documented_in_rules_md() -> None:
 def test_schema_version_is_pinned_and_matches_snapshot() -> None:
     """``SCHEMA_VERSION`` 与钉子里的 ``config_version`` 必须一致。
 
-    R45 核实过的坑：``from_dict`` 会 ``pop`` 掉传入的 ``config_version``，
-    所以这个值**只跟随代码**。若二者漂移，回放守卫会拒收**当前代码自己
-    序列化出来的**配置 —— 一道永远误伤（或永远失效）的门禁。
+    2026-10-25 起 ``from_dict`` 对异版本配置是**拒收**（不是静默忽略）⇒
+    钉子与代码里的 ``SCHEMA_VERSION`` 一致，是「当前代码自己序列化出来的配置
+    能被自己接受」的前提 ⇒ 二者漂移就会误伤自己。
     """
     assert SCHEMA_VERSION == FROZEN["config_version"], (
         f"config.SCHEMA_VERSION={SCHEMA_VERSION!r} 与本文件的钉子 "
@@ -142,10 +143,28 @@ def test_schema_version_is_pinned_and_matches_snapshot() -> None:
 
 
 def test_config_version_cannot_be_overridden_by_data() -> None:
-    """``from_dict`` 必须忽略数据里传入的 ``config_version``。
+    """``from_dict`` 必须**拒收**数据里传来的异版本 ``config_version``。
 
-    这是「版本号只跟随代码」的实现点。没它的话，fixture 可以自称任意版本、
-    绕过 v0 冻结契约（``config.py`` docstring 里点名的那个坑）。
+    2026-10-25 起从「静默忽略」改成「响亮拒收」。
+
+    原来本仓把传入的版本号 ``pop`` 掉 ⇒ 异版本 fixture 被**静默**当成当前版本
+    接受 ⇒ ``SCHEMA_VERSION`` 从 v0 升到 v1 这件事**没有任何机制强制**
+    （改了参数、版本号还是 v0 的旧 fixture 照样通过校验被回放，且不会有任何提示）。
+
+    而 v0→v1 升级的**唯一目的**就是挡住「拿 v0 的 fixture 跑 v1 的代码还显示正常」
+    ⇒ 这个机制必须是**拒收**，不是忽略。
+    口径依据（同仓两处文档都写的是「拒收」）：
+    ``emotion_cpt.structure.config`` 的模块头、``cpt.application.dashboard_reproducibility``
+    的注释。
+
+    本测试原来的**意图**——「fixture 不能自称任意版本、绕过冻结契约」——仍然成立，
+    只是实现从"静默忽略"升级成"响亮报错"。
     """
-    cfg = RulesConfig.from_dict({"config_version": "v99"})
-    assert cfg.config_version == SCHEMA_VERSION, "数据覆盖了版本号"
+    with pytest.raises(ValueError, match="拒收异版本配置"):
+        RulesConfig.from_dict({"config_version": "v99"})
+    # 同版本 / 不带版本 ⇒ 正常接受（线上快照的 ``config`` 本来就是空的）
+    assert (
+        RulesConfig.from_dict({"config_version": SCHEMA_VERSION}).config_version
+        == SCHEMA_VERSION
+    )
+    assert RulesConfig.from_dict({}).config_version == SCHEMA_VERSION
