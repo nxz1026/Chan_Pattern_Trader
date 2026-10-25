@@ -947,11 +947,3 @@ class AShareLocalClient:
     def fetch_validated_bars(self, code: str, start_ms: int, end_ms: int) -> list[BarLike]:
         """与 ``BinanceFuturesClient.fetch_validated_klines`` 同协议的薄封装。"""
         return list(self.fetch_validated_klines(code, start_ms, end_ms).bars)
-
-    def close(self) -> None:
-        if self._conn is not None:
-            try:
-                self._conn.close()
-            except Exception:  # noqa: BLE001
-                pass
-            self._conn = None
