@@ -259,12 +259,70 @@ def c5_hfq_matches_local_factor() -> str:
     )
 
 
+def c6_factor_rows_are_piecewise_constant() -> str:
+    """本地不变量：因子行里不该再有「用供应商 hfq 反推」的口径（R96）。
+
+    后复权因子按定义是**分段常数** —— 两次除权之间必须逐位相同。用
+    ``供应商 hfq ÷ 不复权`` 逐日相除得到的是一条不断漂移的曲线，等于把漂移
+    当成真台阶固化下来（见 ``docs/known-traps.md`` #70）。
+
+    这条检查只查**已经被日线消费**的行：没有日线的孤儿行不进判据 ——
+    它们当下无人使用（``daily_bar`` 最早 2024-01-02，孤儿行全在那之前），
+    拿它们判红只会制造噪音。
+
+    判据：
+    1. 落在有日线日期上的因子行，``source`` 里不得出现 ``tx:``；
+    2. 相邻两个有日线交易日之间，因子相对变化 >0.5% 的，必须能对上除权事件
+       —— 这里只做**粗筛**（数量上限），不做事件级复核。
+    """
+    from cpt.adapters.a_share_local import open_conn
+
+    conn = open_conn()
+    try:
+        conn.autocommit = True
+        cur = conn.cursor()
+        cur.execute(
+            """SELECT count(*) FROM asel.ref_adjust_factor f
+               JOIN public.daily_bar d ON d.code = f.code AND d.date = f.trade_date
+               WHERE f.source LIKE 'tx:%'"""
+        )
+        tx_used = int(cur.fetchone()[0])
+        cur.execute(
+            """WITH t AS (
+                   SELECT f.code, f.trade_date, f.hfq_factor
+                     FROM asel.ref_adjust_factor f
+                     JOIN public.daily_bar d ON d.code = f.code AND d.date = f.trade_date
+               ), j AS (
+                   SELECT code, trade_date, hfq_factor,
+                          lag(hfq_factor) OVER (PARTITION BY code ORDER BY trade_date) AS prev
+                     FROM t
+               )
+               SELECT count(*) FROM j WHERE prev > 0 AND abs(hfq_factor / prev - 1) > 0.005"""
+        )
+        jumps = int(cur.fetchone()[0])
+        cur.execute(
+            """SELECT count(*) FROM asel.ref_adjust_factor f
+               JOIN public.daily_bar d ON d.code = f.code AND d.date = f.trade_date"""
+        )
+        used_rows = int(cur.fetchone()[0])
+    finally:
+        conn.close()
+
+    if tx_used:
+        return f"❌ 还有 {tx_used} 行因子由腾讯 hfq 反推（source=tx:*），会被日线消费"
+    return (
+        f"✅ 被日线消费的 {used_rows:,} 行因子无 tx 口径；"
+        f"相邻日变化 >0.5% 的 {jumps:,} 处（应为除权日，见 migration R96）"
+    )
+
+
 CHECKS = (
     ("契约1 fqkline 字段顺序 = [日期,开,收,高,低,量]", c1_field_order),
     ("契约2 复权键名 hfqday/qfqday/day", c2_adjust_keys),
     ("契约3 逐标的「无 hfq」抛专用异常", c3_per_stock_unsupported),
     ("契约4 新浪快照带 Referer", c4_sina_quote),
     ("交叉 腾讯 hfq vs 本地因子表", c5_hfq_matches_local_factor),
+    ("不变量 因子表不得用腾讯 hfq 反推", c6_factor_rows_are_piecewise_constant),
 )
 
 
