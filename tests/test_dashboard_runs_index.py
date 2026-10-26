@@ -71,7 +71,7 @@ def _v2(
     """领域层快照（``market.symbol`` 显式带上——生产路径也是这么覆盖的）。
 
     ``n`` 用来制造**不同的 dataset_hash**：``dataset_hash`` 只覆盖 bars、不含
-    symbol（``dashboard_reproducibility.py:71``），所以「同长度同内容的 bars」=
+    symbol（``dashboard.py``），所以「同长度同内容的 bars」=
     「同一次运行」，改 symbol 不会被记成新的一条。真实里两只票的 bars 不可能
     一样，测试必须照着这个事实造数据，否则会去重逻辑把用例卡死。
     """

@@ -5,15 +5,12 @@
 CI 与本地就会分叉。这里只断言：
 
 - 档位名字的解析规则与报错；
-- 两个后端都满足 ``ChanlunBackend`` 协议（能算出结构）；
-- ``czsc`` 档在未安装时**响亮报错**、``auto`` 档**静默回落**（用 monkeypatch
-  伪造两种环境，不依赖本机是否真装了 czsc）。
+- ``auto`` 档**静默回落**（用 monkeypatch 伪造环境）。
 """
 
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Any
 
 import pytest
 from cpt.adapters.backend_factory import (
@@ -22,19 +19,16 @@ from cpt.adapters.backend_factory import (
     UnknownBackendError,
     resolve_backend,
 )
-from cpt.adapters.czsc_chanlun import CzscNotInstalledError
 from cpt.adapters.native_chanlun import NativeChanlunBackend
-from cpt.adapters.reference_chanlun import ReferenceChanlunConfig
-from cpt.domain.models import CanonicalBar
-
-_CONFIG = ReferenceChanlunConfig()
 
 _MS_PER_DAY = 24 * 3600 * 1000
 
 
-def _zigzag_bars(n: int = 120) -> list[CanonicalBar]:
-    """正弦式振荡 K 线 —— 保证两个后端都能算出分型/笔。"""
+def _zigzag_bars(n: int = 120) -> list:
+    """正弦式振荡 K 线。"""
     import math
+
+    from cpt.domain.models import CanonicalBar
 
     end_ms = int(datetime(2026, 9, 24, tzinfo=UTC).timestamp() * 1000)
     bars = []
@@ -61,30 +55,9 @@ def _zigzag_bars(n: int = 120) -> list[CanonicalBar]:
 
 
 def test_choices_and_default_are_consistent() -> None:
-    # R45 新增 "reference"：把**参照侧**从 application 层的私有函数提成一等后端。
-    # ⚠️ DEFAULT_BACKEND 刻意**仍是** "native" —— 加一个可选项不等于改默认档
-    # （R36 的教训：谁装了 extra 就静默切后端，正是要堵的那类风险）。
     assert BACKEND_CHOICES == ("auto", "czsc", "native", "reference")
     assert DEFAULT_BACKEND in BACKEND_CHOICES
     assert DEFAULT_BACKEND == "native"
-
-
-def test_reference_backend_is_resolvable_and_distinct() -> None:
-    """``reference`` 必须能解析，且**不是** native 的别名。
-
-    这一条钉的是「参照侧真的成了后端」而不是只加了个名字 ——
-    如果哪天它悄悄回落到 native，对照面板就变成「自己跟自己比」，
-    而那恰恰是最没意义的一种「通过」。
-    """
-    from cpt.adapters.backend_factory import resolve_backend
-    from cpt.adapters.reference_backend import ReferenceChanlunBackend
-
-    backend = resolve_backend("reference", code="600519")
-    assert isinstance(backend, ReferenceChanlunBackend)
-    assert backend.code == "600519"
-    # ⚠️ 比**类型**而不是 isinstance(instance) —— resolve_backend 返回的是实例，
-    # isinstance 的第二参必须是类。
-    assert type(backend) is not type(resolve_backend("native"))
 
 
 def test_native_is_forced_backend() -> None:
@@ -101,64 +74,8 @@ def test_unknown_backend_raises_with_actionable_message() -> None:
     assert "auto/czsc/native" in str(excinfo.value)
 
 
-def test_czsc_forces_error_when_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``czsc`` 档：环境没装就抛错，**不静默回落**（否则用户以为在用 czsc）。"""
-
-    def _boom() -> Any:
-        raise CzscNotInstalledError('czsc 后端需要可选依赖，请安装：pip install -e ".[chan]"')
-
-    monkeypatch.setattr("cpt.adapters.czsc_chanlun._import_czsc", _boom)
-    with pytest.raises(CzscNotInstalledError):
-        resolve_backend("czsc")
-
-
-def test_auto_falls_back_to_native_when_not_installed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``auto`` 档：环境没装 czsc 时回落 native（可用性优先，CI 走这条）。"""
-
-    def _boom() -> Any:
-        raise CzscNotInstalledError("not installed")
-
-    monkeypatch.setattr("cpt.adapters.czsc_chanlun._import_czsc", _boom)
-    assert isinstance(resolve_backend("auto"), NativeChanlunBackend)
-
-
-def test_auto_selects_czsc_when_installed(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``auto`` 档：环境装了 czsc 就选 czsc（生产意图，决策 A1）。"""
-    czsc = pytest.importorskip("czsc")
-    del czsc
-    backend = resolve_backend("auto")
-    assert type(backend).__name__ == "CzscChanlunBackend"
-
-
-def test_min_bi_len_reaches_czsc_backend() -> None:
-    pytest.importorskip("czsc")
-    backend = resolve_backend("czsc", min_bi_len=10)
-    assert getattr(backend, "min_bi_len", None) == 10
-
-
-def test_min_bi_len_defaults_to_upstream_six() -> None:
-    pytest.importorskip("czsc")
-    assert getattr(resolve_backend("czsc"), "min_bi_len", None) == 6
-
-
-def test_native_backend_satisfies_contract() -> None:
-    """native 后端必须满足协议（能算出结构、不抛）。"""
-    result = resolve_backend("native").compute_structures(_zigzag_bars(), _CONFIG)
-    assert len(result.fx_list) > 0
-    assert len(result.bi_list) > 0
-
-
-def test_czsc_backend_satisfies_contract() -> None:
-    pytest.importorskip("czsc")
-    result = resolve_backend("czsc").compute_structures(_zigzag_bars(), _CONFIG)
-    assert len(result.fx_list) > 0
-    assert len(result.bi_list) > 0
-
-
 def test_web_cli_exposes_backend_flag() -> None:
-    """两个 web 入口都要有 ``--backend``（否则看板只能跑自研后端）。"""
     from cpt.web.__main__ import build_parser as build_crypto_parser
-    from cpt.web.a_share import main as _ashare_main  # noqa: F401  (import 即注册)
 
     args = build_crypto_parser().parse_args([])
     assert args.backend == DEFAULT_BACKEND

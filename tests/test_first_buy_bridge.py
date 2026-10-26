@@ -202,7 +202,7 @@ def test_main_path_structure_id_is_code_scoped() -> None:
 
     上一轮只给「结构不足两个中枢」的 ``:empty`` 兜底分支补了 code，主路径仍是
     ``level5:bi:8`` 这种**纯位置下标**。``center_ids`` 取 ``zhongshu.bi_ids[0]``，
-    而代表 id 由 ``reference_chanlun.py:213`` 生成 ``bi:{i}`` —— 与股票无关。
+    而代表 id 由 ``参考后端 id 规则`` 生成 ``bi:{i}`` —— 与股票无关。
     ``load_previous_signal`` 只按 signal_id 查 ⇒ 线上实测 12 组 signal_id 被两只票
     共用（``first_buy:5:level5:bi:8`` = 000002 + 600707），A 读到 B 的历史状态，
     ``record_signal_event`` 的 ``status == prev_status`` 还会把 B 的真实跃迁吞掉。

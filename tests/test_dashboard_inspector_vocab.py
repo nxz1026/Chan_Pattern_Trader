@@ -2,7 +2,7 @@
 
 原实现只认 ``bar:{原始K线下标}``（领域路径 ``detect_fractals`` 的词表），而生产两条
 入口（A 股快照 / ``cpt.web.__main__``）都走
-``cpt.adapters.reference_pipeline.compute_domain_structures``：
+``cpt.application.replay.compute_domain_structures``：
 
 * ``map_fractal`` 发 ``b:{原始K线下标}``
 * ``map_bi`` 发 ``fx:{起点原始K线下标}`` / ``fx:{终点原始K线下标}``
@@ -17,7 +17,7 @@ from __future__ import annotations
 import math
 
 from cpt.adapters.native_chanlun import NativeChanlunBackend
-from cpt.adapters.reference_pipeline import compute_domain_structures
+from cpt.application.replay import compute_domain_structures  # was reference_pipeline (deleted in R96)
 from cpt.application.dashboard_inspector import inspect_bar
 from cpt.domain.bi import build_bis
 from cpt.domain.config import RulesConfig
