@@ -52,7 +52,7 @@ import re
 import subprocess
 import sys
 from pathlib import Path
-from typing import Any, Final, cast
+from typing import Any, Final
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -81,7 +81,7 @@ def _derive_jobs() -> tuple[tuple[str, str], ...]:
             "emotion_cpt 没装 ⇒ 读不到 crontab 真相源。"
             "日报是『作业失败唯一的出口』，宁可不跑也不能盲扫。"
         ) from exc
-    return cast("tuple[tuple[str, str], ...]", jobs_from_crontab())
+    return jobs_from_crontab()
 
 
 JOBS: Final[tuple[tuple[str, str], ...]] = _derive_jobs()

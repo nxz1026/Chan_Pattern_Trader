@@ -7,7 +7,7 @@
 - H2：``?symbol=`` / ``?interval_ms=`` 非法时**在到达上游之前**回 400。
 - H3：``?include_quota=1`` 付费探活过闸；默认路径一次都不花额度。
 - H4：access log 落 ``logging``（敏感 query 值脱敏，路径保留）；并发超限 503。
-- M1：A 股 snapshot GET 默认只读，补因子必须显式 ``?ensure_factors=1``。
+- M1：A 股 snapshot 已彻底删除按需因子路径（R96），GET 只读（无参数可调）。
 - M2：trade 回执 Content-Type 门禁、``for_date`` 校验、回执/幂等键有界保留。
 - M3：非法 code 回 400 JSON（不是连接重置）。
 - M5：``limit``/``days`` 夹到有界区间并**标注截断**。
@@ -430,61 +430,6 @@ def test_serve_snapshot_defaults_to_32_workers() -> None:
         assert server.max_workers == 32
     finally:
         server.server_close()
-
-
-# ── M1：GET 默认只读，补因子必须显式 ─────────────────────────────────
-
-
-def test_ashare_snapshot_get_factor_ensure_is_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
-    """三档语义：不带宽参数 → ``None``（默认只读）；``1`` → True；其它非空 → False。"""
-    from cpt.web import a_share_routes
-
-    seen: list[bool | None] = []
-
-    def _fake_snapshot(
-        code: str, *, width_k: int, ensure_factors: bool | None = None
-    ) -> dict[str, Any]:
-        seen.append(ensure_factors)
-        return {"schema_version": "ashare_snapshot.v1", "code": code}
-
-    monkeypatch.setattr(a_share_routes, "snapshot_payload", _fake_snapshot)
-    with _serve() as server:
-        base = _url(server)
-        for query in ("", "&ensure_factors=1", "&ensure_factors=0"):
-            resp = _request(f"{base}/api/dashboard/a-share/snapshot?code=600519{query}")
-            assert resp.status == 200
-
-    assert seen == [None, True, False]
-
-
-def test_snapshot_payload_maps_ensure_factors_flag(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``ensure_factors`` 三档映射到 ensurer：None 默认只读（default=False）。"""
-    from cpt.application import a_share_snapshot
-    from cpt.web import a_share_routes
-
-    defaults: list[bool] = []
-    used: list[Any] = []
-    sentinel = object()
-
-    def _ensurer(*, default: bool) -> Any:
-        defaults.append(default)
-        return sentinel
-
-    def _fake_build(code: str, *, width_k: int, ensure_factors: Any) -> dict[str, Any]:
-        used.append(ensure_factors)
-        return {"code": code}
-
-    monkeypatch.setattr(a_share_snapshot, "factor_ensurer_from_env", _ensurer)
-    monkeypatch.setattr(a_share_snapshot, "build_ashare_snapshot", _fake_build)
-
-    a_share_routes.snapshot_payload("600519", ensure_factors=None)
-    a_share_routes.snapshot_payload("600519", ensure_factors=True)
-    a_share_routes.snapshot_payload("600519", ensure_factors=False)
-
-    # None → default=False（GET 默认只读）；True → default=True（显式要补）；
-    # False → 连 ensurer 都不构造（ensurer=None）。
-    assert defaults == [False, True]
-    assert used == [sentinel, sentinel, None]
 
 
 # ── M2：trade 回执门禁 + 有界保留 ───────────────────────────────────

@@ -141,7 +141,7 @@ def test_partial_placeholder_rows_still_yield_a_snapshot() -> None:
     ``reason``，成功只有 ``severity``。断言按各自真实形状写，不要想当然。
     """
     client = _PlaceholderClient(placeholders=("2026-09-28", "2026-09-29"))
-    out = snap.build_ashare_snapshot("600519", client=client, ensure_factors=None)  # type: ignore[arg-type]
+    out = snap.build_ashare_snapshot("600519", client=client)  # type: ignore[arg-type]
     assert len(out["candles"]) == 200
     assert out["data_quality"]["severity"] == "ok"
     assert out["runtime"]["status"] != "empty"
@@ -158,7 +158,7 @@ def test_partial_placeholder_rows_are_announced_loudly(caplog: pytest.LogCapture
     """
     client = _PlaceholderClient(placeholders=("2026-09-28", "2026-09-29"))
     with caplog.at_level(logging.WARNING, logger="cpt.application.a_share_snapshot"):
-        snap.build_ashare_snapshot("600519", client=client, ensure_factors=None)  # type: ignore[arg-type]
+        snap.build_ashare_snapshot("600519", client=client)  # type: ignore[arg-type]
     warned = [r for r in caplog.records if "占位行" in r.getMessage()]
     assert warned, "占位行被静默丢弃了 —— 上游写出废行这件事没人会知道"
     msg = warned[0].getMessage()
@@ -171,7 +171,7 @@ def test_no_warning_when_there_are_no_placeholder_rows(caplog: pytest.LogCapture
     """对照组：没有占位行时不得刷 WARNING（否则这条日志会被当成噪音忽略）。"""
     client = _PlaceholderClient(placeholders=())
     with caplog.at_level(logging.WARNING, logger="cpt.application.a_share_snapshot"):
-        snap.build_ashare_snapshot("600519", client=client, ensure_factors=None)  # type: ignore[arg-type]
+        snap.build_ashare_snapshot("600519", client=client)  # type: ignore[arg-type]
     assert not [r for r in caplog.records if "占位行" in r.getMessage()]
 
 
@@ -182,7 +182,7 @@ def test_no_warning_when_there_are_no_placeholder_rows(caplog: pytest.LogCapture
 
 def test_all_placeholder_rows_report_placeholder_rows_reason() -> None:
     client = _AllPlaceholderClient()
-    out = snap.build_ashare_snapshot("600519", client=client, ensure_factors=None)  # type: ignore[arg-type]
+    out = snap.build_ashare_snapshot("600519", client=client)  # type: ignore[arg-type]
     reason = out["data_quality"]["reason"]
     assert reason == "placeholder_rows", (
         f"占位行故障被报成 {reason!r} —— 排查会被指到因子表或采集连通性，而真凶是『采集写出了废行』"
@@ -194,7 +194,7 @@ def test_all_placeholder_rows_report_placeholder_rows_reason() -> None:
 def test_all_placeholder_rows_are_logged(caplog: pytest.LogCaptureFixture) -> None:
     client = _AllPlaceholderClient()
     with caplog.at_level(logging.WARNING, logger="cpt.application.a_share_snapshot"):
-        snap.build_ashare_snapshot("600519", client=client, ensure_factors=None)  # type: ignore[arg-type]
+        snap.build_ashare_snapshot("600519", client=client)  # type: ignore[arg-type]
     assert [r for r in caplog.records if "占位行" in r.getMessage()]
 
 
@@ -206,7 +206,7 @@ def test_placeholder_rows_reason_is_not_one_of_the_old_vocabulary() -> None:
     复用旧词等于把新问题藏进旧分类。
     """
     client = _AllPlaceholderClient()
-    out = snap.build_ashare_snapshot("600519", client=client, ensure_factors=None)  # type: ignore[arg-type]
+    out = snap.build_ashare_snapshot("600519", client=client)  # type: ignore[arg-type]
     reason = out["data_quality"]["reason"]
     assert reason not in {"no_factor", "no_data"}
     assert not reason.startswith(("db_error", "invalid_bars"))
@@ -230,7 +230,7 @@ def test_legacy_two_field_result_object_still_works() -> None:
         def close(self) -> None:
             pass
 
-    out = snap.build_ashare_snapshot("600519", client=_LegacyClient(), ensure_factors=None)  # type: ignore[arg-type]
+    out = snap.build_ashare_snapshot("600519", client=_LegacyClient())  # type: ignore[arg-type]
     assert len(out["candles"]) == 200
     assert out["data_quality"]["severity"] == "ok"
 

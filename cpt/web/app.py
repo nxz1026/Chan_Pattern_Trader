@@ -1704,19 +1704,9 @@ def make_handler(
                             f"width_k 超出范围 5..2000：{width_k}",
                         )
                         return
-                # R59（审计 M1）：GET 默认**只读**（不联网补因子、不写库）。
-                # ``?ensure_factors=1`` 才允许这条请求触发"拉因子 + 落库"——
-                # 把写副作用从"默认发生"改成"必须显式要求"。
-                ensure_raw = ((query.get("ensure_factors") or [""])[0] or "").strip().lower()
-                if ensure_raw in {"1", "true", "yes", "on"}:
-                    ensure_factors: bool | None = True
-                elif ensure_raw:
-                    ensure_factors = False
-                else:
-                    ensure_factors = None
                 try:
                     payload = a_share_routes.snapshot_payload(
-                        code, width_k=width_k, ensure_factors=ensure_factors
+                        code, width_k=width_k
                     )
                 except a_share_routes.InvalidCodeError as exc:
                     # 代码格式非法回 400（JSON 体，见 _write_json_error 的注释：

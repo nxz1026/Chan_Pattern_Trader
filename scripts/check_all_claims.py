@@ -250,6 +250,12 @@ _ALLOW: dict[str, str] = {
     "cpt/application/canvas_wbt.py": "R51 随画布 D 下线删除；progress-log R51 段记的是删除动作本身",
     # R93：「cpt_」前缀让 TABLES 正则把它当本仓表名，但它其实是**隔壁仓**的 provider 模块。
     # 跨仓契约回复里必须写这个路径（emotion-core 要照它改代码），不能为了过门禁改文档。
+    # R96：「不仅要关，而且要删」整个按需因子链。progress-log / known-traps 里的提及是历史记录。
+    "CPT_ASHARE_ONDEMAND_FACTOR": "R96 删除按需因子链，环境变量已不存在",
+    "scripts/factor_backfill.py": "R96 删除按需因子链，脚本已删除",
+    "asel.daily_bar_raw": "R96 历史记录中提到的表，真表是 public.daily_bar",
+    # R93：「cpt_」前缀让 TABLES 正则把它当本仓表名，但它其实是**隔壁仓**的 provider 模块。
+    # 跨仓契约回复里必须写这个路径（emotion-core 要照它改代码），不能为了过门禁改文档。
     "cpt_intraday": "emotion-core 仓的 intraday provider 模块名，不是本仓的表",
 }
 
@@ -352,7 +358,8 @@ def main(argv: list[str] | None = None) -> int:
                 total += 1
                 mod, sym = m.group(1), m.group(2)
                 if not (ROOT / mod).exists():
-                    bad["S 模块路径不存在"].append(f"{rel(d)} → {mod}")
+                    if not _allowed(mod):
+                        bad["S 模块路径不存在"].append(f"{rel(d)} → {mod}")
                 elif sym not in facts["syms"]:
                     bad["S 符号未定义"].append(f"{rel(d)} → {mod}::{sym}")
 

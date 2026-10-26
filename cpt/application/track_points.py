@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import logging
 from datetime import UTC, datetime
-from typing import Any, cast
+from typing import Any
 
 _LOG = logging.getLogger(__name__)
 
@@ -253,6 +253,4 @@ def _confirmed_point(
 
     仅在 ``signal.status == "confirmed"`` 且 ``action`` 匹配时被调。
     """
-    return cast(
-        "dict[str, Any] | None", _shared_confirmed_point(last_bi, last_zs, price_ratio, side)
-    )
+    return _shared_confirmed_point(last_bi, last_zs, price_ratio, side)

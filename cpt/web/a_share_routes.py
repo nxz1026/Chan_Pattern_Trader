@@ -143,45 +143,17 @@ def snapshot_payload(
     code: str,
     *,
     width_k: int = DEFAULT_WIDTH_K,
-    ensure_factors: bool | None = None,
 ) -> dict[str, Any]:
     """构造 A 股 v2 snapshot。失败时返回 degraded 占位快照（不抛）。
 
-    ``R59（审计 M1）``：**GET 默认只读**。修前这里硬编码
-    ``ensure_factors=factor_ensurer_from_env(default=True)`` —— 一次
-    ``GET /api/dashboard/a-share/snapshot?code=...`` 只要本地缺该票因子，就会
-    联网（腾讯）拉几百行并**写生产库**。GET 带写副作用本身就是缺陷：任何能发请求
-    的东西（爬虫、浏览器预取、插件、误点刷新）都能远程触发写库，还要为它付网络
-    延迟；而"用户要看的图"并不需要为每一个来路不明的代码都补一份因子。
-
-    三档语义（`ensure_factors`）：
-    - ``None``（默认，即 GET 不带宽参数）：只有环境变量
-      ``CPT_ASHARE_ONDEMAND_FACTOR`` **显式**开启才补因子 —— 运维若确实想让
-      看板自愈，设一次环境变量即可恢复旧行为（部署侧开关，审计要的就是这个）；
-    - ``True``（``?ensure_factors=1``）：这条请求显式要求补因子（"用户输入了一个
-      本地没有的代码，现在就要算"），**仍受环境变量 kill-switch 约束**
-      （env 显式 ``0/false/off`` 时该请求也只读）；
-    - ``False``（``?ensure_factors=0``）：永不补，只读。
-
-    被拒方案：把 web 层的 ``default=True`` 直接删成 ``default=False`` 就完事 ——
-    那会连"用户主动输入代码"的交互也一起砍掉（前端没有别的入口），且没有留下
-    任何显式开关；现在的写法让"写"必须由请求或部署显式要求。
+    因子路径已经**彻底删除**（R96 用户拍板「不仅要关，而且要删」）：这里不再联网、
+    不再写库，只从本地因子表读。因子缺就是 ``no_factor``，不触发任何自愈行为。
     """
-    from cpt.application.a_share_snapshot import (  # noqa: PLC0415
-        build_ashare_snapshot,
-        factor_ensurer_from_env,
-    )
+    from cpt.application.a_share_snapshot import build_ashare_snapshot  # noqa: PLC0415
 
-    if ensure_factors is True:
-        ensurer = factor_ensurer_from_env(default=True)
-    elif ensure_factors is False:
-        ensurer = None
-    else:
-        ensurer = factor_ensurer_from_env(default=False)
     return build_ashare_snapshot(
         _normalize(code),
         width_k=width_k,
-        ensure_factors=ensurer,
     )
 
 

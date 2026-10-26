@@ -55,14 +55,10 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
 
 from cpt.adapters.a_share_local import AShareLocalClient
 from cpt.adapters.a_share_pool import WatchlistStore, fetch_hot_pool
-from cpt.application.a_share_snapshot import (
-    build_ashare_snapshot,
-    factor_ensurer_from_env,
-)
+from cpt.application.a_share_snapshot import build_ashare_snapshot
 from cpt.web.a_share_routes import DEFAULT_WATCHLIST_PATH
 
 _LOG = logging.getLogger("cpt.snapshot_a_share_batch")
@@ -93,11 +89,11 @@ def collect_codes(*, hot_limit: int, only: str | None = None) -> list[str]:
 
 
 def _run_one(
-    code: str, *, client: AShareLocalClient, ensure_factors: Any
+    code: str, *, client: AShareLocalClient
 ) -> tuple[str, str | None]:
     """单只快照。返回 (status, reason)：status ∈ {ok, skip, err}。"""
     try:
-        snap = build_ashare_snapshot(code, client=client, ensure_factors=ensure_factors)
+        snap = build_ashare_snapshot(code, client=client)
     except Exception as exc:  # noqa: BLE001 — 单只失败隔离
         _LOG.warning("snapshot %s 异常: %s: %s", code, type(exc).__name__, exc)
         return ("err", f"{type(exc).__name__}: {exc}")
@@ -173,14 +169,13 @@ def main(argv: list[str] | None = None) -> int:
             print(c)
         return 0
 
-    ensure_factors = factor_ensurer_from_env(default=True)
     client = AShareLocalClient()
     counts = {"ok": 0, "skip": 0, "err": 0}
     failed: list[str] = []
     t0 = time.time()
     try:
         for code in codes:
-            status, reason = _run_one(code, client=client, ensure_factors=ensure_factors)
+            status, reason = _run_one(code, client=client)
             counts[status] += 1
             if status == "skip":
                 _LOG.info("snapshot %s degraded: %s", code, reason)
