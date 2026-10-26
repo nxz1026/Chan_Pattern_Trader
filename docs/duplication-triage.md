@@ -216,7 +216,7 @@ tests/test_dashboard_http.py:22
 |---|---|---|
 | **D** | `upsert_factor_rows` 分叉收口（适配器成超集、删脚本副本） | `cpt/adapters/a_share_factor.py` |
 | **P0** | `_read_dbconfig` / `_resolve_time` 收口 + 删除 `cpt/engine/`、`cpt/storage/` | `cpt/adapters/_dbconfig.py` |
-| **F3-②** | `_bar_to_dict` 合并为唯一实现 + 键集合冻结守卫 | `cpt/application/_bar_dict.py`、`tests/test_dataset_hashes.py` |
+| **F3-②** | `_bar_to_dict` 合并为唯一实现 + 键集合冻结守卫 | `cpt/application/_bar_dict.py`、~~test_dataset_hashes.py~~ (已删) |
 | **F3-④** | HTTP server 样板 8 处 → 1 处 | `tests/conftest.py::served()` |
 
 ### F3-② 的合并为什么是安全的
@@ -229,7 +229,7 @@ tests/test_dashboard_http.py:22
 
 1. 新模块 `cpt/application/_bar_dict.py` 顶部写**显式 warning**：改键集合 = 改导出格式，
    必须升 `EXPORT_SCHEMA_VERSION` + 同步 `docs/export-schema-v1.md`；
-2. 新增 `tests/test_dataset_hashes.py::test_export_bar_keys_are_frozen_schema_v1`，
+2. 新增 已删，
    把 bar 键集合钉成 13 个键的**冻结字面量**；
 3. **做了反向验证**：往 `bar_to_dict` 里插一个 `__drift_probe__` 字段 →
    该测试立刻 **RED**；还原后 **GREEN**。证明这条守卫不是摆设。

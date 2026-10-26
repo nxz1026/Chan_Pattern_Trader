@@ -1500,7 +1500,7 @@ R36 装机换后端就是靠它发现的）；A 股的对应诊断在 staleness 
    `raw`。绝不能只把尾巴补成不复权：同一张图上前后段口径不同就是 6.39 倍的假跳空
    （600519 的因子是 6.39），看起来像暴跌 84%。
 2. **「重算好了」和「上线了」是两件事**：`asel.ref_adjust_factor_v2` 里 5206 只、到
-   10-13 的正确因子一直躺着，生产表没人搬（只有 `factor_report.py` 读它做对账）。
+   10-13 的正确因子一直躺着，生产表没人搬（只有 ~~factor_report.py~~ (已删) 读它做对账）。
    一句「切不切换看报告」等于**永远不会切**。修法是 cron 直接 `--promote`：
    `ON CONFLICT` 幂等 + 1e-8 容差只改真有差异的行（实测首轮 93,073 行）。
 3. **跨类型比较「看着一样」会骗人**：v2 是 `numeric`、生产表是 `double precision`，
@@ -1702,7 +1702,7 @@ native 笔 28/30/32/27    czsc 笔 15/24/22/26
 
 **修法（R67 已做）**：门槛统一从 `RulesConfig` 取（`--min-bi-len` 可覆盖，`0` = 关闭
 门槛**只用于复现历史数字**）；`PLACEHOLDER_LABEL` 排除在判定外；不一致写进 `problems`
-⇒ `return 1`。回归 `tests/test_compare_chanlun_backends_script.py`（9 例，含"门槛必须
+⇒ `return 1`。回归 ~~test_compare_chanlun_backends_script.py~~ (已删)（9 例，含"门槛必须
 等于生产那份配置"与"不一致必须进退出码"）。
 
 **通用判据**：拿另一个实现做交叉验证之前，**先证明两个实现收到的是同一份输入** ——

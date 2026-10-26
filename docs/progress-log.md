@@ -390,8 +390,8 @@ R45 修了 SQL 排序，**R56 才发现功能仍然是死的**：写完再读自
 |---|---|
 | `scripts/factor_backfill.py` | 从腾讯 raw+hfq 算因子并 upsert 生产表；`--mode full\|incremental`、`--wind-fallback`（默认关）、`--retries` |
 | `scripts/factor_recompute.py` | 按公司行动**重算**，只写暂存表；`--scope placeholder\|all\|wired`、`--source`、`--max-calls` |
-| `scripts/factor_report.py` | 逐票对账（比暂存表 `asel.ref_adjust_factor_v2`） |
-| `scripts/golden_set.py` | 结构指纹基线，`--build` / `--check` |
+| ~~scripts/factor_report.py~~ (已删) | 逐票对账（比暂存表 `asel.ref_adjust_factor_v2`） |
+| ~~scripts/golden_set.py~~ (已删) | 结构指纹基线，`--build` / `--check` |
 
 **重算只写暂存表，绝不自动切换生产表**（R37 起的纪律）。切换是人工决定。
 切换点登记在 `cpt_factor_epoch`。
@@ -777,7 +777,7 @@ GET /api/dashboard/a-share/snapshot?code=XXXXXX
 
 ### 7.5 golden set
 
-`scripts/golden_set.py` + 基线 `deploy/golden/ashare.json`。
+~~scripts/golden_set.py~~ (已删) + 基线 `deploy/golden/ashare.json`。
 集合 = 锚标的 ∪ 热门池 ∪ 服务端自选，去重保序。指纹只存**结构形状**
 （`fractal_ids` / `bi_ids` / `zhongshu_ids` / `bar_count` / `dataset_hash`），
 **不存价格**（价格天天在动，存了只会天天报差异）。`dataset_hash` 是有意放进去的：
