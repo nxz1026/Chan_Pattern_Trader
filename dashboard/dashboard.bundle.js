@@ -1376,15 +1376,6 @@
 
     const reason = quality.reason;
     setText("[data-testid=data-quality-reason]", typeof reason === "string" && reason ? reason : "—");
-    const factorFetch = isObject(quality.factor_fetch) ? quality.factor_fetch : null;
-    if (factorFetch) {
-      const fetched = factorFetch.fetched === true;
-      const rows = factorFetch.rows != null ? `${factorFetch.rows} 行` : "";
-      const reasonSuffix = typeof factorFetch.reason === "string" ? ` (${factorFetch.reason})` : "";
-      setText("[data-testid=data-quality-factor-fetch]", fetched ? `已获取 ${rows}`.trim() : `未获取${reasonSuffix}`);
-    } else {
-      setText("[data-testid=data-quality-factor-fetch]", "—");
-    }
 
     // C7：数据质量明细（severity / 缺口数 / 乱序数 + 明细列表）。
     // 后端这几个字段缺失（老快照）时整块隐藏，既有输出一个字不动。
