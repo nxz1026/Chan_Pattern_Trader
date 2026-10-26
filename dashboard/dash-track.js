@@ -9,7 +9,16 @@
   "use strict";
 
   const LS_KEY = "cpt_track_user";
-  const API = "/cpt/api/dashboard/track";
+  /* ⚠️ 看板可挂在**任意** nginx 前缀下（现役 /cpt/，将来的 /ecpt/cpt/）⇒
+     API 地址**不能写死前缀**：换前缀时写死的 "/cpt/..." 会静默 404。
+     「看板根基址」的推导在 url_safety.js（唯一实现，运行时从
+     window.location.pathname 算出），这里只做薄委托 ——
+     跟本文件其它地方一样不碰 window.CPTDashboard（它只存在于看板页）。
+     ⚠️ url_safety.js 缺席时退回原样返回 ⇒ 地址保持相对，浏览器按当前
+     页面目录解析，结果依然正确（退化但不致命）。 */
+  const basePath = (endpoint) =>
+    (window.CPT_URL && window.CPT_URL.path ? window.CPT_URL.path : (t) => t)(endpoint);
+  const API = basePath("api/dashboard/track");
   const FETCH_OPTS = { credentials: "same-origin" };
   /* R76：追踪页历史上**没有**状态中文映射 —— 后端把 raw 码值
      （``structure_ready``）原样塞进 ``current.status``，页面直接渲染，
@@ -208,7 +217,9 @@
     //    **精确匹配**，不是前缀匹配。R52 修：此前只传前缀 `track:{user}:`，
     //    于是永远查出 count=0，轮询必然走到超时，页面永远显示「等待超时」。
     const subject = `track:${user}:${code}`;
-    const url = `/cpt/api/dashboard/llm/calls?subject_id=${encodeURIComponent(subject)}&limit=10`;
+    const url = basePath(
+      `api/dashboard/llm/calls?subject_id=${encodeURIComponent(subject)}&limit=10`
+    );
     const r = await fetch(url, withUser({ method: "GET" }));
     if (!r.ok) return null;
     const body = await r.json();
@@ -240,7 +251,7 @@
   function pollSpeak(callId, code) {
     return new Promise((resolve, reject) => {
       if (!(window.CPTJob && typeof window.CPTJob.poll === "function")) {
-        reject(new Error("CPTJob 未加载：track.html 需先引入 /cpt/cpt_job.js"));
+        reject(new Error(`CPTJob 未加载：track.html 需先引入 ${basePath("cpt_job.js")}`));
         return;
       }
       // maxTries × interval 覆盖到 POLL_TIMEOUT_MS（含 t=0 那次），与旧实现

@@ -11,6 +11,10 @@
     <title>CPT Dashboard · 只读缠论复盘</title>
     <link rel="stylesheet" href="./dashboard.css" />
   </head>
+  <!-- ⚠️ data-snapshot-url 是**相对看板根**的路径（不是根绝对路径）：
+       看板可挂在任意 nginx 前缀下（现役 /cpt/，将来的 /ecpt/cpt/），
+       前缀由 url_safety.js 在运行时从 window.location.pathname 推导后补全
+       （见 CPT_URL.path）。写成 "/cpt/api/..." 会在换前缀时静默 404。 -->
   <body
     data-testid="dashboard-root"
     data-schema-version="dashboard.v1"
@@ -18,7 +22,7 @@
     data-view-mode="research"
     data-status="empty"
     data-connection="offline"
-    data-snapshot-url="/cpt/api/dashboard/snapshot"
+    data-snapshot-url="api/dashboard/snapshot"
   >
     <a class="skip-link" href="#chart-panel">跳转到 K 线区域</a>
 
@@ -29,10 +33,11 @@
         <span data-testid="topbar-readonly-badge" class="badge badge-readonly" role="note">
           只读 · 无交易入口
         </span>
+        <!-- 相对链接（与本页其它资源同一写法）：跟着看板根走，换 nginx 前缀不用改。 -->
         <a
           data-testid="topbar-track-link"
           class="badge badge-track"
-          href="/cpt/track/"
+          href="track/"
           title="个人追踪列表：长期持仓的结构区间上下沿 + 讲人话"
         >我的追踪</a>
         <div data-testid="mode-switch" class="mode-switch" role="group" aria-label="Dashboard 模式">
