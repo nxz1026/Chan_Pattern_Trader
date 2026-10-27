@@ -61,7 +61,7 @@
 
 | 符号 | 消解方式 | 证据 |
 |---|---|---|
-| `upsert_factor_rows` | **本轮 D**（适配器扩成超集、删脚本副本） | 当前仅 `cpt/adapters/a_share_factor.py:265` 一处定义 |
+| ~~`upsert_factor_rows`~~ | ~~**本轮 D**~~ **R96 已删** | 当前仅 `cpt/adapters/a_share_factor.py:265` 一处定义（按需因子链已删） |
 | `_read_dbconfig` | **P0**（解析/校验收口到 `cpt/adapters/_dbconfig.py`） | 当前 **0 处**定义 |
 | `_resolve_time` | **P0**（`cpt/engine/` 整层删除） | 当前仅 `cpt/adapters/reference_chanlun.py:143` 一处 |
 | `_bar_to_dict` | **本轮 F3-②**（抽到 `cpt/application/_bar_dict.py`） | 当前 **0 处**定义，两处改为 `import bar_to_dict` |
@@ -77,7 +77,7 @@
 
 | # | 符号 | 当前定义处 | 说明 |
 |---|---|---|---|
-| 3 | `connection_kwargs` | `cpt/adapters/a_share_local.py:131`(4 句) / `scripts/factor_backfill.py:84`(1 句) | **薄包装**：都转调 `_shared_connection_kwargs(exc_type=...)`，只有异常类型不同（`AShareLocalError` vs `SystemExit`），前者另加 RDS CA 证书 |
+| 3 | `connection_kwargs` | `cpt/adapters/a_share_local.py:131`(4 句) / ~~`scripts/factor_backfill.py:84`(1 句)~~ (R96 已删) | **薄包装**：都转调 `_shared_connection_kwargs(exc_type=...)`，只有异常类型不同（`AShareLocalError` vs `SystemExit`），前者另加 RDS CA 证书 |
 | 4 | `fetch_validated_klines` | `a_share_local.py:225` / `binance_futures.py:389` | 两个数据源各自的取数+校验 |
 | 5 | `close` | `a_share_local.py:313` / `domain/contain.py:65` | 前者关 psycopg 连接（`self._conn.close()`）；后者是 `_DetailedBar(BarLike, Protocol)` 的**收盘价属性桩**（`-> float: ...`），**语义完全无关** |
 | 6 | `_urlopen_bytes` | `a_share_public.py:128` / `binance_futures.py:197` | 各自带自己的异常类型与超时口径 |
@@ -89,7 +89,7 @@
 | 12 | `resolve` | `czsc_chanlun.py:187` / `native_chanlun.py:60` | 同上 |
 | 14 | `_stamp` | ~~`application/canvas_wbt.py:374`~~ / `domain/signal.py:142` | ~~前者是把毫秒戳格式化成 `%Y-%m-%d`（缺失回 `—`）~~；后者是"已有值不覆盖、缺失才写入"的时间戳保留语义。**R51 画布 D 下线，`canvas_wbt.py` 已删 ⇒ 这条「同名不同义」只剩单边** |
 | 16 | `_infer_interval_ms` | `application/dashboard.py:70` / `application/replay.py:327` | 看板与回放各自推断周期，**参数与回落策略不同** |
-| 17 | `main` | `application/replay.py:448` / `web/__main__.py:884` / `web/a_share.py:95` / `scripts/factor_backfill.py:220` | 四个入口，**同名不同义** |
+| 17 | `main` | `application/replay.py:448` / `web/__main__.py:884` / `web/a_share.py:95` / ~~`scripts/factor_backfill.py:220`~~ (R96 已删) | 四个入口，**同名不同义** |
 | 18 | `_resolve_level` | `domain/bi.py:67` / `domain/trend_type.py:67` / `domain/zhongshu.py:91` | 三种结构各自解析 level |
 | 19 | `direction` | `domain/contain.py:121` **+** `domain/models.py:101`（同实现）/ `domain/types.py:84` | 见下方 §3.3 |
 | 20 | `_source_ids` | `domain/fractal.py:100` / `domain/trend_type.py:150` | 两种结构各自组装 source_ids |
@@ -214,7 +214,7 @@ tests/test_dashboard_http.py:22
 
 | 项 | 内容 | 落点 |
 |---|---|---|
-| **D** | `upsert_factor_rows` 分叉收口（适配器成超集、删脚本副本） | `cpt/adapters/a_share_factor.py` |
+| ~~**D**~~ | ~~`upsert_factor_rows` 分叉收口~~ **R96 已删** | ~~`cpt/adapters/a_share_factor.py`~~ |
 | **P0** | `_read_dbconfig` / `_resolve_time` 收口 + 删除 `cpt/engine/`、`cpt/storage/` | `cpt/adapters/_dbconfig.py` |
 | **F3-②** | `_bar_to_dict` 合并为唯一实现 + 键集合冻结守卫 | `cpt/application/_bar_dict.py`、~~test_dataset_hashes.py~~ (已删) |
 | **F3-④** | HTTP server 样板 8 处 → 1 处 | `tests/conftest.py::served()` |

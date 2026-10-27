@@ -372,19 +372,19 @@ oracle 参照实现 **R13 已整体删除**，`dashboard_snapshot_v2.py:98` 的
 | 函数 | 产品位置 | 处境 | R22 处置 |
 |---|---|---|---|
 | `dashboard_reproducibility.py::snapshot_diff` | roadmap R5 | **已接线（R22）** | 调用方 `dashboard_compare.py` 已接进 C3 `/compare`（`cpt/web/app.py:1212`）；序列型值由 `cpt/web/app.py:487 _summarize_diff_value` 递归降级，避免原始 candles 灌进响应 |
-| `adapters/a_share_local.py::_to_wind_code` | 台账决策 C1 | **已接线（R22）** | 调用方 `scripts/factor_backfill.py:199`（`def fetch_wind_factor_rows`）→ 循环体 `:594` 的 `_wind_fallback`，由 `--wind-fallback`（`:506`，**默认关闭**）开启；同时把非法输入从静默兜底改成抛 `ValueError` |
-| `adapters/wind_source.py::fetch_adjust_factors` | 台账决策 C1 | **已接线（R22）** | 同上调用链 `scripts/factor_backfill.py:210`（引用）与 `:221`（`fetch_adjust_factors` 调用）；取数失败只转文案、绝不向上抛 |
+| ~~`adapters/a_share_local.py::_to_wind_code`~~ | 台账决策 C1 | ~~已接线（R22）~~ **调用方已删（R96）** | ~~`scripts/factor_backfill.py:199`~~ |
+| ~~`adapters/wind_source.py::fetch_adjust_factors`~~ | 台账决策 C1 | ~~已接线（R22）~~ **调用方已删（R96）** | ~~`scripts/factor_backfill.py:210`~~ |
 
 > ⚠️ **前两版本文里的 `scripts/factor_backfill.py:130` 是错行号**，且"有 bug/两份重复实现"的描述
 > 已过期（`_to_wind_code` 的顺序 bug 在 R17 已修，那份重复的 `_code_to_tx` 也已删除）。
-> R22 复核后按上表更正。
+> R22 复核后按上表更正。**R96 已删 `factor_backfill.py`，整条台账决策 C1 已解除。**
 
 > ⚠️ **这两个 Wind 符号在 `whitelist.py` §4c 里保留，但性质已变**：它们**不是待接线**，
 > ✅ **2026-10-06（R57）已解除**：vulture 扫描范围已扩到 `cpt` + `scripts`，
 > 那 6 条「调用方在 scripts/ 所以被误判」的豁免已从 `whitelist.py` 撤销。
 > 扩范围时确实如旧注释预言地又挖出 2 条**真**死代码 ——
 > `scripts/factor_backfill.py` 的 `REPO_ROOT`（未使用变量）与
-> `latest_factor_date`（未使用函数）—— **均已删除**。
+> `latest_factor_date`（未使用函数）—— **原已删除；R96 整文件已删。**
 >
 > 当初「先别扩范围」的结论本身没错（扩了要多处理 2 条真死代码），
 > 但把这件事**永远挂着**才是错的 —— 豁免本身会掩盖未来的真死代码。

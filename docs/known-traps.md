@@ -543,6 +543,8 @@ R45 复盘 `a_share_snapshot` 时，我在**同一处**错了两次。
     try:
         result = fetch()                      # 抛 AShareNoFactorError
     except AShareNoFactorError:
+        # R96 已删：_try_on_demand_factors / 按需因子链（腾讯 hfq/raw 相除路径）
+        # 此处留作历史参考——"在 except 块内部调可能失败的函数"是反模式
         outcome = _try_on_demand_factors(...)  # ← 在 except 块**内部**
         ...                                    # 这里再出错怎么办？
     except Exception:                          # ← 接不住上面那支！
@@ -2130,9 +2132,8 @@ cd /tmp && env -u PYTHONPATH /home/ubuntu/DSH/Chan_Pattern_Trader/.venv/bin/pyth
 grep。自检夹具 `fx_editable_import` 在临时仓库里造「有 `cpt/`、有解释器、
 但这解释器不认识它」的局面 —— 证明门禁**能红**。
 
-**同类隐患**：`scripts/factor_backfill.py` 也缺 `sys.path` 引导（当前无调度器
-引用它，接上必炸）。凡是要被 cron / systemd 直接执行的脚本，都不该依赖
-`PYTHONPATH` 或 CWD。
+**同类隐患**：凡是要被 cron / systemd 直接执行的脚本，都不该依赖
+`PYTHONPATH` 或 CWD（`factor_backfill.py` 曾有此缺陷，R96 已删除）。
 
 ## 62. `setval` 不受事务回滚：测试看起来干净，序列已被永久污染（R81 实测）
 
@@ -2555,11 +2556,9 @@ def open_conn() -> Any:
 **验收**：跨界最大跳变 **+97.17% → 0.000000%**（219 只）；251 行与东财不一致数 **0**；
 剩余 tx 行 **0**；表总行数 3,484,374 → 3,484,374（未增未删）。
 
-**⚠️ 产生 tx 行的那台设备还在**：`a_share_snapshot.py::_ensure_factors_and_persist`
-→ `fetch_factor_rows()`（腾讯 hfq）→ `upsert_factor_rows()`
-（`ON CONFLICT (code, trade_date) DO UPDATE`，会**覆盖**已有的东财值）。
-生产入口 `cpt.web.a_share_routes` 用 `factor_ensurer_from_env(default=True)` 显式打开。
-本次只修数据、没动代码 —— 要根治得改那条按需落库路径。
+**⚠️ R96 已删掉产生 tx 行的路径**：`_ensure_factors_and_persist` / `fetch_factor_rows()` /
+`upsert_factor_rows()` / `factor_ensurer_from_env()` 整套按需因子链已删除（腾讯 hfq/raw 相除
+路径不复存在，`a_share_routes` 不再接受 `ensure_factors` 参数）。
 
 **三条通用规矩**：
 
