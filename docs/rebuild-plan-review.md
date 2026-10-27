@@ -1875,3 +1875,36 @@ def open_conn() -> Any:                       # cpt/adapters/a_share_local.py
 - `ruff format --check` **19 个文件待重排**、`mypy cpt scripts` **21 个错** —— 都是既有的，
   本轮未动（与 R94 无关，另案处理）
 - `verify_public_contracts.py` 契约 5 的判据要不要从「绝对价」改成「收益率序列」—— 待拍板
+
+## §16 封板强度进首屏主判断（2026-10-27）
+
+### 16.1 决策
+
+观察期第 3 天（10-27），奎爷拍板：**封板强度进首屏主判断**。
+
+这意味着：
+- 观察期 5 个交易日（10-23/26/27/28/29）期满后，封板强度正式进入首屏主判断
+- `buildMarketStepBanner` 将引用 `signalOverview.sealBoard` 作为市场阶段判断的辅助因子
+- 不再只是单独一行文字，而是融入「今天该不该看盘」的决策
+
+### 16.2 现状
+
+封板强度首屏展示已就绪（R91 已实现）：
+- 后端：`cpt/application/seal_board.py::seal_board_summary(latest)` 已可用
+- 前端：`renderSealBoard` 已在首屏渲染 `[data-testid=seal-board-line]`
+- API：`/api/dashboard/seal-board` 已可用
+- 数据：14:58 这一轮 40 只封板，封单中位 142 手
+
+### 16.3 待实现（10-29 后启用）
+
+1. `buildMarketStepBanner` 读取封板强度作为辅助因子
+2. 市场阶段标签（`growth`/`bse`/`st_main`）融入封板厚/薄作为置信度
+3. 文档更新
+
+### 16.4 观察期进度
+
+- 10-23（周五）：第 1 天
+- 10-26（周一）：第 2 天
+- 10-27（周二）：第 3 天
+- 10-28（周三）：第 4 天
+- 10-29（周三）：第 5 天 → 期满，正式启用

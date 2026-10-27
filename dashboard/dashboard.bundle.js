@@ -3405,10 +3405,18 @@
     const unknown = Number(dist.no_reason_but_blocked) || 0;
     const done3 = n("3");
 
+    // §16（2026-10-27）：封板强度进首屏主判断
+    const sealBoard = isObject(remoteOps.sealBoard) && isObject(remoteOps.sealBoard.board)
+      ? remoteOps.sealBoard.board
+      : null;
+    const sealLabel = sealBoard && sealBoard.available === true ? sealBoard.label : null;
+
     wrap.hidden = false;
     setText("[data-testid=market-step-headline]", standing
       ? `全市场 ${total} 只里，${standing} 只站在位置上（三步走完或差最后一步）`
-      : `全市场 ${total} 只，没有一只站在位置上`);
+        + (sealLabel ? ` · 封板${sealLabel}` : "")
+      : `全市场 ${total} 只，没有一只站在位置上`
+        + (sealLabel ? ` · 封板${sealLabel}` : ""));
     setText("[data-testid=market-step-numbers]",
       `三步全走完 ${done3} 只 · 差最后一步 ${n("2")} 只 · 卡在第二步 ${n("1")} 只` +
       (unknown ? ` · 不确定走到哪 ${unknown} 只` : ""));
@@ -3421,6 +3429,12 @@
       action = `可以在下面「信号全景」里看这 ${standing} 只具体是哪几只、卡在哪。` +
         "记住 R87 全市场实测：位置之后 20 日平均 +0.56%、胜率 45.6%，随便挑一天是 +0.22%、44.8%" +
         " —— 它是位置提示，不是买点。";
+    }
+    // §16：封板强度作为辅助判断
+    if (sealLabel === "厚" && standing > 0) {
+      action += " 封板偏厚，短期情绪偏高，注意追高风险。";
+    } else if (sealLabel === "薄" && standing > 0) {
+      action += " 封板偏薄，情绪偏谨慎。";
     }
     setText("[data-testid=market-step-action]", action);
   }
