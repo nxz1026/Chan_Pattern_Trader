@@ -35,7 +35,11 @@ DEST="${CPT_DASHBOARD_ROOT:-/var/www/cpt-dashboard}"
 MODE="sync"
 HTTP_CHECK=0
 BASIC_AUTH="${CPT_BASIC_AUTH:-admin:ndjack}"
-PUBLIC_URL="${CPT_PUBLIC_URL:-https://127.0.0.1/cpt}"
+# 挂载前缀：本机 2026-10-29 实测线上是 `/ecpt/cpt/`（vhost 在 /etc/nginx/sites-enabled/
+# dsh-web 的 `location /ecpt/cpt/`）。默认值原先写的是 `/cpt`，而线上 `/cpt` 已不再
+# 由 cpt-dashboard 承载 —— 拿它做 HTTP 校验会取回别处的 JSON 404 页面，
+# 再被误报成「线上与部署目录不一致」。换主机/换前缀时用 CPT_PUBLIC_URL 覆盖。
+PUBLIC_URL="${CPT_PUBLIC_URL:-https://127.0.0.1/ecpt/cpt}"
 
 # R59（审计 M12）：HTTP 校验用的凭据**不再走 `curl -u`（会进 argv，同机任何用户
 # `ps -ef` 都能看到口令）**，改为写进 mktemp 出来的 curl --config 临时文件
@@ -204,18 +208,24 @@ if [ "$HTTP_CHECK" -eq 1 ]; then
   HTTP_BODY=$(mktemp "${TMPDIR:-/tmp}/cpt-http-XXXXXX")
   for f in dashboard.bundle.js index.html dashboard.css; do
     local_url="$PUBLIC_URL/$f"
-    if curl -s --config "$CURL_CONFIG" ${CURL_TLS_ARGS[@]+"${CURL_TLS_ARGS[@]}"} \
-         --max-time 15 "$local_url" -o "$HTTP_BODY" 2>/dev/null; then
-      a=$(md5sum "$DEST/$f" | cut -d' ' -f1)
-      b=$(md5sum "$HTTP_BODY" | cut -d' ' -f1)
-      if [ "$a" = "$b" ]; then
-        echo "  ✓ $f 线上 = 部署目录"
-      else
-        echo "  ✗ $f 线上与部署目录不一致 —— 检查 nginx 缓存 / alias 路径"
-        rc=1
-      fi
+    # 先看状态码再看内容：401/404 时 curl 取回的是一张错误页，直接比 md5 会
+    # 把「路径或认证不对」报成「线上跑的不是这份代码」，排查方向全歪（2026-10-29 踩过）。
+    if ! code=$(curl -s --config "$CURL_CONFIG" ${CURL_TLS_ARGS[@]+"${CURL_TLS_ARGS[@]}"} \
+         --max-time 15 -o "$HTTP_BODY" -w '%{http_code}' "$local_url" 2>/dev/null); then
+      code=000
+    fi
+    if [ "$code" != "200" ]; then
+      echo "  ✗ $f 取不到（HTTP $code）—— 查 $PUBLIC_URL 这个前缀、Basic Auth 与服务是否在跑"
+      rc=1
+      continue
+    fi
+    a=$(md5sum "$DEST/$f" | cut -d' ' -f1)
+    b=$(md5sum "$HTTP_BODY" | cut -d' ' -f1)
+    if [ "$a" = "$b" ]; then
+      echo "  ✓ $f 线上 = 部署目录"
     else
-      echo "  ? $f 取不到（服务没起？或自签证书需 CPT_CURL_CA / CPT_CURL_INSECURE=1）"
+      echo "  ✗ $f 线上与部署目录不一致 —— 检查 nginx 缓存 / alias 路径"
+      rc=1
     fi
   done
   rm -f "$HTTP_BODY"
@@ -225,6 +235,6 @@ echo
 if [ "$rc" -eq 0 ]; then
   echo "✅ 全部一致"
 else
-  echo "❌ 有不一致 —— 线上跑的不是这份代码"
+  echo "❌ 未通过校验（原因见上；「取不到」和「内容不一致」是两码事）"
 fi
 exit $rc

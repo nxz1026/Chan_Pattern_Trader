@@ -73,6 +73,19 @@ deploy/dashboard-sync.sh --verify     # 只校验，不改（排查线上是否�
 deploy/dashboard-sync.sh --http       # 再通过 HTTPS 取一次线上文件，确认线上拿到的就是这份
 ```
 
+`--http` 校验的地址由 `CPT_PUBLIC_URL` 决定，默认 `https://127.0.0.1/ecpt/cpt`
+（本机线上挂载点；vhost 见 `/etc/nginx/sites-enabled/dsh-web` 的
+`location /ecpt/cpt/`）。换主机/换前缀时用环境变量覆盖：
+
+```bash
+CPT_PUBLIC_URL=https://example.internal/cpt deploy/dashboard-sync.sh --verify --http
+```
+
+2026-10-29 实测：默认值原本写的是 `/cpt`，而线上 `/cpt` 已不再由 cpt-dashboard
+承载，`--http` 取回的是别处的 JSON 404 页面，于是把「路径不对」误报成
+「线上与部署目录不一致」。现在脚本先看状态码：非 200 直接报「取不到（HTTP 4xx）」，
+不再拿错误页去比 md5。
+
 ⚠️ **改过任何 `dashboard/` 下的文件就必须跑它，否则等于没部署。**
 本节下面那段手工 `cp` 是**脚本的等价展开**（脚本就是这么做的），只在脚本不可用时
 才照着做——它没有校验，正是「以为部署了」和「真部署了」长得一样的原因。
