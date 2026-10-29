@@ -10,6 +10,7 @@ from __future__ import annotations
 import inspect
 import sys
 from pathlib import Path
+from typing import Any
 
 import pytest
 from cpt.domain import intraday_rules as ir
@@ -17,6 +18,24 @@ from cpt.domain.intraday_rules import board_of, board_pct_limit
 
 #: emotion-core 仓库位置（对账用；不存在则跳过那条测试）。
 _EMOTION_CORE = Path("/home/ubuntu/DSH/emotion-core/src")
+
+
+def _emotion_core_intraday() -> Any:
+    """取 emotion-core 的 ``algorithms.intraday``；拿不到就**跳过**。
+
+    两条对账用例都必须走这里，而不是各自裸 ``import``：CI 上没有兄弟仓，
+    裸 import 会 ``ModuleNotFoundError`` 把整个 pytest 步骤打红（2026-10-29
+    审计实测：``test_constants_match_adr`` 就是因此红的）。
+    """
+    if not _EMOTION_CORE.is_dir():
+        pytest.skip("emotion-core 仓库不在预期位置")
+    if str(_EMOTION_CORE) not in sys.path:
+        sys.path.insert(0, str(_EMOTION_CORE))
+    try:
+        from emotion_core.algorithms import intraday as ec  # noqa: PLC0415
+    except ImportError:
+        pytest.skip("emotion-core 未安装/导入不了")
+    return ec
 
 
 # ───────────────────────── 板块 ─────────────────────────
@@ -200,15 +219,7 @@ def test_matches_emotion_core_implementation() -> None:
     这条测试是对账，不是重复实现：它逐条比较两边的公开函数在**同一批输入**上
     的输出。任何一边改了规则（比如把 ST 从 5% 改成 10%），这条必红。
     """
-    if not _EMOTION_CORE.is_dir():
-        pytest.skip("emotion-core 仓库不在预期位置")
-
-    if str(_EMOTION_CORE) not in sys.path:
-        sys.path.insert(0, str(_EMOTION_CORE))
-    try:
-        from emotion_core.algorithms import intraday as ec  # noqa: PLC0415
-    except ImportError:
-        pytest.skip("emotion-core 未安装/导入不了")
+    ec = _emotion_core_intraday()
 
     codes = [
         "600519",
@@ -255,9 +266,9 @@ def test_matches_emotion_core_implementation() -> None:
     assert ir.SHARES_PER_LOT == ec._SHARES_PER_LOT
 
 
-def test_constants_match_adr():
+def test_constants_match_adr() -> None:
     """ADR 0003 D3 的常量。改任一条要同步改那边的表格。"""
-    from emotion_core.algorithms import intraday as ec  # noqa: PLC0415
+    ec = _emotion_core_intraday()
 
     assert ir.BOARD_PCT_MAIN == 10.0
     assert ir.BOARD_PCT_GROWTH == 20.0

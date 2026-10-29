@@ -273,19 +273,25 @@ _RUN_STORE_PERSIST_ENV = RUN_STORE_PERSIST_ENV
 
 
 @contextmanager
-def _run_store_conn(conn: Any = None) -> Iterator[Any]:
-    """借一条 psycopg 连接给运行持久化表用。
+def _db_conn() -> Iterator[Any]:
+    """借一条 DB 连接（退出时关掉），供 web 层的只读旁路使用。
 
-    :param conn: 已有的连接（测试注入）。给了就直接用，**不负责关闭**。
+    ## 为什么收成一个 helper
 
-    没给就现开一条并在退出时关掉——复用 ``_signal_stats_payload`` 那套
-    ``AShareLocalClient`` 借连接的写法。psycopg 与 ``dashboard_run_store``
-    都**惰性导入**：CI 只跑 ``pip install -e .``（不带 ``[db]``），顶层拖进来
-    会让整包测试在 collection 阶段就炸。
+    R59/R91/R94 期间这段 ``client = AShareLocalClient(); try: client._get_conn()
+    finally: client.close()`` 在 ``app.py`` 里抄了 **9 份**，每份都要自己记得
+    「client 必须活到用完」—— R94 的事故（临时对象 ``__del__`` 把连接关掉、
+    追踪页整页静默无数据）正是漏了这一条。收成一处后，这个约束只有一个实现。
+
+    ⚠️ 为什么不用 ``open_conn()``：它直接 ``psycopg.connect``，绕开
+    ``AShareLocalClient``，而测试普遍 monkeypatch 的是
+    ``cpt.adapters.a_share_local.AShareLocalClient`` —— 换成 ``open_conn()``
+    会让那批用例改成「真连库」。这里保留 client，但**只借它一条连接**，
+    生命周期由本函数兜住。
+
+    psycopg 与 client 都**惰性导入**：CI 只跑 ``pip install -e .``（不带
+    ``[db]``），顶层拖进来会让整包测试在 collection 阶段就炸。
     """
-    if conn is not None:
-        yield conn
-        return
     from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
 
     client = AShareLocalClient()
@@ -293,6 +299,20 @@ def _run_store_conn(conn: Any = None) -> Iterator[Any]:
         yield client._get_conn()  # noqa: SLF001
     finally:
         client.close()
+
+
+@contextmanager
+def _run_store_conn(conn: Any = None) -> Iterator[Any]:
+    """借一条 psycopg 连接给运行持久化表用。
+
+    :param conn: 已有的连接（测试注入）。给了就直接用，**不负责关闭**；
+        没给就委托 :func:`_db_conn` 现开一条并在退出时关掉。
+    """
+    if conn is not None:
+        yield conn
+        return
+    with _db_conn() as borrowed:
+        yield borrowed
 
 
 def _persist_run(row: dict[str, Any], body: dict[str, Any] | None) -> None:
@@ -529,14 +549,10 @@ def _signal_stats_payload(days: int, code: str | None) -> dict[str, Any]:
     }
     try:
         # CI 只跑 ``pip install -e .``（不带 [db]），故连接层必须惰性导入。
-        from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
         from cpt.storage.signal_event_store import load_signal_events  # noqa: PLC0415
 
-        client = AShareLocalClient()
-        try:
-            events = load_signal_events(client._get_conn(), days=days, code=code)  # noqa: SLF001
-        finally:
-            client.close()
+        with _db_conn() as conn:
+            events = load_signal_events(conn, days=days, code=code)
     except Exception as exc:  # noqa: BLE001 — 只读增强，DB 抖动不该让主视图 500
         _LOG.warning("signal stats unavailable: %s", exc)
         payload["available"] = False
@@ -568,15 +584,12 @@ def _signal_overview_payload(days: int) -> dict[str, Any]:
         # CI 只跑 ``pip install -e .``（不带 [db]），故连接层必须惰性导入。
         import time  # noqa: PLC0415
 
-        from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
         from cpt.adapters.a_share_pool import WatchlistStore  # noqa: PLC0415
         from cpt.application.signal_overview import signal_overview  # noqa: PLC0415
         from cpt.storage.signal_event_store import load_signal_events  # noqa: PLC0415
         from cpt.web.a_share_routes import watchlist_path_for  # noqa: PLC0415
 
-        client = AShareLocalClient()
-        try:
-            conn = client._get_conn()  # noqa: SLF001
+        with _db_conn() as conn:
             events = load_signal_events(conn, days=days)
             # R80：关注列表也要一并报「跑过没有」。取不到（文件缺失/损坏）就
             # 传空 —— 关注区不是主视图，不该因为它让整块 overview 降级。
@@ -587,8 +600,6 @@ def _signal_overview_payload(days: int) -> dict[str, Any]:
             except Exception as exc:  # noqa: BLE001 — 自选是旁路
                 _LOG.warning("watchlist unreadable for overview: %s", exc)
                 watched = []
-        finally:
-            client.close()
     except Exception as exc:  # noqa: BLE001 — 只读旁路，DB 抖动不该让主视图 500
         _LOG.warning("signal overview unavailable: %s", exc)
         payload["available"] = False
@@ -659,15 +670,11 @@ def _seal_board_payload() -> dict[str, Any]:
         "basis": SEAL_BOARD_BASIS,
     }
     try:
-        from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
         from cpt.application.seal_board import seal_board_summary  # noqa: PLC0415
         from cpt.storage.intraday_seal_store import load_latest_round  # noqa: PLC0415
 
-        client = AShareLocalClient()
-        try:
-            latest = load_latest_round(client._get_conn())  # noqa: SLF001
-        finally:
-            client.close()
+        with _db_conn() as conn:
+            latest = load_latest_round(conn)
         payload["available"] = True
         payload["board"] = seal_board_summary(latest)
     except Exception as exc:  # noqa: BLE001 — 首屏旁路，坏了不该 500
@@ -694,14 +701,10 @@ def _latest_market_day() -> Any:
     —— 分层门禁要求 SQL 不出 ``cpt/adapters`` 与 ``cpt/storage``。
     """
     try:
-        from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
         from cpt.storage.backtest_panel_store import latest_market_day  # noqa: PLC0415
 
-        client = AShareLocalClient()
-        try:
-            return latest_market_day(client._get_conn())  # noqa: SLF001
-        finally:
-            client.close()
+        with _db_conn() as conn:
+            return latest_market_day(conn)
     except Exception as exc:  # noqa: BLE001 — 日历是旁路
         _LOG.warning("market day unavailable: %s", exc)
         return None
@@ -728,19 +731,15 @@ def _structure_events_payload(
     }
     try:
         # CI 只跑 ``pip install -e .``（不带 [db]），故连接层必须惰性导入。
-        from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
         from cpt.storage.structure_event_store import recent_events  # noqa: PLC0415
 
-        client = AShareLocalClient()
-        try:
+        with _db_conn() as conn:
             events = recent_events(
-                client._get_conn(),  # noqa: SLF001
+                conn,
                 limit=limit,
                 event_type=event_type,
                 kind=kind,
             )
-        finally:
-            client.close()
     except Exception as exc:  # noqa: BLE001 — 只读旁路，DB 抖动不该让主视图 500
         _LOG.warning("structure events unavailable: %s", exc)
         payload["available"] = False
@@ -763,18 +762,14 @@ def _structure_timeline_payload(structure_id: str, *, limit: int) -> dict[str, A
         "limit": limit,
     }
     try:
-        from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
         from cpt.storage.structure_event_store import timeline  # noqa: PLC0415
 
-        client = AShareLocalClient()
-        try:
+        with _db_conn() as conn:
             events = timeline(
-                client._get_conn(),  # noqa: SLF001
+                conn,
                 structure_id,
                 limit=limit,
             )
-        finally:
-            client.close()
     except Exception as exc:  # noqa: BLE001
         _LOG.warning("structure timeline unavailable: %s", exc)
         payload["available"] = False
@@ -795,14 +790,10 @@ def _latest_signal_statuses() -> dict[str, str]:
     ``"none"``，所以「没读到」不会伪装成别的结论，只是这一列失去信息量。
     """
     try:
-        from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
         from cpt.storage.signal_event_store import load_signal_events  # noqa: PLC0415
 
-        client = AShareLocalClient()
-        try:
-            events = load_signal_events(client._get_conn(), days=30)  # noqa: SLF001
-        finally:
-            client.close()
+        with _db_conn() as conn:
+            events = load_signal_events(conn, days=30)
     except Exception as exc:  # noqa: BLE001
         _LOG.warning("watchlist signal statuses unavailable: %s", exc)
         return {}
@@ -1442,7 +1433,6 @@ def make_handler(
             elif path.path == "/api/dashboard/llm/calls":
                 # LLM 调用审计列表（UI 轮询用）。LLM 未启用时返回空列表而不是 500。
                 try:
-                    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
                     from cpt.application.llm_cases import list_calls  # noqa: PLC0415
 
                     subject = (query.get("subject_id") or [""])[0].strip() or None
@@ -1450,15 +1440,12 @@ def make_handler(
                         limit = int((query.get("limit") or ["20"])[0])
                     except ValueError:
                         limit = 20
-                    client = AShareLocalClient()
-                    try:
-                        payload = list_calls(  # noqa: SLF001
-                            client._get_conn(),  # noqa: SLF001
+                    with _db_conn() as conn:
+                        payload = list_calls(
+                            conn,
                             limit=limit,
                             subject_id=subject,
                         )
-                    finally:
-                        client.close()
                 except Exception as exc:  # noqa: BLE001 — LLM 是旁路，不可用就降级
                     _LOG.warning("llm calls unavailable: %s", exc)
                     payload = {
@@ -1472,7 +1459,6 @@ def make_handler(
                 # R38：运行巡检 + 水位（R31-R38 讨论的"日志分两轨"的落地入口）。
                 # 只读旁路：DB 抖动不 500，降级成 available=false + reason。
                 try:
-                    from cpt.adapters.a_share_local import AShareLocalClient  # noqa: PLC0415
                     from cpt.storage import run_metric_store as _rms  # noqa: PLC0415
 
                     limit_raw = (query.get("limit") or ["60"])[0]
@@ -1491,9 +1477,7 @@ def make_handler(
                     # ``?limit=100000000`` 会直接把「最近 N 条」变成全表扫描 +
                     # 每个 (market, symbol) 一次 waterline_trend（N+1 放大到天文数字）。
                     limit = max(1, min(limit, _MAX_LIMIT))
-                    _client = AShareLocalClient()
-                    try:
-                        _conn = _client._get_conn()  # noqa: SLF001
+                    with _db_conn() as _conn:
                         latest = _rms.latest_inspection(_conn)
                         runs = _rms.recent_metrics(_conn, kind=_rms.KIND_RUN, limit=limit)
                         # R59（审计 M5）：N+1 的规模由 distinct (market,symbol) 决定，
@@ -1534,8 +1518,6 @@ def make_handler(
                                 "trend_keys_truncated": truncated_keys,
                             },
                         }
-                    finally:
-                        _client.close()
                 except Exception as exc:  # noqa: BLE001
                     _LOG.warning("inspection unavailable: %s", exc, exc_info=True)
                     payload = {
@@ -1705,9 +1687,7 @@ def make_handler(
                         )
                         return
                 try:
-                    payload = a_share_routes.snapshot_payload(
-                        code, width_k=width_k
-                    )
+                    payload = a_share_routes.snapshot_payload(code, width_k=width_k)
                 except a_share_routes.InvalidCodeError as exc:
                     # 代码格式非法回 400（JSON 体，见 _write_json_error 的注释：
                     # 中文消息不能走 send_error）。

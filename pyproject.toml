@@ -87,7 +87,10 @@ exclude = ["references/", "build/", "dist/"]
 [tool.pytest.ini_options]
 minversion = "8.0"
 testpaths = ["tests"]
-addopts = "-ra -q"
+# 只留 ``-ra``：再加 ``-q`` 会与命令行/CI 的 ``-q`` 叠成 ``-qq``，连
+# 「N passed, M skipped」这行汇总都被吞掉 —— 于是「48 个 skip」只能靠退出码
+# 猜，与本仓「skip 不能假装 pass」的原则相悖（2026-10-29 审计实测）。
+addopts = "-ra"
 python_files = ["test_*.py", "*_test.py"]
 
 [tool.coverage.run]

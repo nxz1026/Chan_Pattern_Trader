@@ -184,9 +184,7 @@ def build_ashare_snapshot(
         # 最常见的一种失败（因子表只覆盖热门池并集）。必须与"没数据"和
         # "DB 挂了"分开报 —— 报成 db_error 会把排查方向带偏（实测踩过）。
         _LOG.info("A 股缺因子 %s: %s", code, exc)
-        return empty_ashare_snapshot(
-            code, "no_factor", name=security_name, board=security_board
-        )
+        return empty_ashare_snapshot(code, "no_factor", name=security_name, board=security_board)
     except AShareNoDataError as exc:
         _LOG.info("A 股无行情 %s: %s", code, exc)
         return empty_ashare_snapshot(code, "no_data", name=security_name, board=security_board)
@@ -1690,7 +1688,6 @@ def _skipped_placeholder(result: Any) -> tuple[str, ...]:
     """
     skipped = getattr(result, "skipped_placeholder", None)
     return tuple(skipped) if skipped else ()
-
 
 
 def empty_ashare_snapshot(

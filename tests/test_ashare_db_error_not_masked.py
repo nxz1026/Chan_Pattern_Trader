@@ -128,5 +128,3 @@ def test_outer_handler_rolls_back_shared_connection(monkeypatch: pytest.MonkeyPa
     )
     assert client.conn.rollbacks >= 1, "共享连接出错后没有 rollback，连接留在 aborted 态"
     assert client.conn.aborted is False
-
-

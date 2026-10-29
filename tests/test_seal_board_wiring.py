@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import subprocess
+import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -168,10 +169,16 @@ class TestBundle:
 
 class TestBundleBuild:
     def test_bundle_is_in_sync_with_sources(self) -> None:
-        """真跑一次 --check，不靠肉眼。"""
+        """真跑一次 --check，不靠肉眼。
+
+        ⚠️ 用 ``sys.executable`` 而不是 ``ROOT/.venv/bin/python``：后者只在
+        开发机上存在，CI runner 上没有 ``.venv``，于是这条用例**结构性地**
+        在 CI 上必红（2026-10-29 审计实测：`FileNotFoundError`，并把整个
+        pytest 步骤打红、连带后面 17 道门禁全部跳过）。
+        """
         out = subprocess.run(
             [
-                str(ROOT / ".venv" / "bin" / "python"),
+                sys.executable,
                 "scripts/build_dashboard_bundle.py",
                 "--check",
             ],

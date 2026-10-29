@@ -51,20 +51,6 @@ from cpt.domain.zhongshu import build_zhongshus  # noqa: E402
 from czsc import Freq, RawBar  # noqa: E402
 
 ORACLE = ROOT / "tests" / "fixtures" / "oracle"
-TIME = {"open_time", "close_time"}
-F = (
-    "open_time",
-    "open",
-    "high",
-    "low",
-    "close",
-    "volume",
-    "close_time",
-    "quote_volume",
-    "trade_count",
-    "taker_buy_base_volume",
-    "taker_buy_quote_volume",
-)
 
 
 def load(path: pathlib.Path) -> list[CanonicalBar]:

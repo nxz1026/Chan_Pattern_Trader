@@ -69,7 +69,13 @@ type = layers
 # application 需要它落库，domain 不该碰它。
 # 2026-10-01（R25）加入 ``cpt.llm``：它是**独立服务层**，只有 application/llm_cases
 # 可以调它，web / storage / adapters / domain 都不得依赖。
+#
+# 2026-10-29（审计）：补上 ``cpt.backtest``。它自 R16 起就存在、`docs/architecture.md`
+# §2 的层图里也画着，但**从来没进过这条 layers 契约** —— 于是它的真实依赖方向
+# 无人守（实测 `cpt/backtest/signals.py` → `cpt.application.first_buy_bridge`，
+# 所以它必须排在 application **之上**；本仓没有任何包 import backtest）。
 layers =
+    cpt.backtest
     cpt.web
     cpt.application
     cpt.llm

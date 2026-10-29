@@ -136,6 +136,9 @@ def test_latest_round_is_empty_when_table_is_empty() -> None:
 
 
 def test_latest_round_counts_sealed_and_open_board() -> None:
+    # 行形状必须与 ``_SELECT_COLS`` **逐列同序**（5 列：at, code, sealed,
+    # bid1_lots, limit_price）—— 形状对不上时下标错位在单测里永远看不见
+    # （2026-10-29 审计实测：假游标喂 4 元组，真库却是带 code 的 5 列）。
     rows = [
         (AT, "600293", True, 847522.5, 5.23),
         (AT, "002249", True, 293674.5, 7.06),
@@ -158,13 +161,18 @@ def test_latest_round_only_reads_one_timestamp() -> None:
 
 
 def test_seal_track_is_ordered_and_scoped() -> None:
+    # 5 列，与 ``_SELECT_COLS`` 同序：at, code, sealed, bid1_lots, limit_price。
     rows = [
-        (AT, True, 100.0, 5.23),
-        (AT + dt.timedelta(minutes=2), False, None, None),
+        (AT, "600293", True, 847522.5, 5.23),
+        (AT + dt.timedelta(minutes=2), "600293", False, None, None),
     ]
     conn = _Conn(track_rows=rows)
     out = load_seal_track(conn, "600293", since=AT, until=AT + dt.timedelta(days=1))
     assert [r["sealed"] for r in out] == [True, False]
+    # 数值列必须落在对的键上 —— 下标错一位时 ``sealed`` 会变成代码字符串
+    # （真值恒 True）、``limit_price`` 会变成封单量（2026-10-29 审计实测）。
+    assert [r["bid1_lots"] for r in out] == [847522.5, None]
+    assert [r["limit_price"] for r in out] == [5.23, None]
     # 每行必须带 code：``track_summary`` 要用它。第一版漏了，实跑时 KeyError，
     # 假游标喂的是 dict 所以测试没抓到 —— 这条断言就是为那次补的。
     assert [r["code"] for r in out] == ["600293", "600293"]

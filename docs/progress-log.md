@@ -960,7 +960,7 @@ whitelist.py`、`ruff check`、`ruff format --check`、`mypy cpt scripts`。
 8. `_pkg` 那条 0 下载的通道：**不退役**（在用）。真问题是 `linux7` 包本身缺
    `scripts/collector_linux.sh`，`run7.sh` 是止血不是修包 —— 应由 collector-cn 的主人
    重新打包。
-9. `web/__main__.py` + `app.py` 合计 2,294 行承担 CLI 解析 / provider 选择 / HTTP
+9. `web/__main__.py` + `app.py` 合计 3,370 行（2026-10-29 复核；本条原写 2,294）承担 CLI 解析 / provider 选择 / HTTP
    handler 装配 / 降级策略四件事，拆分信号明显，但会动到 HTTP 装配路径，
    **风险大于收益**，记此不拆。
 10. `?level=abc` 的行为随模式而变（realtime 回 400，demo/fixture 静默回 200）——
@@ -979,3 +979,50 @@ whitelist.py`、`ruff check`、`ruff format --check`、`mypy cpt scripts`。
     阻止测试行写入。彻底解法是给追踪行加 `is_smoke`/来源列或把测试指向独立 schema ——
     那是表结构变更，未在本轮动。
 
+
+---
+
+## 2026-10-29 · 代码与文档审计修复（无 R 号，按日期记）
+
+审计结论：工程底子没问题（mypy strict 136 文件零错、import-linter 6/6、
+SQL 分层/失败语义/文档漂移四道内容门禁全绿、本地 2,273 passed / 10 skipped），
+但**质量门禁体系已空转 12 天** —— CI 停在 pytest 一步，后面 17 道门禁一次没跑。
+
+### 已修
+
+| # | 问题 | 落点 |
+|---|---|---|
+| 1 | CI 四个根因（`.venv` 硬编码 ×2、空库无表、兄弟仓 import） | `tests/test_seal_board_wiring.py`、`scripts/check_editable_import.py`、`tests/test_intraday_rules.py`、`.github/workflows/ci.yml` 新增 Bootstrap 步骤 |
+| 2 | `load_seal_track` 列错位（真库返回 `sealed='600293'`） | `cpt/storage/intraday_seal_store.py` + 假游标改 5 元组 |
+| 3 | `tests/test_first_buy.py` 是 43 行空壳（0 个用例） | 重写 19 个用例，覆盖五个门槛 |
+| 4 | ruff 11 条 / 6 文件未格式化；vulture 3 条 | 全仓 `ruff --fix` + `format`；删 `MARK = "❌" if False else "✗"` 与两个未使用常量 |
+| 5 | 文档计数：表 28/2 → **55/9**、llm 行数 1,370/1,652/1,300 → **1,692**、层数 6 → **7（含 backtest）** | `README.md`、`docs/architecture.md`、`docs/progress-log.md` |
+| 6 | `check_doc_counts` 的正则漏掉带散文的两行（storage/application 从没被核过） | `scripts/check_doc_counts.py`：限定 §2.1 表 + 允许第三格带散文 |
+| 7 | `.importlinter` 的 layers 缺 `cpt.backtest` | 补进契约（它在 application 之上，实测依赖 `first_buy_bridge`） |
+| 8 | web 层 9 处手抄「借连接 + close」 | 收成 `cpt/web/app.py::_db_conn()` |
+| 9 | `pytest` 的 `-q` 叠成 `-qq`，连汇总行都不打印 | `pyproject.toml` 的 `addopts` 去掉 `-q` |
+| 10 | 新增两条 known-traps（#63 门禁链串联失效 / #64 假游标形状不同步） | `docs/known-traps.md` |
+| 11 | known-traps #1 写死「462 passed / 28 skipped」、#2 写「`dependencies = []`」—— 均已过期 | `docs/known-traps.md`（改为只讲机制 + 判定命令；`dependencies` 现行只有 `emotion-cpt` 一条） |
+| 12 | `reference-audit.md` §2.3 的「`dependencies = []` 必须保持为空」已不成立 | 就地加「2026-10-29 复核」更正块 |
+| 13 | README 的「质量门」清单比 `ci.yml` 少 6 步、vulture 漏了 `scripts` | 按 `ci.yml` 顺序补全（含新增的 Bootstrap 步骤） |
+
+### 验证
+
+```bash
+# CI 同构环境（干净库 + 建表 + CPT_REQUIRE_DB=1）
+python -m pytest tests -q        # 2273 passed, 10 skipped
+ruff check cpt tests scripts     # All checks passed
+ruff format --check cpt tests scripts
+mypy cpt scripts                 # Success: no issues found in 136 source files
+lint-imports                     # 6 kept, 0 broken
+vulture --min-confidence 60 cpt scripts whitelist.py   # 0
+python scripts/check_doc_drift.py && python scripts/check_doc_counts.py
+```
+
+### 未做（需 owner 决定 / 属于部署动作）
+
+- `check_value_plumbing` 在本机报 **R2 部署半边不一致**：`/var/www/cpt-dashboard`
+  里的 bundle 与仓内不同步。修法是跑 `deploy/dashboard-sync.sh` —— 那会改动线上
+  正在服务的静态文件，**没有 owner 授权不动**。CI 上该目录不存在，会自动跳过，
+  不阻塞门禁。
+- `cpt_track` 生产/测试同表（#51 第 4 条）仍未解，需要表结构变更。

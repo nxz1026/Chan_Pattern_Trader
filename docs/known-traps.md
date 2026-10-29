@@ -7,45 +7,56 @@
 
 ---
 
-## 1. CI 里 28 个测试被 skip，不是缺陷
+## 1. CI 里有一批测试被 skip，不是缺陷
 
-**现象**：本地 `.venv` 跑 `462 passed`，CI 里却是 `434 passed, 28 skipped`。
+**现象**：本地与 CI 的 `passed / skipped` 数不一样，CI 里多出一批 `s`。
 
-**原因**：`czsc` / `wbt` / `ccxt` 三个**可选依赖**只在 extras 里
-（`pyproject.toml` 的 `[project.optional-dependencies]` 的 `chan` / `report` / `crypto`），
-CI 只装 `requirements-dev.txt`（不含任何 extra），于是相关测试**优雅跳过**。
-而 `czsc`/`wbt` 的参考实现在 `references/` 下，**该目录不入 git**
+**原因**：`czsc` / `ccxt` 这些**可选依赖**只在 extras 里
+（`pyproject.toml` 的 `[project.optional-dependencies]` 的 `chan` / `crypto`），
+CI 只装 `requirements-dev.txt` + `.[db]`，于是相关测试**优雅跳过**。
+而 `czsc` 的参考实现在 `references/` 下，**该目录不入 git**
 （见 `.gitignore`），所以 CI 结构上就拿不到它们。
+另有一类 skip 是**数据前提不成立**（库里没有真实轮次 / 没有存量行），
+那也不是缺陷 —— 它明确说明了「这条无从验证」。
 
-**判定**：
+**判定**（别看数字，看**原因**；数字会随用例增长而变，背数字必错）：
 
 ```bash
-grep -c "^SKIPPED" /dev/null   # 直接看 skip 原因：
 .venv/bin/python -m pytest tests -rs 2>&1 | grep SKIPPED | sed 's/.*: //' | sort -u
-# -> could not import 'czsc' / 'wbt' / 'ccxt'
+# -> could not import 'czsc' / could not import 'ccxt' / 表里没有真实轮次 …
 ```
 
-**要全量覆盖**：`pip install -e ".[dev,chan,report,crypto,db]"`。
-2026-09-25 用 python-build-standalone 的真 3.12.14 实测：装上全部 extras 后
-**462 passed**，与 3.14 完全一致 —— 所以这不是版本差异。
+**要全量覆盖**：`pip install -e ".[dev,chan,crypto,db]"`（`report` extra 已随 R51
+画布 D 下线删除，不再是有效 extra）。
+
+> 2026-10-29 复核：本条原先写死「`462 passed` / `434 passed, 28 skipped`」，
+> 早已与现状无关（当时 CI 还是**全红**的，28 这个数字本身也不可信）。
+> 现在只保留机制与判定命令。
 
 ---
 
-## 2. `pyproject.toml` 的 `dependencies = []` 是有意的
+## 2. `pyproject.toml` 的 `dependencies` 只有一条，且 extras 是**可选能力**
 
-**现象**：`cpt/` 里 import 了 `psycopg` / `czsc` / `ccxt` / `pandas` / `plotly` / `wbt`，
-但核心依赖是空的，看着像漏写。
+**现象**：`cpt/` 里 import 了 `psycopg` / `czsc` / `ccxt`，但 `dependencies`
+里只有 `emotion-cpt`，看着像漏写。
 
-**原因**：这是**刻意的**。核心零依赖；每个可选能力对应一个 extra：
+**原因**：这是**刻意的**。2026-10-23 判据内核迁到 Emotion-CPT 之后，
+`dependencies` 只剩**一条**——`emotion-cpt @ git+…@v0.8.4`（钉 tag 不钉 main），
+因为它是「判据」而不是三方库；其余能力都走 extra：
 
 | extra | 包 | 缺了会怎样 |
 |---|---|---|
 | `db` | `psycopg[binary]` | A 股本地数据层连不上 |
 | `chan` | `czsc` | czsc 后端报 `CzscNotInstalledError` |
-| `report` | `wbt` | 画布 D 返回 `available=false` |
 | `crypto` | `ccxt` | 注册表把该源标成 unavailable |
 
-**判定**：`sed -n '16,40p' pyproject.toml`（注释写明了每个 extra 的降级行为）。
+（`report` / `wbt` 随 R51 画布 D 下线**已删除**，不要再往这里加。）
+
+**判定**：`sed -n '/^dependencies/,/^\[/p' pyproject.toml`（注释写明了每个 extra
+的降级行为与主版本上界）。
+
+> 2026-10-29 复核：本条原写作「`dependencies = []` 是有意的」，在判据内核迁移后
+> 已不成立（当时 README 仍写「核心依赖为空」）。以 `pyproject.toml` 为准。
 
 > **已修平的不一致**：`psycopg` 现在在 `a_share_local.py:103,190` 两处都是
 > `try/except ModuleNotFoundError` → 抛带安装指引的 `AShareLocalError`，
@@ -695,7 +706,7 @@ grep -rnE "(index|idx|col|pos|offset|ix)\w* *= *[a-z_]+\([^)]*\) +or " cpt/
 |---|---|---|
 | `reference_backend:386-390` | `int(f.get("x", 0) or 0)` | 两边都是 0，收敛成默认值本就正确 |
 | `a_share_factor:552` | `getattr(act,"share_ratio",0.0) or 0.0` | 同上（None → 0.0 是有意的） |
-| `app.py:1403` | `find_run(run_id) or _index_row_from_body(...)` | `find_run` 返回 **dict 或 None**；非空 dict 恒为真，None 才回落 ⇒ 正确 |
+| `app.py:1394` | `find_run(run_id) or _index_row_from_body(...)` | `find_run` 返回 **dict 或 None**；非空 dict 恒为真，None 才回落 ⇒ 正确 |
 
 ⇒ **判据不是「用了 `or`」，而是「左边函数的返回值合法地包含 0 / "" / []」**。
 这条 grep 只能**筛出候选**，逐个看清左边是什么才算结论。
@@ -2569,3 +2580,64 @@ def open_conn() -> Any:
    必须先实测「是不是真的常数」—— 实测结果是相邻日跳 97%，那就完全不是常数。
 3. **数据修复要落成可重跑的 SQL 文件**，附带备份表 + 自检 `RAISE EXCEPTION`。
    在 psql 里手动改完就走的修复，下次没人知道做过什么、做了多少。
+
+---
+
+## 63. CI 红在**第一步**，后面 17 道门禁全部变成「没跑过」（2026-10-29 实测，连续 12 天）
+
+**现象**：`gh run list -L 100` → **93 failure / 7 success**，最后一次绿是 2026-10-17。
+每次红都停在 `Run unit and integration tests`，它之后的
+`Gates self-test / Static quality gates / Doc claims / Doc counts / Dead-code audit …`
+在 Actions 页面上显示为 `-`（skipped）。
+
+**为什么这是最坏的一种红**：门禁全绿的日志与门禁没跑的日志，**在退出码上一样**。
+于是这 12 天里 `ruff` 攒了 11 条错误、6 个文件没格式化、vulture 3 条、
+`application/` 的行数断言漂了 325 行 —— 没有任何一道门禁报警，因为它们压根没启动。
+
+**四个独立根因**（每个都足以让 CI 红）：
+
+| 根因 | 位置 | 判据 |
+|---|---|---|
+| 硬编码 `.venv/bin/python` | `tests/test_seal_board_wiring.py` | runner 上没有 `.venv` → `FileNotFoundError` |
+| 空库没有表 | CI 只起 Postgres、从不建表 | `live_conn` 用例 `relation ... does not exist` |
+| 依赖兄弟仓 | `tests/test_intraday_rules.py::test_constants_match_adr` | `import emotion_core` → `ModuleNotFoundError` |
+| 门禁自己钉死 `.venv` | `scripts/check_editable_import.py` | 解释器不存在 → 恒 `return 1` |
+
+**修法**：测试/脚本一律 `sys.executable`（或 `CPT_PYTHON`）；CI 加
+`Bootstrap CPT tables in test DB` 一步，按文件名顺序跑「建表/加列」迁移；
+对账类用例统一走 `_emotion_core_intraday()`，拿不到兄弟仓就 `skip`。
+
+**判定命令**（改完必跑）：
+
+```bash
+gh run view --job <id> | sed -n '/JOBS/,$p'   # 看「X 在哪一步」+ 后面是不是全 `-`
+```
+
+**通用规矩**：**门禁链的每一步都必须是独立 job，或至少「失败不阻断后续」**。
+现在这种「pytest 一红、后面全跳过」的串联，等于把 18 道门禁绑在一根绳上。
+
+---
+
+## 64. 假游标的行形状与真 SQL 不同步：单测全绿，真库必错（2026-10-29 实测）
+
+**现象**：`cpt/storage/intraday_seal_store.py::load_seal_track` 在真库上返回
+`sealed='600293'`（代码字符串，恒真）、`bid1_lots=True`、`limit_price=847522.5`（封单量）。
+单测 `test_seal_track_is_ordered_and_scoped` 一直绿。
+
+**真根因**：`_SELECT_COLS` 在 R93 从 4 列扩到 9 列、`code` 插在第 2 位，
+而读侧的映射仍是 `sealed=r[1] / bid1_lots=r[2] / limit_price=r[3]`（**错一位**）。
+测试的假游标喂的是**旧的 4 元组**，索引 1/2/3 恰好落在 sealed/bid1_lots/limit_price 上
+⇒ 形状对不上，但断言看不出。
+
+**判定**：喂一条**与 `SELECT` 逐列同序**的真实行给假游标，断言每个键的值。
+
+```python
+rows = [(AT, "600293", True, 847522.5, 5.23)]   # at, code, sealed, bid1_lots, limit_price
+assert out[0]["sealed"] is True                  # 错位时这里是 '600293'
+```
+
+**修法**：`_SELECT_COLS` 收回 CPT 真正读的 5 列（那 4 列归 emotion-core，契约 §2.1
+另有一份 9 列 SELECT）；映射改 `r[2]/r[3]/r[4]`；测试假行改成 5 元组。
+
+**通用规矩**：假游标/假连接的行形状**必须从 SELECT 列清单派生**，不许手写。
+「测试绿、真库错」的假绿，比没有测试更危险 —— 它把 bug 变成了「已验证」。

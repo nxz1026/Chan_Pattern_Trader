@@ -17,8 +17,10 @@ from __future__ import annotations
 import math
 
 from cpt.adapters.native_chanlun import NativeChanlunBackend
-from cpt.application.replay import compute_domain_structures  # was reference_pipeline (deleted in R96)
 from cpt.application.dashboard_inspector import inspect_bar
+from cpt.application.replay import (
+    compute_domain_structures,  # was reference_pipeline (deleted in R96)
+)
 from cpt.domain.bi import build_bis
 from cpt.domain.config import RulesConfig
 from cpt.domain.contain import merge_contained_bars

@@ -42,6 +42,11 @@ v0.1（2026-09-22，M0-02）的 chanlun-pro / chanlun.py / chanlun_pine / chan.p
 
 用户 2026-09-24 定：**可选依赖 extra**，`dependencies = []` 必须保持为空。三个备选方案被实测否决：
 
+> ⚠️ **2026-10-29 复核：这句话已过期。** 2026-10-23 判据内核迁到 Emotion-CPT 后，
+> `dependencies` 里有且只有一条 `emotion-cpt @ git+…@v0.8.4`（它是「判据」不是三方库，
+> 且必须钉 tag）。「核心零三方依赖」的原则没变，但**不再是空列表**。
+> 现行口径见 `docs/known-traps.md` #2 与 `pyproject.toml`。
+
 | 方案 | 实测结论 |
 |---|---|
 | A 无条件 `pip install czsc` | 会拉入 pandas / numpy / pyarrow / polars / scipy / statsmodels / openpyxl / requests，破坏 `dependencies = []` |

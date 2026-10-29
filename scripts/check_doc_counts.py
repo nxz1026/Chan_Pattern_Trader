@@ -78,6 +78,27 @@ def front_files(rel: str) -> list[pathlib.Path]:
     return sorted(p for p in base.iterdir() if p.is_file() and p.suffix in FRONT_SUFFIXES)
 
 
+#: §2.1 层计数表的表头（改表头就等于换表，这里会响亮失败）。
+SECTION_21_HEADER = "| 层 | 文件 | 行数 |"
+
+
+def _section_21_table(text: str) -> str:
+    """截出 §2.1 那张表的文本（表头 → 第一行非 ``|`` 开头为止）。
+
+    找不到表头时返回**空串** —— 后面的 ``matched == 0`` 分支会判失败，
+    不会静默通过。
+    """
+    lines = text.splitlines()
+    try:
+        start = next(i for i, line in enumerate(lines) if line.startswith(SECTION_21_HEADER))
+    except StopIteration:
+        return ""
+    end = start + 1
+    while end < len(lines) and lines[end].startswith("|"):
+        end += 1
+    return "\n".join(lines[start:end])
+
+
 def main() -> int:
     print("═══ 实际计数（用作对照）═══")
     truth: dict[str, tuple[int, int]] = {}
@@ -95,7 +116,13 @@ def main() -> int:
     arch = (ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
     bad = 0
     matched = 0
-    for m in re.finditer(r"\| `(\w+)/`[^|]*?\| (\d+) \| ([\d,]+) \|", arch):
+    # 只扫 §2.1 那张表：从表头到第一行非 ``|`` 开头为止。全文件扫会撞上
+    # 别的表（如覆盖率表的 ``| `domain/` `storage/` | 0 | 0% |``）造成假阳性。
+    table = _section_21_table(arch)
+    # ⚠️ 第三格允许**数字后面跟散文**：``| `storage/` | 11 | 3,582。**R90**：… |``。
+    # 旧正则要求 ``| (数字) |`` 紧邻，于是 storage / application 两行**从没被核过**
+    # （2026-10-29 审计实测：application 写 8,934、实际 8,609，差 325 行而门禁全绿）。
+    for m in re.finditer(r"\| `(\w+)/`[^|]*?\| (\d+) \| ([\d,]+)(?:[^\d|][^|]*)? \|", table):
         layer, n_doc, l_doc = m.group(1), int(m.group(2)), int(m.group(3).replace(",", ""))
         if layer not in truth:
             continue

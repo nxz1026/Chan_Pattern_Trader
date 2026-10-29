@@ -37,10 +37,14 @@ PROBE_CODE_PREFIX: Final[str] = "\x01"
 #: 当成占位符报 ``only '%s', '%b', '%t' are allowed as placeholders, got '%'``。
 _REAL_ROWS: Final[str] = f"code NOT LIKE '{PROBE_CODE_PREFIX}%%'"
 
-#: 全部 9 列，读侧统一用这一份。
-_SELECT_COLS: Final[str] = (
-    "at, code, sealed, bid1_lots, limit_price, price, prev_close, distance_pct, is_st"
-)
+#: CPT **读侧**用到的 5 列，三个 ``load_*`` 统一用这一份。
+#:
+#: ⚠️ 写侧是 9 列（R93 补了 ``price`` / ``prev_close`` / ``distance_pct`` / ``is_st``），
+#: 但那 4 列是 **emotion-core N5 的输入**，CPT 自己不读 —— 契约
+#: `docs/intraday-seal-contract.md` §2.1 给两边列了两份 SELECT。早先这里写的是
+#: 9 列、三个读函数却只映射前 5 个，等于每行白取 4 列（2026-10-29 审计）。
+#: 要那 4 列的下游**直接查表**（契约 §2.1 第 90 行那份 9 列 SELECT），不要改这里。
+_SELECT_COLS: Final[str] = "at, code, sealed, bid1_lots, limit_price"
 
 _INSERT_SQL: Final[str] = (
     "INSERT INTO public.intraday_seal_snapshot ("
@@ -146,13 +150,18 @@ def load_seal_track(conn: Any, code: str, *, since: Any, until: Any) -> list[dic
         )
         # 带上 code：下游 track_summary 要它，缺了会在真数据上报 KeyError（测试里
         # 的假游标喂的是带 code 的 dict，所以只在实跑时才暴露）。
+        #
+        # ⚠️ 下标必须跟着 ``_SELECT_COLS`` 走：``at, code, sealed, bid1_lots,
+        # limit_price, ...`` —— ``code`` 插在第 2 列，所以 sealed 从 r[2] 起。
+        # 2026-10-29 审计实测：这里曾写成 r[1]/r[2]/r[3]（``code`` 加入前的下标），
+        # 真库返回 ``sealed='600293'``、``bid1_lots=True``；假游标喂 4 元组所以单测全绿。
         return [
             {
                 "at": r[0],
                 "code": code,
-                "sealed": r[1],
-                "bid1_lots": r[2],
-                "limit_price": r[3],
+                "sealed": r[2],
+                "bid1_lots": r[3],
+                "limit_price": r[4],
             }
             for r in cur.fetchall()
         ]

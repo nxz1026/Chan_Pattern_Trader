@@ -303,6 +303,17 @@ def _install_fake_pre_migration(cur: Any) -> None:
     cur.execute("DROP INDEX IF EXISTS public.uq_cpt_structure_event_sid_rev")
     cur.execute(f"DELETE FROM {_TABLE}")
 
+    # 前置守卫 2 读的是 ``cpt_run_metric``（加密侧必须只有 BTCUSDT）。空库里
+    # ``string_agg`` 返回 NULL，而 ``NULL IS DISTINCT FROM 'BTCUSDT'`` 为真 ⇒
+    # 迁移直接拒绝执行。CI 的库是干净的，所以这里补一行前提数据（事务内，
+    # 随收尾 rollback 消失）。生产上本来就有 BTCUSDT 行，这段是 no-op。
+    cur.execute("SELECT count(*) FROM public.cpt_run_metric WHERE market = 'crypto'")
+    if cur.fetchone()[0] == 0:
+        cur.execute(
+            "INSERT INTO public.cpt_run_metric (kind, market, symbol) "
+            "VALUES ('run', 'crypto', 'BTCUSDT')"
+        )
+
     cur.execute(
         "SELECT COALESCE((SELECT max(id) FROM public.cpt_structure_event), 0), "
         "(SELECT last_value FROM pg_sequences "
@@ -508,6 +519,11 @@ def test_invariant_holds_for_the_live_table_after_migration(live_conn: Any) -> N
     区别于此前的几条：它不针对某个市场、也不依赖「表还是 4 段」这个前提。
     """
     with live_conn.cursor() as cur:
+        cur.execute(f"SELECT count(*) FROM {_TABLE}")
+        if cur.fetchone()[0] == 0:
+            # 空表上「整张表满足不变量」是空真 —— 跑迁移还会撞守卫 2（水位表里
+            # 没有 BTCUSDT 行），报一个与本题无关的错。CI 的干净库正是这种情形。
+            pytest.skip("cpt_structure_event 为空，没有可验的存量数据")
         state = _migration_state(cur)
         if state == "before":
             cur.execute(_SQL_MIGRATION)

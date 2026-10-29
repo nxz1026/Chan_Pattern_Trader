@@ -1564,7 +1564,7 @@ R89 的首屏横幅说的是**收盘后的日线结构**（三步进度），盘
 
 插入 `_seal_board_payload` 时按 `def _latest_market_day() -> Any:` 做锚点，
 连续命中两处，结果 `_intraday_log_path` 的**函数名**被换成 `_latest_market_day`，
-导致 `app.py:630` 出现 `F821 Undefined name '_intraday_log_path'`，
+导致 `app.py` 出现 `F821 Undefined name '_intraday_log_path'`（当时在第 630 行附近），
 而 `test_payload_reads_the_configured_log` 在全量里红、单跑绿（因为它 monkeypatch
 的 `_latest_market_day` 被第二次定义覆盖后语义变了）。
 `ruff check` 的 F821 是抓到这个的唯一手段 —— **它不是噪音**。

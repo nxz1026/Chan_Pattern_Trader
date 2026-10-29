@@ -46,9 +46,26 @@ import tempfile
 from pathlib import Path
 
 ROOT = Path(os.environ.get("CPT_REPO") or Path(__file__).resolve().parents[1])
-PYTHON = Path(os.environ.get("CPT_PYTHON") or ROOT / ".venv" / "bin" / "python")
 
-MARK = "❌" if False else "✗"
+
+def _resolve_python() -> Path:
+    """探针解释器：``CPT_PYTHON`` → 仓内 ``.venv`` → **当前解释器**。
+
+    最后一档是给 CI 用的：runner 上没有 ``.venv``，早先硬编码
+    ``ROOT/.venv/bin/python`` 让本门禁在 CI 上**结构性必红**
+    （2026-10-29 审计实测）。用 ``sys.executable`` 仍然验证「仓外目录、
+    无 PYTHONPATH 时能不能 import cpt」这件事本身，只是换了跑它的解释器。
+    """
+    explicit = os.environ.get("CPT_PYTHON")
+    if explicit:
+        return Path(explicit)
+    venv_python = ROOT / ".venv" / "bin" / "python"
+    return venv_python if venv_python.exists() else Path(sys.executable)
+
+
+PYTHON = _resolve_python()
+
+MARK = "✗"
 OK = "✓"
 
 
@@ -107,7 +124,7 @@ def main() -> int:
             for line in stderr_tail.splitlines():
                 print(f"      {line}")
         print("      ⇒ 这是 cron / systemd 的真实运行条件。修法：")
-        print(f"        {ROOT}/.venv/bin/python -m pip install -e {ROOT} --no-deps")
+        print(f"        {PYTHON} -m pip install -e {ROOT} --no-deps")
         problems.append("仓外不能 import cpt")
     else:
         origin = Path(detail).resolve()

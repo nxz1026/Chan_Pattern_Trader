@@ -88,9 +88,7 @@ def collect_codes(*, hot_limit: int, only: str | None = None) -> list[str]:
     return out
 
 
-def _run_one(
-    code: str, *, client: AShareLocalClient
-) -> tuple[str, str | None]:
+def _run_one(code: str, *, client: AShareLocalClient) -> tuple[str, str | None]:
     """单只快照。返回 (status, reason)：status ∈ {ok, skip, err}。"""
     try:
         snap = build_ashare_snapshot(code, client=client)

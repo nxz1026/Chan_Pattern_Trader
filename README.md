@@ -16,10 +16,11 @@ CPT 基于缠中说禅理论做结构分析：缠论K线 → 分型 → 新笔 �
 
 ## 架构速览
 
-**6 层**（`engine/` 已于 2026-09-25 整层删除；`storage/` 于 2026-10-01 的 R24
-**恢复**；`llm/` 于 2026-10-02 的 R25 **落地**，8 文件 / 1,370 行）：
+**7 层**（`engine/` 已于 2026-09-25 整层删除；`storage/` 于 2026-10-01 的 R24
+**恢复**；`llm/` 于 2026-10-02 的 R25 **落地**，8 文件 / 1,692 行）：
 
 ```text
+backtest/      回测：panel（前视收益）/ signals（逐根）/ runner / stats —— 不写 SQL
 web/           只读 HTTP adapter + 两个入口（加密 / A股）
 application/   用例编排（回放 / 查询 / 导出 / 快照构造）—— 不出现 SQL
 llm/           独立 LLM 服务层：配置 / 异步队列 / provider / 提示词（不碰 SQL）
@@ -28,13 +29,19 @@ adapters/      外部系统接入（行情源 + 共享数据源 emotion_core + �
 domain/        别名转发层：把 17 个子模块直接别名到外部包 emotion_cpt（算法真源，pyproject 钉 v0.8.4；本仓不含算法本体）
 ```
 
-依赖方向 `web → application → llm → storage → adapters → domain`，`domain` 不导入任何
-上层，由 `.importlinter` 的 **6 条契约**强制（5 条 `forbidden` + 1 条 `layers`，CI 门禁之一）。
+主干依赖方向 `web → application → llm → storage → adapters → domain`；`backtest`
+是独立的消费方，依赖 `application`（`first_buy_bridge`）与 `storage`（取数），
+没有包反过来依赖它。`domain` 不导入任何上层，由 `.importlinter` 的 **6 条契约**
+强制（5 条 `forbidden` + 1 条 `layers`，CI 门禁之一）——`layers` 覆盖全部 7 个包。
 
 > ⚠️ R56 更正：本节原先写「5 层」并画成 `web → application → {storage, adapters} → domain`，
 > **漏掉了 R25（2026-10-02）加入的 `llm` 层** —— 而下面那条 R45 复盘引用里
-> 又自己提到了 `cpt/llm/`，**同一份文件自相矛盾**。层数与依赖链均按 `.importlinter:67-73`
-> 与 `docs/architecture.md` §2 更正为 6 层。
+> 又自己提到了 `cpt/llm/`，**同一份文件自相矛盾**。层数与依赖链均按 `.importlinter`
+> 与 `docs/architecture.md` §2 更正。
+>
+> ⚠️ 2026-10-29 审计更正：上面这次更正自己又漏了 `backtest/` —— `architecture.md` §2
+> 的层图画着它、`.importlinter` 的 `layers` 却没有它，于是它的依赖方向无人守。
+> 现改为 7 层，并把 `cpt.backtest` 写进 layers 契约。
 
 ### 分层的两条硬规矩
 
@@ -42,8 +49,8 @@ domain/        别名转发层：把 17 个子模块直接别名到外部包 emo
    `import-linter` 查的是依赖方向，查不了职责归属 —— `conn` 只是个 `Any` 形参、
    没有 `import psycopg`，依赖图上看不出越界。R24 实测 SQL 曾铺在四层里而 3 条
    契约全绿。这条由 `scripts/check_sql_layering.py` 做**内容级**门禁，已进 CI。
-2. **`cpt/storage/` 只装 CPT 自有表**（`public.cpt_*`）。`emotion_core` 共 28 张表，
-   **只有 2 张是 CPT 的**，其余 26 张是跨项目共享的 A 股数据枢纽 —— 读它属于
+2. **`cpt/storage/` 只装 CPT 自有表**（`public.cpt_*`）。`emotion_core` 共 **55 张表**，
+   其中 **9 张是 CPT 的**，其余 46 张是跨项目共享的 A 股数据枢纽 —— 读它属于
    「接外部数据源」，归 `adapters`，不归 storage。
 
 > ⚠️ R45 复盘更正：这段话**曾经是对的，现在错了**。`architecture.md` §4 里
@@ -302,25 +309,35 @@ CI（`.github/workflows/ci.yml`）在 **Python 3.12 与 3.14 两个版本**上�
 逐条执行、任一失败即红：
 
 ```bash
+# 0) 测试库骨架（2026-10-29 新增）：CI 起的是空 Postgres，CPT 的表由迁移建出来，
+#    否则 live_conn 那批用例恒红。见 ci.yml 的 "Bootstrap CPT tables in test DB"。
+pytest tests -rsq                               # CPT_REQUIRE_DB=1：DB 用例连不上即红
 python scripts/selftest_gates.py                # 门禁自检，必须排最前
-pytest tests -rsq
+
+# 静态门禁（同一个 step，任一失败即红）
 ruff check cpt tests scripts
 ruff format --check cpt tests scripts
 mypy cpt scripts
-lint-imports                                    # 6 条分层契约（5 forbidden + 1 layers）
-python scripts/check_sql_layering.py           # SQL 只许在 adapters/storage（R24 新增）
+lint-imports                                    # 6 条分层契约（5 forbidden + 1 layers，覆盖 7 个包）
+python scripts/check_sql_layering.py            # SQL 只许在 adapters/storage
 python scripts/check_storage_failure_semantics.py   # 门禁②
 python scripts/check_doc_drift.py               # 门禁③
+
 python scripts/build_dashboard_bundle.py --check    # bundle 必须与 dash-*.js 同步
-python scripts/check_all_claims.py              # 门禁④
-python scripts/check_doc_counts.py              # 门禁⑤
+python scripts/check_value_plumbing.py          # 值从数据源到屏幕的静默失效
+python scripts/check_all_claims.py              # 门禁④：文档断言全量对账
+python scripts/check_doc_counts.py              # 门禁⑤：文档里的计数
 python scripts/check_enqueue_skeleton_unique.py # 门禁⑥
 python scripts/check_job_poll_unique.py         # 门禁⑦
 python scripts/check_ci_workflow.py             # 门禁⑩（R51 新增）
 python scripts/check_line_refs.py               # 门禁⑪（R54 新增）
 python scripts/check_gate_coverage.py           # 门禁⑫（R55 新增）
+python scripts/check_bigserial_sequence.py      # 门禁⑯（R72 新增）
+python scripts/check_editable_import.py         # 门禁⑰：仓外目录也能 import cpt
 python scripts/check_cold_environment.py        # 门禁⑬（R55 新增，约 75 秒）
-vulture --min-confidence 60 cpt whitelist.py    # 死代码审计
+python scripts/check_test_mutation.py           # 门禁⑭：测试真的在断言吗（要求工作区干净）
+vulture --min-confidence 60 cpt scripts whitelist.py    # 死代码审计
+python -m emotion_cpt.cli.check_contracts --upstream-root .   # 判据内核契约
 ```
 
 > ⚠️ **R51 更新**：这段清单以前只写了「6 条」，因为**另外 5 个门禁被 YAML 缩进
