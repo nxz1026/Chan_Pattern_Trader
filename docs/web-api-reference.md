@@ -8,13 +8,13 @@
 > `/candles`、`/events` 从未作为独立接口实现
 > （数据已并入 `/api/dashboard/snapshot`），`/api/dashboard/stats` 代码里没有。
 
-共 **26** 个接口（R45 新增 `a-share/recommendation` 与 `a-share/llm/summarize`），全部可达（状态码 2xx/4xx 均表示路由存在且按契约应答）。
+共 **26** 个 Dashboard 路由（R45 新增 `a-share/recommendation` 与 `a-share/llm/summarize`），全部可达（状态码 2xx/4xx 均表示路由存在且按契约应答）。另有 **Track 族 8 个**（见下文「我的追踪」）与 **Trade 族 3 个**（见下文「Trade API」），`scripts/check_doc_drift.py` 合计 **37** 个 `/api` 路径。
 
 > ⚠️ **原写 27，是数错了（R56 更正）**：多出来的那一个是
 > `/api/dashboard/a-share/` —— 它是 app.py 里的**路径前缀常量**，
 > **不是一个路由**（真正处理请求的是它下面那 6 个具体路径）。
 > `scripts/check_doc_drift.py:142` 明确把它 `discard` 掉了。
-> ⇒ 真实路由数 **26**，与下表行数一致。
+> ⇒ Dashboard 路由表 **26** 行 = 26 个真实路由（外加表头那行 R51 已下线的 `/api/canvas/wbt`）。Track 族与 Trade 族不计入上表，见下文。
 >
 > 复核命令（与 D 类门禁同一套正则）：
 > `python scripts/check_doc_drift.py`
@@ -75,7 +75,7 @@
 > - 一并核对补齐：`a-share/recommendation` / `a-share/llm/summarize`
 >   原先只在下方小节里讲、没进一览表。
 >
-> 现在本表 26 行 = 26 个真实路由（外加表头那行 R51 已下线的 `/api/canvas/wbt`）。
+> 现在本表 26 行 = 26 个真实路由（外加表头那行 R51 已下线的 `/api/canvas/wbt`）。Track 族（8 个）与 Trade 族（3 个）在下方独立小节，未并入上表计数。
 
 ## 两个写接口的额外约束
 
@@ -279,4 +279,35 @@ POST /api/dashboard/track/{code}/speak                  「再讲一次人话」
 表：`public.cpt_track`（活跃+回收站）/ `public.cpt_track_snapshot`（30 天历史）。
 Storage 详见 `cpt/storage/track_store.py`，应用逻辑（点位计算）见
 `cpt/application/track_points.py`，端点 + 头解析见 `cpt/web/track_api.py`。
+
+### Track 维护端点（破坏性，R67 / 审计 P2-9）
+
+`GET /api/dashboard/track/maintenance?apply=1` 清追踪过期快照与回收站（loopback 调用，
+由 `deploy/cron/track-maintenance-daily.sh` 每日 07:30 触发）。**它是破坏性写操作**：
+不带 `apply` 参数是 dry-run（不删）；带 `apply=1` 必须同时带请求头 `X-CPT-Maintenance: 1`。
+
+> ⚠️ 这个确认头是**防 CSRF 式全表删除**的关键：服务在 loopback、无凭据，
+> 一个第三方页面的 `<img src="http://127.0.0.1:8010/api/dashboard/track/maintenance?apply=1">`
+> 就能让浏览器替它做删除。自定义头正是这类请求过不去的那道门（浏览器发不出自定义头，
+> 而 urllib / curl 加一行即可）。详见 `cpt/web/app.py` 的 `MAINTENANCE_CONFIRM_HEADER`。
+
+## Trade API（R67 新增，投喂外部交易机）
+
+把 CPT 的缠论信号以「决策批次」投喂给外部交易机 **LKL-Trade**。与 emotion-core 的
+`presentation/trade_api.py` **协议完全一致**（同一个交易机客户端要能对接两个上游）。
+**CPT 自身不下单、不撤单、不碰账户/持仓**——它只把「哪些信号可下单」整理成批次供交易机拉取，
+并接收交易机回执。这不改变 README 的「API 只读、无自动下单」定位（下单动作在交易机侧）。
+
+| 方法 | 路径 | 用途 | 源码 |
+|---|---|---|---|
+| `GET` | `/api/trade/decisions?date=YYYY-MM-DD` | 取某日决策批次 `{batch_id, for_date, actions[]}`（从 `cpt_signal_event` 经 `signal_event_store.load_trade_decisions` 取数） | `trade_api.py` |
+| `POST` | `/api/trade/results` | 交易机回执 `{status: "ok", batch_id}`（写回） | `trade_api.py` |
+| `GET` | `/api/trade/results?date=YYYY-MM-DD` | 最近一次回执 | `trade_api.py` |
+| `GET` | `/api/trade/health` | `{ok, service, source}` 探活 | `trade_api.py` |
+
+> ⚠️ `POST /api/trade/results` 是**写接口**（落交易机回执）。与 dashboard 写接口同理，
+> 单用户看板经 nginx `auth_basic` 暴露，应用层无独立鉴权；不要把它当认证用。
+> 状态目录默认 `/home/ubuntu/trade_cpt`，**绝不能**与 emotion-core 的 `/home/ubuntu/trade`
+> 共用（否则 `state.json` 的 `decisions[for_date]` 缓存互相覆盖，谁先生成 batch_id 谁赢，
+> 另一个的决策永远发不出去且不报错）。
 

@@ -155,3 +155,28 @@ MAINTENANCE_PATH  # web/track_api.py —— 路由字面量声明，供 check_do
 #    调用方在 stdlib 内部（`process_request_thread` / `server_close`）。
 daemon_threads  # web/app.py —— ThreadingMixIn 类属性（标准库读取）
 block_on_close  # web/app.py —— BaseServer 类属性（标准库读取）
+
+# --------------------------------------------------------------------------- #
+# 9. R67（2026-10-29 死代码审计）：vulture --min-confidence 60 命中的已知项
+# --------------------------------------------------------------------------- #
+# 以下均非真死代码，逐条定性如下：
+# - backtest/panel.py 的 5 个字段是 dataclass 字段（运行时由 dataclass 生成 __init__
+#   接收），与本文件第 3 节同类；
+# - backtest/runner.py 的 skipped_bars、backtest/shapes.py 的 lookback 是内部记账 /
+#   窗口变量；
+# - llm/structured.py 的 _inside_open_container 是结构化解析的内部辅助；
+# - a_share_local._to_wind_code / eastmoney_actions.fetch_actions /
+#   wind_source.fetch_corporate_actions / wind_source.fetch_adjust_factors 是 Wind / 东财
+#   parity 接入的预留或对照接口（本仓保留 Wind/ccxt 作接口示例，见审计 §九）。
+_to_wind_code  # adapters/a_share_local —— Wind parity 辅助
+fetch_actions  # adapters/eastmoney_actions —— 东财 parity 接口
+fetch_corporate_actions  # adapters/wind_source —— Wind parity 接口（接口示例保留）
+fetch_adjust_factors  # adapters/wind_source —— Wind parity 接口（接口示例保留）
+pre_close  # backtest/panel —— dataclass 字段（第 3 节同类）
+is_limit_down  # backtest/panel —— dataclass 字段
+is_bomb  # backtest/panel —— dataclass 字段
+is_one_word  # backtest/panel —— dataclass 字段
+touched_limit  # backtest/panel —— dataclass 字段
+skipped_bars  # backtest/runner —— 内部记账变量 / 属性
+lookback  # backtest/shapes —— 内部窗口变量
+_inside_open_container  # llm/structured —— 结构化解析内部辅助

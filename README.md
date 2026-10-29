@@ -25,7 +25,7 @@ application/   用例编排（回放 / 查询 / 导出 / 快照构造）—— �
 llm/           独立 LLM 服务层：配置 / 异步队列 / provider / 提示词（不碰 SQL）
 storage/       CPT 自有持久化：public.cpt_* 的读写。SQL 只许出现在这一层和 adapters
 adapters/      外部系统接入（行情源 + 共享数据源 emotion_core + 缠论后端委托）
-domain/        纯算法与领域模型（零第三方依赖，一套算法跨级别复用）
+domain/        别名转发层：把 17 个子模块直接别名到外部包 emotion_cpt（算法真源，pyproject 钉 v0.8.4；本仓不含算法本体）
 ```
 
 依赖方向 `web → application → llm → storage → adapters → domain`，`domain` 不导入任何
@@ -191,7 +191,7 @@ Wind 路径（`--source wind`）保留作交叉校验，但要积分 —— 实�
 | `docs/rules.md` | 规则口径唯一事实来源（含 §9 已冻结约定） |
 | `docs/architecture.md` | 软件结构设计（分层、模块、数据模型、复用映射、测试策略） |
 | `docs/known-traps.md` | 踩坑清单（**39 条**，每条含「踩过 → 为什么 → 判据」） |
-| `docs/web-api-reference.md` | 看板 HTTP 接口清单（26 个路由） |
+| `docs/web-api-reference.md` | 看板 HTTP 接口清单（Dashboard 26 + Track 8 + Trade 3，共 37 个 /api 路径） |
 | `docs/pending-wiring.md` | 尚未接线模块清单（是产品决策，不是死代码） |
 | `docs/calibration-r56-min-bi-len.md` | `min_bi_len` 按 bar 间隔分档的定档依据（90 天真实样本） |
 | `docs/db-inventory-and-cleanup.md` | 生产库表与索引清单 + 清理执行状态 |
@@ -256,7 +256,7 @@ R45 之后每一轮的修复都续写在同一份报告里（**查库实证 → 
 
 ## 当前状态
 
-核心算法、只读 Dashboard（四画布）、研究服务、HTTP adapter、**加密实时行情**、**A 股日线链路**（含按需复权因子与证券名称）均已实现并上线（`cpt-dashboard.service`，`--mode realtime`）。API 只读，不提供自动下单、撤单、账户、持仓或订单簿接口。
+核心算法、只读 Dashboard（四画布）、研究服务、HTTP adapter、**加密实时行情**、**A 股日线链路**（含按需复权因子与证券名称）均已实现并上线（`cpt-dashboard.service`，`--mode realtime`）。API 只读，不提供自动下单、撤单、账户、持仓或订单簿接口。（另有 Trade API `/api/trade/*` 把结构信号以「决策批次」投喂给外部交易机 LKL-Trade，CPT 自身不下单——详见 `docs/web-api-reference.md`。）
 
 ## 本地启动
 

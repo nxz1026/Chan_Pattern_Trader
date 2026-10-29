@@ -33,7 +33,7 @@
 │ adapters/         外部接入：Binance / ccxt / Wind / 腾讯 /     │
 │                   本地 A 股库 / 三种缠论实现                    │
 ├─────────────────────────────────────────────────────────────┤
-│ domain/           纯算法与领域模型（零第三方依赖，全部纯函数）    │
+│ domain/           纯算法与领域模型（cpt/domain 为 emotion_cpt.structure 别名转发层） │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -153,6 +153,8 @@ domain 不导入 pandas / httpx / ccxt / fastapi / sqlalchemy / torch / openai /
 ## 3. 各层职责
 
 ### 3.1 domain/ — 纯算法与领域模型（虚拟层）
+
+> ⚠️ **R67 更正（2026-10-29 复核）**：本节描述的是 domain 层的**逻辑内容**——缠论算法真源在外部包 `emotion_cpt.structure`，`cpt/domain/__init__.py` 把 17 个子模块直接别名到它（`pyproject.toml` 钉 `emotion-cpt==v0.8.4`）。因此「domain 零第三方依赖」指的是**算法本体**不依赖交易所 / DB / 绘图 / LLM；而 `cpt/domain` 这个转发层本身**依赖 emotion_cpt**。§2.1 表里 domain 的「16 模块 / 2,894 行」是 emotion_cpt 侧的有效计数，不是 cpt/domain 在本仓的行数（本仓 domain 仅 1 个转发文件，约 61 行）。可复现性依赖该 tag 不漂移。
 
 唯一允许存在缠论概念的地方。无状态、无副作用、同输入必同输出。
 

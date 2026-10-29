@@ -137,14 +137,15 @@ def check_endpoints() -> list[str]:
     code: set[str] = set()
     for p in sorted((ROOT / "cpt" / "web").rglob("*.py")):
         src = p.read_text(encoding="utf-8")
-        for m in re.finditer(r'["\'](/api/(?:dashboard|canvas)/[a-z0-9/_-]*)["\']', src):
+        for m in re.finditer(r'["\'](/api/(?:dashboard|canvas|trade)/[a-z0-9/_-]*)["\']', src):
             code.add(m.group(1))
     code.discard("/api/dashboard/a-share/")  # 前缀常量，非独立路由
+    code.discard("/api/trade/")  # 前缀常量（app.py 路由字典的键），非独立路由
 
     docs: dict[str, list[str]] = {}
     for p in sorted((ROOT / "docs").glob("*.md")) + [ROOT / "deploy" / "README.md"]:
         for m in re.finditer(
-            r"(/api/(?:dashboard|canvas)/[a-z0-9/_-]+)", p.read_text(encoding="utf-8")
+            r"(/api/(?:dashboard|canvas|trade)/[a-z0-9/_-]+)", p.read_text(encoding="utf-8")
         ):
             docs.setdefault(m.group(1).rstrip(".,)"), []).append(p.name)
 
