@@ -12,7 +12,7 @@
     <link rel="stylesheet" href="./dashboard.css" />
   </head>
   <!-- ⚠️ data-snapshot-url 是**相对看板根**的路径（不是根绝对路径）：
-       看板可挂在任意 nginx 前缀下（现役 /cpt/，将来的 /ecpt/cpt/），
+       看板可挂在任意 nginx 前缀下（现役 /ecpt/cpt/，历史上的 /cpt/ 已于 2026-10-26 下线），
        前缀由 url_safety.js 在运行时从 window.location.pathname 推导后补全
        （见 CPT_URL.path）。写成 "/cpt/api/..." 会在换前缀时静默 404。 -->
   <body

@@ -12,7 +12,7 @@
   "use strict";
 
   // API 基址**必须**从页面自身推导，不能写死 "/api/..." ——
-  // 页面挂在 /cpt/ 下，写死就会取到 nginx 的 404 HTML（实测报
+  // 页面挂在看板前缀下（现役 /ecpt/cpt/），写死就会取到 nginx 的 404 HTML（实测报
   // "Unexpected token '<'" —— 拿到的是 index.html 而不是 JSON）。
   // 规则与 dashboard.js 的 DASHBOARD_BASE() 一致：从 body 上的 snapshot-url
   // 截到 /dashboard 之前；没有就退回按当前路径推断。

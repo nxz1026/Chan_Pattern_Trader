@@ -92,7 +92,7 @@
         <button id="save-user" type="button">保存</button>
         <span id="user-status" data-status></span>
         <!-- 相对链接：本页在看板根的**子目录** track/ 下 ⇒ 上一级就是看板根。
-             看板可挂任意 nginx 前缀下（现役 /cpt/，将来的 /ecpt/cpt/），不写死前缀。 -->
+             看板可挂任意 nginx 前缀下（现役 /ecpt/cpt/，历史上的 /cpt/ 已下线），不写死前缀。 -->
         <a class="toplinks" href="../">← 回到看板</a>
       </div>
     </header>
@@ -127,7 +127,7 @@
   <!-- R59（门禁⑦）：轮询统一走全站唯一实现 window.CPTJob.poll ⇒ cpt_job.js 必须
        排在 dash-track.js 之前（同步脚本按文档顺序执行，后者运行时 CPTJob 已就绪）。
        ⚠️ 这里的路径全是**相对**的（"../"）：本页挂在看板根的**子目录** track/ 下，
-       看板又可挂在任意 nginx 前缀下（现役 /cpt/，将来的 /ecpt/cpt/）⇒ 写死
+       看板又可挂在任意 nginx 前缀下（现役 /ecpt/cpt/）⇒ 写死
        "/cpt/" 会在换前缀时静默 404。
        url_safety.js 是「看板根基址」推导的唯一实现，必须排在 dash-track.js 之前 ——
        后者用 window.CPT_URL.path 拼 API 地址。 -->

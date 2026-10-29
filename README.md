@@ -303,6 +303,12 @@ czsc 现在的位置是 parity 的**参照侧**（`parity_reference.py`），那
 
 Dashboard 静态文件位于 `dashboard/`，Nginx/systemd 模板见 `deploy/README.md`。
 
+线上入口是 `https://<host>/ecpt/cpt/`（「我的追踪」页在其下的 `track/`）。前缀
+2026-10-26 从 `/cpt/` 收编进 `/ecpt/` 门面，旧路径**已下线**（直接 404）。前端不写死
+前缀——`dashboard/url_safety.js` 从 `window.location.pathname` 推导，所以挂到别的
+前缀下也能跑；换前缀时要跟着改的是 nginx 与 `deploy/dashboard-sync.sh` 的
+`CPT_PUBLIC_URL`。
+
 ## 质量门
 
 CI（`.github/workflows/ci.yml`）在 **Python 3.12 与 3.14 两个版本**上各跑一遍，

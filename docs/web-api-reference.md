@@ -110,9 +110,10 @@ python scripts/verify_public_contracts.py    # 外部契约（adapters 层）
 
 ## 已知不在本清单里的东西
 
-- **静态资源**（`/cpt/dashboard/*.js|css|html`）由 nginx 直接从
-  `/var/www/cpt-dashboard/` 提供，**不经** Python。改前端要同步那个目录，
-  用 `deploy/dashboard-sync.sh`（带三层校验：仓库→部署目录→线上 HTTP）。
+- **静态资源**（`/ecpt/cpt/*.js|css|html`，前缀下的**根**就是 `dashboard/` 目录，
+  没有 `/dashboard/` 这一层）由 nginx 直接从 `/var/www/cpt-dashboard/` 提供，
+  **不经** Python。改前端要同步那个目录，用 `deploy/dashboard-sync.sh`
+  （带三层校验：仓库→部署目录→线上 HTTP）。
 - **认证**由 nginx `auth_basic` 做（`/etc/nginx/.htpasswd`），应用层不做认证。
 
 ---

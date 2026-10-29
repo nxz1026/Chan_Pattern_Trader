@@ -30,7 +30,7 @@
 # 端点就在本机 loopback：`CPT_HOST=127.0.0.1` + `CPT_PORT=8010`（见
 # deploy/env/cpt-dashboard.env），**不经过 nginx ⇒ 不需要任何凭据** ——
 # 也就不存在 dashboard-sync.sh 那条「口令进 argv / 跳过 TLS」的问题（R59/审计 M12）。
-# ⚠️ 不要把默认的 PUBLIC_URL（https://.../cpt/...）拿来做这件事：那条路径挂了
+# ⚠️ 不要把默认的 PUBLIC_URL（https://.../ecpt/cpt/...）拿来做这件事：那条路径挂了
 #    nginx Basic Auth，凭据就得进 cron。
 #
 # ## ?apply=1 是**必须**的（约定，见审计 M18）

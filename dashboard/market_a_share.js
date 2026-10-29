@@ -52,7 +52,7 @@
    * 从现有 snapshot 地址推出 A 股路由。
    *
    * **必须从 data-snapshot-url 推导**，不能写死 `/cpt/api/...`：看板可以挂在任意
-   * nginx 前缀下（本地是 `/cpt/`，独立 A 股服务是根路径），写死会在换前缀时静默 404。
+   * nginx 前缀下（现役是 `/ecpt/cpt/`，独立 A 股服务是根路径），写死会在换前缀时静默 404。
    */
   function aShareBase(snapshotUrl) {
     const fallback = "/api/dashboard";

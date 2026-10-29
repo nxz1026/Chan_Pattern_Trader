@@ -3,7 +3,7 @@
 #
 # ## 为什么需要这个脚本
 #
-# nginx 的 `location /cpt/ { alias /var/www/cpt-dashboard/; }`（见
+# nginx 的 `location /ecpt/cpt/ { alias /var/www/cpt-dashboard/; }`（见
 # deploy/nginx/cpt-dashboard.conf）指向的是**独立部署副本**，不是仓库目录。
 # 两者各改各的：只 scp 到 ~/DSH/Chan_Pattern_Trader/dashboard/ 的话，
 # **线上毫无变化**，而你毫不知情。

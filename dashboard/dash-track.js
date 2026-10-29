@@ -9,7 +9,7 @@
   "use strict";
 
   const LS_KEY = "cpt_track_user";
-  /* ⚠️ 看板可挂在**任意** nginx 前缀下（现役 /cpt/，将来的 /ecpt/cpt/）⇒
+  /* ⚠️ 看板可挂在**任意** nginx 前缀下（现役 /ecpt/cpt/）⇒
      API 地址**不能写死前缀**：换前缀时写死的 "/cpt/..." 会静默 404。
      「看板根基址」的推导在 url_safety.js（唯一实现，运行时从
      window.location.pathname 算出），这里只做薄委托 ——

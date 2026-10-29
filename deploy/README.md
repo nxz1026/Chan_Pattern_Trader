@@ -32,11 +32,17 @@ curl http://127.0.0.1:8010/api/dashboard/snapshot
 ```
 
 > **端口用 8010，不要用 8000。** 8000 已被本机另一个项目（Resume-Matcher 的
-> uvicorn）占用，绑定会失败；而线上 nginx 的 `/cpt/api/` 也是反代到 8010
+> uvicorn）占用，绑定会失败；而线上 nginx 的 `/ecpt/cpt/api/` 也是反代到 8010
 > （见 `/etc/nginx/sites-enabled/dsh-web`）。`deploy/env/*.example` 里的默认值
 > 已按线上实况填好，照抄即可。
 
 ## Nginx
+
+**线上前缀是 `/ecpt/cpt/`，不是 `/cpt/`。** 2026-10-26 入口重排：CPT 与 emotion
+一起收编进 `/ecpt/` 门面（8092），旧 `/cpt/`、`/emotion/` 的兼容跳转**全部删除**
+⇒ 现在打开 `/cpt/...` 直接 404。`/ecpt/` 之下所有 location 的唯一真相源在门面项目
+自己的安装脚本里（按标记区间替换写进线上），**不在本仓**；本仓只保证模板与线上
+形状一致。
 
 ⚠️ **线上并没有安装 `deploy/nginx/cpt-dashboard.conf`。** 它是一个**独立主机**参考
 模板（自带 `listen 80` server 块）；线上是把其中那几个 `location` 并进了既有的
@@ -46,18 +52,27 @@ curl http://127.0.0.1:8010/api/dashboard/snapshot
 
 - **不要** `cp deploy/nginx/cpt-dashboard.conf /etc/nginx/sites-enabled/` ——
   会与 dsh-web 的 `listen 80` 冲突；
-- 正确做法是把文件里的 `location = /cpt`、`location = /cpt/`、`location = /cpt/track/`、
-  `location /cpt/`、`location /cpt/api/`、`location /api/` 六块摘进 dsh-web，
-  再 `nginx -t && systemctl reload nginx`。
+- 线上真正生效的是四块：`location /ecpt/cpt/api/`、`location = /ecpt/cpt/`、
+  `location = /ecpt/cpt/track/`、`location /ecpt/cpt/`；
+- 模板里另有三块**线上没有、只给独立主机用**：`location = /ecpt/cpt`（301 到带
+  斜杠，线上由 `/ecpt/` 门面兜住）、裸 `location /api/`（线上不暴露）、
+  `location ~ /\.`（拒绝点文件）。
 
 ⚠️ **每一块都要带 `auth_basic`（R59/审计 M11）**：模板此前一个认证都没有，而线上
-R30 早已给 `/cpt/` 系列挂上 `auth_basic "Restricted"` + `/etc/nginx/.htpasswd`。
-只加静态块、漏掉 `/cpt/api/`（或裸 `/api/`）的话，看板 401 而**写库 API 仍然匿名可达**
-—— 那种「看起来加了认证」比没加更危险。做法见下面「/cpt/ 的 Basic Auth」一节。
+R30 早已给静态块与 API 块挂上 `auth_basic "Restricted"` + `/etc/nginx/.htpasswd`。
+只加静态块、漏掉 `/ecpt/cpt/api/`（或裸 `/api/`）的话，看板 401 而**写库 API 仍然
+匿名可达** —— 那种「看起来加了认证」比没加更危险。做法见下面
+「`/ecpt/cpt/` 的 Basic Auth」一节。
 
 只有在独立主机或独立 vhost 上才整块使用本文件。模板里的
-`proxy_read_timeout`/301 跳转已与线上实测对齐。Nginx 仅提供静态 Dashboard 和
-`/cpt/api/` 反向代理；Python API 必须先运行。
+`proxy_read_timeout`/`try_files`/301 跳转已与线上实测对齐（2026-10-29 用
+`nginx -t` 验过语法）。Nginx 仅提供静态 Dashboard 和 `/ecpt/cpt/api/` 反向代理；
+Python API 必须先运行。
+
+> 换前缀要连带改三处：本模板、`deploy/dashboard-sync.sh` 的 `CPT_PUBLIC_URL`
+> 默认值（`--http` 校验用）、以及本文件的部署步骤。前端不用改——它从
+> `window.location.pathname` 推导基址（`dashboard/url_safety.js`）。
+
 
 ## 部署静态看板
 
@@ -385,33 +400,37 @@ ssh oracle 'sudo -n systemctl restart cpt-dashboard && sleep 3 && \
 > `DROP TABLE IF EXISTS public.cpt_dashboard_run CASCADE;`——表无 FK，代价是 0。
 > **不要 DROP `public.cpt_signal_event`**，那是 R21 的真数据。
 
-## `/cpt/` 的 Basic Auth（R30 补上）与一个操作坑
+## `/ecpt/cpt/` 的 Basic Auth（R30 补上）与一个操作坑
 
-2026-10-02 补：`/cpt/` 此前是同一个 nginx 站点上**唯一没有 `auth_basic` 的项目**
-（`/emotion/` `/dashboard/` `/resume` 三个都有），静态看板与 `/cpt/api/` 全部匿名
-可读可写地挂在公网上。现在五处都挂了 `auth_basic "Restricted"` + `/etc/nginx/.htpasswd`。
+> **前缀说明**：本节 2026-10-02 写下时前缀是 `/cpt/`；2026-10-26 收编进 `/ecpt/`
+> 门面后变成 `/ecpt/cpt/`。下面的 location 名已按现役前缀改写，结论不变。
+
+2026-10-02 补：CPT 此前是同一个 nginx 站点上**唯一没有 `auth_basic` 的项目**
+（`/emotion/` `/dashboard/` `/resume` 三个都有），静态看板与 API 全部匿名
+可读可写地挂在公网上。现在线上 CPT 的四块都挂了 `auth_basic "Restricted"` +
+`/etc/nginx/.htpasswd`（门面的 `/ecpt/` 也挂）。
 
 ### 坑一：每个承载数据的 location 都要加，漏一个等于没做
 
-    location /cpt/api/       ← 独立块，且比 /cpt/ 更具体，nginx 按最长前缀匹配
-    location /api/           ← 裸反代，同样能写库
-    location = /cpt/         ← 静态首页
-    location = /cpt/track/   ← 「我的追踪」独立页
-    location /cpt/           ← 静态资源
+    location /ecpt/cpt/api/       ← 独立块，且比静态块更具体，nginx 按最长前缀匹配
+    location = /ecpt/cpt/         ← 静态首页
+    location = /ecpt/cpt/track/   ← 「我的追踪」独立页
+    location /ecpt/cpt/           ← 静态资源
+    location /api/                ← 裸反代（仅独立主机模板有，线上不暴露），同样能写库
 
-只给静态那几块加认证时，实测是 `/cpt/` → 401 而 `/cpt/api/...` → **200 无凭据可读
-可写**。看起来做了、其实没做 —— 比完全没做更危险。
+只给静态那几块加认证时，实测是静态页 → 401 而 `/ecpt/cpt/api/...` → **200 无凭据
+可读可写**。看起来做了、其实没做 —— 比完全没做更危险。
 
 ⚠️ R59（审计 M11）：`deploy/nginx/cpt-dashboard.conf` 这个**参考模板**此前
 **一块 auth_basic 都没有**（线上 R30 的改动只落在 `/etc/nginx/sites-enabled/dsh-web`，
 没回流到模板）。照模板整块部署就会得到一个未认证的看板 + 未认证写库 API。
-现已按上面的写法给模板的五块都补上 `auth_basic` + `/etc/nginx/.htpasswd`。
+现已按上面的写法给模板的每块都补上 `auth_basic` + `/etc/nginx/.htpasswd`。
 ⚠️ 口令文件路径写死在配置里没问题，**但不要把账号口令写进配置**：
 线上口令等于仓库默认值的问题见审计 S1，另行处置。
 
 ### 坑二：不能用 URL 内嵌凭据驱动这个页面
 
-`https://admin:xxx@host/cpt/` 这种写法会让页面里的相对 `fetch` **继承凭据**，
+`https://admin:xxx@host/ecpt/cpt/` 这种写法会让页面里的相对 `fetch` **继承凭据**，
 浏览器直接抛：
 
     Failed to execute 'fetch' on 'Window': Request cannot be constructed from a
@@ -580,11 +599,18 @@ set -a; . deploy/env/cpt-dashboard.env; set +a
 远端采集机上执行：
 
 ```bash
-curl -sSk https://<host>/cpt/_pkg/run5.sh | bash
+# 2026-10-29 实测：前缀已随入口重排变成 /ecpt/cpt/_pkg/（旧 /cpt/_pkg/ 现在 404），
+# 且这块在 auth_basic 之后 —— 不带凭据是 401，带上是 200。
+# 凭据别写进 argv（同机 ps -ef 可见），用 0600 的 curl --config 文件。
+curl -sSk --config ~/.cpt-curl.cfg https://<host>/ecpt/cpt/_pkg/run5.sh | bash
 ```
 
 即「一条命令装采集机」。所以这个目录是**故意的发布通道**，不是垃圾 —— 但它有三个
 问题，2026-10-01 记录在此：
+
+> **读本节须知**：下面 2026-09-29 ~ 10-02 的日志片段、URL 与命中计数**保留原样**
+> （当时前缀确实是 `/cpt/`，那时也没有认证）。它们是一手证据，改了就失去意义。
+> 现役前缀是 `/ecpt/cpt/`，且整块在 `auth_basic` 之后。
 
 1. **不在版本控制下**。这些 `.tgz` 只存在于那台机器，仓里没有、CPT 的
    `deploy/` 也没有对应脚本或说明。

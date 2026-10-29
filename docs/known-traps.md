@@ -828,8 +828,8 @@ git fetch origin        # 之后 origin/main 正常更新
 ## 30. 一个未闭合的 `<script>` 标签 ⇒ **功能静默消失**（R45 真踩）
 
 **症状**：「结构判断」卡里那段**说人话**的 LLM 摘要不见了。
-但**页面完全正常**：`/cpt/` 200、`/health` 200、推荐接口 200、
-**console 零错误、零 pageerror**。
+但**页面完全正常**：`/cpt/` 200（当时的前缀；现役是 `/ecpt/cpt/`）、`/health` 200、
+推荐接口 200、**console 零错误、零 pageerror**。
 
 **根因**（拆 `dashboard.js` 时一次批量替换把 `</script>` 落错了位置）：
 
@@ -2641,3 +2641,34 @@ assert out[0]["sealed"] is True                  # 错位时这里是 '600293'
 
 **通用规矩**：假游标/假连接的行形状**必须从 SELECT 列清单派生**，不许手写。
 「测试绿、真库错」的假绿，比没有测试更危险 —— 它把 bug 变成了「已验证」。
+
+---
+
+## 65. URL 前缀迁移只改了 nginx：模板、校验脚本、文档全停在旧前缀（2026-10-29 实测）
+
+**现象**：`deploy/dashboard-sync.sh --verify --http` 报
+`index.html` / `dashboard.css`「线上与部署目录不一致」，但这两个文件在部署目录与
+仓库里 **md5 完全相同**。差一点就去查 nginx 缓存和 alias 了。
+
+**真根因**（两层，都是"没人跟着改"）：
+1. 2026-10-26 入口重排，CPT 从 `/cpt/` 收编进 `/ecpt/cpt/`，旧路径兼容跳转**删除**。
+   但 `deploy/dashboard-sync.sh` 的 `CPT_PUBLIC_URL` 默认值还是 `https://127.0.0.1/cpt`
+   ⇒ 取回的是**别处的 JSON 404 页面**。
+2. 校验循环用 `curl -s`（没有 `-f`、也不看状态码），404 的响应体照样被拿去比 md5
+   ⇒ 把「路径/认证不对」报成「线上跑的不是这份代码」。**错误信息指向了完全错误的方向。**
+
+同一个迁移还漏了三处：`deploy/nginx/cpt-dashboard.conf` 整个模板仍是 `/cpt/`、
+`deploy/README.md` 的部署步骤与 Basic Auth 一节、`docs/web-api-reference.md` 的
+静态资源路径（那里连 `/dashboard/` 这层都不存在——前缀根就是 `dashboard/` 目录）。
+
+**判定**：先看状态码，再看内容。非 200 时内容没有比较的意义。
+
+```bash
+curl -s --config <(printf 'user = "u:p"\n') -o /tmp/b -w '%{http_code}\n' \
+  https://127.0.0.1/ecpt/cpt/index.html     # 200 才继续比 md5
+```
+
+**通用规矩**：迁前缀/迁域名/迁端口是**多点同改**，改完必须反向搜一遍旧值
+（`grep -rn '/cpt/' --include=*.md --include=*.sh --include=*.conf .`），
+并且**校验脚本本身也要能区分"取不到"和"不一致"** —— 否则它会用一条看似确凿的
+结论，把你带到最远的地方去。

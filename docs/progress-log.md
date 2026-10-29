@@ -1005,6 +1005,9 @@ SQL 分层/失败语义/文档漂移四道内容门禁全绿、本地 2,273 pass
 | 11 | known-traps #1 写死「462 passed / 28 skipped」、#2 写「`dependencies = []`」—— 均已过期 | `docs/known-traps.md`（改为只讲机制 + 判定命令；`dependencies` 现行只有 `emotion-cpt` 一条） |
 | 12 | `reference-audit.md` §2.3 的「`dependencies = []` 必须保持为空」已不成立 | 就地加「2026-10-29 复核」更正块 |
 | 13 | README 的「质量门」清单比 `ci.yml` 少 6 步、vulture 漏了 `scripts` | 按 `ci.yml` 顺序补全（含新增的 Bootstrap 步骤） |
+| 14 | 线上 bundle 停在 10-26，§16 封板强度**没上线**（页面与 API 都正常，看不出来） | 跑 `deploy/dashboard-sync.sh` 同步；`check_value_plumbing` 的 R2 随之转绿 |
+| 15 | `dashboard-sync.sh --http` 默认前缀 `/cpt` 已失效，404 错误页被当文件比 md5 ⇒ 误报「线上跑的不是这份代码」 | 默认值改 `/ecpt/cpt`；先看 `%{http_code}` 再比内容；负向用例实测 exit 1 |
+| 16 | 前缀 2026-10-26 从 `/cpt/` 收编进 `/ecpt/cpt/`，但**模板/文档/注释全停在旧前缀** | `deploy/nginx/cpt-dashboard.conf` 整份重写（四个线上块 + 三个模板专属块）；`deploy/README.md` 部署步骤与 Basic Auth 一节；`docs/web-api-reference.md` 静态资源路径（连 `/dashboard/` 那层都不存在）；`README.md` 补线上入口；`dashboard/{index.html,url_safety.js,track.html,dash-track.js,dash-chart.js,market_a_share.js,inspection_panel.js}` 的「现役 /cpt/，将来 /ecpt/cpt/」注释；新增 known-traps #65 |
 
 ### 验证
 
@@ -1021,8 +1024,9 @@ python scripts/check_doc_drift.py && python scripts/check_doc_counts.py
 
 ### 未做（需 owner 决定 / 属于部署动作）
 
-- `check_value_plumbing` 在本机报 **R2 部署半边不一致**：`/var/www/cpt-dashboard`
-  里的 bundle 与仓内不同步。修法是跑 `deploy/dashboard-sync.sh` —— 那会改动线上
-  正在服务的静态文件，**没有 owner 授权不动**。CI 上该目录不存在，会自动跳过，
-  不阻塞门禁。
+- ~~`check_value_plumbing` 在本机报 **R2 部署半边不一致**~~ —— 2026-10-29 已按
+  owner 授权跑 `deploy/dashboard-sync.sh` 同步，线上 bundle 与仓内一致，
+  `--verify --http` 三个文件全部对上（`/ecpt/cpt/` 前缀，200）。
+- `/etc/nginx/sites-enabled/dsh-web` 里 `/cpt/` 那套旧 location 已无人使用，
+  但**删不删由 owner 定**（本仓只改了模板与文档）。
 - `cpt_track` 生产/测试同表（#51 第 4 条）仍未解，需要表结构变更。
