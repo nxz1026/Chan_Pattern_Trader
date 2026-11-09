@@ -87,7 +87,7 @@ DEFAULT_LEDGER_PATH: Final[Path] = Path(
     os.getenv("CPT_WIND_LEDGER", "~/.cache/cpt/wind_quota.jsonl")
 ).expanduser()
 #: 跑 ``cli.mjs`` 的 node。**R31：默认的 "node" 在这台机器上根本不在 PATH 里**
-#: （node 装在 nvm 下 ``~/.nvm/versions/node/v22.23.2/bin/node``，而 systemd 给
+#: （node 装在 nvm 下 ``~/.nvm/versions/node/v24.22.2/bin/node``，而 systemd 给
 #: 服务的 PATH 是 ``/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/snap/bin``）。
 #: 所以线上要用 ``CPT_WIND_NODE`` 指到绝对路径 —— 拼 PATH 不可靠，nvm 会换版本。
 DEFAULT_NODE: Final[str] = os.getenv("CPT_WIND_NODE", "node")
